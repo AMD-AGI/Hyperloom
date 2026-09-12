@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging as _logging
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -31,6 +32,9 @@ from ..actions.executors._workload_envs import geak_metric_axis
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     ROUTE_GEAK,
+    kernel_event_id,
+    record_geak_attempts,
+    reject_geak_attempts,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..state.optimization_journal import (
@@ -51,6 +55,7 @@ from ..loop.coordinator_helpers import (
     geak_spec_is_env,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
+    _accepted_config_controls,
     _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
@@ -976,16 +981,60 @@ class KernelPhase(PhaseHandler):
 
         benchmark_mode = str(getattr(state, "benchmark_mode", "") or "").strip()
         agentx = is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
+
+        def _finish_skip(
+            result: dict[str, Any],
+            *,
+            started_at: str = "",
+            duration_sec: float | None = None,
+            runner_timeout_s: int | None = None,
+            kill_timeout_s: int | None = None,
+            record_delegation: bool = True,
+        ) -> None:
+            """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
+
+            A settled verdict is left standing: a later failure records
+            itself without retiring the candidate that already adjudicated.
+            """
+            if record_delegation:
+                self._record_geak_delegation_timeline(
+                    result,
+                    handoff=handoff,
+                    started_at=started_at,
+                    duration_sec=duration_sec,
+                    runner_timeout_sec=runner_timeout_s,
+                    kill_timeout_sec=kill_timeout_s,
+                )
+            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
+            if not _geak_rebench.geak_verdict_is_terminal(prev):
+                state.geak_result = result
+            self._record_phase_entry_evidence(
+                geak={
+                    "status": result.get("status"),
+                    "error_class": result.get("error_class"),
+                    "error": (str(result.get("error") or "")[:500] or None),
+                }
+            )
+            # Persist the wind-down hint durably.
+            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
+            state.save(self.session_dir)
+
         cb = state.current_best or {}
         try:
             env_spec = self.build_env_spec()
-        except Exception:  # noqa: BLE001 — a legacy handoff remains runnable
-            log.exception("geak: build_env_spec failed; handoff is unverified")
-            env_spec = {}
+        except (OSError, TypeError, ValueError) as exc:
+            log.exception("geak: cannot serialize the accepted launch configuration")
+            recorder = self._kernel_timeline()
+            if recorder is not None:
+                recorder.finish_failed(stage="geak_handoff", error_class="invalid_env_spec", message=str(exc))
+            _finish_skip(
+                {"status": "error", "error_class": "invalid_env_spec", "error": str(exc)}, record_delegation=False
+            )
+            return
         spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
-        accepted_flags = str(spec_config.get("extra_server_args") or cb.get("extra_server_args") or "")
-        extra_envs = spec_config.get("extra_envs") or cb.get("extra_envs") or {}
-        accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
+        extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
+        accepted_env = shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items())
         state_measurement = getattr(state, "current_best_measurement", None)
         measurement = (
             state_measurement
@@ -1070,7 +1119,16 @@ class KernelPhase(PhaseHandler):
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
-        _current_best_server_args = str(spec_config.get("server_launch_flags") or _baseline_srv_args)
+        _current_best_server_args = str(spec_config.get("server_launch_flags") or "")
+        if not _current_best_server_args:
+            from ..actions.executors._grid_server_args import compose_server_args
+
+            _current_best_server_args = compose_server_args(
+                inherited_args=_baseline_srv_args,
+                variant_extra_args=accepted_flags,
+                remove_args=spec_config.get("remove_args"),
+                args_mode=str(spec_config.get("args_mode") or "append"),
+            )
         _serving_fidelity = _resolve_serving_fidelity(
             baseline_server_args=_current_best_server_args,
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
@@ -1210,7 +1268,7 @@ class KernelPhase(PhaseHandler):
             started_at: str = "",
             duration_sec: float | None = None,
             kill_timeout_s: int | None = None,
-        ) -> None:
+        ) -> bool:
             self._record_geak_delegation_timeline(
                 result,
                 handoff=handoff,
@@ -1220,11 +1278,16 @@ class KernelPhase(PhaseHandler):
                 runner_timeout_sec=runner_timeout_s,
                 kill_timeout_sec=kill_timeout_s,
             )
+            previous = state.geak_result or {}
+            if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
+                result["kernel_event_id"] = previous["kernel_event_id"]
             state.geak_result = result
             self._record_geak_measurement(result)
             # Rebench-first: record the recovered win as an UNVALIDATED candidate;
             # the caller enqueues the main-flow rebench that writes the headline.
-            self._record_geak_candidate(result)
+            if not self._record_geak_candidate(result):
+                state.save(self.session_dir)
+                return False
             self._record_geak_kernel_journey(result)
             evidence = {
                 "status": result.get("status"),
@@ -1240,43 +1303,7 @@ class KernelPhase(PhaseHandler):
             # Set the wind-down hint BEFORE the durable save (it is in-memory only).
             state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
             state.save(self.session_dir)
-
-        def _finish_skip(
-            result: dict[str, Any],
-            *,
-            started_at: str = "",
-            duration_sec: float | None = None,
-            runner_timeout_s: int | None = None,
-            kill_timeout_s: int | None = None,
-            record_delegation: bool = True,
-        ) -> None:
-            """Record a (failed/skipped) GEAK outcome + wind down to SWEEP.
-
-            A settled AgentX verdict is left standing: a later failure records
-            itself without retiring the candidate that already adjudicated.
-            """
-            if record_delegation:
-                self._record_geak_delegation_timeline(
-                    result,
-                    handoff=handoff,
-                    started_at=started_at,
-                    duration_sec=duration_sec,
-                    runner_timeout_sec=runner_timeout_s,
-                    kill_timeout_sec=kill_timeout_s,
-                )
-            prev = state.geak_result if isinstance(getattr(state, "geak_result", None), dict) else {}
-            if not (agentx and _geak_rebench.geak_verdict_is_terminal(prev)):
-                state.geak_result = result
-            self._record_phase_entry_evidence(
-                geak={
-                    "status": result.get("status"),
-                    "error_class": result.get("error_class"),
-                    "error": (str(result.get("error") or "")[:500] or None),
-                }
-            )
-            # Persist the wind-down hint durably.
-            state.set_pending_escalate_hint(_phase_state.ESCALATE_HINT_SKIP_TO_SWEEP)
-            state.save(self.session_dir)
+            return True
 
         async def _replay_succeeded_rebench(task_id: str) -> bool:
             """Replay a persisted delegated result lost before state writeback."""
@@ -1346,8 +1373,18 @@ class KernelPhase(PhaseHandler):
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
-            # The dispatcher refuses to launch a rebench whose only material is an overlay that cannot load — that run
-            # would measure plain baseline and credit GEAK for the noise.
+            if isinstance(summary, dict) and summary.get("reason") == "geak_invalid_config":
+                return False
+            if isinstance(summary, dict) and summary.get("reason") == "geak_no_material":
+                state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
+                state.geak_pending = {}
+                state.resume_pending_revalidation = False
+                state.save(self.session_dir)
+                return False
+
+            # The grid cannot carry a dead overlay or a source-patch-only
+            # deployment. GEAK's final launcher may materialize that artifact;
+            # its fresh measurements still have to pass the fallback gates.
             if isinstance(summary, dict) and summary.get("fallback") == "geak_harness":
                 log.warning(
                     "geak: 2b declined (%s); validating through the GEAK harness instead",
@@ -1361,6 +1398,8 @@ class KernelPhase(PhaseHandler):
                 if bool(fb.get("validated")):
                     # 2a promotes and clears geak_pending itself.
                     return True
+                if fb.get("status") == "no_promote":
+                    return False
                 pending = dict(state.geak_pending) if isinstance(state.geak_pending, dict) else {}
                 pending["status"] = _geak_decline_status((summary or {}).get("reason"))
                 pending.pop("revalidation_task_id", None)
@@ -1444,7 +1483,8 @@ class KernelPhase(PhaseHandler):
                 "GEAK result.json exists but state has no recorded win "
                 "(crash before handback); promoting recovered result."
             )
-            _promote_recovered_result(recovered, recovered_from="existing_result_json")
+            if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
+                return
             if recovered.get("status") == "ok":
                 await _enqueue_geak_revalidation(reason="geak_e2e_win_recovered")
             return
@@ -1570,14 +1610,15 @@ class KernelPhase(PhaseHandler):
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
-                _promote_recovered_result(
+                if not _promote_recovered_result(
                     recovered,
                     recovered_from="sigterm_flushed_result_json",
                     runner_timeout_s=runner_timeout,
                     started_at=runner_started_at,
                     duration_sec=time.monotonic() - runner_started_monotonic,
                     kill_timeout_s=kill_timeout,
-                )
+                ):
+                    return
                 # Rebench-first: enqueue the main-flow rebench (candidate stays pending if a budget cap prevents it
                 # from running).
                 await _enqueue_geak_revalidation(reason="geak_e2e_win_sigterm_recovered")
@@ -1675,7 +1716,9 @@ class KernelPhase(PhaseHandler):
 
         # Rebench-first: record the win as an UNVALIDATED candidate only; the headline is written later from the
         # measured rebench.
-        self._record_geak_candidate(result)
+        if not self._record_geak_candidate(result):
+            state.save(self.session_dir)
+            return
         self._record_geak_kernel_journey(result)
         # Enqueue the same-harness config-identity rebench — the ONLY path that
         # writes the headline. Until it lands the candidate stays pending.
@@ -1729,17 +1772,22 @@ class KernelPhase(PhaseHandler):
         """Parse ``result.accepted_config`` into (flags, env dict)."""
         return _accepted_config_as_variant(result.get("accepted_config"))
 
-    def _record_geak_candidate(self, result: dict[str, Any]) -> None:
-        """Record a GEAK e2e win as an UNVALIDATED candidate (no headline)."""
+    def _record_geak_candidate(self, result: dict[str, Any]) -> bool:
+        """Validate the return and record any measured claim without a headline gain."""
         if not isinstance(result, dict):
-            return
-        # ``no_gain`` is GEAK's verdict on its own headline number, not on the kernels it accepted.
+            return False
+        result.setdefault("kernel_event_id", kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)))
+        try:
+            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+        except ValueError as exc:
+            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            return False
+        # A material artifact can still be rechecked without a GEAK throughput claim.
         if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
-            return
+            return True
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
-            return
-        accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+            return True
         base = float(self.shared_state.baseline_tput or 0.0)
         # ``base`` is OUR measurement and ``new_tput`` is GEAK's, so this
         # percentage is defined only when both were measured on the same
@@ -1770,8 +1818,10 @@ class KernelPhase(PhaseHandler):
             # Reproducible config the rebench launches from.
             "accepted_flags": accepted_flags,
             "accepted_envs": dict(parsed_envs),
-            # Carry the kernels and the basis they were judged on into the pending record, so a later promotion can
-            # name what it adopted without re-reading result.json.
+            **_accepted_config_controls(result.get("accepted_config")),
+            # Carry the kernels and the basis they were judged on into the
+            # pending record, so a later promotion can name what it adopted
+            # without re-reading result.json.
             "accepted_kernels": result.get("accepted_kernels") or [],
             "geak_status": str(result.get("status") or ""),
             "baseline_alignment_status": str((result.get("baseline_alignment") or {}).get("status") or ""),
@@ -1823,6 +1873,7 @@ class KernelPhase(PhaseHandler):
                 float(mdiv),
                 _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
             )
+        return True
 
     @staticmethod
     def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1882,6 +1933,47 @@ class KernelPhase(PhaseHandler):
             "overlay_loaded": overlay_loaded,
         }
 
+    def _reject_geak_promotion(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        current_best_tput: float,
+        reason: str,
+        attempt_id: str = "geak_final_validation",
+    ) -> None:
+        """Close a measured candidate without recording an adoption."""
+        rejected_result = dict(result)
+        rejected_result["revalidation_status"] = "no_promote"
+        rejected_result["revalidation_error"] = reason
+        rejected_result["final_validation"] = {
+            "decision": "REJECTED",
+            "reason": reason,
+            "measured_tput": measured_tput,
+            "current_best_tput": current_best_tput,
+        }
+        self.shared_state.geak_result = rejected_result
+        self.shared_state.geak_pending = {}
+        KernelPhase._reject_geak_kernel_journey(
+            self,
+            rejected_result,
+            measured_tput=measured_tput,
+            current_best_tput=current_best_tput,
+            provenance="geak_promote_rejected",
+            rejection_reason=reason,
+        )
+        recorder = KernelPhase._kernel_timeline(self)
+        if recorder is not None:
+            recorder.record_geak_rebench_attempt(
+                attempt_id=attempt_id,
+                base_tput=current_best_tput,
+                measured_tput=measured_tput if measured_tput > 0 else None,
+                decision="no_promote",
+                decision_reason=reason,
+                status="no_promote",
+            )
+            recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
+
     def _promote_geak_from_candidate(
         self,
         result: dict[str, Any],
@@ -1902,27 +1994,49 @@ class KernelPhase(PhaseHandler):
             return False
         cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
         cb_tput = cb_now.get("tput")
-        accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+        try:
+            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+        except ValueError as exc:
+            self._reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            return False
 
         # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
         # config/env-only win, and only this site holds the overlay proof.
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
         kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
+        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
 
         promotion_measurement = {
             "name": "geak_e2e",
             "candidate_extra_server_args": accepted_flags,
+            "extra_server_args": accepted_flags,
             "extra_envs": dict(parsed_envs),
+            **_accepted_config_controls(result.get("accepted_config")),
             "final_overlay": result.get("final_overlay") or "",
             "source_phase": "KERNEL_AGENT",
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
-            **graded_axes_of(result),
+            **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
         if isinstance(measurement_provenance, Mapping):
             for key in (
+                "extra_server_args",
+                "effective_extra_server_args",
+                "extra_envs",
+                "candidate_extra_server_args",
+                "candidate_extra_envs",
+                "recipe_delta",
+                "remove_args",
+                "unset_envs",
+                "args_mode",
+                "fingerprint",
+            ):
+                if key in measurement_provenance:
+                    promotion_measurement[key] = measurement_provenance[key]
+            for key in (
+                "accuracy",
                 "launch_evidence",
                 "launch_evidence_path",
                 "server_log_path",
@@ -1932,17 +2046,68 @@ class KernelPhase(PhaseHandler):
                 value = measurement_provenance.get(key)
                 if value not in (None, "", {}):
                     promotion_measurement[key] = value
-        if not self._lift_to_current_best(
+        if not isinstance(measurement_provenance, Mapping) or "extra_server_args" not in measurement_provenance:
+            from hyperloom.common.coerce import to_str_list
+            from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+
+            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+            from ..actions.executors._grid_server_args import compose_server_args, remove_server_args
+
+            accepted_controls = _accepted_config_controls(result.get("accepted_config"))
+            prior_controls = _accepted_config_controls(cb_now)
+            launch_controls = {**prior_controls, **accepted_controls}
+            for key in ("remove_args", "unset_envs"):
+                values = list(
+                    dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key)))
+                )
+                if values:
+                    launch_controls[key] = values
+            accepted_config = result.get("accepted_config") or {}
+            if accepted_controls.get("args_mode") == "replace" and "remove_args" in accepted_config:
+                launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
+            if launch_controls:
+                complete = accepted_controls.get("args_mode") == "replace"
+                prior_complete = prior_controls.get("args_mode") == "replace"
+                inherited_args = ""
+                if not complete and not prior_complete:
+                    recipe_envs = self._read_recipe_bench_envs(str(self.shared_state.baseline_config_path or ""))
+                    inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
+                promotion_measurement["extra_server_args"] = compose_server_args(
+                    inherited_args=inherited_args,
+                    base_extra_args="" if complete else cb_now.get("extra_server_args"),
+                    variant_extra_args=accepted_flags,
+                    remove_args=launch_controls.get("remove_args"),
+                    args_mode="replace" if complete else "append",
+                )
+                if not complete and launch_controls.get("remove_args"):
+                    # A legacy delta can re-enable a removed flag. The retained
+                    # snapshot is complete, so stale removals would prune it again.
+                    accepted_identity = canonical_fingerprint(accepted_flags, {})
+                    launch_controls["remove_args"] = [
+                        spec
+                        for spec in launch_controls["remove_args"]
+                        if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
+                    ]
+                launch_envs = dict(cb_now.get("extra_envs") or {})
+                for key in accepted_controls.get("unset_envs", []):
+                    launch_envs.pop(key, None)
+                launch_envs.update(parsed_envs)
+                promotion_measurement["extra_envs"] = launch_envs
+                promotion_measurement.update(launch_controls)
+                promotion_measurement["args_mode"] = "replace"
+        lifted = self._lift_to_current_best(
             "geak_e2e",
             measured,
             promotion_measurement,
             entry_extra=entry_extra,
-        ):
-            self._reject_geak_kernel_journey(
+        )
+        if not lifted:
+            KernelPhase._reject_geak_promotion(
+                self,
                 result,
                 measured_tput=measured,
-                current_best_tput=float(cb_tput or 0.0),
-                provenance="geak_promote_rejected",
+                current_best_tput=float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0,
+                reason="graded_comparison_rejected",
             )
             return False
 
@@ -1970,7 +2135,7 @@ class KernelPhase(PhaseHandler):
         if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
-                result,
+                graded_measurement,
                 source="geak_e2e_promote",
             )
         self.shared_state.resume_pending_revalidation = False
@@ -2185,12 +2350,16 @@ class KernelPhase(PhaseHandler):
         if not journey:
             return
 
-        recorder = self._kernel_timeline()
-        if recorder is not None:
-            try:
-                recorder.record_geak_attempts(journey)
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
-                log.debug("kernel timeline: geak attempts record failed", exc_info=True)
+        try:
+            record_geak_attempts(
+                event=str(
+                    result.get("kernel_event_id")
+                    or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+                ),
+                journey=journey,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            log.debug("kernel timeline: geak attempts record failed", exc_info=True)
 
         for tool, meta in (journey.get("versions") or {}).items():
             if not isinstance(meta, dict):
@@ -2214,29 +2383,16 @@ class KernelPhase(PhaseHandler):
         provenance: str,
         rejection_reason: str = "rebench_did_not_beat_current_best",
     ) -> None:
-        """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
-
-        # Named on the class, not through ``self``: Coordinator does not
-        # delegate this method, so callers bind it with a Coordinator as
-        # ``self`` and an attribute lookup there would not find the helper.
-        for kernel in KernelPhase._geak_journey_kernels(result):
-            kernel_id = str(kernel.get("kernel_id") or "")
-            e2e = kernel.get("e2e")
-            if not kernel_id or not isinstance(e2e, dict):
-                continue
-            decision = str(e2e.get("decision") or "").upper()
-            if decision not in {"KEEP", "ADOPTED"}:
-                continue
-            evidence = dict(e2e)
-            evidence.update(
-                {
-                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
-                    "revalidation_measured_tput": measured_tput,
-                    "revalidation_current_best_tput": current_best_tput,
-                    "revalidation_provenance": provenance,
-                    "rejection_reason": rejection_reason,
-                }
-            )
+        """Revoke the persisted provisional GEAK KEEPs after a final rebench."""
+        reject_geak_attempts(
+            event=str(
+                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+            ),
+            measured_tput=measured_tput,
+            current_best_tput=current_best_tput,
+            provenance=provenance,
+            rejection_reason=rejection_reason,
+        )
 
     def _runtime_uses_aiter_fused_moe(self) -> bool:
         """Return whether the served model dispatches MoE through aiter."""

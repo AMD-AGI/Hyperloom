@@ -964,14 +964,35 @@ class ExploreExecutor:
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
+                if stack_base_args_mode == "replace":
+                    run_remove_args = to_str_list(getattr(gv, "remove_args", []))
+                else:
+                    run_remove_args = list(
+                        dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", [])))
+                    )
+                run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
+                run_extra_envs = dict(stack_extra_envs)
+                for key in gv.unset_envs:
+                    run_extra_envs.pop(key, None)
+                run_extra_envs.update(gv.extra_envs)
+                run_gv = GridVariant(
+                    name=gv.name,
+                    extra_server_args=gv.extra_server_args,
+                    extra_envs=run_extra_envs,
+                    note=gv.note,
+                    remove_args=run_remove_args,
+                    unset_envs=run_unset_envs,
+                    args_mode=str(getattr(gv, "args_mode", "append") or "append"),
+                )
+                _carry_variant_metadata(gv, run_gv)
                 # ``--no-eval`` opted the session out of accuracy entirely, so it
                 # holds for every round. The decision round additionally skips
                 # eval when a warmup preceded it: it is timed against a
                 # throughput-only anchor, and ``parse_eval_results`` falls back
                 # to the score the warmup took. Without a warmup there is nothing
                 # to fall back to, so the decision round keeps its own eval.
-                warmup_gv = _variant_with_eval_off(gv) if eval_disabled else gv
-                decision_gv = _variant_with_eval_off(gv) if (use_warm_decision or eval_disabled) else gv
+                warmup_gv = _variant_with_eval_off(run_gv) if eval_disabled else run_gv
+                decision_gv = _variant_with_eval_off(run_gv) if (use_warm_decision or eval_disabled) else run_gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
@@ -1422,17 +1443,15 @@ class ExploreExecutor:
                             remove_args=to_str_list(getattr(gv, "remove_args", [])),
                             args_mode=getattr(gv, "args_mode", "append"),
                         )
-                        next_envs = dict(stack_extra_envs)
-                        for k in _keep_unset_envs:
-                            next_envs.pop(str(k), None)
-                        next_envs.update(gv.extra_envs)
+                        next_envs = dict(run_extra_envs)
                         effective_control_fields = dict(control_fields)
                         if _keep_remove_args:
                             effective_control_fields["remove_args"] = list(_keep_remove_args)
                         if _keep_unset_envs:
                             effective_control_fields["unset_envs"] = list(_keep_unset_envs)
                         persist_effective_args = bool(
-                            _keep_remove_args
+                            run_remove_args
+                            or run_unset_envs
                             or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
                             or stack_base_args_mode == "replace"
                         )

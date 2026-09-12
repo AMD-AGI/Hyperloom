@@ -1202,7 +1202,153 @@ async def test_run_grid_multi_node_removal_matches_materialized_yaml(tmp_path, m
     assert captured_restart["extra_env"] == {"SGLANG_KEEP_ME": "1"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["unset", "unset-and-reassign", "replace-empty", "remove-all", "baseline"])
+async def test_grid_removals_reach_actual_child_environment(tmp_path, monkeypatch, case):
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"].update(EXTRA_SGLANG_ARGS="--ambient-flag 1", SGLANG_REMOVE_ME="recipe")
+    base.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("EXTRA_SGLANG_ARGS", "--ambient-flag 1")
+    monkeypatch.setenv("SGLANG_REMOVE_ME", "ambient")
+    variant = GridVariant(
+        case,
+        unset_envs=["SGLANG_REMOVE_ME"] if case.startswith("unset") else [],
+        extra_envs={"SGLANG_REMOVE_ME": "accepted"} if case == "unset-and-reassign" else {},
+        args_mode="replace" if case == "replace-empty" else "append",
+        remove_args=["--ambient-flag"] if case == "remove-all" else [],
+    )
+    observed = []
+    managed_run = gr.run_with_session_kill
+
+    def launch_observer(cmd, **kwargs):
+        config_path = Path(cmd[cmd.index("--benchmark-config") + 1])
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        observer = (
+            "import json, os, subprocess, sys, yaml; from pathlib import Path; "
+            "env = os.environ.copy(); "
+            "env.update({k:str(v) for k,v in yaml.safe_load(Path(sys.argv[1]).read_text())['benchmark']['envs'].items()}); "
+            "subprocess.run([sys.executable, '-S', '-c', "
+            "\"import json,os; print(json.dumps([os.environ.get('EXTRA_SGLANG_ARGS'), os.environ.get('SGLANG_REMOVE_ME')]))\"], "
+            "env=env, check=True)"
+        )
+        result = managed_run([sys.executable, "-c", observer, str(config_path)], **kwargs)
+        assert result.returncode == 0, result.stderr
+        observed.append(json.loads(result.stdout))
+        _fake_workspace(slot)
+        return result
+
+    monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
+    await run_grid(
+        base_yaml_path=base, base_extra_args="", grid=[variant], output_root=tmp_path / "out", variant_timeout_sec=15
+    )
+    assert observed
+    expected_args = "" if case in {"replace-empty", "remove-all"} else "--ambient-flag 1"
+    expected_env = None if case == "unset" else ("accepted" if case == "unset-and-reassign" else "recipe")
+    assert all(row == [expected_args, expected_env] for row in observed)
+
+
 # Framework-aware help-text probe (atom + multi-framework cache)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_overlay", [False, True])
+async def test_exported_reference_controls_reimport_requires_static_settings(tmp_path, monkeypatch, with_overlay):
+    from types import SimpleNamespace
+
+    from hyperloom.inference_optimizer.cli.bootstrap import _resolve_reference_recipe
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+    from hyperloom.orchestrator.actions.executors._workload_envs import materialize_config_with_envs
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    overlay = tmp_path / "overlay ' literal"
+    overlay.mkdir()
+    (overlay / "sitecustomize.py").write_text("import os; os.environ['OVERLAY_OBSERVED'] = 'loaded'\n")
+    session = tmp_path / "session"
+    session.mkdir()
+    state = SharedState(framework="sglang", reference_model="/models/test")
+    state.current_best = {
+        "extra_server_args": "--max-running-requests 4",
+        "extra_envs": {"SGLANG_REASSIGN": "accepted"},
+        "unset_envs": ["SGLANG_REMOVE_ME", "SGLANG_REASSIGN"],
+        "remove_args": ["--disable-radix-cache"],
+        "args_mode": "replace",
+    }
+    if with_overlay:
+        state.current_best["final_overlay"] = str(overlay)
+    state.save(session)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    if with_overlay:
+        with pytest.raises(SystemExit) as exc:
+            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
+        assert exc.value.code == 2
+        return
+    args, envs, model, source, controls = _resolve_reference_recipe(
+        SimpleNamespace(reference_script=str(session / "current_setting.sh"))
+    )
+    assert "PYTHONPATH" not in envs
+    assert "overlay_pythonpath" not in controls
+    imported = SharedState(
+        framework="sglang",
+        reference_server_args=args,
+        reference_envs=envs,
+        reference_model=model,
+        reference_source=source,
+        reference_launch_controls=controls,
+    )
+    imported.save(session)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_overrides(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["envs"].update(
+        EXTRA_SGLANG_ARGS="--disable-radix-cache --mem-fraction-static 0.7",
+        SGLANG_REMOVE_ME="recipe",
+        SGLANG_REASSIGN="recipe",
+    )
+    base.write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("SGLANG_REMOVE_ME", "ambient")
+    monkeypatch.setenv("SGLANG_REASSIGN", "ambient")
+    observed = []
+    managed_run = gr.run_with_session_kill
+
+    def launch_observer(cmd, **kwargs):
+        config_path = Path(cmd[cmd.index("--benchmark-config") + 1])
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        probe = (
+            "import json,os; print(json.dumps({k:os.environ.get(k) for k in "
+            "['EXTRA_SGLANG_ARGS','SGLANG_REMOVE_ME','SGLANG_REASSIGN','OVERLAY_OBSERVED']}))"
+        )
+        observer = (
+            "import os,subprocess,sys,yaml; from pathlib import Path; env=os.environ.copy(); "
+            "env.update({k:str(v) for k,v in yaml.safe_load(Path(sys.argv[1]).read_text())['benchmark']['envs'].items()}); "
+            "subprocess.run([sys.executable,'-c',sys.argv[2]],env=env,check=True)"
+        )
+        result = managed_run([sys.executable, "-c", observer, str(config_path), probe], **kwargs)
+        assert result.returncode == 0, result.stderr
+        observed.append(json.loads(result.stdout))
+        _fake_workspace(slot)
+        return result
+
+    monkeypatch.setattr(gr, "run_with_session_kill", launch_observer)
+    with session_scope(session):
+        materialized = materialize_config_with_envs(base, tmp_path / "materialized", model_path="/models/test")
+        await run_grid(
+            base_yaml_path=materialized,
+            base_extra_args="",
+            grid=[GridVariant("reference")],
+            output_root=tmp_path / "out",
+            variant_timeout_sec=15,
+        )
+    assert observed
+    for child in observed:
+        assert "--max-running-requests 4" in child["EXTRA_SGLANG_ARGS"]
+        assert "--disable-radix-cache" not in child["EXTRA_SGLANG_ARGS"]
+        assert "--mem-fraction-static 0.7" not in child["EXTRA_SGLANG_ARGS"]
+        assert child["SGLANG_REMOVE_ME"] is None
+        assert child["SGLANG_REASSIGN"] == "accepted"
+        assert child["OVERLAY_OBSERVED"] is None
 
 
 @pytest.fixture(autouse=False)
@@ -2187,7 +2333,7 @@ class TestSessionBudgetWarmupRounds:
 
         async def slow_restart(**_kwargs):
             restarts.append(time.monotonic())
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(3.0)
 
         monkeypatch.setattr(mnsl, "restart_server_for_round", slow_restart)
         recorded: list[dict] = []
@@ -2202,8 +2348,8 @@ class TestSessionBudgetWarmupRounds:
                 grid=[GridVariant("v0")],
                 output_root=tmp_path / "out",
                 variant_timeout_sec=600,
-                session_deadline_sec=time.monotonic() + 1.3,
-                variant_expected_sec=0.6,
+                session_deadline_sec=time.monotonic() + 6.0,
+                variant_expected_sec=2.0,
             )
 
         assert restarts, "the restart never ran, so this is not the case under test"

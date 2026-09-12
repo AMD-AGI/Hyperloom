@@ -563,6 +563,65 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unrelated_patch_root_cannot_redirect_selected_patch(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    intended = tmp_path / "sglang"
+    unrelated = tmp_path / "aiter"
+    init_git_repo(intended)
+    init_git_repo(unrelated)
+    _write_specialist_workspace(
+        session_dir,
+        "partial-roots",
+        done_payload_override={"patch_roots": {"unselected-harvest.patch": str(unrelated)}},
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "integrate-partial-roots",
+        {"specialist_task_id": "partial-roots", "framework_source_root": str(intended), "apply_only": True},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench"
+    assert (intended / "src.py").read_text().endswith("return 2\n")
+    assert (unrelated / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    alias = tmp_path / "session-alias"
+    alias.symlink_to(session_dir, target_is_directory=True)
+    intended = tmp_path / "aiter"
+    unrelated = tmp_path / "sglang"
+    init_git_repo(intended)
+    init_git_repo(unrelated)
+    patch = alias / "runs" / "specialist" / "complete-roots" / "worktree" / "patches" / "001_test.patch"
+    _write_specialist_workspace(
+        alias,
+        "complete-roots",
+        patch_contents=[
+            "diff --git a/new.py b/new.py\nnew file mode 100644\nindex 0000000..3e75765\n"
+            "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
+        ],
+        done_payload_override={"patches_written": [str(patch)], "patch_roots": {str(patch): str(intended)}},
+    )
+    executor = IntegratePatchExecutor(session_dir=alias)
+    ctx = _make_ctx(
+        "integrate-complete-roots",
+        {"specialist_task_id": "complete-roots", "framework_source_root": str(unrelated), "apply_only": True},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench", result
+    assert (intended / "new.py").read_text() == "new\n"
+    assert not (unrelated / "new.py").exists()
+
+
+@pytest.mark.asyncio
 async def test_executor_single_node_guard_not_triggered(tmp_path: Path, monkeypatch):
     """Single-node (is_multi_node False): the guard must NOT fire — the
     executor proceeds to the normal apply path bit-for-bit. This is the

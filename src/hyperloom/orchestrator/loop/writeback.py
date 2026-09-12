@@ -51,12 +51,13 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
-from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison
+from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
     _MIN_KERNEL_ENGAGED_GAIN_PCT,
     _accepted_config_as_variant,
+    _accepted_config_controls,
     _baseline_params_fingerprint,
     _dedupe_extra_server_args,
     _merge_cumulative_extra_server_args,
@@ -70,6 +71,7 @@ from .coordinator_helpers import (
     _geak_spec_name,
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
+    baseline_benchmark_script,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -86,6 +88,7 @@ from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_OBSERVED_ACCURACY_KEY,
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
+    accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
 
@@ -3612,6 +3615,7 @@ class WritebackCollaborator:
         if anchor_accepted:
             from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
+            self.shared_state.baseline_benchmark_script = str(task_params.get("benchmark_script") or "").strip()
             self.shared_state.baseline_perf = perf_snapshot_from_mapping(result) or {}
             acc = result.get("accuracy")
             if isinstance(acc, (int, float)):
@@ -4208,11 +4212,12 @@ class WritebackCollaborator:
                     self.shared_state, rebench_measurement, against_baseline=True
                 )
                 current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
+                expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
                 decision = _geak_revalidation_decision(
                     measured=baseline_grade.candidate,
                     baseline=baseline_grade.reference,
                     got_hash=got_hash,
-                    expected_hash=str((task.params or {}).get("expected_cfg_hash") or ""),
+                    expected_hash=expected_hash,
                     min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
                     current_best=current_grade.reference,
                 )
@@ -4224,8 +4229,37 @@ class WritebackCollaborator:
                     or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}
                 ):
                     decision = "fallback"
-                elif decision == "validated" and any(
+                elif (not expected_hash or got_hash == expected_hash) and any(
                     grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
+                ):
+                    decision = "no_promote"
+                native_rejection = next(
+                    (
+                        str(entry.get("reason") or "native_gate_rejected")
+                        for entry in result.get("per_variant_outcomes") or []
+                        if isinstance(entry, Mapping)
+                        and entry.get("outcome") == "REVERT"
+                        and (
+                            any(
+                                isinstance(gate, Mapping)
+                                and gate.get("gate") in {"graded_axes", "accuracy"}
+                                and gate.get("passed") is False
+                                for gate in entry.get("gates") or []
+                            )
+                            or (
+                                "gates" not in entry
+                                and entry.get("reason")
+                                in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
+                            )
+                        )
+                        and (not expected_hash or entry.get("fingerprint") == expected_hash)
+                    ),
+                    "",
+                )
+                if (
+                    measured > 0
+                    and got_hash == expected_hash
+                    and (not baseline_grade.comparable or not current_grade.comparable)
                 ):
                     decision = "no_promote"
                 # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
@@ -4251,6 +4285,8 @@ class WritebackCollaborator:
                             got_digest,
                         )
                         decision = "fallback"
+                if native_rejection:
+                    decision = "no_promote"
                 ps = (
                     self.shared_state.geak_result
                     if isinstance(getattr(self.shared_state, "geak_result", None), dict)
@@ -4279,12 +4315,21 @@ class WritebackCollaborator:
                     if not has_prior_geak_e2e:
                         if not ps:
                             decision = "no_material"
-                        elif not _geak_result_has_material(
-                            ps,
-                            prev_best_flags=str(cb_now.get("extra_server_args") or ""),
-                            prev_best_envs=cb_now.get("extra_envs") or {},
-                        ):
-                            decision = "no_material"
+                        else:
+                            try:
+                                _accepted_config_as_variant(ps.get("accepted_config"))
+                                has_material = _geak_result_has_material(
+                                    ps,
+                                    prev_best_flags=str(cb_now.get("extra_server_args") or ""),
+                                    prev_best_envs=cb_now.get("extra_envs") or {},
+                                    prev_best_controls={**cb_now, **self._current_best_launch_config()},
+                                )
+                            except ValueError as exc:
+                                decision = "no_promote"
+                                native_rejection = f"invalid_accepted_config: {exc}"
+                            else:
+                                if not has_material:
+                                    decision = "no_material"
                 pending = getattr(self.shared_state, "geak_pending", None) or {}
                 pending_tid = str(pending.get("revalidation_task_id") or "") if isinstance(pending, dict) else ""
                 from ..phases.geak_rebench import geak_harness_replays_workload, geak_rebench_should_apply_result
@@ -4411,13 +4456,12 @@ class WritebackCollaborator:
                     # long-standing behaviour and is left as it is.
                     if geak_harness_replays_workload(self.shared_state):
                         self.shared_state.resume_pending_revalidation = False
-                elif decision == "no_promote":
-                    # Well-measured + engaged over baseline, but does not beat
-                    # current_best. This is a real result, NOT inconclusive, so
-                    # do not replay via the GEAK harness (2a); clear the pending
-                    # candidate without touching the headline / stack / gain.
+                elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
+                    # A native quality rejection or measured loss is conclusive;
+                    # replaying through another harness cannot overturn it.
                     log.info(
-                        "geak 2b rebench did not beat current_best (measured=%r current_best=%r) -> no_promote",
+                        "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
+                        decision,
                         measured,
                         cb_tput,
                     )
@@ -4426,8 +4470,8 @@ class WritebackCollaborator:
                             "coordinator",
                             "observation",
                             {
-                                "kind": "geak_no_promote",
-                                "measured_tput": float(measured),
+                                "kind": f"geak_{decision}",
+                                "measured_tput": float(measured) if measured_ok else None,
                                 "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
@@ -4437,11 +4481,13 @@ class WritebackCollaborator:
                     # Persist the closed verdict so a later KERNEL entry does
                     # not recover stale result.json and re-enqueue this already
                     # adjudicated candidate (#1240).
-                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
-                    ps_stamped["revalidation_status"] = "no_promote"
-                    self.shared_state.geak_result = ps_stamped
-                    self._record_geak_rebench_conclusion(final_status="no_promote")
-                    self.shared_state.geak_pending = {}
+                    self._reject_geak_promotion(
+                        ps,
+                        measured_tput=float(measured) if measured_ok else 0.0,
+                        current_best_tput=float(cb_tput or 0.0),
+                        reason=native_rejection or "graded_comparison_rejected",
+                        attempt_id=str(task.idempotency_key or task.task_id),
+                    )
                     result["status"] = "no_promote"
                     result[PROMOTION_REFUSED_KEY] = True
                 elif decision == "fallback":
@@ -4487,18 +4533,20 @@ class WritebackCollaborator:
                         # reason text is for the report, and a later KERNEL entry
                         # needs to know the replay is settled, not merely broken.
                         refusal = str(fallback_result.get("status") or "")
-                        geak_result["revalidation_status"] = "fallback_failed"
+                        geak_result["revalidation_status"] = (
+                            "no_promote" if refusal == "no_promote" else "fallback_failed"
+                        )
                         geak_result["revalidation_error_class"] = refusal
                         geak_result["revalidation_error"] = str(
                             fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
                         )[:500]
                         self.shared_state.geak_result = geak_result
                         self._record_geak_rebench_conclusion(
-                            final_status="fallback_failed",
+                            final_status=geak_result["revalidation_status"],
                             final_error=str(geak_result.get("revalidation_error") or ""),
                         )
                         self.shared_state.geak_pending = {}
-                        result["status"] = refusal if refusal == INCOMPARABLE_REVALIDATION else "failed"
+                        result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
                         result[PROMOTION_REFUSED_KEY] = True
                     else:
                         promoted = True
@@ -5253,7 +5301,7 @@ class WritebackCollaborator:
                 "unset_envs": list(materialized["unset_envs"]),
                 "args_mode": materialized["args_mode"],
                 # Authoritative, COMPLETE engine flags (run-specific stripped);
-                # empty => consumer keeps its own adapter defaults (prior behavior).
+                # when unavailable, args_mode governs recipe inheritance.
                 "server_launch_flags": server_launch_flags,
             },
             "source_snapshots": source_snapshots,
@@ -5920,14 +5968,9 @@ class WritebackCollaborator:
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
         """
-        # fix-point 7 (2b) — when the win is a GEAK e2e result, source the
-        # revalidation config from result.json (the SINGLE source of truth), NOT
-        # from stack materialization. This guarantees the same-harness rebench
-        # launches byte-for-byte the config GEAK optimized (flags + parsed env +
-        # authored overlay), independent of whether the optimization is a MoE
-        # tuned-config / kernel / flag winner — no case-by-case markers. The
-        # consumer (_promote_to_shared_state) asserts config identity + effect
-        # before stamping validated, and falls back to 2a (GEAK harness) on miss.
+        benchmark_script = baseline_benchmark_script(self.shared_state)
+        # GEAK's explicit launch controls distinguish complete flags from legacy
+        # deltas. Both retain the current stack's environment removal controls.
         ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
@@ -5935,14 +5978,31 @@ class WritebackCollaborator:
         # a result carrying an accepted, positive-delta kernel is revalidated
         # too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
-        if ps_admissible and (ps_cfg.get("flags") or ps_cfg.get("env") or ps_overlay):
+        try:
+            ps_controls = _accepted_config_controls(
+                ps_cfg, inherited_remove_args=self._current_best_launch_config()["remove_args"]
+            )
+            ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
+            ps_has_material = ps_admissible and _geak_result_has_material(ps)
+        except ValueError as exc:
+            self._reject_geak_promotion(ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            self.shared_state.save(self.session_dir)
+            return {"skipped": True, "reason": "geak_invalid_config"}
+        if ps_admissible and (
+            ps_cfg.get("flags")
+            or ps_cfg.get("env")
+            or "env_map" in ps_cfg
+            or ps_controls
+            or ps_overlay
+            or ps_has_material
+        ):
             from ..actions.executors._proposal_identity import effective_fingerprint
 
-            ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
             # An overlay that cannot load installs nothing: the server launches
             # as plain baseline and any delta measured against it belongs to the
             # flags alone. Resolve that BEFORE dispatch so the task never carries
             # a dead path, and so the row cannot be read as a kernel win.
+            overlay_requested = bool(ps_overlay)
             ps_overlay_loadable = _geak_overlay_is_loadable(ps_overlay)
             if ps_overlay and not ps_overlay_loadable:
                 log.warning(
@@ -5951,27 +6011,38 @@ class WritebackCollaborator:
                     ps_overlay,
                 )
                 ps_overlay = ""
-            if not (ps_flags or ps_envs or ps_overlay):
-                # The overlay was the only material and it is dead. A rebench
-                # here would measure plain baseline and credit GEAK for the
-                # noise. Hand it to the GEAK harness (2a), which reproduces the
-                # optimized config from result.json and so engages by construction.
+            if not (ps_flags or ps_envs or ps_controls or ps_overlay):
+                if not ps_has_material:
+                    return {"skipped": True, "reason": "geak_no_material"}
+                # A dead overlay or a source-patch-only result cannot be
+                # represented by this grid. Its final launcher may deploy it.
                 return {
                     "skipped": True,
-                    "reason": "geak_overlay_unloadable",
+                    "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
                     "fallback": "geak_harness",
                 }
-            if ps_flags or ps_envs or ps_overlay:
-                launch = self._current_best_launch_config()
-                base_controls: dict[str, Any] = {}
-                if launch["remove_args"]:
-                    base_controls["base_remove_args"] = launch["remove_args"]
-                if launch["unset_envs"]:
-                    base_controls["base_unset_envs"] = launch["unset_envs"]
-                if launch["args_mode"] == "replace":
-                    base_controls["base_args_mode"] = "replace"
-                # Explore folds the frozen base controls into its variant identity.
-                expected_cfg_hash = effective_fingerprint(ps_flags, ps_envs, **base_controls)
+            if ps_flags or ps_envs or ps_controls or ps_overlay:
+                cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+                base_params = stack_base_params({**cb_now, **self._current_best_launch_config()})
+                base_params = {
+                    key: value
+                    for key, value in base_params.items()
+                    if key not in {"base_remove_args", "base_unset_envs", "base_args_mode"} or value
+                }
+                if ps_controls.get("args_mode") == "replace":
+                    base_params["base_extra_args"] = ""
+                    base_params["base_args_mode"] = "replace"
+                    base_params.pop("base_remove_args", None)
+                # This is Explore's stack-relative proposal identity. The
+                # materialized launch and its evidence carry inherited values.
+                expected_cfg_hash = effective_fingerprint(
+                    ps_flags,
+                    ps_envs,
+                    controls=ps_controls,
+                    base_remove_args=base_params.get("base_remove_args"),
+                    base_unset_envs=base_params.get("base_unset_envs"),
+                    base_args_mode=base_params.get("base_args_mode"),
+                )
                 # ``expected_cfg_hash`` cannot see the overlay, so carry the
                 # overlay's own identity beside it. The consumer re-checks both
                 # after the run: a dropped or altered overlay then reads as
@@ -5981,7 +6052,6 @@ class WritebackCollaborator:
                 # string as its whole identity and the kernel rides along unnamed.
                 ps_kernels = [_geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
                 params_ps: dict[str, Any] = {
-                    **base_controls,
                     "source": "resume_stack_revalidate",
                     "reason": reason,
                     "geak_fallback": True,
@@ -5993,6 +6063,7 @@ class WritebackCollaborator:
                             "name": "geak_revalidate",
                             "extra_args": ps_flags,
                             "extra_envs": dict(ps_envs),
+                            **ps_controls,
                             "overlay_pythonpath": ps_overlay,
                             "provenance": "geak_revalidate",
                             # Only claim kernels when an overlay is actually
@@ -6004,9 +6075,12 @@ class WritebackCollaborator:
                     # Revalidation reproduces the whole stack, so its gain is
                     # cumulative-vs-baseline, not a delta over current_best.
                     "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                    **base_params,
                 }
                 if self.shared_state.baseline_config_path:
                     params_ps["config_path"] = self.shared_state.baseline_config_path
+                if benchmark_script:
+                    params_ps["benchmark_script"] = benchmark_script
                 from ..phases.geak_rebench import resolve_geak_revalidate_idempotency_key
 
                 idempotency_key = await resolve_geak_revalidate_idempotency_key(
@@ -6014,6 +6088,7 @@ class WritebackCollaborator:
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 )
                 lanes, ttl = self._registry_lanes_ttl("explore")
+                self._inject_explore_runtime_params(params_ps)
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
@@ -6067,7 +6142,10 @@ class WritebackCollaborator:
             params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         lanes, ttl = self._registry_lanes_ttl("explore")
+        self._inject_explore_runtime_params(params)
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
@@ -6179,7 +6257,34 @@ class WritebackCollaborator:
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
         )
-        promotion_measurement = res.get("promotion_measurement")
+        measurement = res.get("promotion_measurement")
+        measurement = measurement if isinstance(measurement, Mapping) else {}
+        baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
+        replay_accuracy = measurement.get("accuracy")
+        accuracy_failure = ""
+        if baseline_accuracy > 0:
+            if (
+                isinstance(replay_accuracy, bool)
+                or not isinstance(replay_accuracy, (int, float))
+                or not 0.0 <= replay_accuracy <= 1.0
+            ):
+                accuracy_failure = EVAL_KIND_ACCURACY_UNAVAILABLE
+            elif not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
+                accuracy_failure = "accuracy_drop"
+        if accuracy_failure:
+            self._reject_geak_promotion(
+                {
+                    **ps,
+                    "fallback_result": res,
+                    "failure_reason": accuracy_failure,
+                    "baseline_accuracy": baseline_accuracy,
+                },
+                measured_tput=_geak_sweep_measured_tput(res) or 0.0,
+                current_best_tput=float((self.shared_state.current_best or {}).get("tput") or 0.0),
+                reason=accuracy_failure,
+            )
+            self.shared_state.save(self.session_dir)
+            return {"validated": False, "status": "no_promote", "reason": accuracy_failure}
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
             # Rebench-first: write the headline from the GEAK-harness MEASURED
             # throughput (engages by construction via the launch-script replay),
@@ -6210,25 +6315,34 @@ class WritebackCollaborator:
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
                 overlay_loaded=overlay_loaded_2a,
-                measurement_provenance=promotion_measurement if isinstance(promotion_measurement, Mapping) else res,
+                measurement_provenance=measurement or res,
             )
-            if not accepted:
-                return {"validated": False, "status": "no_promote", "reason": "replay_not_accepted"}
-            gain_out = float(self.shared_state.cumulative_gain_validated)
             try:
                 self.shared_state.save(self.session_dir)
             except Exception:  # noqa: BLE001 - defensive
                 log.exception("geak 2a: SharedState.save failed")
+            if not accepted:
+                return {
+                    "validated": False,
+                    "status": "no_promote",
+                    "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
+                }
+            gain_out = float(self.shared_state.cumulative_gain_validated)
             return {"validated": True, "gain": gain_out, "reason": reason}
         if res.get("error"):
             reason = str(res["error"])
         log.warning(
-            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s accuracy_failure=%s)",
             res.get("status"),
             geak_sp,
             reason,
+            accuracy_failure,
         )
-        return {"validated": False, "status": res.get("status"), "reason": reason}
+        return {
+            "validated": False,
+            "status": "failed" if accuracy_failure else res.get("status"),
+            "reason": accuracy_failure or reason,
+        }
 
     async def _resume_reenter_kernel_if_needed(self) -> None:
         """Idempotently re-fire the KERNEL_AGENT entry hook on resume.

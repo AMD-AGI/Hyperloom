@@ -234,7 +234,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_source, _ref_controls = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -279,6 +279,7 @@ def _seed_shared_state(
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
+        reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
         reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
@@ -590,11 +591,11 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], str, str]:
+) -> tuple[str, dict[str, str], str, str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
-        return ("", {}, "", "")
+        return ("", {}, "", "", {})
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
@@ -605,7 +606,8 @@ def _resolve_reference_recipe(
         print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    if not recipe.server_args and not recipe.envs:
+    controls = getattr(recipe, "launch_controls", {})
+    if not recipe.server_args and not recipe.envs and not controls:
         print(
             f"ERROR: --reference-script {source!r} lifted no server flags and no env exports",
             file=sys.stderr,
@@ -613,7 +615,7 @@ def _resolve_reference_recipe(
         raise SystemExit(2)
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:

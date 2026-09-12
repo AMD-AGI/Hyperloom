@@ -44,6 +44,7 @@ from ..actions.executors._workload_envs import (
     default_baseline_config,
     materialize_config_with_envs,
 )
+from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from .roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
@@ -51,6 +52,7 @@ from .roofline_ceiling import (
     select_peak_and_bound,
 )
 from ..state.shared_state import SharedState
+from ..loop.coordinator_helpers import baseline_benchmark_script
 
 
 log = logging.getLogger(__name__)
@@ -87,12 +89,11 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: i
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
-    """Return ``(has_opt, args, envs)`` from ``state.current_best`` (either non-empty side counts as optimized)."""
+    """Return ``(has_opt, args, envs)`` for a retained config or kernel overlay."""
     cb = state.current_best or {}
-    args = str(cb.get("extra_server_args") or "").strip()
-    envs_raw = cb.get("extra_envs") or {}
-    envs = {str(k): str(v) for k, v in envs_raw.items()}
-    return (bool(args) or bool(envs)), args, envs
+    config = normalize_proposal(cb)
+    overlay = str(cb.get("final_overlay") or "").strip()
+    return bool(is_executable(config) or overlay), config["extra_args"], config["extra_envs"]
 
 
 def _budget_skip_result(variant: GridVariant) -> VariantResult:
@@ -363,6 +364,8 @@ def _build_arm_grid(
     num_prompts_factor: int,
     arm_args: str,
     arm_envs: dict[str, str],
+    overlay_pythonpath: str = "",
+    arm_controls: Mapping[str, Any] | None = None,
 ) -> list[GridVariant]:
     """Build a single-arm grid in descending CONC order."""
     out: list[GridVariant] = []
@@ -378,14 +381,15 @@ def _build_arm_grid(
             }
         )
         envs["RUN_EVAL"] = "false"
-        out.append(
-            GridVariant(
-                name=f"{arm_name}_conc{conc}",
-                extra_server_args=arm_args,
-                extra_envs=envs,
-                note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
-            )
+        variant = GridVariant(
+            name=f"{arm_name}_conc{conc}",
+            extra_server_args=arm_args,
+            extra_envs=envs,
+            note=f"arm={arm_name} conc={conc} isl={isl} osl={osl}",
+            **(arm_controls or {}),
         )
+        variant.overlay_pythonpath = overlay_pythonpath  # type: ignore[attr-defined]
+        out.append(variant)
     return out
 
 
@@ -417,6 +421,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     _all_results_ref: list[VariantResult],
     _budget_state: dict[str, Any],
     recorder: Any = None,
+    benchmark_script: str | None = None,
 ) -> list[VariantResult]:
     """Sweep one arm across all CONC values reusing a single persistent server.
 
@@ -439,6 +444,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     )
 
     arm_results: list[VariantResult] = []
+    overlay = str((state.current_best or {}).get("final_overlay") or "").strip()
     grid = _build_arm_grid(
         arm_name,
         concs_desc,
@@ -447,6 +453,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         num_prompts_factor=num_prompts_factor,
         arm_args=arm_args,
         arm_envs=arm_envs,
+        overlay_pythonpath=overlay if arm_name == "optimized" else "",
+        arm_controls=controls_of(normalize_proposal(state.current_best or {})) if arm_name == "optimized" else {},
     )
     if not grid:
         return arm_results
@@ -514,6 +522,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 workspace=workspace,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 variant_timeout_sec=variant_timeout_sec,
                 soft_deadline_sec=soft_deadline_sec,
                 deadline=deadline,
@@ -567,6 +576,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 server_lifecycle=server_lifecycle_boot,
                 server_already_ready=False,
                 preclean_before_run=True,
@@ -718,6 +728,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             workspace=workspace,
             model_path=model_path,
             gpu_type=gpu_type,
+            benchmark_script=benchmark_script,
             variant_timeout_sec=variant_timeout_sec,
             soft_deadline_sec=soft_deadline_sec,
             deadline=deadline,
@@ -822,6 +833,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     variant_timeout_sec=variant_timeout_sec,
                     model_path=model_path,
                     gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
                     server_lifecycle=server_lifecycle_reuse,
                     server_already_ready=True,
                     preclean_before_run=False,
@@ -919,6 +931,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     _budget_state: dict[str, Any],
     serving_lease: Any = None,
     recorder: Any = None,
+    benchmark_script: str | None = None,
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
@@ -993,6 +1006,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
+                benchmark_script=benchmark_script,
                 soft_deadline_sec=soft_deadline_sec,
                 serving_lease=serving_lease,
             )
@@ -1260,6 +1274,13 @@ async def run_conc_sweep(
         return _declined(recorder, "missing_workload_shape", isl=isl, osl=osl)
     if not has_opt:
         return _declined(recorder, "no_optimization_to_compare")
+    opt_overlay = str((state.current_best or {}).get("final_overlay") or "").strip()
+    if opt_overlay:
+        from ..actions.executors._grid_runner import _is_safe_path_entry
+        from ..loop.coordinator_helpers import _geak_overlay_is_loadable
+
+        if not _is_safe_path_entry(opt_overlay) or not _geak_overlay_is_loadable(opt_overlay):
+            return _declined(recorder, "optimized_overlay_unavailable", final_overlay=opt_overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
     # A non-positive budget is "no time left", not "budget gate off": running the
@@ -1292,12 +1313,14 @@ async def run_conc_sweep(
     resolved_gpu = _gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
+    benchmark_script = baseline_benchmark_script(state)
     try:
         base_yaml_path = materialize_config_with_envs(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,
             gpu_type=resolved_gpu or None,
+            benchmark_script=benchmark_script,
             out_name="conc_sweep_base.with_envs.yaml",
         )
     except FrameworkScriptMismatchError as exc:
@@ -1442,6 +1465,8 @@ async def run_conc_sweep(
                 num_prompts_factor=num_prompts_factor,
                 arm_args=_aa,
                 arm_envs=_ae,
+                overlay_pythonpath=opt_overlay if _an == "optimized" else "",
+                arm_controls=controls_of(normalize_proposal(state.current_best or {})) if _an == "optimized" else {},
             )
 
             # Check overall budget before starting each arm.
@@ -1496,6 +1521,7 @@ async def run_conc_sweep(
                 workspace=workspace,
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
+                benchmark_script=benchmark_script,
                 variant_timeout_sec=variant_timeout_sec,
                 soft_deadline_sec=_session_soft_dl,
                 deadline=deadline,

@@ -8,6 +8,8 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors import _git as gitmod
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
@@ -22,8 +24,108 @@ def test_now_iso():
     assert "T" in ip._now_iso()
 
 
+@pytest.mark.parametrize(
+    ("metadata", "selected", "expected"),
+    [
+        (None, ["handwritten.patch"], None),
+        ({}, ["handwritten.patch"], None),
+        ({"harvest.patch": "/aiter"}, [], None),
+        ({"harvest.patch": "/aiter"}, ["handwritten.patch", "harvest.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["handwritten.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["base.patch", "harvest.patch"], None),
+        ({"harvest.patch": "/aiter"}, ["harvest.patch"], "/aiter"),
+        ({"a.patch": "/sglang", "b.patch": "/sglang"}, ["a.patch", "b.patch"], "/sglang"),
+        ({"a.patch": "/sglang", "b.patch": "/aiter"}, ["a.patch", "b.patch"], None),
+        ({"a.patch": "/sglang", "unused.patch": "/aiter"}, ["a.patch"], "/sglang"),
+        ({"a.patch": None}, ["a.patch"], None),
+        ({"a.patch": " "}, ["a.patch"], None),
+    ],
+)
+def test_recorded_root_covers_selected_patches(tmp_path, metadata, selected, expected):
+    for path in set(selected) | set(metadata or {}):
+        (tmp_path / path).touch()
+    payload = {"patch_roots": metadata, "patches_written": ["harvest.patch"]}
+    assert (
+        ip._sole_patch_root(payload, [tmp_path / path for path in selected], specialist_workspace=tmp_path) == expected
+    )
+
+
+@pytest.mark.parametrize("relative", [False, True])
+@pytest.mark.parametrize("conflicting_alias", [False, True])
+def test_recorded_root_matches_resolved_patch_identity(tmp_path, relative, conflicting_alias):
+    workspace = tmp_path / "workspace"
+    patches = workspace / "worktree" / "patches"
+    patches.mkdir(parents=True)
+    patch = patches / "harvest.patch"
+    patch.touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    recorded = "patches/harvest.patch" if relative else str(alias / "worktree" / "patches" / patch.name)
+    metadata = {recorded: "/aiter"}
+    if conflicting_alias:
+        metadata[str(patch)] = "/sglang"
+    payload = {"patch_roots": metadata}
+
+    result = ip._sole_patch_root(payload, [patch.resolve()], specialist_workspace=alias)
+
+    assert result == (None if conflicting_alias else "/aiter")
+
+
 def test_resolve_framework_root_explicit_dir(tmp_path):
     assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
+
+
+def test_recorded_roots_with_external_localization_require_full_resolution(tmp_path):
+    workspace = tmp_path / "specialist"
+    workspace.mkdir()
+    authored = workspace / "authored.patch"
+    authored.touch()
+    localization = tmp_path / "localization.patch"
+    localization.touch()
+    payload = {"patch_roots": {str(authored): "/aiter", str(localization): "/aiter"}}
+    assert ip._sole_patch_root(payload, [authored, localization], specialist_workspace=workspace) is None
+
+
+def test_recorded_root_with_nul_declines_fast_path(tmp_path):
+    patch = tmp_path / "a.patch"
+    patch.touch()
+    assert (
+        ip._sole_patch_root(
+            {"patch_roots": {"a.patch": "/bad\0root"}},
+            [patch],
+            specialist_workspace=tmp_path,
+        )
+        is None
+    )
+
+
+def test_recorded_roots_compare_directory_identity(tmp_path):
+    root = tmp_path / "aiter"
+    root.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(root, target_is_directory=True)
+    patches = [tmp_path / "a.patch", tmp_path / "b.patch"]
+    for patch in patches:
+        patch.touch()
+    payload = {"patch_roots": {"a.patch": str(root) + "/", "b.patch": "alias"}}
+    assert ip._sole_patch_root(payload, patches, specialist_workspace=tmp_path) == str(root)
+
+
+@pytest.mark.parametrize("failing_path", ["a.patch", "aiter"])
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+def test_recorded_roots_decline_unresolvable_paths(tmp_path, monkeypatch, failing_path, error):
+    patch = tmp_path / "a.patch"
+    patch.touch()
+    resolve = Path.resolve
+
+    def failing_resolve(path, *args, **kwargs):
+        if path.name == failing_path:
+            raise error("unresolvable path")
+        return resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", failing_resolve)
+    payload = {"patch_roots": {"a.patch": "aiter"}}
+    assert ip._sole_patch_root(payload, [patch], specialist_workspace=tmp_path) is None
 
 
 def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypatch):

@@ -495,23 +495,61 @@ def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
     return texts
 
 
-def _sole_patch_root(done_payload: dict[str, Any] | None) -> str | None:
+def _sole_patch_root(
+    done_payload: dict[str, Any] | None,
+    patch_paths: list[Path],
+    *,
+    specialist_workspace: Path,
+) -> str | None:
     """Return the one apply root recorded for every patch, or ``None``.
 
-    A set spanning two trees has no single apply root, so it falls back to
-    resolution rather than silently picking one.
+    Only metadata covering the selected patch set can replace target
+    resolution. Unselected patches cannot supply or contradict its root.
+    Localization patches outside the specialist workspace deliberately use
+    full-set content resolution: the specialist cannot attest their paths.
 
     Args:
         done_payload: The originating specialist's done payload, if any.
+        patch_paths: The complete patch set selected for this integration.
+        specialist_workspace: Workspace used to resolve recorded patch paths.
 
     Returns:
         The sole recorded root, or ``None``.
     """
     raw = (done_payload or {}).get("patch_roots")
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not patch_paths:
         return None
-    roots = {str(v) for v in raw.values() if str(v).strip()}
-    return roots.pop() if len(roots) == 1 else None
+    try:
+        selected = {patch.resolve() for patch in patch_paths}
+    except (OSError, RuntimeError, ValueError):
+        return None
+    covered: set[Path] = set()
+    roots: set[str] = set()
+    for recorded_patch, root in raw.items():
+        if not isinstance(recorded_patch, str) or not recorded_patch.strip():
+            continue
+        try:
+            resolved = _resolve_patch_paths(
+                specialist_workspace=specialist_workspace,
+                explicit_patches=[recorded_patch],
+                done_payload=None,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        for patch in resolved:
+            if patch not in selected:
+                continue
+            if not isinstance(root, str) or not root.strip():
+                return None
+            covered.add(patch)
+            try:
+                root_path = Path(root).expanduser()
+                if not root_path.is_absolute():
+                    root_path = specialist_workspace / root_path
+                roots.add(str(root_path.resolve()))
+            except (OSError, RuntimeError, ValueError):
+                return None
+    return roots.pop() if covered == selected and len(roots) == 1 else None
 
 
 def _resolve_framework_root(
@@ -2371,7 +2409,7 @@ class IntegratePatchExecutor:
         framework_root = _resolve_framework_root(
             explicit_framework_root,
             patch_paths=patch_paths,
-            recorded_root=_sole_patch_root(done_payload),
+            recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)

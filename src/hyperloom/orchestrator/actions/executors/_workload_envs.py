@@ -34,6 +34,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.perf_metric import (
+    agentx_enabled as agentx_enabled,
     intvty_grading_enabled,
     is_agentx_mode,
     parse_intvty_noise_pct,
@@ -54,7 +55,7 @@ from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
-from ._grid_runner import (
+from ._grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
     inject_sglang_attention_backend,
@@ -116,7 +117,6 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # was attempted and did not apply. Distinct from "never attempted": patching can
 # be disabled for an image that already ships the patch.
 _TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
-_AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
@@ -141,12 +141,6 @@ def _first_env(names: tuple[str, ...]) -> str:
         if value:
             return value
     return ""
-
-
-def agentx_enabled(env: dict[str, str] | None = None) -> bool:
-    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    raw = (env or os.environ).get("HYPERLOOM_AGENTX", "")
-    return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
 
 
 def agentx_active(shared_state: Any = None) -> bool:
@@ -403,7 +397,7 @@ def apply_agentx_switch(
     # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
     # layers stay consistent. AgentX-only: this function returned early above when AgentX
     # is off, so the default (synthetic) cap is untouched. The import is function-local
-    # to avoid a circular dependency (``baseline`` imports this module at load time).
+    # so standalone workload materialization uses the same timeout derivation.
     #
     # max(), never assignment: this is the ONLY place in the AgentX path that
     # writes an existing cap, and a bare assignment LOWERS every config that
@@ -414,7 +408,7 @@ def apply_agentx_switch(
     # module exists to prevent, introduced by the fix for it. A declared cap is a
     # measured statement about that config; the derivation is a floor under it,
     # not a replacement for it.
-    from hyperloom.orchestrator.actions.executors.baseline import (
+    from ._agentx_timeouts import (
         agentx_baseline_timeout_sec,
         agentx_warmup_grace_sec,
     )
@@ -684,12 +678,18 @@ def resolve_reference_base() -> tuple[str, dict[str, str]]:
 
     Returns ``("", {})`` when the run has no reference recipe.
     """
+    args, envs, _controls = resolve_reference_launch()
+    return args, envs
+
+
+def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
+    """Read the accepted reference recipe and its dedicated launch controls."""
     from hyperloom.inference_optimizer.session.paths import session_dir
 
     from ...state.shared_state import SharedState
 
     state = SharedState.load_or_init(session_dir())
-    return state.reference_server_args.strip(), dict(state.reference_envs)
+    return state.reference_server_args.strip(), dict(state.reference_envs), dict(state.reference_launch_controls)
 
 
 def _apply_custom_runtime_defaults(
@@ -1631,12 +1631,28 @@ def materialize_config_with_envs(
     # Seed the framework server-args env + envs from a reference recipe below
     # the YAML base and any per-task extra_server_args (reference flags leftmost,
     # so last-wins lets later merges override them).
-    ref_args, reference_envs = resolve_reference_base()
-    if ref_args:
+    ref_args, reference_envs, reference_controls = resolve_reference_launch()
+    for name in reference_controls.get("unset_envs", []):
+        envs.pop(name, None)
+    if ref_args or reference_controls.get("remove_args") or reference_controls.get("args_mode") == "replace":
         _ref_fw_env = server_args_env_name(bench.get("framework"))
-        envs[_ref_fw_env] = merge_server_args(ref_args, str(envs.get(_ref_fw_env, "")))
+        from ._grid_server_args import compose_server_args
+
+        envs[_ref_fw_env] = compose_server_args(
+            base_extra_args=ref_args,
+            variant_extra_args=""
+            if reference_controls.get("args_mode") == "replace"
+            else str(envs.get(_ref_fw_env, "")),
+            remove_args=reference_controls.get("remove_args"),
+            args_mode="replace",
+        )
     for _rk, _rv in reference_envs.items():
         envs.setdefault(str(_rk), str(_rv))  # never clobber YAML/CLI envs
+    if reference_controls.get("overlay_pythonpath"):
+        from hyperloom.common.overlay import validate_overlay_pythonpath
+
+        overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
+        envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1951,6 +1967,9 @@ def materialize_config_with_envs(
         envs.setdefault("SGLANG_USE_AITER_FP8_PER_TOKEN", "1")
     remove_list = to_str_list(remove_args)
     unset_list = to_str_list(unset_envs)
+    for key in reference_controls.get("unset_envs", []):
+        if key not in reference_envs and key not in safe_extra_envs:
+            envs.pop(key, None)
     if remove_list:
         envs[framework_env] = remove_server_args(envs.get(framework_env, ""), remove_list)
     for key in unset_list:

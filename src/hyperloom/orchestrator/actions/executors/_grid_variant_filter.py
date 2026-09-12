@@ -274,8 +274,7 @@ def _probe_server_help_text(framework: str) -> str:
     expiry = _HELP_PROBE_FAILED_UNTIL.get(fw)
     if expiry is not None and time.monotonic() < expiry:
         return ""
-    # Deferred: _grid_runner imports this module at module scope.
-    from ._grid_runner import _resolve_probe_python
+    from ._benchmark_interpreter import _resolve_probe_python
 
     try:
         interpreter = _resolve_probe_python(fw)

@@ -38,6 +38,21 @@ GEAK's `e2e_workflow` recursively drives `kernel_workflow` to author and tune th
 individual hot kernels worth fixing. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
+## Current-best launch configuration
+
+The handoff's `baseline_env_spec.config` carries the accepted server arguments,
+environment assignments, `remove_args`, `unset_envs`, and `args_mode`. An explicit
+`args_mode: replace` preserves a complete argument list even when it is empty.
+Without an observed `server_launch_flags` snapshot, this mode prevents recipe
+arguments from being restored. A nonempty snapshot from the same promoted
+measurement remains the complete launch base, including script-derived defaults.
+
+Environment removals precede the accepted assignments, so a later explicit
+assignment can re-add a variable. The launch identity includes removal and
+replacement controls: changing them invalidates the same-configuration throughput
+reference. Handoffs with default append mode and no removals retain their existing
+identities.
+
 ## GPU pinning in the handoff
 
 GEAK launches full servers out-of-process (baseline, profile, config-tuning

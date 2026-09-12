@@ -515,6 +515,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_targeted_build: dict = field(default_factory=dict)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
+    baseline_benchmark_script: str | None = None
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
     stack_fingerprint_meta: dict = field(default_factory=dict)
     # Extra workload-shape fields from baseline YAML; warm-start/lesson filters, not part of recipe canonical id.
@@ -560,6 +561,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # every baseline.
     reference_server_args: str = ""
     reference_envs: dict[str, str] = field(default_factory=dict)
+    reference_launch_controls: dict[str, Any] = field(default_factory=dict)
     reference_model: str = ""
     reference_source: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
@@ -1309,6 +1311,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
+                    overlay_pythonpath=str(cb.get("final_overlay") or ""),
+                    unset_envs=to_str_list(cb.get("unset_envs")),
+                    remove_args=to_str_list(cb.get("remove_args")),
+                    args_mode=str(cb.get("args_mode") or "append"),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
                     tp=int(self.tp or 0) or None,
                     max_model_len=int(self.max_model_len or 0) or None,
@@ -1319,7 +1325,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     encoding="utf-8",
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
-            log.debug("current_setting.sh render failed", exc_info=True)
+            # Never leave a stale launcher or export a subset of the retained
+            # configuration. The complete settings remain in durable state.
+            try:
+                (Path(session_dir) / "current_setting.sh").unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not remove stale current_setting.sh", exc_info=True)
+            log.warning("current_setting.sh render failed", exc_info=True)
         # Live status mirror: reflect the persisted snapshot into Langfuse for real-time status.
         try:
             from ..trace.langfuse_emitter import record_status as _lf_record_status

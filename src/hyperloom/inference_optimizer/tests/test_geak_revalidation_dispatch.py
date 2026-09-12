@@ -7,7 +7,9 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import shlex
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -412,8 +414,204 @@ async def test_geak_rebench_preserves_native_base_removal_controls(
     assert {key: value for key, value in row.params.items() if key in base_keys} == native_controls
 
 
-@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current", "accepted", "expected_flags", "expected_env"),
+    [
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.9",
+                "extra_envs": {},
+                "args_mode": "replace",
+                "remove_args": ["--disable-radix-cache"],
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--mem-fraction-static 0.9",
+            None,
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024 --mem-fraction-static 0.8"},
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--disable-radix-cache --mem-fraction-static 0.9 --chunked-prefill-size 1024",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}, "args_mode": "replace"},
+            "--mem-fraction-static 0.9",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024"},
+            {"flags": "", "env_map": {}, "args_mode": "replace"},
+            "",
+            "1",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "2"}},
+            {"remove_args": ["--disable-radix-cache"], "unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            "--mem-fraction-static 0.7 --chunked-prefill-size 1024",
+            None,
+        ),
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.8",
+                "args_mode": "replace",
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {"SGLANG_AITER_MLA_PERSIST": "3"}},
+            "--mem-fraction-static 0.9",
+            "3",
+        ),
+        (
+            {"extra_server_args": "--chunked-prefill-size 1024", "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "2"}},
+            {"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+            "--disable-radix-cache --mem-fraction-static 0.7 --chunked-prefill-size 1024",
+            None,
+        ),
+        (
+            {
+                "extra_server_args": "--mem-fraction-static 0.8",
+                "args_mode": "replace",
+                "extra_envs": {"SGLANG_AITER_MLA_PERSIST": "3"},
+                "unset_envs": ["SGLANG_AITER_MLA_PERSIST"],
+            },
+            {"flags": "--mem-fraction-static 0.9", "env_map": {}},
+            "--mem-fraction-static 0.9",
+            "3",
+        ),
+    ],
+    ids=[
+        "legacy_retains_removals",
+        "legacy_delta",
+        "complete_flags",
+        "empty_replacement",
+        "removal_only",
+        "readd_env",
+        "unset_only",
+        "retained_env_override",
+    ],
+)
+async def test_geak_launch_controls_reach_materialized_rebench(
+    coordinator, tmp_path, monkeypatch, current, accepted, expected_flags, expected_env
+) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
+    from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "sglang",
+                    "model": "/models/test",
+                    "run_mode": "local",
+                    "benchmark_script": "sglang_custom.sh",
+                    "envs": {
+                        "TP": "1",
+                        "CONC": "8",
+                        "ISL": "256",
+                        "OSL": "256",
+                        "EXTRA_SGLANG_ARGS": "--disable-radix-cache --mem-fraction-static 0.7",
+                        "SGLANG_AITER_MLA_PERSIST": "1",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.baseline_double_run = False
+    state.current_best = {"tput": 110.0, **current}
+    state.geak_result = {"schema_version": 2, "status": "ok", "accepted_config": accepted}
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+    fingerprints = []
+    original_fingerprint = explore.effective_fingerprint
+
+    def observe_fingerprint(*args, **kwargs):
+        fingerprint = original_fingerprint(*args, **kwargs)
+        fingerprints.append(fingerprint)
+        return fingerprint
+
+    async def capture_grid(**kwargs):
+        output = tmp_path / f"materialized_{len(calls)}"
+        output.mkdir()
+        path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            kwargs["base_extra_args"],
+            kwargs["grid"][0],
+            output_subdir=output,
+            model_path=kwargs["model_path"],
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs["benchmark_script"],
+            base_args_mode=kwargs["base_args_mode"],
+        )
+        calls.append(yaml.safe_load(path.read_text())["benchmark"]["envs"])
+        if len(calls) > 1:
+            return []
+        return [
+            VariantResult(
+                name="geak_revalidate",
+                extra_server_args=kwargs["grid"][0].extra_server_args,
+                extra_envs=dict(kwargs["grid"][0].extra_envs),
+                status="succeeded",
+                output_throughput=120.0,
+            )
+        ]
+
+    monkeypatch.setattr(explore, "run_grid", capture_grid)
+    monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
+    monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
+    monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._grid_variant_filter._probe_server_help_text", lambda _framework: ""
+    )
+    result = await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+
+    assert len(calls) == 1
+    assert fingerprints == [task.params["expected_cfg_hash"]]
+    envs = calls[0]
+    flags = shlex.split(envs.get("EXTRA_SGLANG_ARGS", ""))
+    if "--watchdog-timeout" in flags:
+        position = flags.index("--watchdog-timeout")
+        del flags[position : position + 2]
+    assert flags == shlex.split(expected_flags)
+    assert envs.get("SGLANG_AITER_MLA_PERSIST") == expected_env
+    if current.get("extra_envs", {}).get("SGLANG_USE_AITER"):
+        assert envs["SGLANG_USE_AITER"] == "1"
+    assert len(result["winners"]) == 1
+    assert coordinator._promote_geak_from_candidate(
+        state.geak_result, measured_tput=120.0, measurement_provenance=result["best_variant"], overlay_loaded=False
+    )
+    state.geak_result = {}
+    state.save(coordinator.session_dir)
+    coordinator.shared_state = SharedState.load_or_init(coordinator.session_dir)
+    resumed = await coordinator._enqueue_internal_stack_rebench(reason="launch_controls_resume")
+    resume_task = await coordinator.tasks.get(str(resumed["task_id"]))
+    await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=resume_task, extra={"shared_state": coordinator.shared_state})
+    )
+    assert len(calls) == 2
+    resume_flags = shlex.split(calls[1].get("EXTRA_SGLANG_ARGS", ""))
+    if "--watchdog-timeout" in resume_flags:
+        position = resume_flags.index("--watchdog-timeout")
+        del resume_flags[position : position + 2]
+    assert resume_flags == flags
+    assert calls[1].get("SGLANG_AITER_MLA_PERSIST") == expected_env
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_removal_controls", [False, True], ids=["plain", "removal_controls"])
 async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     coordinator, with_removal_controls: bool
 ) -> None:
@@ -460,6 +658,78 @@ async def test_expected_cfg_hash_matches_the_variant_the_executor_builds(
     )
 
 
+@pytest.mark.asyncio
+async def test_structured_environment_alone_dispatches_geak_rebench(coordinator) -> None:
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {"SGLANG_USE_AITER": "1"}}}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    row = await coordinator.tasks.get(str(enqueued["task_id"]))
+    entry = row.params["grid"][0]
+    ran = GridVariant(str(entry["name"]), str(entry["extra_args"]), dict(entry["extra_envs"]))
+    assert row.params["geak_fallback"] is True
+    assert ran.extra_envs == {"SGLANG_USE_AITER": "1"}
+    assert row.params["expected_cfg_hash"] == ran.fingerprint
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_env", ["", "SGLANG_USE_AITER=1"])
+async def test_empty_structured_environment_does_not_rebench_legacy_values(coordinator, legacy_env) -> None:
+    st = coordinator.shared_state
+    st.baseline_tput = 100.0
+    st.geak_result = {"status": "ok", "accepted_config": {"env_map": {}, "env": legacy_env}}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert enqueued == {"skipped": True, "reason": "geak_no_material"}
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("env_map", [None, [], {"SGLANG_USE_AITER": 1}, {"BAD-NAME": "1"}, {"VALID": "a\0b"}])
+async def test_malformed_structured_environment_does_not_dispatch(coordinator, env_map) -> None:
+    coordinator.shared_state.geak_result = {"status": "ok", "accepted_config": {"env_map": env_map}}
+    result = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert result == {"skipped": True, "reason": "geak_invalid_config"}
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert not coordinator.shared_state.geak_pending
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "material",
+    [{"final_patch": "/geak/final.patch"}, {"accepted_kernels": ["gemm"]}, {"accepted_heads": ["attention"]}],
+)
+async def test_artifact_only_result_requires_its_own_harness(coordinator, material) -> None:
+    coordinator.shared_state.geak_result = {"status": "ok", **material}
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="geak_e2e_win")
+    assert enqueued == {"skipped": True, "reason": "geak_material_requires_harness", "fallback": "geak_harness"}
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_recovered_empty_map_closes_without_fallback(coordinator, tmp_path, monkeypatch) -> None:
+    c = coordinator
+    _arm_kernel_to_sweep(c.shared_state)
+    geak_dir = tmp_path / "geak"
+    geak_dir.mkdir()
+    result = {"status": "ok", "final_throughput_tok_s": 116.0, "accepted_config": {"env_map": {}}}
+    (geak_dir / "result.json").write_text(json.dumps(result), encoding="utf-8")
+    c.shared_state.geak_result = {}
+
+    async def _must_not_fallback(**_kwargs):
+        pytest.fail("empty optimization must not launch a fallback")
+
+    monkeypatch.setattr(c, "_validate_geak_via_geak_harness", _must_not_fallback)
+    await c._run_geak_kernel_phase(from_phase="KERNEL")
+
+    assert c.shared_state.geak_result["revalidation_status"] == "no_material"
+    assert not c.shared_state.geak_pending
+    assert not c.shared_state.resume_pending_revalidation
+    assert not await c.tasks.queued()
+
+
 def test_material_check_ignores_untrusted_env_names() -> None:
     """An untrusted key on one side only must not read as a config difference."""
     from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
@@ -481,6 +751,35 @@ def test_material_check_ignores_untrusted_env_names() -> None:
         echoed,
         prev_best_flags="--fp8-gemm-backend triton",
         prev_best_envs={"SGLANG_USE_AITER": "1"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("accepted", "previous", "expected"),
+    [
+        ({"flags": "", "args_mode": "replace"}, {"flags": "--disable-radix-cache"}, True),
+        ({"flags": "", "args_mode": "replace"}, {"flags": "", "args_mode": "replace"}, False),
+        (
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"},
+            False,
+        ),
+        ({"flags": "--mem-fraction-static 0.9"}, {"flags": "--mem-fraction-static 0.9", "args_mode": "replace"}, False),
+        ({"flags": "", "env_map": {}}, {"flags": "--disable-radix-cache", "args_mode": "replace"}, False),
+        ({"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]}, {"env_map": {"SGLANG_AITER_MLA_PERSIST": "1"}}, True),
+    ],
+)
+def test_material_check_distinguishes_explicit_controls_from_empty_legacy(accepted, previous, expected):
+    from hyperloom.orchestrator.loop.coordinator_helpers import _geak_result_has_material
+
+    assert (
+        _geak_result_has_material(
+            {"status": "ok", "accepted_config": accepted},
+            prev_best_flags=previous.get("flags", ""),
+            prev_best_envs=previous.get("env_map", {}),
+            prev_best_controls=previous,
+        )
+        is expected
     )
 
 
@@ -1771,3 +2070,195 @@ async def test_prune_drain_leaves_running_rebench_alone(coordinator) -> None:
 
     assert cancelled == []
     assert (await c.tasks.get(running.task_id)).state == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["geak", "resume"])
+@pytest.mark.parametrize(
+    ("baseline_runtime", "timeout_override", "expected_timeout", "expected_soft_deadline"),
+    [(4140.0, 9000, 9000, 6210.0), (4140.0, 0, 8280, 6210.0), (0.0, 0, 2400, None)],
+    ids=["explicit_override", "measured_baseline", "default"],
+)
+async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
+    coordinator,
+    tmp_path,
+    monkeypatch,
+    source,
+    baseline_runtime,
+    timeout_override,
+    expected_timeout,
+    expected_soft_deadline,
+) -> None:
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        "benchmark:\n"
+        "  framework: sglang\n"
+        "  model: /models/test\n"
+        "  run_mode: local\n"
+        "  benchmark_script: sglang_mi300x.sh\n"
+        "  envs: {TP: 1, CONC: 8, ISL: 256, OSL: 256}\n",
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_config_path = str(baseline)
+    state.baseline_tput = 100.0
+    state.baseline_runtime_sec = baseline_runtime
+    state.explore_variant_timeout_sec_override = timeout_override
+    state.explore_variant_timeout_safety_margin = 0.5
+    state.explore_overtime_kill_ratio = 1.5
+    state.baseline_double_run = False
+    if source == "geak":
+        state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
+    else:
+        state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
+
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="runtime_budget_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+
+    async def capture_grid(**kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
+    executor = ExploreExecutor(session_dir=coordinator.session_dir)
+    await executor._run_explore(SimpleNamespace(task=task, extra={"shared_state": state}))
+
+    assert len(calls) == 1
+    assert calls[0]["variant_timeout_sec"] == expected_timeout
+    assert calls[0]["soft_deadline_sec"] == expected_soft_deadline
+    assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
+    assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
+    if timeout_override:
+        assert task.params["variant_timeout_sec"] == timeout_override
+    else:
+        assert "variant_timeout_sec" not in task.params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["geak", "resume"])
+@pytest.mark.parametrize("enablement_revalidation", [False, True])
+async def test_internal_stack_rebench_preserves_baseline_script(
+    coordinator, tmp_path, monkeypatch, source, enablement_revalidation
+) -> None:
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    baseline = tmp_path / "baseline.yaml"
+    baseline.write_text(
+        "benchmark:\n  framework: sglang\n  model: /models/test\n  run_mode: local\n"
+        "  benchmark_script: sglang_custom.sh\n  envs: {TP: 1, CONC: 8, ISL: 256, OSL: 256}\n",
+        encoding="utf-8",
+    )
+    state = coordinator.shared_state
+    state.baseline_tput = 0.0
+    state.baseline_double_run = True
+    for name, tput in [("sglang_custom.sh", 100.0), ("rejected_script.sh", 90.0)]:
+        task = await coordinator.tasks.create(kind="baseline", params={"benchmark_script": name}, idempotency_key=name)
+        await coordinator._promote_to_shared_state(
+            "baseline", {"output_throughput": tput, "materialized_config": str(baseline)}, task=task
+        )
+    assert state.baseline_tput == 100.0
+    assert state.last_baseline["extras"]["fingerprint"]["benchmark_script"] == "rejected_script.sh"
+    if enablement_revalidation:
+        task = await coordinator.tasks.create(
+            kind="baseline",
+            params={"reason": "enablement_eval_revalidation", "benchmark_script": "sglang_custom.sh"},
+            idempotency_key="revalidate-baseline",
+        )
+        await coordinator._promote_to_shared_state(
+            "baseline", {"output_throughput": 105.0, "materialized_config": str(baseline)}, task=task
+        )
+    state.save(coordinator.session_dir)
+    coordinator.shared_state = state = type(state).load_or_init(coordinator.session_dir)
+    assert state.baseline_benchmark_script == "sglang_custom.sh"
+    if source == "geak":
+        state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
+    else:
+        state.current_best = {"extra_server_args": "--mem-fraction-static 0.9"}
+    monkeypatch.setenv("GPU_TYPE", "mi355x")
+    enqueued = await coordinator._enqueue_internal_stack_rebench(reason="script_regression")
+    task = await coordinator.tasks.get(str(enqueued["task_id"]))
+    calls = []
+
+    async def capture_grid(**kwargs):
+        output = tmp_path / f"variant_{len(calls)}"
+        output.mkdir()
+        variant_path = _build_variant_yaml(
+            kwargs["base_yaml_path"],
+            "",
+            kwargs["grid"][0],
+            output_subdir=output,
+            gpu_type=kwargs["gpu_type"],
+            benchmark_script=kwargs["benchmark_script"],
+        )
+        calls.append((kwargs, yaml.safe_load(variant_path.read_text())["benchmark"]))
+        return []
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.explore.teardown_lifecycle_server", lambda **_kwargs: None
+    )
+    await ExploreExecutor(session_dir=coordinator.session_dir)._run_explore(
+        SimpleNamespace(task=task, extra={"shared_state": state})
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]["benchmark_script"] == "sglang_custom.sh"
+    assert calls[0][1]["runner_type"] == "mi355x"
+    assert calls[0][0]["server_lifecycle"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["synthetic", "agentx"])
+@pytest.mark.parametrize("settled", [False, True])
+async def test_invalid_handoff_configuration_never_launches_geak(coordinator, monkeypatch, mode, settled):
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    def invalid_spec():
+        raise ValueError("unserializable launch configuration")
+
+    def must_not_launch(*_args, **_kwargs):
+        pytest.fail("Invalid launch configuration must stop before runner invocation")
+
+    monkeypatch.setattr(coordinator, "build_env_spec", invalid_spec)
+    monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.subprocess.Popen", must_not_launch)
+    coordinator.shared_state.benchmark_mode = mode
+    previous = {"status": "ok", "revalidation_status": "no_promote", "accepted_config": {"flags": "--old"}}
+    if settled:
+        coordinator.shared_state.geak_result = dict(previous)
+    recorder = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK)
+    assert recorder is not None
+    recorder.begin()
+    coordinator._kernel_timeline_recorder = recorder
+    await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
+    if settled:
+        assert coordinator.shared_state.geak_result == previous
+    else:
+        assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
+    event = next(row for row in read_timeline_events(coordinator.session_dir) if row["type"] == "kernel")
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["error_class"] == "invalid_env_spec"
+    assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("config", [{"env_map": None}, {"unset_envs": ["PYTHONPATH"]}])
+async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coordinator, config):
+    coordinator.shared_state.geak_result = {
+        "status": "ok",
+        "accepted_config": config,
+        "accepted_kernels": ["real_kernel"],
+    }
+    result = await coordinator._enqueue_internal_stack_rebench(reason="invalid_config")
+    assert result == {"skipped": True, "reason": "geak_invalid_config"}
+    assert coordinator.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert "accepted_config" in coordinator.shared_state.geak_result["revalidation_error"]
+    assert not await coordinator.tasks.queued()

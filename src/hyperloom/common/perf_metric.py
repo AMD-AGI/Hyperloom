@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -12,7 +13,6 @@ from hyperloom.common.env import env_bool, env_str
 
 INTVTY_V1 = "intvty_v1"
 
-# Read by name because ``common/`` must not import the orchestrator, where ``agentx_enabled`` lives.
 _AGENTX_ENV = "HYPERLOOM_AGENTX"
 
 # The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped at seed so it outlives the shell
@@ -39,6 +39,12 @@ AGENTX_KEEP_THRESHOLD_FLOOR_PCT = 2.0
 VERDICT_KEEP = "KEEP"
 VERDICT_REVERT = "REVERT"
 VERDICT_RECORDED = "RECORDED"
+
+
+def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
+    raw = (env or os.environ).get(_AGENTX_ENV, "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:

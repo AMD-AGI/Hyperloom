@@ -42,10 +42,10 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(kernel_agent_root))
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
-    from hyperloom.orchestrator.actions.executors import _grid_runner
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
     monkeypatch.setattr(
-        _grid_runner,
+        _benchmark_interpreter,
         "_resolve_magpie_python",
         lambda: "/usr/bin/python3",
     )

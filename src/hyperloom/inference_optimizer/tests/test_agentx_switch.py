@@ -182,7 +182,7 @@ def test_runtime_overrides_honor_agentx_on(monkeypatch):
     """apply_runtime_benchmark_overrides must apply the switch, else the gpu_type-derived synthetic script silently reverts a materialize-time swap (the exact defect E1 caught: run_grid rebuilt to vllm_mi300x.sh)."""
     _clear_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
@@ -194,7 +194,7 @@ def test_runtime_overrides_honor_agentx_on(monkeypatch):
 
 def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
     _clear_env(monkeypatch)  # HYPERLOOM_AGENTX cleared => OFF
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
@@ -205,7 +205,7 @@ def test_runtime_overrides_off_keeps_synthetic(monkeypatch):
 
 def test_runtime_overrides_preserve_materialized_agentx_without_env(monkeypatch):
     _clear_env(monkeypatch)
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.orchestrator.actions.executors._benchmark_runtime import (
         apply_runtime_benchmark_overrides,
     )
 
