@@ -51,24 +51,30 @@ def _load_allscenarios(path: str):
     return pd.concat(frames, ignore_index=True)
 
 
-#: Normalize Hyperloom precision strings AND MAIDAS ``bfp`` tokens to a common
-#: key, so e.g. Hyperloom ``mxfp4`` matches MAIDAS ``MX4``, and ``fp8_e4m3``
-#: matches ``FP8``. Unknown values pass through lowercased.
+#: Map Hyperloom precision/dtype tags (its ``_DTYPE_BYTES`` / ``_QUANT_WEIGHT_BYTES``
+#: vocabulary) to MAIDAS ``bfp`` tokens. ALIASES ONLY — tokens that already match
+#: after lowercasing (``fp8``, ``bf16``, ``mx4`` from MAIDAS, ...) are handled by
+#: the passthrough in ``_bfp_token``, so they are not listed.
+#:
+#: We deliberately do NOT reuse Hyperloom's own precision canonicalizer
+#: (``cli/__init__``), which collapses ``mxfp4 -> fp4`` (same byte width): MAIDAS
+#: models ``MX4`` (microscaling) and ``FP4`` (plain) as DISTINCT SoC formats with
+#: different peak FLOPS, so that distinction must be preserved for the match.
 _PRECISION_ALIASES = {
-    "mxfp4": "mx4", "mx4": "mx4",
-    "mxfp6": "mx6", "mx6": "mx6",
-    "mxfp8": "mx8", "mx8": "mx8",
-    "fp8": "fp8", "fp8_e4m3": "fp8", "fp8_e5m2": "fp8",
-    "float8_e4m3fn": "fp8", "float8_e5m2": "fp8", "w8a8": "fp8",
-    "bf16": "bf16", "bfloat16": "bf16",
-    "fp16": "fp16", "float16": "fp16",
-    "fp6": "fp6", "fp4": "fp4",
+    "bfloat16": "bf16",
+    "float16": "fp16",
+    "float32": "fp32",
+    "float8_e4m3fn": "fp8", "float8_e5m2": "fp8",
+    "fp8_e4m3": "fp8", "fp8_e5m2": "fp8",
+    "mxfp8": "mx8",
+    "float4": "fp4",
+    "mxfp4": "mx4",
 }
 
 
 def _bfp_token(precision: str) -> str:
     p = (precision or "").strip().lower()
-    return _PRECISION_ALIASES.get(p, p)
+    return _PRECISION_ALIASES.get(p, p)  # passthrough: fp8/bf16/mx4/... already match
 
 
 def _soc_token(gpu_type: str) -> str:
