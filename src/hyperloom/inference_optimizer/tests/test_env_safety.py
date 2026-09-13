@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for multi-node SSH env key validation.
-
-``env_safety`` is the last-mile gate on keys that already entered a forward
-dict: it blocks shell/loader injection vectors (``BLOCKED_UNTRUSTED_ENV_NAMES``
-from ``hyperloom.common.env_safety``) and invalid key shapes. Credential
-exclusion happens upstream in ``infera._collect_forward_env`` (prefix whitelist)
-and the platform's pod env (operator ``--extra-env`` only); those keys are never
-placed into the forward dict, so they are not SSH-forwarded to inference pods.
-"""
+"""Unit tests for multi-node SSH env key validation."""
 
 from __future__ import annotations
 
@@ -69,23 +61,21 @@ def test_common_env_safety_filters_dotenv_and_kernel_agent_keys_only():
     assert common_env_safety.is_allowed_dotenv_key("HF_TOKEN")
     assert common_env_safety.is_allowed_dotenv_key("HTTPS_PROXY")
     assert common_env_safety.is_allowed_dotenv_key("HYPERLOOM_RUNTIME_DIR")
-    # hyperloom-setup writes the gateway auth headers into .env, so the .env
-    # loader must read them back instead of dropping them as unsupported.
+    # hyperloom-setup writes the gateway auth headers into .env, so the .env loader must read them back instead of
+    # dropping them as unsupported.
     assert common_env_safety.is_allowed_dotenv_key("ANTHROPIC_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_dotenv_key("OPENAI_CUSTOM_HEADERS")
     assert not common_env_safety.is_allowed_dotenv_key("PYTHONPATH")
     assert not common_env_safety.is_allowed_dotenv_key("BAD-NAME")
 
     assert common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_ROOT")
-    # install.sh persists the Anthropic header into kernel-agent.env.sh, so the
-    # reader must accept it; the OpenAI one is read on the same terms as the
-    # OpenAI URL and key already are.
+    # install.sh persists the Anthropic header into kernel-agent.env.sh, so the reader must accept it; the OpenAI one
+    # is read on the same terms as the OpenAI URL and key already are.
     assert common_env_safety.is_allowed_kernel_agent_env_key("ANTHROPIC_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("OPENAI_CUSTOM_HEADERS")
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV")
     assert common_env_safety.is_allowed_kernel_agent_env_key("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS")
-    # Dropped keys never reach the kernel-agent child, so an opt-in route switch
-    # is inert until it is listed here.
+    # Dropped keys never reach the kernel-agent child, so an opt-in route switch is inert until it is listed here.
     assert common_env_safety.is_allowed_kernel_agent_env_key("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL")
     assert not common_env_safety.is_allowed_kernel_agent_env_key("TRACELENS_TOKEN")
 
@@ -143,14 +133,13 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
 
 
 def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
-    # Sweep, conc-sweep and shape-capture grids set these from code, so an
-    # allowlist that dropped them would silently flatten every variant.
+    # Sweep, conc-sweep and shape-capture grids set these from code, so an allowlist that dropped them would silently
+    # flatten every variant.
     for pinned in ("CONC", "ISL", "OSL", "NUM_PROMPTS", "RUN_EVAL", "PORT", "TP", "MAX_MODEL_LEN"):
         assert common_env_safety.is_allowed_variant_env_key(pinned)
     for knob in ("SGLANG_USE_AITER", "VLLM_USE_MTP", "AITER_CONFIG_GEMM_A8W8", "PYTORCH_TUNABLEOP_ENABLED"):
         assert common_env_safety.is_allowed_variant_env_key(knob)
-    # Name-shape matching would read this as a credential; it is the private
-    # model download token and has to survive.
+    # Name-shape matching would read this as a credential; it is the private model download token and has to survive.
     assert common_env_safety.is_allowed_variant_env_key("HF_TOKEN")
 
     for hijack in ("LD_PRELOAD", "PATH", "PYTHONPATH", "BASH_ENV", "LD_AUDIT", "PYTHONSTARTUP"):

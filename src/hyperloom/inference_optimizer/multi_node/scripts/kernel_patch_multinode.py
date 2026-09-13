@@ -35,8 +35,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 from patch_path_safety import (  # noqa: E402
     atomic_write_bytes,
     assert_backup_dir_allowed,
-    assert_revert_paths_allowed,
-    assert_target_path_allowed,
+    assert_backup_path_allowed,
     finalize_patch_records,
     invalidate_aiter_jit_build,
     restore_aiter_jit_build,
@@ -88,14 +87,13 @@ def _apply_remote(
         and compile status.
 
     Raises:
-        ValueError: If ``target_path`` does not exist or resolves outside the
-            framework patch roots, ``backup_dir`` is outside the kernel backup
-            root, ``patch_b64`` is not valid base64, or a ``.py`` target fails
-            to compile (it is auto-reverted first).
+        ValueError: If ``backup_dir`` is outside the kernel backup root,
+            ``patch_b64`` is not valid base64, or a ``.py`` target fails to
+            compile (it is auto-reverted first).
+        FileNotFoundError: If ``target_path`` does not exist on the pod.
     """
     host = socket.gethostname()
     target = Path(target_path)
-    assert_target_path_allowed(target, must_exist=True)
     assert_backup_dir_allowed(Path(backup_dir))
     if not target.is_file():
         raise FileNotFoundError(f"target_path does not exist on pod {host}: {target}")
@@ -157,7 +155,7 @@ def _revert_remote(records: list[dict]) -> dict:
         backup = Path(str(record.get("backup_path") or ""))
         if not backup.is_file():
             raise FileNotFoundError(f"backup missing on {host}: {backup}")
-        assert_revert_paths_allowed(target, backup)
+        assert_backup_path_allowed(backup)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(backup, target)
         restored.append(str(target))

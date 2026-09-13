@@ -448,7 +448,9 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     assert backend.specs[0].cwd.endswith("analysis/work/abc123")
     assert backend.specs[0].tool_policy.shell is True
     assert backend.specs[0].writable is True
-    assert backend.specs[0].reasoning_effort == "high"
+    # The analysis session names no effort of its own: it runs at the campaign
+    # effort, which ``resolved()`` fills in from the runtime.
+    assert backend.specs[0].reasoning_effort == ""
     assert backend.specs[0].hooks.stop == []
     assert "Profiler safety contract" in backend.specs[0].system_prompt
     prompt_payload = json.loads(backend.specs[0].user_prompt)
@@ -484,8 +486,8 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
         "directions.json",
     } & {Path(artifact["path"]).name for artifact in catalog["artifacts"]}
     applied = bundle.apply(context)
-    # The bundle rebuilds the context field by field; the editable set is a
-    # property of the campaign, not of the analysis, so it must survive intact.
+    # The bundle rebuilds the context field by field; the editable set is a property of the campaign, not of the
+    # analysis, so it must survive intact.
     assert applied.editable_sources == context.editable_sources
     evidence_paths = {reference.path for reference in applied.evidence_refs}
     directions_path = next(

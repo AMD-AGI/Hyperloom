@@ -5,30 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Opt-in LIVE integration test for the v2 source-resolver stack.
-
-Runs the three real modules against the *actually installed* framework tree
-inside a real vLLM ROCm container (e.g. ``vllm/vllm-openai-rocm:v0.27.1``) --
-no fakes, no GPU needed (this only scans source):
-
-1. ``source_env``            -> discover_frameworks() dictionaries + metadata,
-                                and prove the discovered csrc holds real kernels.
-2. ``kernel_source_index``   -> build + cache the kernel index; the cache is
-                                written to a repo-local dir you can inspect.
-3. ``source_resolver``    -> resolve many real kernels to their file/line.
-4. full cache                -> generate the complete kernel cache (JSON, plus a
-                                human-readable dump) into the repo-local dir.
-
-The persistent cache lands under ``results/resolver_benchmarks_vllm/ksi_cache/``
-(inside the mounted repo, so it shows up on the host for manual verification).
-
-Gated by ``HYPERLOOM_LIVE_STACK=1`` so it is skipped in ordinary (no-container)
-runs. Run it directly inside a serving-framework ROCm container::
-
-    HYPERLOOM_LIVE_STACK=1 HYPERLOOM_DISCOVER_ONLY=aiter,vllm \
-    HYPERLOOM_EXPECT_FRAMEWORKS=aiter,vllm \
-    PYTHONPATH=src python3 src/hyperloom/agents/kernel/tests/test_live_source_stack.py
-"""
+"""Opt-in LIVE integration test for the v2 source-resolver stack."""
 
 from __future__ import annotations
 
@@ -45,16 +22,15 @@ from hyperloom.agents.kernel.tools import (
     source_resolver,
 )
 
-# A kernel known to ship in aiter (macro/launch-bounds template) -- the headline
-# case the attribute-aware scanner recovers. Sampling falls back to other indexed
-# kernels if a given image renamed it, so the test stays robust across versions.
+# A kernel known to ship in aiter (macro/launch-bounds template) -- the headline case the attribute-aware scanner
+# recovers.
 _PREFERRED_KERNEL = "paged_attention_ll4mi_reduce_kernel"
 
 # How many kernels each section must exercise (coverage knob).
 _SAMPLE_N = 10
 
-# Repo root (…/Hyperloom) resolved from this file's location, and a persistent,
-# human-inspectable cache directory inside the mounted repo.
+# Repo root (…/Hyperloom) resolved from this file's location, and a persistent, human-inspectable cache directory
+# inside the mounted repo.
 REPO_ROOT = Path(__file__).resolve().parents[5]
 LOCAL_CACHE_DIR = REPO_ROOT / "results" / "resolver_benchmarks_vllm" / "ksi_cache"
 
@@ -62,17 +38,14 @@ LOCAL_CACHE_DIR = REPO_ROOT / "results" / "resolver_benchmarks_vllm" / "ksi_cach
 def _require_live() -> None:
     if os.environ.get("HYPERLOOM_LIVE_STACK", "").strip() != "1":
         raise SystemExit(
-            "SKIP: set HYPERLOOM_LIVE_STACK=1 and run inside a serving-framework "
-            "ROCm container (see this module's docstring for the exact command)."
+            "SKIP: run inside a serving-framework ROCm container with "
+            "HYPERLOOM_LIVE_STACK=1, HYPERLOOM_DISCOVER_ONLY=aiter,vllm, "
+            "HYPERLOOM_EXPECT_FRAMEWORKS=aiter,vllm, and PYTHONPATH=src."
         )
 
 
 def _expected_frameworks() -> set[str]:
-    """Frameworks that MUST be discovered, from ``$HYPERLOOM_EXPECT_FRAMEWORKS``.
-
-    Defaults to ``aiter,vllm`` (vLLM images). For SGLang images set
-    ``HYPERLOOM_EXPECT_FRAMEWORKS=aiter,sglang``.
-    """
+    """Frameworks that MUST be discovered, from ``$HYPERLOOM_EXPECT_FRAMEWORKS``."""
     raw = os.environ.get("HYPERLOOM_EXPECT_FRAMEWORKS", "aiter,vllm")
     return {n.strip().lower() for n in raw.split(",") if n.strip()}
 
@@ -111,9 +84,8 @@ def check_source_env() -> dict[str, source_env.FrameworkRoot]:
     assert fw, "no frameworks discovered (is this running inside a serving image?)"
     assert isinstance(fw, dict)
 
-    # Each expected framework (aiter,vllm for vLLM; aiter,sglang for SGLang) must
-    # be discovered, be a real dir, and report a plausible version. Any reported
-    # csrc root must actually exist on disk.
+    # Each expected framework (aiter,vllm for vLLM; aiter,sglang for SGLang) must be discovered, be a real dir, and
+    # report a plausible version.
     expected = _expected_frameworks()
     for name in sorted(expected):
         assert name in fw, f"{name} not discovered: {sorted(fw)}"
@@ -123,12 +95,11 @@ def check_source_env() -> dict[str, source_env.FrameworkRoot]:
         assert re.match(r"^\d+\.\d+", fr.version), f"odd {name} version: {fr.version!r}"
         assert all(Path(cr).is_dir() for cr in fr.csrc_roots), fr.csrc_roots
 
-    # At least one discovered framework must ship native csrc (aiter in both the
-    # vLLM and SGLang images; SGLang also ships sgl-kernel/csrc).
+    # At least one discovered framework must ship native csrc (aiter in both the vLLM and SGLang images; SGLang also
+    # ships sgl-kernel/csrc).
     assert any(fr.csrc_roots for fr in fw.values()), "no native csrc discovered"
 
-    # Metadata helpers: fingerprint is a stable 16-hex key; tag names every
-    # expected framework.
+    # Metadata helpers: fingerprint is a stable 16-hex key; tag names every expected framework.
     fp1 = source_env.fingerprint(fw)
     fp2 = source_env.fingerprint(fw)
     assert fp1 == fp2 and re.fullmatch(r"[0-9a-f]{16}", fp1), fp1
@@ -137,8 +108,8 @@ def check_source_env() -> dict[str, source_env.FrameworkRoot]:
         assert name in tag, tag
     print(f"  fingerprint={fp1}  version_tag={tag}")
 
-    # Prove discovery pointed at real source: the csrc trees must hold >= 10
-    # genuine kernel definitions (file exists, positive line), which we print.
+    # Prove discovery pointed at real source: the csrc trees must hold >= 10 genuine kernel definitions (file exists,
+    # positive line), which we print.
     kernels = list(_kernels_in_csrc(fw, _SAMPLE_N))
     assert len(kernels) >= _SAMPLE_N, f"only {len(kernels)} kernels found in csrc"
     print(f"  {len(kernels)} kernel definitions found in discovered csrc:")
@@ -168,8 +139,7 @@ def check_index(fw: dict[str, source_env.FrameworkRoot]) -> kernel_source_index.
     assert checked >= _SAMPLE_N, f"only {checked} indexed records verifiable"
     print(f"  verified {checked} index records point at real file:line")
 
-    # Cache is written to the repo-local dir at a fingerprint-keyed path we can
-    # inspect. Force a clean miss, confirm the file appears, then confirm a hit.
+    # Cache is written to the repo-local dir at a fingerprint-keyed path we can inspect.
     _use_local_cache()
     cache_path = kernel_source_index._cache_path(idx.fingerprint)
     if cache_path.exists():
@@ -224,8 +194,8 @@ def check_resolver(idx: kernel_source_index.SourceIndex) -> None:
         assert res.source_file and Path(res.source_file).is_file(), (sym, res)
         assert res.line and res.line > 0, (sym, res)
 
-        # Cross-check with the indexer: the file really defines that kernel (ties
-        # all three modules together -- discovered, indexed, and re-parsed).
+        # Cross-check with the indexer: the file really defines that kernel (ties all three modules together --
+        # discovered, indexed, and re-parsed).
         text = Path(res.source_file).read_text(encoding="utf-8", errors="ignore")
         defined = {n for n, _pos in kernel_source_index._iter_global_defs(text)}
         assert sym in defined, sym
@@ -255,8 +225,8 @@ def check_full_cache(fw: dict[str, source_env.FrameworkRoot]) -> None:
     cache_path = kernel_source_index._cache_path(idx.fingerprint)
     assert cache_path.exists(), cache_path
 
-    # Machine cache is a compact one-liner; also emit a sorted, indented dump
-    # (kernel -> ["file:line", ...]) for easy manual verification on the host.
+    # Machine cache is a compact one-liner; also emit a sorted, indented dump (kernel -> ["file:line", ...]) for easy
+    # manual verification on the host.
     readable = LOCAL_CACHE_DIR / f"ksi_{idx.fingerprint}_readable.json"
     mapping = {name: [f"{r['file']}:{r['line']}" for r in recs] for name, recs in sorted(idx.symbol_index.items())}
     payload = {
@@ -279,8 +249,7 @@ def check_full_cache(fw: dict[str, source_env.FrameworkRoot]) -> None:
 
 # --- 5) real Triton/TileLang .py kernels: discovery + editable gate ---------
 def check_py_kernels(fw: dict[str, source_env.FrameworkRoot]) -> None:
-    """Find real ``@triton.jit`` kernels in the installed tree; the editable gate
-    must accept them (their source comes from the trace ``kernel_file``)."""
+    """Find real ``@triton.jit`` kernels in the installed tree; the editable gate must accept them (their source comes from the trace ``kernel_file``)."""
     found: list[Path] = []
     for name in sorted(fw):  # aiter sorts first: its ops/ hold triton kernels
         for dirpath, _dirs, names in os.walk(fw[name].root):
@@ -302,9 +271,8 @@ def check_py_kernels(fw: dict[str, source_env.FrameworkRoot]) -> None:
 
     assert found, "no real @triton.jit .py kernels found in the installed tree"
     print(f"  {len(found)} real @triton.jit kernel files found:")
-    # Every real, repo-resident triton .py must be classified editable. (The
-    # editable Triton source is provided upstream by the trace ``kernel_file``;
-    # the finder itself resolves only native device kernels by symbol.)
+    # Every real, repo-resident triton .py must be classified editable. (The editable Triton source is provided
+    # upstream by the trace ``kernel_file``; the finder itself resolves only native device kernels by symbol.)
     for p in found:
         assert source_resolver.is_editable_source(str(p)), p
         print(f"      {p.name}: editable (repo-resident @triton.jit)")
@@ -315,12 +283,7 @@ def check_py_kernels(fw: dict[str, source_env.FrameworkRoot]) -> None:
     reason="LIVE stack test: set HYPERLOOM_LIVE_STACK=1 inside a serving-framework ROCm container.",
 )
 def test_live_source_stack() -> None:
-    """Opt-in LIVE end-to-end check of the resolver stack (collected + skippable).
-
-    Skipped by default so ordinary (no-container) CI collects it as one skipped
-    case rather than the file contributing zero tests. Inside a real framework
-    container it exercises discovery -> index -> resolve -> cache -> Triton gate.
-    """
+    """Opt-in LIVE end-to-end check of the resolver stack (collected + skippable)."""
     fw = check_source_env()
     idx = check_index(fw)
     check_resolver(idx)

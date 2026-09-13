@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-section fact synthesis for the executive summary + LLM prompt.
-
-All facts are computed deterministically here (the LLM never invents
-numbers); any cross-section reasoning belongs in this module.
-"""
+"""Cross-section fact synthesis for the executive summary + LLM prompt."""
 
 from __future__ import annotations
 
@@ -14,7 +10,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_float
 
-from .base import RenderedSection, as_dict
+from .base import RenderedSection, as_dict, outcome_of, session_of, stop_reason_of, task_config_of, validation_of
 
 __all__ = ["GlobalFacts", "build_global_facts"]
 
@@ -33,35 +29,29 @@ class GlobalFacts:
     capabilities_kept: list[str]
     kernel_pipeline_funnel: dict[str, int]  # detected/recommended/optimized/adopted/...
     data_quality_flags: list[str]
-    attribution_method: str  # "validated" | "unattributed" | "unattributed (stack listed for reference, not verified as KEEP)" | "missing"
+    # "stack_ledger" | "unattributed" | "unattributed (stack listed for
+    # reference, not verified as KEEP)" | "missing"
+    attribution_method: str
 
     def as_prompt_dict(self) -> dict[str, Any]:
-        """Serialize the fact pack to a plain dict for the LLM prompt.
-
-        Returns:
-            dict[str, Any]: All fields of this dataclass as a JSON-friendly
-                mapping (via ``dataclasses.asdict``).
-        """
+        """Serialize the fact pack to a plain dict for the LLM prompt."""
         return asdict(self)
 
 
 def _workload_summary(workload: dict[str, Any]) -> str:
-    """Build a compact one-line description of the workload.
-
-    Args:
-        workload (dict[str, Any]): The ``workload`` section of the breakdown,
-            with keys such as ``model_name``, ``framework_name``, ``precision``,
-            ``tp``, ``conc``, ``isl`` and ``osl``.
-
-    Returns:
-        str: A single line like ``"DeepSeek-R1 vllm fp8 tp=8 conc=64 ..."``,
-            using placeholders for any missing fields.
-    """
+    """Build a compact one-line description of the workload."""
     model = workload.get("model_name") or "(unknown-model)"
     fw = workload.get("framework_name") or "?"
     prec = workload.get("precision") or "?"
     tp = workload.get("tp")
     conc = workload.get("conc")
+    if workload.get("benchmark_mode") == "agentx":
+        # Corpus-level shape, not fixed ISL/OSL.
+        isl_dist = workload.get("isl_distribution") or {}
+        osl_dist = workload.get("osl_distribution") or {}
+        isl_s = f"isl(p50={isl_dist.get('p50', '?')},p90={isl_dist.get('p90', '?')})"
+        osl_s = f"osl(p50={osl_dist.get('p50', '?')},p90={osl_dist.get('p90', '?')})"
+        return f"{model} {fw} {prec} tp={tp} conc={conc} {isl_s} {osl_s} [agentx]"
     isl = workload.get("isl")
     osl = workload.get("osl")
     return f"{model} {fw} {prec} tp={tp} conc={conc} isl={isl} osl={osl}"
@@ -72,9 +62,9 @@ def _gain_attribution_lines(
 ) -> tuple[list[str], str]:
     """Compute per-source gain attribution + the method used.
 
-    Priority: canonical ``optimizations.summary_by_source``. Legacy
-    ``attribution.source_breakdown`` remains a read-only fallback for archived
-    breakdowns supplied directly to the reporter.
+    Read off ``outcome.validation``, the stack ledger's own account of itself.
+    A run whose ledger holds no measurable contribution falls back to naming
+    the total as unattributed and listing the final stack for reference.
 
     Args:
         breakdown: The full ``session_breakdown.json`` dict.
@@ -83,9 +73,8 @@ def _gain_attribution_lines(
         A tuple of the human-readable attribution lines and a label
         describing the method used to derive them.
     """
-    optimizations = as_dict(breakdown.get("optimizations"))
-    summary = as_dict(optimizations.get("summary_by_source"))
-    validation = as_dict(optimizations.get("validation"))
+    validation = validation_of(breakdown)
+    summary = as_dict(as_dict(validation.get("attribution")).get("by_source"))
     canonical_sources = {
         source: to_float(bucket.get("total_gain_pct")) for source, bucket in summary.items() if isinstance(bucket, dict)
     }
@@ -99,31 +88,14 @@ def _gain_attribution_lines(
                 key=lambda item: -item[1],
             )
         ]
-        method = validation.get("method")
-        return lines, str(method) if isinstance(method, str) and method else "missing"
+        # Every contribution is measured against the session baseline, so the
+        # split is the ledger's own arithmetic rather than one of several
+        # attribution methods the section used to have to name.
+        return lines, "stack_ledger"
 
-    attribution = as_dict(breakdown.get("attribution"))
-    sb = as_dict(attribution.get("source_breakdown"))
-    total = to_float(sb.get("validated_total_pct"))
-    sources = {
-        "backends": to_float(sb.get("backends_pct_of_total")),
-        "params": to_float(sb.get("params_pct_of_total")),
-        "explore": to_float(sb.get("explore_pct_of_total")),
-        "replay_warm_recipe": to_float(sb.get("replay_warm_recipe_pct_of_total")),
-        "geak": to_float(sb.get("geak_pct_of_total")),
-        "sweep": to_float(sb.get("sweep_pct_of_total")),
-    }
-    nonzero = {k: v for k, v in sources.items() if v and v != 0}
-    if nonzero and total:
-        lines = [
-            f"{k}: {v:.2f}% of total (={(v / total * 100):.0f}% share of {total:.2f}%)"
-            for k, v in sorted(nonzero.items(), key=lambda kv: -kv[1])
-        ]
-        return lines, "validated"
-
-    final = as_dict(breakdown.get("final"))
+    final = as_dict(outcome_of(breakdown).get("final"))
     path = final.get("action_path") or []
-    gain_v = to_float(final.get("cumulative_gain_pct_validated"))
+    gain_v = to_float(final.get("gain_pct"))
     # No validated per-source split. We must NOT claim a KEEP or "100% via"
     # from optimization_stack alone: action_path is built from the final stack,
     # which can include seeded / warm-replayed entries that were never a real
@@ -151,6 +123,9 @@ def _gain_attribution_lines(
 def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
     """Count kernels at each stage of the optimization lifecycle.
 
+    Counted off the same per-kernel rollup the lifecycle section renders, so
+    the funnel in the summary and the table below it cannot disagree.
+
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
 
@@ -159,58 +134,33 @@ def _kernel_funnel(breakdown: dict[str, Any]) -> dict[str, int]:
             ``recommended``, ``optimized``, ``adopted``, ``partial``,
             ``reverted`` and ``rejected``).
     """
-    kl = as_dict(breakdown.get("kernel_lifecycle"))
+    from ._renderers._kernels import kernel_rows
+
+    rows = kernel_rows(breakdown)
+    decisions = [str(row.get("final_decision") or "") for row in rows]
     return {
-        "detected": len(kl.get("detected") or []),
-        "recommended": len(kl.get("recommended") or []),
-        "optimized": len(kl.get("optimized") or []),
-        "adopted": len(kl.get("adopted") or []),
-        "partial": len(kl.get("partial") or []),
-        "reverted": len(kl.get("reverted") or []),
-        "rejected": len(kl.get("rejected") or []),
+        "detected": len(rows),
+        "recommended": sum(1 for row in rows if row.get("selected_for_optimization")),
+        "optimized": sum(1 for row in rows if row.get("geak") or row.get("forge")),
+        "adopted": decisions.count("kept"),
+        # A candidate a route measured and nothing gated: the win is real at
+        # the micro level and was never ruled on end to end.
+        "partial": decisions.count("attempted"),
+        "reverted": decisions.count("reverted"),
+        "rejected": decisions.count("rejected"),
     }
-
-
-# Sections whose renderer is registered but whose data nothing produces: no
-# collector, exporter key or recorder fragment ever fills them. They are always
-# skipped, so surfacing that as a data-quality flag would tell the reader this
-# run came up short when the truth is that the feature was never wired up --
-# and four permanent flags would drown the ones that do describe the session.
-# ``test_breakdown_report_integrity`` recomputes this set from the real
-# exporter + recorder key space, so wiring a producer up (or adding another
-# dead section) fails the suite instead of silently drifting.
-_SECTIONS_WITHOUT_PRODUCER = frozenset(
-    {
-        "data_provenance",
-        "decision_journal",
-        "kernel_decision_path",
-        "kernel_profiling",
-    }
-)
 
 
 def _data_quality_flags(
     breakdown: dict[str, Any],
     rendered: list[RenderedSection],
 ) -> list[str]:
-    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks.
-
-    Args:
-        breakdown: The full ``session_breakdown.json`` dict.
-        rendered: Rendered sections whose warnings are folded in.
-
-    Returns:
-        A de-duplicated list of data-quality flag strings.
-    """
+    """Collect de-duplicated data-quality warnings from renderers + global cross-section checks."""
     flags: list[str] = []
     seen: set[str] = set()
 
     def _push(line: str) -> None:
-        """Append ``line`` to ``flags`` once, de-duplicating via ``seen``.
-
-        Args:
-            line (str): The flag text to record.
-        """
+        """Append ``line`` to ``flags`` once, de-duplicating via ``seen``."""
         if line in seen:
             return
         seen.add(line)
@@ -218,8 +168,6 @@ def _data_quality_flags(
 
     for sec in rendered:
         if sec.skipped:
-            if sec.section_id in _SECTIONS_WITHOUT_PRODUCER:
-                continue
             # A dropped section still carries evidence: "this never ran" is a
             # data-quality fact, and discarding it lets a reader mistake an
             # untested area for a clean one. Prefer the renderer's warnings,
@@ -235,13 +183,8 @@ def _data_quality_flags(
         for w in sec.warnings:
             _push(f"[{sec.section_id}] {w}")
 
-    optimizations = as_dict(breakdown.get("optimizations"))
-    validation = as_dict(optimizations.get("validation"))
-    attribution = as_dict(breakdown.get("attribution"))
-    notes = validation.get("notes") or attribution.get("notes") or []
-    if notes:
-        for n in notes:
-            _push(f"[attribution] {n}")
+    for note in validation_of(breakdown).get("notes") or []:
+        _push(f"[attribution] {note}")
     return flags
 
 
@@ -257,11 +200,12 @@ def _capabilities_split(
         tuple[list[str], list[str]]: A sorted list of capability names with
             status ``"kept"`` and a sorted list with status ``"not_attempted"``.
     """
-    cap = as_dict(breakdown.get("capability_summary"))
+    from ._renderers.capability_summary import capability_rows
+
     kept = []
     not_attempted = []
-    for name, v in cap.items():
-        status = as_dict(v).get("status") or "not_attempted"
+    for name, row in capability_rows(breakdown).items():
+        status = str(row.get("status") or "not_attempted")
         if status == "kept":
             kept.append(name)
         elif status == "not_attempted":
@@ -270,21 +214,14 @@ def _capabilities_split(
 
 
 def _headline(breakdown: dict[str, Any]) -> str:
-    """Build the one-line baseline→final throughput headline.
-
-    Args:
-        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
-
-    Returns:
-        str: A line such as ``"baseline X → final Y tok/s/gpu = +Z% validated
-            gain"``, or a fallback message when validated throughput is missing.
-    """
+    """Build the one-line baseline→final throughput headline."""
     from ... import framework_registry
 
-    fw = as_dict(breakdown.get("workload")).get("framework_name")
-    b = to_float(as_dict(breakdown.get("baseline")).get("throughput_tok_s_per_gpu"))
-    f = to_float(as_dict(breakdown.get("final")).get("throughput_tok_s_per_gpu"))
-    g = to_float(as_dict(breakdown.get("final")).get("cumulative_gain_pct_validated"))
+    fw = task_config_of(breakdown).get("framework_name")
+    outcome = outcome_of(breakdown)
+    b = to_float(as_dict(outcome.get("baseline")).get("throughput_tok_s_per_gpu"))
+    f = to_float(as_dict(outcome.get("final")).get("throughput_tok_s_per_gpu"))
+    g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
         return (
@@ -315,13 +252,13 @@ def build_global_facts(
     Returns:
         GlobalFacts: The populated, frozen fact pack.
     """
-    workload = as_dict(breakdown.get("workload"))
-    session = as_dict(breakdown.get("session"))
+    workload = task_config_of(breakdown)
+    session = session_of(breakdown)
     attribution_lines, attribution_method = _gain_attribution_lines(breakdown)
     kept, not_attempted = _capabilities_split(breakdown)
     return GlobalFacts(
         headline=_headline(breakdown),
-        stop_reason=str(session.get("stop_reason") or ""),
+        stop_reason=stop_reason_of(breakdown),
         elapsed_minutes=to_float(session.get("elapsed_minutes")),
         objective=as_dict(workload.get("objective")),
         workload_summary=_workload_summary(workload),

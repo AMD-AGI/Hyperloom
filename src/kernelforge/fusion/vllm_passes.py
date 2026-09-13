@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read which vLLM compile-fusion passes the TARGET install actually has switched on.
-
-forge-fuse used to read "vLLM ships a compile pass for this chain" as "vLLM
-already fuses it" and dropped the candidate as a no-op. That inference is wrong:
-most ``PassConfig`` fusion flags are only resolved at runtime, so a pass can EXIST
-while being disabled -- the fusion never runs and nobody turns it on. Enabling
-vLLM's own QK-norm+RoPE pass on dense Qwen3 measured several percent of decode
-throughput that was being left on the table.
-
-Nothing about on/off is hardcoded here: the state is version-, platform- and
-optimization-level dependent, so it is read out of the target vLLM (see
-``_PROBE_SRC`` for the precedence, which mirrors how a real run resolves a flag).
-Reading it in a subprocess is deliberate -- importing vLLM is heavy and its
-platform init can abort, and the framework under test may live under a different
-interpreter than the one running forge-fuse.
-"""
+"""Read which vLLM compile-fusion passes the TARGET install actually has switched on."""
 
 from __future__ import annotations
 
@@ -48,18 +33,9 @@ def _within(path: str, root: str) -> bool:
 
 _VLLM_PASS_PROBE_MARKER = "FORGE_VLLM_PASS_PROBE "
 
-# Resolves each flag the way a real run does, which is NOT the annotation default:
-# vLLM's optimization level (default -O2) owns most fusion flags, so a bare
-# PassConfig would report every level-owned flag as off and invent opportunities
-# that the runtime already takes. Precedence, all read out of the target vLLM:
-#   1. the default optimization level's pass_config, when it pins a literal bool;
-#   2. UNKNOWN when that entry is a predicate -- it is resolved from the full
-#      VllmConfig (AITER on? model quantized? hidden size?), which cannot be
-#      answered here, and guessing would mean proposing no-op work;
-#   3. otherwise the resolved PassConfig attribute (flags no level owns, which is
-#      where enable_qk_norm_rope_fusion lives).
-# Every requested flag shares one import: that import is the whole cost, so probing
-# per flag would re-pay it for every matched pattern.
+# Resolves each flag the way a real run does, which is NOT the annotation default: vLLM's optimization level (default
+# -O2) owns most fusion flags, so a bare PassConfig would report every level-owned flag as off and invent
+# opportunities that the runtime already takes.
 _PROBE_SRC = """
 import inspect, json, sys
 
@@ -121,47 +97,26 @@ DEFAULT_PROBE_TIMEOUT_S = 120
 
 @dataclass(frozen=True)
 class PassState:
-    """Whether a vLLM compile-fusion pass exists in the target install and is on.
-
-    ``enabled is None`` means the state could not be determined (no importable
-    vLLM, probe failure, or a level-resolved predicate); it is NOT a guess of
-    "off". ``present is False`` means the target has no such flag at all, which is
-    different again: there is no framework implementation to claim.
-    """
+    """Whether a vLLM compile-fusion pass exists in the target install and is on."""
 
     flag: str
     present: bool = False
     enabled: Optional[bool] = None
     config_file: str = ""
     error: str = ""
-    # Where the verdict came from: "level" (optimization level pins a literal),
-    # "level-dynamic" (level resolves it from the full VllmConfig -> unknown),
-    # "default" (no level owns it, so the PassConfig default stands), "absent".
+    # Where the verdict came from: "level" (optimization level pins a literal), "level-dynamic" (level resolves it
+    # from the full VllmConfig -> unknown), "default" (no level owns it, so the PassConfig default stands), "absent".
     source: str = ""
     package_root: str = ""
 
     @property
     def missed(self) -> bool:
-        """Framework implements this fusion but ships it switched OFF.
-
-        An error voids the verdict: a probe that failed halfway can report a
-        ``None`` attribute as ``False``, and acting on that would claim a pass
-        that is really enabled.
-        """
+        """Framework implements this fusion but ships it switched OFF."""
         return self.present and self.enabled is False and bool(self.config_file) and not self.error
 
     @property
     def claimable(self) -> bool:
-        """Missed AND actually flippable by editing the ``PassConfig`` default.
-
-        Only flags no optimization level owns qualify. A level that pins the flag
-        (``source="level"``) overrides the class default at runtime, so flipping
-        that default changes nothing -- it would export a patch with no behavioural
-        effect. Those are left alone rather than fought: upstream pins
-        ``fuse_attn_quant`` off through ``IS_QUANTIZED = False`` deliberately (see
-        vllm-project/vllm#25689), and forcing it on would drive a path upstream
-        has disabled on purpose.
-        """
+        """Missed AND actually flippable by editing the ``PassConfig`` default."""
         return self.missed and self.source == "default"
 
     @property
@@ -172,17 +127,7 @@ class PassState:
 
 @dataclass(frozen=True)
 class TargetRuntime:
-    """The ONE vLLM install a run probes, edits and serves.
-
-    These three used to be resolved independently -- the probe imported vLLM under
-    ``sys.executable``, serving booted whatever ``vllm`` was first on ``PATH``, and
-    ``--framework-root`` only steered model-source lookup -- so a run could read
-    state from install A, edit A, and then validate with launcher C. The
-    interpreter is therefore derived FROM the serving launcher, which makes probe
-    and serving the same install by construction instead of by coincidence, and
-    ``require_root`` makes an explicitly requested framework root a hard
-    precondition rather than a hint.
-    """
+    """The ONE vLLM install a run probes, edits and serves."""
 
     framework: str = ""
     python: str = ""
@@ -216,12 +161,7 @@ def _launcher_interpreter(launcher_exe: str) -> str:
 
 
 def resolve_target_runtime(framework: str, *, framework_root: str = "", launcher_exe: str = "") -> TargetRuntime:
-    """Pin the install that will be probed, edited and served.
-
-    ``error`` is set (and the caller must not edit anything) when the launcher
-    cannot be located or attributed to an interpreter -- guessing would risk
-    editing an install other than the one under test.
-    """
+    """Pin the install that will be probed, edited and served."""
     exe = launcher_exe or shutil.which("vllm") or ""
     if not exe:
         return TargetRuntime(framework=framework, require_root=framework_root, error="no vllm launcher on PATH")
@@ -259,19 +199,7 @@ def probe_pass_states(
     require_root: str = "",
     timeout_s: int = DEFAULT_PROBE_TIMEOUT_S,
 ) -> Mapping[str, PassState]:
-    """Resolved state of every requested ``PassConfig`` flag, in ONE subprocess.
-
-    Batched on purpose: the cost here is importing vLLM, so all flags share a
-    single import (and a single timeout) instead of paying it per flag. Never
-    raises -- any failure yields ``enabled=None`` (unknown) for every flag so
-    callers stay conservative instead of acting on a guessed default.
-
-    ``python`` and ``require_root`` are part of the cache key: probe state from one
-    install must never be reused for another. When ``require_root`` is set, an
-    install whose config file lives outside it is a hard failure (all-unknown) --
-    the run was told which framework to target, so silently probing and editing a
-    different one is worse than stopping.
-    """
+    """Resolved state of every requested ``PassConfig`` flag, in ONE subprocess."""
     wanted = tuple(dict.fromkeys(f for f in flags if f))
     if not wanted:
         return MappingProxyType({})
@@ -312,8 +240,8 @@ def probe_pass_states(
         item = values.get(flag)
         item = item if isinstance(item, dict) else {}
         enabled = item.get("enabled")
-        # A flag absent from the target install is "not present", NOT "disabled":
-        # there is nothing to enable and nothing to claim.
+        # A flag absent from the target install is "not present", NOT "disabled": there is nothing to enable and
+        # nothing to claim.
         states[flag] = PassState(
             flag=flag,
             present=bool(item.get("present")),
@@ -356,12 +284,7 @@ def verify_pass_enabled(
     require_root: str = "",
     timeout_s: int = DEFAULT_PROBE_TIMEOUT_S,
 ) -> PassState:
-    """Re-read a flag AFTER editing, bypassing the cache.
-
-    Editing the ``PassConfig`` default only takes effect for flags nothing else
-    overrides, so the edit must be confirmed against the target rather than
-    assumed: an unconfirmed flip would export a patch with no behavioural effect.
-    """
+    """Re-read a flag AFTER editing, bypassing the cache."""
     probe_pass_states.cache_clear()
     return probe_pass_state(flag, python=python, require_root=require_root, timeout_s=timeout_s)
 
@@ -374,12 +297,7 @@ def _disabled_default_re(flag: str) -> re.Pattern[str]:
 
 
 def enable_pass_in_source(config_file: str, flag: str) -> bool:
-    """Flip ``flag``'s disabled default to ``True`` in vLLM's ``PassConfig`` source.
-
-    Deterministic (no LLM) and idempotent: returns False when there is no disabled
-    default to flip -- already ``True``, flag absent, or file unreadable -- so a
-    re-run never rewrites the file. Only the requested field's line is touched.
-    """
+    """Flip ``flag``'s disabled default to ``True`` in vLLM's ``PassConfig`` source."""
     if not config_file or not flag:
         return False
     path = Path(config_file)

@@ -1,12 +1,4 @@
-"""vLLM takes the TraceLens patch at every supported version, 0.26+ included.
-
-Upstream took the profiler *config fields* from 0.26 but not the graph-capture
-implementation, which moved into the v2 runner and stayed patch-only. So on
-0.26+ the config fields no longer prove the patch landed -- only the module the
-patch creates at ``vllm/profiler/graph_capture.py`` does. Trusting the fields
-there reports success while ``capture_traces/`` is never written, which is a
-silent loss of the graph-capture sidecars for a whole profile run.
-"""
+"""vLLM takes the TraceLens patch at every supported version, 0.26+ included."""
 
 from __future__ import annotations
 
@@ -102,8 +94,8 @@ def test_undiscoverable_vllm_fails_soft(monkeypatch):
 
 
 def test_stock_native_install_is_not_mistaken_for_patched(tmp_path, monkeypatch):
-    # The regression: a stock 0.28 carries both config markers natively, so the
-    # base sentinel alone says "already patched" and the patch gets skipped.
+    # The regression: a stock 0.28 carries both config markers natively, so the base sentinel alone says "already
+    # patched" and the patch gets skipped.
     _fake_install(monkeypatch, tmp_path, "0.28.1")
     root = _fake_tracelens(tmp_path, ["0.25.0", "0.28.0"])
     plan = sp._discover_vllm_plan(root, install=("0.28.1", tmp_path))
@@ -133,8 +125,8 @@ def test_partial_graph_capture_module_is_not_patched(tmp_path, monkeypatch):
 
 
 def test_pre_native_plan_keeps_the_config_fields_as_proof(tmp_path, monkeypatch):
-    # Below 0.26 the patch writes the config fields, so they do prove it landed
-    # and no graph-capture module is expected.
+    # Below 0.26 the patch writes the config fields, so they do prove it landed and no graph-capture module is
+    # expected.
     _fake_install(monkeypatch, tmp_path, "0.25.0")
     root = _fake_tracelens(tmp_path, ["0.25.0"])
     plan = sp._discover_vllm_plan(root, install=("0.25.0", tmp_path))

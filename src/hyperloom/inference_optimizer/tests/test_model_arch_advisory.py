@@ -86,9 +86,8 @@ def test_load_model_arch_stale_mismatch_returns_empty(tmp_path: Path):
     assert _load_model_arch(tmp_path, "DeepSeek-R1-0528") == {}
 
 
-# 1a. $HYPERLOOM_MODEL_ARCH_FILE pre-seed: the session dir is created and read
-# in the same CLI process, so a launcher can only get a profile in by seeding
-# it before launch.
+# 1a. $HYPERLOOM_MODEL_ARCH_FILE pre-seed: the session dir is created and read in the same CLI process, so a launcher
+# can only get a profile in by seeding it before launch.
 def test_load_model_arch_preseed_env_loads_and_copies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     src = tmp_path / "preseed.json"
     src.write_text(json.dumps(_VALID_ARCH), encoding="utf-8")
@@ -130,8 +129,7 @@ def test_load_model_arch_preseed_still_stale_guarded(tmp_path: Path, monkeypatch
     assert _load_model_arch(session, "DeepSeek-R1-0528") == {}
 
 
-# 1b. HF hub cache path: launched --model is a snapshots/<hash> dir whose
-# basename is a commit hash, but the declared clean model_name must still match.
+# 1b.
 _HF_SNAPSHOT = (
     "/root/.cache/huggingface/hub/models--Qwen--Qwen2.5-7B-Instruct/snapshots/a09a35458c702b33eeacc393d103063234e8bc28"
 )

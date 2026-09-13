@@ -617,6 +617,7 @@ resolve_python() {
   # Bare-image bootstrap (Debian/Ubuntu only). Skipped silently when
   # apt-get is missing (RHEL/Alpine/etc.) or the operator opted out.
   if command -v apt-get >/dev/null 2>&1 \
+      && [ "${ONLY_AIPERF:-0}" -eq 0 ] \
       && [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ] \
       && [ -z "${INFERENCE_OPTIMIZER_SKIP_APT_BOOTSTRAP:-}" ]; then
     log "no python3 found; attempting bare-image apt bootstrap " \
@@ -751,7 +752,7 @@ fi
 # in pip 23.0.1; older pips reject it as an unknown option, so we probe
 # `pip install --break-system-packages --help` before adopting it.
 PIP_EXTRA=()
-if "$PYTHON" - <<'PY' 2>/dev/null
+if [ "$ONLY_AIPERF" -eq 0 ] && "$PYTHON" - <<'PY' 2>/dev/null
 import sys
 raise SystemExit(0 if sys.prefix == sys.base_prefix else 1)
 PY
@@ -797,7 +798,10 @@ PY
       # holding the old one. pip resolves `[llm,forge]` against the already
       # installed distribution -- verified to need no index for the top-level
       # package -- so this is a metadata read, not a reinstall.
-      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      # REPO_ROOT is the `pip install --target` dir, which is not on the default
+      # sys.path; without it pip misses the wheel and resolves it off the index.
+      env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
         "hyperloom-inference_optimizer[llm,forge]"
       # web extra only when critic web tools are enabled (off by default).
       if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
@@ -1192,81 +1196,175 @@ PY
 }
 
 # --- 2a. aiperf (AgentX benchmark client) ---
-# Installs the pinned aiperf. Reached from the gate at the call site on either
-# branch -- a default provision pre-warms it when this build ships the AgentX
-# client, and an explicit INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf
-# demands it. Skipped when the operator points AIPERF_BIN at their own build.
-#
-# Failure handling is asymmetric by design, keyed on $AIPERF_REQUIRED:
-#   * pre-warm (nobody asked)  -> WARN. The install is speculative: nothing has
-#     said this box will run AgentX, so an interpreter below the pin's floor or
-#     an unreachable index must not fail a provision that was never going to use
-#     it. The runtime preflight repairs and, failing that, stops the run.
-#   * explicit request         -> FATAL. A dependency the caller asked for by
-#     name, with a pin this repository owns, must not end up absent with only a
-#     warning in a log nobody reads. Measured: the fail-soft warn let a
-#     provisioning run report success while leaving the box unable to run AgentX
-#     at all, and the gap surfaced hours later as a benchmark failure that was
-#     then handed to an enablement specialist as if it were a framework bug.
-#
-# So the synthetic path can still be provisioned on a box that cannot host
-# aiperf -- what it no longer does is skip the install merely because nobody
-# happened to export a runtime mode flag while provisioning.
+# The client owns a separate Python environment; never pip into the GPU stack.
+_aiperf_clean_env() (
+  unset PYTHONHOME PYTHONPATH PYTHONUSERBASE PYTHONPLATLIBDIR __PYVENV_LAUNCHER__ VIRTUAL_ENV CONDA_PREFIX
+  unset PIP_TARGET PIP_PREFIX PIP_ROOT PIP_USER
+  unset UV_PYTHON UV_SYSTEM_PYTHON UV_TARGET UV_PREFIX UV_PROJECT_ENVIRONMENT
+  unset UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON UV_PYTHON_PREFERENCE
+  "$@"
+)
+
+_aiperf_check_owned_dir() {
+  local dir="$1" marker="$1/.hyperloom-${1##*/}"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    if [ -L "$dir" ] || [ ! -d "$dir" ] || [ ! -f "$marker" ] || [ -L "$marker" ] \
+        || [ "$(cat "$marker")" != hyperloom-aiperf-v1 ]; then
+      warn "refusing to modify unowned aiperf directory: $dir"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+_aiperf_healthy() {
+  local venv="$1" help_text ref="$AIPERF_REF"
+  # A package-spec override chooses its own source; the default must match our pin.
+  [ "$AIPERF_PACKAGE_SPEC" = "aiperf @ git+${AIPERF_REPO}@${AIPERF_REF}" ] || ref=""
+  [ -x "$venv/bin/python" ] && [ -x "$venv/bin/aiperf" ] || return 1
+  _aiperf_clean_env timeout 60 "$venv/bin/python" -I - "$ref" <<'PY' >/dev/null 2>&1 || return 1
+import json
+import re
+import sys
+from importlib.metadata import PackageNotFoundError, distribution
+try:
+    source = json.loads(distribution("aiperf").read_text("direct_url.json") or "{}")
+except (PackageNotFoundError, ValueError, OSError):
+    raise SystemExit(1)
+vcs = source.get("vcs_info", {})
+ref = sys.argv[1]
+if not ref:
+    matches = True
+elif re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
+    matches = (vcs.get("commit_id") or "").lower().startswith(ref.lower())
+else:
+    matches = vcs.get("requested_revision") == ref
+raise SystemExit(0 if matches and (3, 11) <= sys.version_info[:2] < (3, 14) else 1)
+PY
+  help_text="$(_aiperf_clean_env timeout 60 "$venv/bin/aiperf" profile --help)" || return 1
+  case "$help_text" in *weka-trace*--scenario*|*--scenario*weka-trace*) ;; *) return 1 ;; esac
+  [[ "$help_text" == *--benchmark-duration* ]]
+}
+
+_aiperf_uv() (
+  local no_index="${PIP_NO_INDEX:-}"
+  # uv does not read pip's network environment variables.
+  if [ -n "${PIP_INDEX_URL:-}" ] && [ -z "${UV_DEFAULT_INDEX:-}${UV_INDEX_URL:-}" ]; then
+    export UV_DEFAULT_INDEX="$PIP_INDEX_URL"
+  fi
+  if [ -n "${PIP_EXTRA_INDEX_URL:-}" ] && [ -z "${UV_INDEX:-}${UV_EXTRA_INDEX_URL:-}" ]; then
+    export UV_EXTRA_INDEX_URL="$PIP_EXTRA_INDEX_URL"
+  fi
+  if [ -n "${PIP_FIND_LINKS:-}" ] && [ -z "${UV_FIND_LINKS:-}" ]; then
+    export UV_FIND_LINKS="$PIP_FIND_LINKS"
+  fi
+  if [ "${1:-} ${2:-}" = "pip install" ]; then
+    case "${no_index,,}" in 1|true|yes|on) set -- "$@" --no-index ;; esac
+  fi
+  _aiperf_clean_env env \
+    UV_PYTHON_INSTALL_DIR="$state/aiperf-python" \
+    UV_PYTHON_BIN_DIR="$state/aiperf-python-bin" \
+    UV_CACHE_DIR="$state/aiperf-cache" \
+    "$uv" --no-config "$@"
+)
+
+_install_aiperf() (
+  local state="${HYPERLOOM_STATE_DIR:-}" home="${HOME:-}" venv stamp install_id uv tools candidate aiperf_python=""
+  local offline="${UV_OFFLINE:-}"
+  if [ -z "$state" ]; then
+    if [ -z "$home" ]; then
+      home="$(_aiperf_clean_env "$PYTHON" -I -c 'import os, pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" || return 1
+    fi
+    state="${home}/.hyperloom"
+  fi
+  case "$state" in /*) ;; *) warn "HYPERLOOM_STATE_DIR must be an absolute path: $state"; return 1 ;; esac
+  venv="$state/aiperf-venv"
+  stamp="$state/aiperf_installed_ref"
+  install_id="$(printf '%s\n%s' "$AIPERF_REF" "$AIPERF_PACKAGE_SPEC")"
+  tools="$state/aiperf-tools"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "would install ${AIPERF_PACKAGE_SPEC} into ${venv} using Python >=3.11,<3.14 (managed 3.11 if needed)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if _aiperf_healthy "$venv"; then log "aiperf ready: $venv/bin/aiperf"; else warn "aiperf missing or unhealthy at $venv (check-only)"; fi
+    return 0
+  fi
+
+  # The checkout lock is acquired by the caller, before this shared state lock.
+  mkdir -p "$state" || return 1
+  exec 8>"$state/aiperf-install.lock" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    flock 8 || return 1
+  else
+    warn "flock not available; concurrent aiperf installs may race"
+  fi
+  if [ "$(cat "$stamp" 2>/dev/null)" = "$install_id" ] && _aiperf_healthy "$venv"; then
+    log "aiperf at $venv/bin/aiperf is healthy at ref ${AIPERF_REF:0:8}; skipping install"
+    return 0
+  fi
+  _aiperf_check_owned_dir "$venv" || return 1
+  rm -f -- "$stamp" || return 1
+
+  uv="$(command -v uv 2>/dev/null || true)"
+  if [ -z "$uv" ]; then
+    _aiperf_check_owned_dir "$tools" || return 1
+    uv="$tools/bin/uv"
+    if [ ! -x "$uv" ]; then
+      case "${offline,,}" in
+        1|true|yes|on) warn "aiperf: UV_OFFLINE forbids bootstrapping uv with pip; provide uv on PATH"; return 1 ;;
+      esac
+      if ! _aiperf_clean_env "$PYTHON" -I -m pip --version >/dev/null 2>&1; then
+        warn "aiperf needs uv, but uv and pip in $PYTHON are unavailable; install uv on PATH or provide AIPERF_BIN"
+        return 1
+      fi
+      mkdir -p "$tools" || return 1
+      printf '%s\n' hyperloom-aiperf-v1 > "$tools/.hyperloom-aiperf-tools" || return 1
+      log "installing private uv==0.12.3 into $tools"
+      _aiperf_clean_env env PIP_REQUIRE_VIRTUALENV=false "$PYTHON" -I -m pip install --disable-pip-version-check \
+        --no-cache-dir --no-deps --only-binary=:all: --upgrade --target "$tools" uv==0.12.3 \
+        || { warn "aiperf: private uv bootstrap failed; check the pip/download error above"; return 1; }
+    fi
+  fi
+  for candidate in "$PYTHON" python3.11 python3.12 python3.13; do
+    if [ "$candidate" != "$PYTHON" ]; then
+      candidate="$(command -v "$candidate" 2>/dev/null)" || continue
+    fi
+    if _aiperf_clean_env "$candidate" -I -c 'import sys; sys.exit(not ((3, 11) <= sys.version_info[:2] < (3, 14)))'; then
+      aiperf_python="$candidate"
+      break
+    fi
+  done
+  if [ -z "$aiperf_python" ]; then
+    log "aiperf requires Python >=3.11,<3.14; preparing private managed Python 3.11"
+    _aiperf_uv python install --no-bin 3.11 \
+      || { warn "aiperf: managed Python 3.11 download failed; check network access and the uv error above"; return 1; }
+    aiperf_python="$(_aiperf_uv python find --managed-python --no-python-downloads 3.11)" || return 1
+  fi
+
+  # Only an environment bearing our marker can be removed, including partial builds.
+  if [ -d "$venv" ]; then rm -rf -- "$venv" || return 1; fi
+  mkdir -p "$venv" || return 1
+  printf '%s\n' hyperloom-aiperf-v1 > "$venv/.hyperloom-aiperf-venv" || return 1
+  _aiperf_uv venv --allow-existing --python "$aiperf_python" "$venv" || return 1
+  log "installing aiperf (AgentX) into $venv: ${AIPERF_PACKAGE_SPEC}"
+  _aiperf_uv pip install --python "$venv/bin/python" "$AIPERF_PACKAGE_SPEC" || return 1
+  _aiperf_healthy "$venv" || { warn "aiperf installed but failed its pinned-build health check at $venv"; return 1; }
+  printf '%s\n' "$install_id" > "$stamp" || return 1
+  log "aiperf installed OK: $venv/bin/aiperf"
+)
+
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
     return 0
   fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    if command -v aiperf >/dev/null 2>&1; then log "aiperf on PATH"; else warn "aiperf not found (check-only)"; fi
+  if _install_aiperf; then
     return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would pip install aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-    return 0
-  fi
-  # Presence is not enough. Measured: the previous pin (aiperf 0.8.0) carries
-  # weka-trace, --scenario and --benchmark-duration, and defines a scenario by
-  # the same name -- but with different invariants and an allowlist that predates
-  # the current corpus. A presence-only skip therefore left every already
-  # provisioned box on the old build after a pin bump, silently, while the
-  # preflight's own advice ("install via install.sh") pointed back at this no-op.
-  # Record what we installed and reinstall when it no longer matches.
-  local stamp="${HYPERLOOM_STATE_DIR:-${HOME}/.hyperloom}/aiperf_installed_ref"
-  local -a pip_args=("${PIP_EXTRA[@]}")
-  if command -v aiperf >/dev/null 2>&1; then
-    if [ "$(cat "$stamp" 2>/dev/null)" = "$AIPERF_REF" ]; then
-      log "aiperf on PATH is the pinned ref ${AIPERF_REF:0:8}; skipping install"
-      return 0
-    fi
-    if [ "$AIPERF_REQUIRED" -ne 1 ]; then
-      # Pre-warm, and something is already on PATH. --force-reinstall below
-      # rebuilds aiperf's whole dependency tree (deliberately NOT --no-deps),
-      # which on a shared venv can move packages this box actually runs on --
-      # and nothing has said this box will run AgentX at all. Leave it: the
-      # runtime preflight sees the stale ref, and its repair asks for the
-      # upgrade by name, which does reach the branch below.
-      log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); leaving it alone on a pre-warm -- the runtime repair upgrades it if AgentX is actually used"
-      return 0
-    fi
-    log "aiperf on PATH is not the pinned ref ${AIPERF_REF:0:8} (recorded: $(cat "$stamp" 2>/dev/null || echo none)); reinstalling"
-    # Deliberately NOT --no-deps: a newer aiperf may need dependencies the old
-    # one did not, and installing the package without them is a worse failure
-    # than the stale build we are replacing.
-    pip_args+=(--force-reinstall)
-  fi
-  log "installing aiperf (AgentX): ${AIPERF_PACKAGE_SPEC}"
-  if "$PYTHON" -m pip install --quiet "${pip_args[@]}" "$AIPERF_PACKAGE_SPEC"; then
-    log "aiperf installed OK"
-    # Stamp only after a success, so a failed upgrade retries next run instead
-    # of recording a ref that is not what is on disk. Best-effort: an unwritable
-    # state dir costs a redundant reinstall, never a wrong skip.
-    mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
-      warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
   elif [ "$AIPERF_REQUIRED" -eq 1 ]; then
-    die "aiperf install failed (${AIPERF_PACKAGE_SPEC}). AgentX was explicitly requested (INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf), and aiperf is the AgentX benchmark client -- there is no usable AgentX install without it. Fix the failure above, or point AIPERF_BIN at an existing pinned build."
+    die "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX was explicitly requested. Fix the error above or provide AIPERF_BIN."
   else
-    warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
+    warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX remains unavailable. Default synthetic path is unaffected."
   fi
 }
 
@@ -1726,15 +1824,7 @@ chain_kernel_agent() {
 }
 
 # --- targeted entry point: aiperf only -------------------------------------
-# Placed after every function definition (so ensure_aiperf exists) and before
-# the first heavy step. Everything ensure_aiperf reads is resolved by here:
-# $PYTHON (resolve_python), $PIP_EXTRA, $AIPERF_PACKAGE_SPEC, $AIPERF_REQUIRED
-# and the state dir. Other top-level statements do run between those and this
-# line -- directory setup, dependency-list arrays -- but ensure_aiperf reads
-# none of them, so the short-circuit drops nothing it depends on.
-#
-# The lock is taken for the same reason a full install takes it: two sessions on
-# one node must not pip into the same interpreter concurrently.
+# Both entry points acquire the checkout lock before the aiperf state lock.
 if [ "$ONLY_AIPERF" -eq 1 ]; then
   log "--only-aiperf: installing just the pinned AgentX client"
   acquire_install_lock

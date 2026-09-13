@@ -21,9 +21,7 @@ from hyperloom.agents.framework.models import (
 )
 
 
-# ---------------------------------------------------------------------------
 # winner_decision
-# ---------------------------------------------------------------------------
 
 
 def _req_for_gate(threshold_ratio: float = 1.05, max_drop: float = 0.05) -> ExploreRequest:
@@ -82,9 +80,7 @@ def test_winner_decision_missing_throughput() -> None:
     assert "missing throughput" in reason
 
 
-# ---------------------------------------------------------------------------
 # _passes_filter
-# ---------------------------------------------------------------------------
 
 
 def test_passes_filter_empty_filter_passes() -> None:
@@ -126,9 +122,7 @@ def test_passes_filter_include_paths_hit() -> None:
     assert ok is True
 
 
-# ---------------------------------------------------------------------------
 # metric extraction via first_float
-# ---------------------------------------------------------------------------
 
 
 def test_first_float_returns_first_finite_key() -> None:
@@ -142,9 +136,7 @@ def test_first_float_returns_first_finite_key() -> None:
     assert first_float(True, 3.0) == 3.0
 
 
-# ---------------------------------------------------------------------------
 # explore plan mode
-# ---------------------------------------------------------------------------
 
 
 def test_explore_plan_writes_summary(monkeypatch, tmp_path: Path) -> None:
@@ -176,9 +168,7 @@ def test_explore_plan_writes_summary(monkeypatch, tmp_path: Path) -> None:
     assert summary["candidates"][0]["status"] == "planned"
 
 
-# ===========================================================================
 # end-to-end ranking_mode + keep_winner_only + build_concurrency flows
-# ===========================================================================
 
 
 def _request(

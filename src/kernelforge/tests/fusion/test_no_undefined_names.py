@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A name used but never bound is invisible until the line runs.
-
-Import-time checks and the test suite both pass on it, because the call sites
-that reach it are the ones that need a GPU, a server, or a failure to have
-happened. Two of these shipped into a run and were catalogued as bad kernels:
-the validator raised NameError, the loop wrote "VALIDATE FAILED" against the
-recipe, and the attempt was spent.
-"""
+"""A name used but never bound is invisible until the line runs."""
 
 from __future__ import annotations
 
@@ -35,12 +28,7 @@ MODULES = (
 
 
 def _bound_at_module_level(tree: ast.Module) -> set[str]:
-    """Every name the module itself binds, at any nesting depth.
-
-    Deliberately flat: this is looking for names bound nowhere at all, not for
-    names bound in the wrong scope, so collecting them all keeps it from
-    reporting a local that a sibling function happens to share a name with.
-    """
+    """Every name the module itself binds, at any nesting depth."""
     bound: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):

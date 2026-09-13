@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared model-config helpers (config.json parsing + arch/type detection).
-
-Leaf module: depends only on the standard library (and the stdlib-only
-``hyperloom.common`` base) so both ``cli`` and the orchestrator executors can
-import it without a circular dependency.
-"""
+"""Shared model-config helpers (config.json parsing + arch/type detection)."""
 
 from __future__ import annotations
 
@@ -18,29 +13,16 @@ from pathlib import Path
 
 from hyperloom.common.coerce import to_int
 
-# Single source of truth for --model (path OR HF repo id) -> local dir. Re-exported
-# here so existing callers keep ``from ..model_config_utils import
-# resolve_local_model_dir`` working.
+# Single source of truth for --model (path OR HF repo id) -> local dir.
 from hyperloom.common.model_paths import resolve_local_model_dir  # noqa: F401
 
 
 def _load_model_config_dict(model_path: str) -> dict | None:
-    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure.
-
-    Args:
-        model_path: Filesystem path to the model directory, or an HF repo id
-            (resolved to the local HF cache dir via ``resolve_local_model_dir``).
-
-    Returns:
-        The parsed ``config.json`` dict, or ``None`` when the path is empty,
-        the file is missing/unreadable, the JSON is invalid, or it is not a
-        dict.
-    """
+    """Best-effort parse of ``<model_path>/config.json`` into a dict; returns ``None`` on any failure."""
     if not model_path:
         return None
-    # --model may be an HF repo id rather than a local dir; resolve it (a real
-    # dir is returned unchanged) so config-derived metadata isn't silently empty
-    # for repo-id launches.
+    # --model may be an HF repo id rather than a local dir; resolve it (a real dir is returned unchanged) so
+    # config-derived metadata isn't silently empty for repo-id launches.
     base = resolve_local_model_dir(model_path) or Path(model_path)
     cfg_path = base / "config.json"
     try:
@@ -66,15 +48,7 @@ def _load_model_config_dict(model_path: str) -> dict | None:
 
 
 def _config_architectures(config: dict) -> list[str]:
-    """Normalise ``config["architectures"]`` to a list of non-empty strings (scalar wrapped; absent -> []).
-
-    Args:
-        config: A parsed model config dict.
-
-    Returns:
-        The non-empty architecture strings; a lone scalar is wrapped and a
-        missing key yields ``[]``.
-    """
+    """Normalise ``config[\"architectures\"]`` to a list of non-empty strings (scalar wrapped; absent -> [])."""
     arches_raw = config.get("architectures")
     if isinstance(arches_raw, list):
         return [str(a).strip() for a in arches_raw if str(a or "").strip()]
@@ -83,8 +57,8 @@ def _config_architectures(config: dict) -> list[str]:
     return []
 
 
-# Gemma2 breaks the TraceLens shape-discovery patch under CUDA-graph capture, so
-# callers skip shape-discovery for Gemma2. ``cli`` reuses these for preflight.
+# Gemma2 breaks the TraceLens shape-discovery patch under CUDA-graph capture, so callers skip shape-discovery for
+# Gemma2.
 GEMMA2_MODEL_TYPE = "gemma2"
 GEMMA2_ARCHITECTURES = frozenset({"gemma2forcausallm"})
 
@@ -94,33 +68,14 @@ _GEMMA2_PATH_RE = re.compile(r"(?:^|[-_.])gemma[-_.]?2(?:[-_.]|$)")
 
 
 def _path_looks_like_gemma2(model_path: str) -> bool:
-    """Heuristic Gemma2 detection from the path when config.json is absent.
-
-    Word-boundary match on the directory name (gemma2 / gemma-2 / gemma_2),
-    so a not-yet-materialized Hub-id style path still gets the workaround
-    without false-positives on names like notgemma2 / gemma25.
-
-    Args:
-        model_path: Filesystem or Hub-id style path to the model.
-
-    Returns:
-        ``True`` when the path's final component looks like a Gemma2 name.
-    """
+    """Heuristic Gemma2 detection from the path when config.json is absent."""
     if not model_path:
         return False
     return _GEMMA2_PATH_RE.search(Path(model_path).name.lower()) is not None
 
 
 def _config_gemma2_scopes(data: dict) -> list[dict]:
-    """Return [top-level, text_config?] scopes for Gemma2 inspection.
-
-    Args:
-        data: A parsed model config dict.
-
-    Returns:
-        The top-level config plus its nested ``text_config`` when that is a
-        dict.
-    """
+    """Return [top-level, text_config?] scopes for Gemma2 inspection."""
     scopes = [data]
     nested = data.get("text_config")
     if isinstance(nested, dict):
@@ -129,15 +84,7 @@ def _config_gemma2_scopes(data: dict) -> list[dict]:
 
 
 def _config_is_gemma2(data: dict) -> bool:
-    """True when a parsed config dict declares Gemma2 (top level or text_config).
-
-    Args:
-        data: A parsed model config dict.
-
-    Returns:
-        ``True`` when any scope declares the Gemma2 ``model_type`` or
-        architecture.
-    """
+    """True when a parsed config dict declares Gemma2 (top level or text_config)."""
     for cfg in _config_gemma2_scopes(data):
         if str(cfg.get("model_type") or "").strip().lower() == GEMMA2_MODEL_TYPE:
             return True
@@ -147,19 +94,7 @@ def _config_is_gemma2(data: dict) -> bool:
 
 
 def _config_has_model_identity(data: dict) -> bool:
-    """True when the config carries any recognizable model_type/architectures.
-
-    Used to decide whether a non-Gemma2 verdict is trustworthy: a config that
-    clearly identifies another model (e.g. llama) must NOT fall back to the path
-    heuristic, while an empty/residual config (``{}``, no model_type) should.
-
-    Args:
-        data: A parsed model config dict.
-
-    Returns:
-        ``True`` when any scope carries a non-empty ``model_type`` or
-        ``architectures``.
-    """
+    """True when the config carries any recognizable model_type/architectures."""
     for cfg in _config_gemma2_scopes(data):
         if str(cfg.get("model_type") or "").strip():
             return True
@@ -175,18 +110,7 @@ _SAFETENSORS_HEADER_MAX_BYTES = 100 * 1024 * 1024
 
 
 def _read_safetensors_header(path: Path) -> dict | None:
-    """Parse the JSON header of a ``.safetensors`` file without loading tensor data.
-
-    The safetensors layout is: 8-byte little-endian ``uint64`` header length,
-    then that many bytes of UTF-8 JSON mapping tensor name -> ``{dtype, shape,
-    data_offsets}``. Only the header is read.
-
-    Args:
-        path: Path to a ``.safetensors`` file.
-
-    Returns:
-        The parsed header dict, or ``None`` on any read/parse failure.
-    """
+    """Parse the JSON header of a ``.safetensors`` file without loading tensor data."""
     try:
         with path.open("rb") as fh:
             raw_len = fh.read(8)
@@ -206,25 +130,11 @@ def _read_safetensors_header(path: Path) -> dict | None:
 
 
 def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
-    """Classify a serialized FP8 checkpoint's weight-scale granularity.
-
-    Reads the first ``*.weight_scale`` tensor found in the model's safetensors
-    header(s) and classifies it by element count: a per-channel scale has one
-    entry per output channel (numel > 1), while a per-tensor scale is a scalar
-    (numel == 1). Granularity is uniform across a checkpoint, so the first
-    weight-scale tensor is representative.
-
-    Args:
-        model_path: Filesystem path to the model directory.
-
-    Returns:
-        ``True`` for per-channel, ``False`` for per-tensor, or ``None`` when it
-        cannot be determined (no readable safetensors / no weight-scale tensor).
-    """
+    """Classify a serialized FP8 checkpoint's weight-scale granularity."""
     if not model_path:
         return None
-    # --model may be an HF repo id; resolve to the local weights dir so the
-    # safetensors scan works for repo-id launches.
+    # --model may be an HF repo id; resolve to the local weights dir so the safetensors scan works for repo-id
+    # launches.
     base = resolve_local_model_dir(model_path) or Path(model_path)
     files = sorted(base.glob("*.safetensors"))
     if not files:
@@ -236,8 +146,7 @@ def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
         for name, meta in header.items():
             if name == "__metadata__" or not isinstance(meta, dict):
                 continue
-            # Skip block-scale ``weight_scale_inv``; only per-channel/per-tensor
-            # ``weight_scale`` is relevant here.
+            # Skip block-scale ``weight_scale_inv``; only per-channel/per-tensor ``weight_scale`` is relevant here.
             if "weight_scale" not in name or "weight_scale_inv" in name:
                 continue
             shape = meta.get("shape")
@@ -252,29 +161,7 @@ def _fp8_weight_scale_is_per_channel(model_path: str) -> bool | None:
 
 
 def _fp8_is_per_channel_per_token(model_path: str) -> bool:
-    """True when a serialized FP8 checkpoint uses per-channel weight + per-token (dynamic) activation.
-
-    This is the scheme that benefits from the aiter CK
-    ``gemm_a8w8_bpreshuffle`` fast path (via
-    ``SGLANG_USE_AITER_FP8_PER_TOKEN=1``).
-
-    Gated strictly so it is default-safe:
-
-    * ``quantization_config.quant_method == "fp8"`` (standard HF FP8), AND
-    * NO ``weight_block_size`` (block-scale FP8 is unaffected), AND
-    * activation is dynamic (per-token); ``activation_scheme == "static"`` is
-      excluded and an absent scheme defaults to dynamic, AND
-    * the serialized weight scale is **per-channel** (read from the safetensors
-      header; per-tensor weights already use the fast path and would regress).
-      An undeterminable checkpoint declines (safe).
-
-    Args:
-        model_path: Filesystem path to the model directory.
-
-    Returns:
-        ``True`` only for non-block FP8 checkpoints with dynamic activation
-        whose serialized weight scale is confirmed per-channel.
-    """
+    """True when a serialized FP8 checkpoint uses per-channel weight + per-token (dynamic) activation."""
     data = _load_model_config_dict(model_path)
     if not isinstance(data, dict):
         return False
@@ -295,19 +182,7 @@ def _fp8_is_per_channel_per_token(model_path: str) -> bool:
 
 
 def _fp8_is_block_scale(model_path: str) -> bool:
-    """True when a serialized FP8 checkpoint uses block-scale quantization.
-
-    Block-scale FP8 is the standard HF FP8 format (``quant_method == "fp8"``)
-    that additionally declares a non-empty ``weight_block_size``. Other FP8
-    schemes carry no ``weight_block_size`` and are excluded.
-
-    Args:
-        model_path: Filesystem path to the model directory.
-
-    Returns:
-        ``True`` only for standard HF FP8 checkpoints that declare a non-empty
-        ``weight_block_size``.
-    """
+    """True when a serialized FP8 checkpoint uses block-scale quantization."""
     data = _load_model_config_dict(model_path)
     if not isinstance(data, dict):
         return False
@@ -330,13 +205,7 @@ _FAMILY_TOKENS = ("qwen3", "qwen2", "deepseek", "llama", "gemma", "mistral", "ph
 
 
 def _merge_config_scopes(data: dict) -> dict:
-    """Flatten nested text-tower config(s) over the top level (nested wins).
-
-    Multimodal wrappers describe the benchmarkable decoder under
-    ``text_config`` / ``llm_config`` / ``language_config``. Merge every present
-    scope in priority order so a stub high-priority scope is backfilled by a
-    fuller lower-priority one (a field already set by a higher scope is kept).
-    """
+    """Flatten nested text-tower config(s) over the top level (nested wins)."""
     merged = dict(data)
     seen: set[str] = set()
     for scope_key in _TEXT_SCOPE_KEYS:
@@ -379,14 +248,7 @@ def _derive_quantization(cfg: dict) -> str:
 
 
 def _derive_model_family(model_type: str, model_path: str) -> str:
-    """Infer the base model family with generation (e.g. qwen3, deepseek_v3).
-
-    Collapses same-generation structural variants (moe / next / vl / text)
-    into the generation key. Bare ``llama`` derives its generation from the
-    path; unknown types fall back to a family prefix. Returns '' when unknown.
-    Callers pass the merged (nested-wins) model_type so wrappers already
-    resolve to the underlying decoder.
-    """
+    """Infer the base model family with generation (e.g. qwen3, deepseek_v3)."""
     mt = str(model_type or "").strip().lower()
     name = Path(model_path or "").name.lower()
 
@@ -450,19 +312,15 @@ def _derive_model_family(model_type: str, model_path: str) -> str:
 
 
 def summarize_model_config(model_path: str) -> dict:
-    """Best-effort structured summary of a model's ``config.json`` ({} on failure).
-
-    Reads core shape/quant fields plus inferred ``attention_type`` and
-    ``is_moe`` so session state can carry model basics without a framework.
-    """
+    """Best-effort structured summary of a model's ``config.json`` ({} on failure)."""
     data = _load_model_config_dict(model_path)
     if data is None:
         return {}
     cfg = _merge_config_scopes(data)
     out: dict = {}
 
-    # Prefer the merged (nested text-tower wins) model_type so multimodal
-    # wrappers report the real decoder rather than the wrapper shell.
+    # Prefer the merged (nested text-tower wins) model_type so multimodal wrappers report the real decoder rather than
+    # the wrapper shell.
     model_type = str(cfg.get("model_type") or data.get("model_type") or "").strip()
     if model_type:
         out["model_type"] = model_type
@@ -510,8 +368,8 @@ def summarize_model_config(model_path: str) -> dict:
     if experts_per_tok > 0:
         out["num_experts_per_tok"] = experts_per_tok
 
-    # Shared-expert detection: only emit when is_moe is also true to avoid
-    # false positives on non-MoE models that happen to carry shared-looking keys.
+    # Shared-expert detection: only emit when is_moe is also true to avoid false positives on non-MoE models that
+    # happen to carry shared-looking keys.
     if out["is_moe"]:
         num_shared = 0
         for k in _SHARED_EXPERT_KEYS:
@@ -538,19 +396,7 @@ def summarize_model_config(model_path: str) -> dict:
 
 
 def _model_is_gemma2(model_path: str) -> bool:
-    """Best-effort detect a Gemma2 model from config.json (top level or text_config).
-
-    Falls back to a path heuristic when config.json is missing/unreadable OR
-    present-but-unidentifiable (empty dict / no model_type/architectures). A
-    config that clearly identifies a non-Gemma2 model is trusted as-is.
-
-    Args:
-        model_path: Filesystem path to the model directory.
-
-    Returns:
-        ``True`` when the model is detected as Gemma2 via config.json or the
-        path heuristic.
-    """
+    """Best-effort detect a Gemma2 model from config.json (top level or text_config)."""
     data = _load_model_config_dict(model_path)
     if data is not None:
         if _config_is_gemma2(data):
@@ -561,26 +407,7 @@ def _model_is_gemma2(model_path: str) -> bool:
 
 
 def _sparse_kv_block_size(model_path: str) -> int | None:
-    """Return the KV-cache block size a sparse-attention model requires, or None.
-
-    Sparse-attention models (e.g. MiniMax-M3 MSA) declare a fixed page/block
-    size under ``sparse_attention_config.sparse_block_size`` (top level or a
-    nested text-tower scope). Their vLLM sparse backends only accept that exact
-    block size (``get_supported_kernel_block_sizes()`` returns just it), so the
-    paged KV cache must launch with ``--block-size <that value>`` or KV-cache
-    init aborts with "No common block size for <default>".
-
-    Config-derived and model-agnostic: returns the declared size (e.g. 128) for
-    ANY model that carries it, else ``None`` (dense model, no declared size, or
-    unreadable config -- the caller then injects nothing and keeps prior
-    behaviour). Requires a readable ``config.json`` at ``model_path``.
-
-    Args:
-        model_path: Filesystem path (or resolvable id) to the model.
-
-    Returns:
-        The required KV-cache block size, or ``None`` when undetermined.
-    """
+    """Return the KV-cache block size a sparse-attention model requires, or None."""
     data = _load_model_config_dict(model_path)
     if not isinstance(data, dict):
         return None

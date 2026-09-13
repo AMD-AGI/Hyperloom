@@ -1,29 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Critic runtime CLI.
-
-The Critic SKILL shells out to this module via:
-
-```
-python -m hyperloom.agents.critic.runtime.cli init-session     --request request.json
-python -m hyperloom.agents.critic.runtime.cli prepare-review   --request request.json [--out judge.json]
-python -m hyperloom.agents.critic.runtime.cli commit-review    --request request.json --review review.json [--out emit.json]
-python -m hyperloom.agents.critic.runtime.cli close-session    --request request.json [--kb-draft draft.json]
-
-# Low-level KB ops.
-python -m hyperloom.agents.critic.runtime.cli list-priors      --packet packet.json [--kind ...] [--topic ...]
-python -m hyperloom.agents.critic.runtime.cli write-verdict    --packet packet.json --verdict verdict.json --ctx ctx.json
-python -m hyperloom.agents.critic.runtime.cli write-kb-drafts  --packet packet.json --kb-draft kb_draft.json --ctx ctx.json
-python -m hyperloom.agents.critic.runtime.cli add-contradiction --new-id ID --old-ids id1,id2 --ctx ctx.json
-python -m hyperloom.agents.critic.runtime.cli replay-dead-letter [--dir DIR] [--keep-on-success]
-```
-
-Every command writes a single JSON object to stdout (or to ``--out``)
-and returns exit code 0 on logical success — including
-``dead_lettered`` outcomes per the critic contract. Exit code 2 is reserved for
-adapter bugs that should propagate back to the SKILL caller.
-"""
+"""Critic runtime CLI."""
 
 from __future__ import annotations
 
@@ -45,20 +23,7 @@ from .session_memory import SessionMemory
 
 
 def _resolve_kb_client() -> KBClient:
-    """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``.
-
-    Modes:
-        ``live`` — :class:`HTTPKBClient` against the legacy ``/api/kb/*``
-            scoped-article contract (``KB_BASE_URL`` required).
-        anything else — :class:`InMemoryKBClient` (tests / dry-runs).
-
-    Returns:
-        KBClient: The resolved KB client.
-
-    Raises:
-        RuntimeAdapterError: If ``live`` is selected but ``KB_BASE_URL`` is
-            unset.
-    """
+    """Build the KB client selected by ``CRITIC_KB_CLIENT_MODE``."""
     mode = os.environ.get("CRITIC_KB_CLIENT_MODE", "inmemory").lower()
     timeout_ms = int(os.environ.get("KB_TIMEOUT_MS", "10000"))
     retry_max = int(os.environ.get("KB_RETRY_MAX", "3"))
@@ -72,12 +37,7 @@ def _resolve_kb_client() -> KBClient:
 
 
 def _resolve_reviewer() -> DecisionReviewer:
-    """Build a fully wired :class:`DecisionReviewer` for CLI commands.
-
-    Returns:
-        DecisionReviewer: A reviewer backed by a fresh ``SessionMemory``, the
-        env-selected KB client and a matching ``KBWriter``.
-    """
+    """Build a fully wired :class:`DecisionReviewer` for CLI commands."""
     sm = SessionMemory()
     client = _resolve_kb_client()
     writer = KBWriter(client, session_memory=sm)
@@ -85,11 +45,7 @@ def _resolve_reviewer() -> DecisionReviewer:
 
 
 def _cmd_init_session(args: argparse.Namespace) -> None:
-    """Handle ``init-session``: merge a request's context and emit it.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
-    """
+    """Handle ``init-session``: merge a request's context and emit it."""
     request = read_json(args.request)
     reviewer = _resolve_reviewer()
     out = reviewer.init_session(request)
@@ -97,11 +53,7 @@ def _cmd_init_session(args: argparse.Namespace) -> None:
 
 
 def _cmd_prepare_review(args: argparse.Namespace) -> None:
-    """Handle ``prepare-review``: emit the phase-1 judge bundle.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``request``, ``out``).
-    """
+    """Handle ``prepare-review``: emit the phase-1 judge bundle."""
     request = read_json(args.request)
     reviewer = _resolve_reviewer()
     bundle = reviewer.prepare_review(request)
@@ -109,15 +61,7 @@ def _cmd_prepare_review(args: argparse.Namespace) -> None:
 
 
 def _cmd_commit_review(args: argparse.Namespace) -> None:
-    """Handle ``commit-review``: validate a review and emit the outcome.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``request``, ``review``,
-            ``out``).
-
-    Raises:
-        RuntimeAdapterError: If ``--review`` is not a JSON object.
-    """
+    """Handle ``commit-review``: validate a review and emit the outcome."""
     request = read_json(args.request)
     review = read_json(args.review)
     if not isinstance(review, dict):
@@ -128,12 +72,7 @@ def _cmd_commit_review(args: argparse.Namespace) -> None:
 
 
 def _cmd_close_session(args: argparse.Namespace) -> None:
-    """Handle ``close-session``: close a session, optionally flushing drafts.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``request``, ``kb_draft``,
-            ``out``).
-    """
+    """Handle ``close-session``: close a session, optionally flushing drafts."""
     request = read_json(args.request)
     kb_draft = read_json(args.kb_draft) if args.kb_draft else None
     reviewer = _resolve_reviewer()
@@ -142,12 +81,7 @@ def _cmd_close_session(args: argparse.Namespace) -> None:
 
 
 def _cmd_list_priors(args: argparse.Namespace) -> None:
-    """Handle ``list-priors``: look up KB priors for a packet's scope.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``packet``, ``kind``,
-            ``topic``, ``limit``, ``session``, ``out``).
-    """
+    """Handle ``list-priors``: look up KB priors for a packet's scope."""
     packet = read_json(args.packet) or {}
     context = packet.get("context") or packet.get("environment") or {}
     scope = build_scope(context, require_critical=False)
@@ -166,12 +100,7 @@ def _cmd_list_priors(args: argparse.Namespace) -> None:
 
 
 def _cmd_write_verdict(args: argparse.Namespace) -> None:
-    """Handle ``write-verdict``: write a single verdict lesson to KB.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``packet``, ``verdict``,
-            ``ctx``, ``out``).
-    """
+    """Handle ``write-verdict``: write a single verdict lesson to KB."""
     packet = read_json(args.packet) or {}
     verdict = read_json(args.verdict) or {}
     ctx_raw = read_json(args.ctx) or {}
@@ -195,12 +124,7 @@ def _cmd_write_verdict(args: argparse.Namespace) -> None:
 
 
 def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
-    """Handle ``write-kb-drafts``: batch-write KB drafts from a packet.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``packet``, ``kb_draft``,
-            ``ctx``, ``out``).
-    """
+    """Handle ``write-kb-drafts``: batch-write KB drafts from a packet."""
     packet = read_json(args.packet) or {}
     kb_draft = read_json(args.kb_draft) or {}
     ctx_raw = read_json(args.ctx) or {}
@@ -223,12 +147,7 @@ def _cmd_write_kb_drafts(args: argparse.Namespace) -> None:
 
 
 def _cmd_add_contradiction(args: argparse.Namespace) -> None:
-    """Handle ``add-contradiction``: add contradicts edges between rows.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``new_id``, ``old_ids``
-            comma-separated, ``ctx``, ``out``).
-    """
+    """Handle ``add-contradiction``: add contradicts edges between rows."""
     ctx_raw = read_json(args.ctx) or {}
     client = _resolve_kb_client()
     writer = KBWriter(client)
@@ -243,12 +162,7 @@ def _cmd_add_contradiction(args: argparse.Namespace) -> None:
 
 
 def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
-    """Handle ``replay-dead-letter``: re-dispatch queued failed KB writes.
-
-    Args:
-        args (argparse.Namespace): Parsed CLI args (``dir``,
-            ``keep_on_success``, ``out``).
-    """
+    """Handle ``replay-dead-letter``: re-dispatch queued failed KB writes."""
     dlq = DeadLetter(root=args.dir or os.environ.get("KB_DEAD_LETTER_DIR"))
     client = _resolve_kb_client()
     summary = dlq.replay(
@@ -259,17 +173,7 @@ def _cmd_replay_dead_letter(args: argparse.Namespace) -> None:
 
 
 def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -> None:
-    """Re-dispatch a single dead-lettered KB request to ``client``.
-
-    Args:
-        client (KBClient): The KB client to replay against.
-        endpoint (str): The original endpoint name (``upsert``,
-            ``batch_insert``, ``edges/add`` or ``list``).
-        payload (dict[str, Any]): The stored request payload.
-
-    Raises:
-        RuntimeAdapterError: If ``endpoint`` is unknown.
-    """
+    """Re-dispatch a single dead-lettered KB request to ``client``."""
     if endpoint == "upsert":
         client.upsert(payload)
     elif endpoint == "batch_insert":
@@ -283,12 +187,7 @@ def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -
 
 
 def _make_parser() -> argparse.ArgumentParser:
-    """Build the argparse parser with all Critic CLI subcommands.
-
-    Returns:
-        argparse.ArgumentParser: A parser whose subcommands each set ``func``
-        to the matching handler.
-    """
+    """Build the argparse parser with all Critic CLI subcommands."""
     p = argparse.ArgumentParser(prog="hyperloom.agents.critic.runtime.cli", description="Critic runtime CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -354,16 +253,7 @@ def _make_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Parse arguments and run the selected subcommand.
-
-    Args:
-        argv (list[str] | None): Argument vector; defaults to ``sys.argv`` when
-            ``None``.
-
-    Returns:
-        int: ``0`` on logical success (including dead-lettered outcomes) or
-        ``2`` when a :class:`RuntimeAdapterError` propagates from the handler.
-    """
+    """Parse arguments and run the selected subcommand."""
     parser = _make_parser()
     args = parser.parse_args(argv)
     try:

@@ -40,8 +40,7 @@
 # Prerequisites:
 #   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * 8 GPUs, mori installed (`python -c "import mori"`)
-#   * A `mori` git checkout on disk for the correctness gate -- see
-#     MORI_REPO_ROOT above (driver.py's module docstring has details)
+#   * A `mori` checkout at MORI_REPO_ROOT for the correctness gate
 #   * HSA_NO_SCRATCH_RECLAIM=1 (driver.py also sets this itself as a
 #     belt-and-suspenders default, but it must take effect before HIP init)
 #   * Claude gateway configured: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
@@ -164,9 +163,8 @@ kernelforge forge-loop \
 # (correctness/bench/profile modes) was verified by hand against
 # examples/README.md §2 before this task was ever launched, so the
 # preflight is redundant here regardless.
-# --bench-mode's default (non-`--graph-mode`) path is still eager dispatch/
-# combine calls, not graph replay -- see driver.py's module docstring for
-# why, and its --graph-mode flag for the closer-to-production alternative.
+# --bench-mode defaults to eager dispatch/combine calls; --graph-mode captures
+# each rank separately for the closer-to-production alternative.
 
 echo "==> Done. Best config is checked out in: $WORKSPACE/mori_ep_config.py"
 echo "    Iteration archive + profiles: $WORKSPACE/forge_experiments/"

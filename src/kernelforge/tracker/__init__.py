@@ -5,6 +5,22 @@
 
 from kernelforge.tracker.experiment import ExperimentTracker
 from kernelforge.tracker.schema import Experiment, Iteration
-from kernelforge.tracker.usage import UsageAccumulator
+from kernelforge.tracker.usage import UsageAccumulator, combine_usage_totals
+from kernelforge.tracker.usage_ledger import (
+    LEDGER_FILENAME,
+    UsageLedgerFile,
+    ledger_path,
+    read_usage_ledger,
+)
 
-__all__ = ["ExperimentTracker", "Experiment", "Iteration", "UsageAccumulator"]
+__all__ = [
+    "ExperimentTracker",
+    "Experiment",
+    "Iteration",
+    "LEDGER_FILENAME",
+    "UsageAccumulator",
+    "UsageLedgerFile",
+    "combine_usage_totals",
+    "ledger_path",
+    "read_usage_ledger",
+]

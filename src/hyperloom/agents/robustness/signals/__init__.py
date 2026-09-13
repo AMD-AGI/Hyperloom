@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Signal rules.
-
-Each rule consumes :class:`ReactorContext` plus :class:`SourceData` and
-yields zero or more :class:`Symptom` records; the classifier composes
-the rules and de-duplicates by ``(name, subject_key)``.
-"""
+"""Signal rules."""
 
 from .aiter_jit import (
     AiterJitConfig,
@@ -14,10 +9,6 @@ from .aiter_jit import (
 )
 from .budget import BudgetConfig, evaluate_budget_signals
 from .classifier import Classifier, SignalSpec
-from .conversation_progress import (
-    ConversationProgressConfig,
-    evaluate_conversation_progress_signals,
-)
 from .crash import evaluate_crash_signals
 from .critic_health import (
     CriticHealthConfig,
@@ -76,7 +67,6 @@ __all__ = [
     "BudgetConfig",
     "Classifier",
     "ColdStartConfig",
-    "ConversationProgressConfig",
     "CriticHealthConfig",
     "DecisionAuditConfig",
     "ExternalDepsConfig",
@@ -100,7 +90,6 @@ __all__ = [
     "evaluate_budget_signals",
     "family_of",
     "evaluate_cold_start_signals",
-    "evaluate_conversation_progress_signals",
     "evaluate_crash_signals",
     "evaluate_critic_health_signals",
     "evaluate_decision_audit_signals",

@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Every Implementer lane compiles into its own AITER build cache.
-
-aiter's ``get_module`` imports a JIT module by name out of ``AITER_JIT_DIR`` and
-never checks the ``.so`` against the source it was built from. Two lanes sharing
-one cache therefore load each other's binaries: a lane validates and benchmarks
-code it did not write, and reports the number as its own.
-
-The lanes run concurrently inside one Forge process, so the routing cannot be a
-process-wide ``os.environ`` write -- one lane's write would be the other lane's
-too. These tests pin what environment each spawned session actually receives.
-"""
+"""Every Implementer lane compiles into its own AITER build cache."""
 
 from __future__ import annotations
 
@@ -38,12 +28,7 @@ from kernelforge.llm.git import git
 
 @pytest.fixture(autouse=True)
 def _isolate_aiter_env():
-    """Keep the campaign cache variables this file sets out of later tests.
-
-    ``configure_aiter_cache_isolation`` writes ``os.environ`` directly, and
-    monkeypatch cannot roll that back: it only restores keys it recorded, and
-    ``delenv`` on an absent key records nothing.
-    """
+    """Keep the campaign cache variables this file sets out of later tests."""
     keys = (
         "AITER_ROOT_DIR",
         "AITER_JIT_DIR",
@@ -82,12 +67,7 @@ def _result_message():
 
 
 def _recording_claude_backend(spawned: list[dict[str, str]]) -> ClaudeBackend:
-    """A Claude backend whose SDK records the environment a session would get.
-
-    claude-agent-sdk builds the CLI subprocess environment as the inherited
-    process environment with ``ClaudeAgentOptions.env`` applied over it, so the
-    recorded mapping is what that session's build and benchmark commands read.
-    """
+    """A Claude backend whose SDK records the environment a session would get."""
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
     backend.fallback_reason = ""
@@ -160,9 +140,8 @@ async def _run_lanes(tmp_path: Path, factory, lane_ids: tuple[str, ...]) -> None
     async def lane(lane_id: str) -> None:
         lane_dir = _lane_dir(tmp_path, lane_id)
         session = factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))
-        # Hand control back so both lanes are inside their session before either
-        # spawns: a routing that writes the process environment would give the
-        # first lane whatever the second lane wrote last.
+        # Hand control back so both lanes are inside their session before either spawns: a routing that writes the
+        # process environment would give the first lane whatever the second lane wrote last.
         await asyncio.sleep(0)
         await session(str(lane_dir / "src" / "kernel.py"), f"plan {lane_id}")
 
@@ -192,11 +171,7 @@ async def test_two_concurrent_lanes_are_spawned_with_different_aiter_caches(
 
 
 async def test_a_lane_cache_is_created_beside_the_lane_copy(tmp_path):
-    """The cache goes where the round's fan-out removes it, but not into the lane.
-
-    Inside the lane copy it would be the lane's own worktree, and every compiled
-    artifact would become an untracked file a backend can reject the session for.
-    """
+    """The cache goes where the round's fan-out removes it, but not into the lane."""
     config, workspace = _campaign(tmp_path)
     aiter_cache.configure_aiter_cache_isolation(tmp_path / "experiments")
     spawned: list[dict[str, str]] = []
@@ -216,12 +191,7 @@ async def test_a_lane_cache_is_created_beside_the_lane_copy(tmp_path):
 
 
 async def test_running_lanes_leaves_the_campaign_cache_selected(tmp_path):
-    """A lane routes its own subprocess, never the Forge process it runs in.
-
-    Everything else in the process -- the canonical correctness run, the
-    benchmark, the lock cleanup -- reads these variables, so a lane that wrote
-    them would move the campaign's own measurements into the lane's cache.
-    """
+    """A lane routes its own subprocess, never the Forge process it runs in."""
     config, workspace = _campaign(tmp_path)
     campaign = aiter_cache.configure_aiter_cache_isolation(tmp_path / "experiments")
 
@@ -237,11 +207,7 @@ async def test_running_lanes_leaves_the_campaign_cache_selected(tmp_path):
 
 
 async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_path):
-    """A lane that cannot get a private cache must not fall back to the shared one.
-
-    Falling back is the whole defect: the lane would compile into the campaign
-    cache beside its siblings and trust whatever module came back.
-    """
+    """A lane that cannot get a private cache must not fall back to the shared one."""
     config, workspace = _campaign(tmp_path)
     aiter_cache.configure_aiter_cache_isolation(tmp_path / "experiments")
     lane_dir = _lane_dir(tmp_path, "1")

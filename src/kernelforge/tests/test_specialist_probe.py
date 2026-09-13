@@ -1,12 +1,4 @@
-"""A planning specialist may measure one variant, in a scratch tree only.
-
-On `dynamic-quant` the whole 12.88% deficit reduced to one geometry constant
-that the specialists could only argue about, because they run read-only. These
-tests pin the two halves of the fix: the probe reaches nothing but its own
-scratch root, and every attempt it makes -- refused, failed, or over budget --
-comes back into the analysis labelled, so an unmeasured question never reads
-like one nobody asked.
-"""
+"""A planning specialist may measure one variant, in a scratch tree only."""
 
 from __future__ import annotations
 
@@ -43,14 +35,7 @@ def _refusing_load_sandbox(env):
 
 
 def _patch_primitive(monkeypatch, primitive) -> None:
-    """Stand PR-1's seam in or out, strictly.
-
-    The patch targets the resolver this branch owns rather than the attribute in
-    ``tools.bench``, which the earlier revision patched with ``raising=False`` --
-    and so kept passing while the probe named a primitive PR-1 never wrote.
-    ``test_the_seam_is_callable_the_way_the_probe_calls_it`` is what checks the
-    name and the signature against whatever this build actually provides.
-    """
+    """Stand PR-1's seam in or out, strictly."""
     monkeypatch.setattr(probe_server, "resolve_probe_primitive", lambda: primitive)
 
 
@@ -450,9 +435,8 @@ def _sandbox(tmp_path, **overrides) -> probe_server.ProbeSandbox:
         "ledger_path": scratch / "probe_ledger.jsonl",
         "max_probes": 2,
         "budget_sec": 60.0,
-        # Every real sandbox has one, and it exists: a probe with no device
-        # sentinel refuses to measure rather than timing against whatever else
-        # holds the GPU, and one it created itself would serialize nothing.
+        # Every real sandbox has one, and it exists: a probe with no device sentinel refuses to measure rather than
+        # timing against whatever else holds the GPU, and one it created itself would serialize nothing.
         "device_lock": tmp_path / "device.lock",
     }
     (tmp_path / "device.lock").touch()
@@ -528,8 +512,7 @@ async def test_server_passes_verbatim_names_and_records_what_was_read(tmp_path, 
     assert seen["prefix_constants"] is False
     assert result["status"] == probe_server.MEASURED
     assert result["case_selection"] == "whole_suite"
-    # The ledger has to keep the difference between a confirmed number and one
-    # nothing was seen to read.
+    # The ledger has to keep the difference between a confirmed number and one nothing was seen to read.
     assert _ledger(sandbox)[0]["override_consumption"] == {"GPTOSS_BOUND": "unread"}
 
 
@@ -778,12 +761,7 @@ async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(tmp_path, mon
 
 
 def test_the_seam_is_callable_the_way_the_probe_calls_it() -> None:
-    """Whatever this build provides under PR-1's name must take the probe's call.
-
-    Absent, this is the branch's stated dependency and the probe says so. Present
-    with a signature the probe cannot call, the second branch fails -- which is
-    the check the earlier ``raising=False`` monkeypatch removed.
-    """
+    """Whatever this build provides under PR-1's name must take the probe's call."""
     primitive, unusable = probe_server.probe_primitive_status()
 
     assert probe_server.PRIMITIVE_PATH.endswith(".sweep_case")
@@ -835,12 +813,7 @@ def test_probe_config_rejects_an_empty_budget() -> None:
 
 @pytest.mark.asyncio
 async def test_the_default_campaign_layout_still_gets_a_usable_probe(tmp_path, monkeypatch) -> None:
-    """The CLI default puts experiments_dir inside the workspace; the probe runs anyway.
-
-    ``config.experiments_dir = campaign_root`` is ``<workspace>/forge_experiments``
-    on every default campaign, and a scratch root under it is the one placement
-    the probe refuses. Placing it there disabled the feature everywhere.
-    """
+    """The CLI default puts experiments_dir inside the workspace; the probe runs anyway."""
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
     config = Config(workspace=str(workspace))
@@ -888,13 +861,7 @@ def test_factory_says_when_it_cannot_place_a_scratch_root(caplog) -> None:
 
 @pytest.mark.asyncio
 async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_path, monkeypatch) -> None:
-    """The MCP client forwards a six-name allow-list, not this process's env.
-
-    So the child would start with no import path -- this repo is not installed
-    -- and the driver ``sweep_case`` re-runs would compile and dispatch with no
-    ROCm and no device selection. The allow-list is forwarded explicitly, and
-    only the allow-list.
-    """
+    """The MCP client forwards a six-name allow-list, not this process's env."""
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setenv("PYTHONPATH", "/repo/src")
     monkeypatch.setenv("ROCM_PATH", "/opt/rocm")
@@ -952,13 +919,7 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
 
 @pytest.mark.asyncio
 async def test_specialist_setup_creates_the_campaign_sentinel(tmp_path, monkeypatch) -> None:
-    """Naming the sentinel is not enough; the analysis round has to find it.
-
-    A probe opens the sentinel without creating it, and the only other maker is
-    the fan-out lane path, which a campaign reaches after the analysis round.
-    Left uncreated here, every probe of every specialist is refused and the
-    round plans against nothing it measured.
-    """
+    """Naming the sentinel is not enough; the analysis round has to find it."""
     from kernelforge.loop.fanout import campaign_device_lock_path
 
     _patch_primitive(monkeypatch, _stub_primitive)
@@ -1049,11 +1010,7 @@ def test_a_probe_ceiling_leaves_the_session_time_to_write_its_analysis() -> None
 
 @pytest.mark.asyncio
 async def test_a_probe_that_would_leave_no_time_for_the_analysis_is_refused(tmp_path, monkeypatch) -> None:
-    """A specialist killed mid-probe returns no analysis, and the round raises.
-
-    Driven with a fake clock rather than a sleep: what is under test is the
-    arithmetic on the session deadline, not the passage of time.
-    """
+    """A specialist killed mid-probe returns no analysis, and the round raises."""
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
     sandbox = _sandbox(
@@ -1108,8 +1065,8 @@ async def test_the_mcp_tool_timeout_is_not_the_raw_budget(tmp_path, monkeypatch)
     await agent.run(_assignment(), _context(_workspace(tmp_path)))
 
     server = backend.specs[0].mcp_servers["specialist_probe"]
-    # Plus the grace the server itself allows the primitive: a client that
-    # timed out first would kill the call before ``_record`` wrote anything.
+    # Plus the grace the server itself allows the primitive: a client that timed out first would kill the call before
+    # ``_record`` wrote anything.
     assert server.tool_timeout_sec == (int(300 - probe_server.ANALYSIS_RESERVE_SEC) + probe_server.PROBE_TOOL_GRACE_SEC)
     assert float(server.env[probe_server.SESSION_DEADLINE_ENV]) > 0.0
 
@@ -1195,19 +1152,13 @@ async def test_a_rounds_scratch_tree_is_removed_when_the_round_fails(tmp_path, m
 
 
 def _fake_reaper(monkeypatch, report_for):
-    """Stand in for the reaper, recording where and when it was asked.
-
-    Never a real process and never a real signal: what these tests pin is that
-    the round asks at all, that it asks while its tree is still there to be
-    surveyed, and that what comes back travels.
-    """
+    """Stand in for the reaper, recording where and when it was asked."""
     calls: list[Path] = []
 
     async def _reap(directory, *, description):
         directory = Path(directory)
-        # Before the removal, not after: the reaper identifies a process by
-        # what it holds open under this directory, so a tree already gone
-        # would answer "nothing is running" for every leak.
+        # Before the removal, not after: the reaper identifies a process by what it holds open under this directory,
+        # so a tree already gone would answer "nothing is running" for every leak.
         assert directory.is_dir(), "the round was reaped after its tree was gone"
         assert str(directory) in description
         calls.append(directory)
@@ -1244,14 +1195,7 @@ async def _run_one_round(tmp_path, monkeypatch, *, probe=None):
 
 @pytest.mark.asyncio
 async def test_a_probe_that_outlived_its_round_is_reported_to_the_caller(tmp_path, monkeypatch) -> None:
-    """A specialist killed mid-probe left a benchmark on the shared GPU.
-
-    The tree was removed and nothing else was done, so the lanes queued behind
-    the leftover probe on the device sentinel while the canonical measurement --
-    which takes no lock -- ran straight into it. The report has to reach the
-    caller, blockers included: those pids are all that is left to ask about once
-    the round's tree is gone.
-    """
+    """A specialist killed mid-probe left a benchmark on the shared GPU."""
     calls = _fake_reaper(
         monkeypatch,
         lambda directory: ReapReport(
@@ -1267,8 +1211,7 @@ async def test_a_probe_that_outlived_its_round_is_reported_to_the_caller(tmp_pat
     assert run.contended is True
     assert run.reaped.blockers == (4321,)
     assert "4321" in run.reaped.describe()
-    # The round still analysed; the contention is about the device, not this
-    # round's own answer.
+    # The round still analysed; the contention is about the device, not this round's own answer.
     assert run.outcomes[0].succeeded
     assert list(Path(_probe(tmp_path).scratch_root).iterdir()) == []
 
@@ -1469,23 +1412,7 @@ def test_a_primitive_that_explodes_on_import_is_reported_unavailable(
 
 @pytest.mark.asyncio
 async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(tmp_path, monkeypatch) -> None:
-    """A probe that misses these times a binary built from other source.
-
-    ``aiter_cache.configure_aiter_cache_isolation`` puts five variables in the
-    environment, and aiter's ``get_module`` imports the ``.so`` out of
-    ``AITER_JIT_DIR`` by name without checking it against the source. A child
-    that fell back to the shared default cache would therefore report a number
-    labelled ``measured`` for a binary it did not build -- and, on a cold
-    default cache, spend the whole probe budget rebuilding while holding the
-    device lock.
-
-    FlyDSL is the third compiler behind that isolation and reaches the child the
-    same way. Unforwarded, aiter's own default puts its cache inside the
-    workspace, which is both the wrong binary and a git-visible write. It is
-    named rather than swept in by a ``FLYDSL_`` prefix because the same family
-    holds ``FLYDSL_RUNTIME_RUN_ONLY`` and ``FLYDSL_RUNTIME_ENABLE_CACHE``, which
-    would change what the probe measures rather than where it builds.
-    """
+    """A probe that misses these times a binary built from other source."""
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setenv("AITER_ROOT_DIR", "/cache/aiter/root")
     monkeypatch.setenv("AITER_JIT_DIR", "/cache/aiter/jit")
@@ -1493,12 +1420,12 @@ async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(tmp_
     monkeypatch.setenv("FORGE_AITER_CACHE_OWNER_PID", "4242")
     monkeypatch.setenv("FLYDSL_RUNTIME_CACHE_DIR", "/cache/aiter/flydsl_cache")
     monkeypatch.setenv("FORGE_NPROC_PER_NODE", "4")
-    # Same family, but knobs that change what is measured rather than where it
-    # is built: forwarding these is what a "FLYDSL_" prefix would have cost.
+    # Same family, but knobs that change what is measured rather than where it is built: forwarding these is what a
+    # "FLYDSL_" prefix would have cost.
     monkeypatch.setenv("FLYDSL_RUNTIME_RUN_ONLY", "1")
     monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
-    # Neither is a variable this campaign sets: AITER_HOME appears nowhere in
-    # this repository, and AITER_REBUILD is popped by the cache isolation.
+    # Neither is a variable this campaign sets: AITER_HOME appears nowhere in this repository, and AITER_REBUILD is
+    # popped by the cache isolation.
     monkeypatch.setenv("AITER_HOME", "/somewhere/else")
     monkeypatch.setenv("AITER_REBUILD", "1")
     backend = _McpBackend()
@@ -1593,8 +1520,8 @@ async def test_the_prompt_states_the_ceiling_the_client_enforces(tmp_path, monke
     spec = backend.specs[0]
     server = spec.mcp_servers["specialist_probe"]
     ceiling = probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0)
-    # The client must outlast the server, or ``_record`` never writes the
-    # ledger line that is the only channel back to the parent.
+    # The client must outlast the server, or ``_record`` never writes the ledger line that is the only channel back to
+    # the parent.
     assert server.tool_timeout_sec == ceiling + probe_server.PROBE_TOOL_GRACE_SEC
     assert server.tool_timeout_sec > ceiling
     assert f"{ceiling}s" in spec.system_prompt
@@ -1656,12 +1583,7 @@ async def test_a_non_utf8_round_budget_does_not_escape_the_handler(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_the_gate_is_re_checked_after_waiting_for_the_device(tmp_path, monkeypatch) -> None:
-    """A full-length wait can push the session under the analysis reserve.
-
-    The old code recomputed the ceiling but not the gate, so the probe started
-    with the ``max(1, ...)`` clamp and the ledger recorded "the probe exceeded
-    its 1s ceiling" for a session that had simply run out.
-    """
+    """A full-length wait can push the session under the analysis reserve."""
     clock = {"wall": 1_000.0, "mono": 0.0}
     monkeypatch.setattr(probe_server, "wall_clock", lambda: clock["wall"])
     monkeypatch.setattr(probe_server, "monotonic_clock", lambda: clock["mono"])
@@ -1751,8 +1673,8 @@ async def test_every_result_carries_the_three_numbers_promised(tmp_path, monkeyp
 
     assert result["probes_remaining"] == 1
     assert result["seconds_remaining"] > 0.0
-    # The round's budget being gone is a different thing from this session
-    # nearly being over, and the model is told it can tell them apart.
+    # The round's budget being gone is a different thing from this session nearly being over, and the model is told it
+    # can tell them apart.
     assert result["session_seconds_remaining"] == pytest.approx(1800.0)
     assert _ledger(sandbox)[0]["session_seconds_remaining"] == pytest.approx(1800.0)
     description = probe_server.TOOL_DEFINITIONS[0]["description"]

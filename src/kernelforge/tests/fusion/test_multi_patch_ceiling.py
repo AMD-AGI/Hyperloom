@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One lane ceiling has to cover both multi-patch pipelines.
-
-``_run_multi_patch_nomination`` runs authored recipes through the kernel autoloop
-and compile-pass claims through their own serving A/B. Each costs a full
-validation, so a ceiling that bounds only the autoloop lets the claims push the
-round past the share that paid for it.
-
-Both pipelines are faked: what is pinned is how many targets each was handed.
-"""
+"""One lane ceiling has to cover both multi-patch pipelines."""
 
 from __future__ import annotations
 
@@ -102,11 +94,7 @@ def test_claims_take_the_whole_ceiling_when_nothing_was_authored(tmp_path, spied
 
 
 def test_no_ceiling_withholds_neither_kind(tmp_path, spied):
-    """Zero means none could be derived, never "run nothing".
-
-    The autoloop is handed the discovered count, which withholds nothing, and
-    every claim still runs.
-    """
+    """Zero means none could be derived, never \"run nothing\"."""
     _nominate(tmp_path, authored=["a1", "a2"], claims=["c1", "c2", "c3"], max_recipes=0)
 
     assert spied["autoloop_recipes"] == ["a1", "a2"]

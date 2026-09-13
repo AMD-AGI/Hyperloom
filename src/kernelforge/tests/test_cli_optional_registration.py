@@ -1,17 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Failure semantics for the eagerly registered `gemm-tune` command group.
-
-Upstream KernelForge registered this group defensively, because the tuner was
-a separate distribution back then and a root install could intentionally omit
-it. Vendored into Hyperloom it is a subpackage of the same
-wheel, so there is no such thing as a deliberate absence: if the import fails,
-the installation is broken and the run must say so rather than hand back a CLI
-that is quietly missing a subcommand and then dies mid-tuning on "No such
-command 'gemm-tune'". These tests pin that decision down, along with the part
-of upstream's reasoning that survives it -- an error raised *inside* the
-subpackage is never a "missing command".
-"""
+"""Failure semantics for the eagerly registered `gemm-tune` command group."""
 
 from __future__ import annotations
 

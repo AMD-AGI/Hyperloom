@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""low-quality steady-state chunk auto-recovery.
-
-``_check_selected_chunk_has_gpu_events_quality`` emits ``steady_state_chunk_low_quality`` when busy ratio is below threshold AND a meaningfully-better alternate exists; threshold via ``INFERENCE_OPTIMIZER_CHUNK_QUALITY_MIN_BUSY_RATIO`` (default 0.05).
-"""
+"""low-quality steady-state chunk auto-recovery."""
 
 from __future__ import annotations
 

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage-gap unit tests for the external baseline comparison layer.
-
-Covers uncovered branches in ``baseline_comparison``: whitespace-only input to
-``to_inferencex_name``, the optional-field/all-concurrencies rendering in
-``_format_report_md``, and the fail-soft branches in ``_row_to_point``.
-"""
+"""Coverage-gap unit tests for the external baseline comparison layer."""
 
 from __future__ import annotations
 

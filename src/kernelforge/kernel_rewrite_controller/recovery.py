@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
@@ -20,10 +21,13 @@ from kernelforge.kernel_rewrite_controller.publisher import (
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import discover_task_dirs, load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
     changed_files_from_base,
     export_patch_from_base,
+    operator_workspace,
 )
+from kernelforge.loop.editable_repo import needs_inplace
 from kernelforge.loop.reporting import BestResultPublisher
 
 log = logging.getLogger(__name__)
@@ -103,15 +107,7 @@ def _select_trusted_result(
     manifest: dict[str, Any] | None,
     sidecar: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str]:
-    """Choose between the two trusted views of one workspace's best result.
-
-    They are not equally attested. A manifest is trusted only once
-    ``describes_current_best`` has confirmed a complete bundle behind it, while
-    the sidecar needs an ``improved`` flag and a commit. So the manifest wins
-    whenever both name the same commit, and when they name different ones the
-    newer iteration wins -- a sidecar left from an earlier keep must not pull the
-    published patch backwards, which is what preferring it outright allowed.
-    """
+    """Choose between the two trusted views of one workspace's best result."""
     if sidecar is None:
         return manifest, "best manifest"
     if manifest is None:
@@ -122,9 +118,30 @@ def _select_trusted_result(
     sidecar_iteration = _iteration_of(sidecar)
     if manifest_iteration is not None and sidecar_iteration is not None and sidecar_iteration > manifest_iteration:
         return sidecar, "forge result sidecar"
-    # Either the manifest is at least as new, or one of them names no iteration
-    # to compare on. Keep the better-attested view rather than guessing.
+    # Either the manifest is at least as new, or one of them names no iteration to compare on.
     return manifest, "best manifest"
+
+
+def _nothing_to_recover_reason(task: KernelRewriteTask, workspace: Path) -> str:
+    """Say which of two different facts stopped a recovery.
+
+    A borrowed repository is handed back the moment its patch is exported, and
+    forge-loop's best-result bundle lives inside the workspace. The release
+    archives it rather than deleting it, so the bundle outlives the borrow --
+    but at the operator's own directory, not at the repository the sweep would
+    ask about. Both are read before this is reported.
+
+    Only when neither holds anything is there a fact to state, and it is not
+    "no trusted forge-loop best result": that states a verdict on evidence
+    never read, which reads as "the campaign produced nothing" and is a
+    different claim entirely.
+    """
+    if needs_inplace(str(task.repo_root)) and not (workspace / FORGE_LOOP_OUTPUT_DIRNAME).is_dir():
+        return (
+            "the borrowed repository was handed back and its archived forge-loop bundle holds no trusted "
+            "best result; a completed campaign is recovered during dispatch or from the task's result sidecar"
+        )
+    return "no trusted forge-loop best result"
 
 
 def _already_published(layout: ControllerLayout, operator_id: str, best_commit: str) -> bool:
@@ -143,7 +160,7 @@ def recover_task_result(
     if parsed.task is None:
         return RecoveryResult(operator_id=Path(task_dir).name, published=False, reason=parsed.reason)
     task = parsed.task
-    workspace = layout.workspace_dir(task.operator_id)
+    workspace = operator_workspace(task, layout)
     if not workspace.is_dir():
         return RecoveryResult(
             operator_id=task.operator_id,
@@ -151,15 +168,19 @@ def recover_task_result(
             reason="operator workspace does not exist",
         )
 
+    # The archive second, and only if the workspace holds nothing: a borrowed
+    # repository hands its bundle back to the operator's own directory on
+    # release, which is the one copy a run the host killed still leaves
+    # reachable. For a private checkout the two are the same directory.
     manifest, source = _select_trusted_result(
-        _trusted_manifest(workspace),
+        _trusted_manifest(workspace) or _trusted_manifest(layout.workspace_dir(task.operator_id)),
         _trusted_result_sidecar(Path(task_dir)),
     )
     if manifest is None:
         return RecoveryResult(
             operator_id=task.operator_id,
             published=False,
-            reason="no trusted forge-loop best result",
+            reason=_nothing_to_recover_reason(task, workspace),
         )
 
     best_commit = str(manifest.get("commit_hash") or "").strip().lower()
@@ -217,14 +238,9 @@ def recover_task_result(
             best_commit=best_commit,
         )
     except Exception as error:
-        # A validated best commit that cannot be shipped is the one recovery
-        # outcome that says something went wrong rather than that nothing was
-        # found, so it is worth a line of its own.
         log.warning(
-            "could not publish %s for %s at %s: %s",
-            source,
+            "could not publish result for %s: %s",
             task.operator_id,
-            best_commit,
             error,
         )
         return RecoveryResult(

@@ -19,11 +19,7 @@ _AMD_GPU_TYPES = frozenset(AMD_GPU_DISPATCH_IDENTITIES)
 _PRODUCT_TAGS: tuple[str, ...] = tuple(sorted((t.upper() for t in _AMD_GPU_TYPES), reverse=True))
 
 _GFX_TO_RUNNER: dict[str, str] = {
-    # gfx arch -> Magpie runner label, so launchers and runtime materializers
-    # agree on the selected benchmark script. Not derived by inverting the
-    # identities table: that map is many-to-one (mi308x and mi325x are gfx942
-    # too), and this answers "which benchmark script", not "which board", so
-    # the arch a runner is reached by is a deliberate choice, not an inverse.
+    # gfx arch -> Magpie runner label, so launchers and runtime materializers agree on the selected benchmark script.
     "gfx942": "mi300x",
     "gfx950": "mi355x",
 }
@@ -73,8 +69,8 @@ def _autodetect_gpu_type() -> str | None:
             if tag in out:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted; fall through to the torch
-        # gcnArchName probe below (autodetect is best-effort).
+        # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
+        # best-effort).
         pass
     try:
         import torch

@@ -18,20 +18,14 @@ from typing import Any
 
 from .aiter_script_map import TUNER_SCRIPT_HINTS as _TUNER_SCRIPT_HINTS
 
-# Re-exported: these used to live here, and both callers and tests import them
-# from this module. They moved to the leaf so ``script_discovery`` can reach
-# them without importing this module back.
+# Re-exported: these used to live here, and both callers and tests import them from this module.
 from .aiter_script_map import resolve_aiter_csrc, resolve_aiter_root  # noqa: F401
 
 log = logging.getLogger(__name__)
 
 
 def sha256_file(path: str | Path | None) -> str:
-    """Return the sha256 hex digest of a file, or ``""`` on any I/O error.
-
-    Used to fingerprint produced tuned CSVs in the TuningArtifactManifest so a
-    consumer can verify the artifact it applies matches what was tuned.
-    """
+    """Return the sha256 hex digest of a file, or ``\"\"`` on any I/O error."""
     if not path:
         return ""
     try:
@@ -48,10 +42,7 @@ def sha256_file(path: str | Path | None) -> str:
 RESULT_SENTINEL_BEGIN = "FORGE_GEMM_TUNE_RESULT_BEGIN"
 RESULT_SENTINEL_END = "FORGE_GEMM_TUNE_RESULT_END"
 
-# Preferred relative path per tuner, derived from the discovery hints so there is
-# one source of truth. Kept as a plain mapping for callers that only want the
-# expected location; resolution itself goes through script_discovery, which falls
-# back to searching when aiter has moved the file.
+# Preferred relative path per tuner, derived from the discovery hints so there is one source of truth.
 AITER_TUNER_SCRIPTS = {name: rels[0] for name, rels in _TUNER_SCRIPT_HINTS.items() if rels}
 
 # Environment variable names for tuned config outputs
@@ -61,10 +52,8 @@ TUNER_ENV_VARS = {
     "a8w8_blockscale": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
     "a8w8_bpreshuffle": "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE",
     "a8w8_blockscale_bpreshuffle": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
-    # aiter reads the a4w4 (fp4/mxfp4, gfx950-only) config via AITER_CONFIG_GEMM_A4W4
-    # (jit/core.py); the "_BLOCKSCALE" suffix here was a dead key aiter never reads,
-    # which silently dropped all tuned fp4 GEMM configs at serving. Runtime filename
-    # (a4w4_blockscale_tuned_gemm.csv) matches aiter's default and is unchanged.
+    # aiter reads the a4w4 (fp4/mxfp4, gfx950-only) config via AITER_CONFIG_GEMM_A4W4 (jit/core.py); the "_BLOCKSCALE"
+    # suffix here was a dead key aiter never reads, which silently dropped all tuned fp4 GEMM configs at serving.
     "a4w4_blockscale": "AITER_CONFIG_GEMM_A4W4",
     "sglang_dense_bf16": "AITER_CONFIG_GEMM_BF16",
     "vllm_moe_triton": "VLLM_TUNED_CONFIG_FOLDER",
@@ -86,12 +75,7 @@ class GpuInfo:
 
 
 def find_tuner_script(tuner_name: str) -> Path | None:
-    """Locate a specific aiter tuner script by name.
-
-    Delegates to script_discovery: the hinted path is tried first, then the file
-    is searched for. A hardcoded path is what left the bf16 tuner pointing at
-    ``gradlib/`` after aiter moved it.
-    """
+    """Locate a specific aiter tuner script by name."""
     from .script_discovery import discover_tuner_script
 
     return discover_tuner_script(tuner_name)
@@ -136,6 +120,75 @@ def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
         return []
 
 
+#: MI355X/ROCm 7.2 measured 1.64 GiB peak per hipcc job; round up to cover
+#: heavier templates and prevent aiter's unconstrained parallel build from OOMing.
+HIPCC_JOB_BYTES = 2 * 1024**3
+
+#: How much of the container's memory allowance a build may claim. The rest is
+#: the tuner process that launched it -- torch, a loaded model, GPU buffers --
+#: all of it already resident and none of it accounted for by the compiler.
+BUILD_MEMORY_SHARE = 0.7
+
+#: Where the kernel publishes the container's memory ceiling, cgroup v2 first.
+_CGROUP_MEMORY_LIMITS = (
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+)
+
+
+def cgroup_memory_limit() -> int | None:
+    """Return the cgroup memory ceiling, or None when absent or unlimited."""
+    for path in _CGROUP_MEMORY_LIMITS:
+        try:
+            raw = Path(path).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if raw == "max":
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # v1's "no limit" is PAGE_COUNTER_MAX rounded to a page; anything past
+        # a petabyte is that sentinel rather than a real allowance.
+        return value if 0 < value < 2**50 else None
+    return None
+
+
+def build_job_limit(cpus: int | None = None, memory_bytes: int | None = None) -> int | None:
+    """Return a cgroup-safe compile-job limit, or None when no cap is needed."""
+    if cpus is None:
+        # The affinity mask, not the host's core count: a container pinned to a
+        # subset is the case where the two differ and the smaller one is true.
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    if memory_bytes is None:
+        memory_bytes = cgroup_memory_limit()
+    if not memory_bytes:
+        return None
+    fits = int(memory_bytes * BUILD_MEMORY_SHARE) // HIPCC_JOB_BYTES
+    capped = max(1, min(cpus, fits))
+    return capped if capped < cpus else None
+
+
+def cap_build_parallelism(env: dict[str, str]) -> dict[str, str]:
+    """Set ``MAX_JOBS`` only when cgroup memory requires a lower default."""
+    if env.get("MAX_JOBS"):
+        return env
+    limit = build_job_limit()
+    if limit is None:
+        return env
+    log.info(
+        "capping MAX_JOBS at %d: %d CPUs visible but the cgroup allows %.0f GiB, "
+        "and one hipcc job holds about %.1f GiB",
+        limit,
+        len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1),
+        (cgroup_memory_limit() or 0) / 1024**3,
+        HIPCC_JOB_BYTES / 1024**3,
+    )
+    env["MAX_JOBS"] = str(limit)
+    return env
+
+
 def run_subprocess(
     cmd: list[str],
     *,
@@ -144,18 +197,14 @@ def run_subprocess(
     log_file: Path | None = None,
     env_override: dict[str, str] | None = None,
 ) -> tuple[int, str, str]:
-    """Run a subprocess, optionally logging output to a file.
-
-    Uses Popen with start_new_session=True so that on timeout we can kill
-    the entire process group (including forked GPU workers, hipcc, etc).
-
-    Returns (returncode, stdout, stderr).
-    """
+    """Run a subprocess, optionally logging output to a file."""
     import signal
 
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
+    # Every tuner here shells out to something that ends in an aiter JIT build.
+    cap_build_parallelism(env)
 
     log.info("Running: %s", " ".join(cmd))
     started = time.time()

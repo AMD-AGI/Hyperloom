@@ -1,25 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which chip this run targets.
-
-Tile shapes, warp counts and intrinsics are chosen per ISA, so the author has
-to be told which architecture it is writing for. Marketing names are folded
-onto the canonical ``gfx*`` token so an operator saying ``MI355X`` and a probe
-reporting ``gfx950`` mean the same thing to the prompt.
-
-An unresolvable arch stays empty rather than guessing: naming the wrong chip
-would send the author after the wrong instruction set, which is worse than
-saying nothing and letting it write portable code.
-"""
+"""Which chip this run targets."""
 
 from __future__ import annotations
 
 import re
 import subprocess
 
-# Canonical arch tokens are lowercase ``gfx*``; marketing names are folded in so
-# a caller reporting ``MI355X`` and a probe reporting ``gfx950`` agree.
+# Canonical arch tokens are lowercase ``gfx*``; marketing names are folded in so a caller reporting ``MI355X`` and a
+# probe reporting ``gfx950`` agree.
 _ARCH_ALIASES = {
     "gfx942": "gfx942",
     "gfx950": "gfx950",

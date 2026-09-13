@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Symptoms derived from LocalProbe-only data.
-
-Fire only when :class:`LocalProbeSource` is active; silent when the probe is
-disabled, since the SourceData fields are then empty. Covers
-``local_server_unreachable`` (HIGH if all targets fail), ``log_error_pattern`` (OOM/NCCL → HIGH),
-``gpu_thermal_high``, plus disk/shm/ray-head/fd pressure rules.
-"""
+"""Symptoms derived from LocalProbe-only data."""
 
 from __future__ import annotations
 
@@ -22,41 +16,14 @@ from ..sources.base import SourceData
 from .symptom import Symptom, SymptomSeverity
 
 
-# Load generators that only run while an inference server is expected to answer,
-# so their presence turns "no server process" from an idle stretch into an
-# outage. Deliberately narrower than the harness patterns the process probe
-# matches: the outer Magpie/InferenceX harness is also up while it launches a
-# server and while it tears one down, when a refused port is the correct reading.
+# Load generators that only run while an inference server is expected to answer, so their presence turns "no server
+# process" from an idle stretch into an outage.
 _BENCHMARK_CLIENT_PATTERNS: tuple[str, ...] = ("benchmark_serving",)
 
 
 @dataclass
 class LocalHealthConfig:
-    """Thresholds for the LocalProbe-derived health rules.
-
-    Attributes:
-        gpu_temp_warn_c (float): GPU temperature (Celsius) at/above which a
-            MEDIUM thermal symptom fires.
-        gpu_temp_crit_c (float): GPU temperature (Celsius) at/above which a HIGH
-            thermal symptom fires.
-        disk_used_warn_pct (float): Non-SHM mountpoint used-percent for a MEDIUM
-            disk-pressure symptom.
-        disk_used_crit_pct (float): Non-SHM mountpoint used-percent for a HIGH
-            disk-pressure symptom.
-        shm_mountpoints (tuple[str, ...]): Mountpoints treated as shared memory
-            (stricter thresholds, handled separately from disk).
-        shm_used_warn_pct (float): SHM used-percent for a MEDIUM symptom.
-        shm_used_crit_pct (float): SHM used-percent for a HIGH symptom.
-        fd_warn_used_pct (float): File-descriptor used-percent for a MEDIUM
-            symptom.
-        fd_crit_used_pct (float): File-descriptor used-percent for a HIGH
-            symptom.
-        benchmark_client_patterns (tuple[str, ...]): Commands whose presence
-            means a server is supposed to be answering right now.
-        session_dir (Path | None): This session's directory, used to tell its
-            own processes from a co-tenant's. ``None`` leaves the benchmark
-            client check host-wide, which is only safe on a dedicated node.
-    """
+    """Thresholds for the LocalProbe-derived health rules."""
 
     gpu_temp_warn_c: float = 90.0
     gpu_temp_crit_c: float = 100.0
@@ -115,18 +82,7 @@ def evaluate_local_health_signals(
     *,
     config: LocalHealthConfig | None = None,
 ) -> list[Symptom]:
-    """Run all LocalProbe-only health rules and aggregate their symptoms.
-
-    Args:
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected LocalProbe source data.
-        config (LocalHealthConfig | None): Thresholds; defaults to
-            :class:`LocalHealthConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: All local-health symptoms found this tick, possibly
-            empty.
-    """
+    """Run all LocalProbe-only health rules and aggregate their symptoms."""
     cfg = config or LocalHealthConfig()
     out: list[Symptom] = []
     out.extend(_server_unreachable(data, cfg))
@@ -140,38 +96,7 @@ def evaluate_local_health_signals(
 
 
 def _server_unreachable(data: SourceData, cfg: LocalHealthConfig) -> list[Symptom]:
-    """Emit ``local_server_unreachable`` for each failed local HTTP probe.
-
-    The probe detects "process is alive but the server is wedged", so a refusal
-    with no server process behind the port is the expected reading, not a
-    fault: a session spends long stretches — preparation, analysis, the gap
-    between two variants — with no server up by design, and alerting there
-    tells an operator to restart something that was never meant to be running.
-
-    That reasoning needs to know there is no server, which is not the same as
-    failing to find one. When the process probe could not answer at all, the
-    symptom is emitted with the uncertainty recorded in its evidence, so a
-    broken ``ps`` cannot mute an unrelated finding.
-
-    "No server process" also does not always mean no server was wanted. A
-    server that died mid-benchmark leaves that exact snapshot while its own
-    load generator keeps sending requests into a closed port, so a benchmark
-    client of *this session* is treated as proof that something was supposed to
-    be answering and the alert stands. A co-tenant's client on a shared node
-    proves nothing about this session's port.
-
-    Severity is HIGH when every probed target is unreachable, otherwise MEDIUM.
-
-    Args:
-        data (SourceData): Collected source data including
-            ``local_server_health``, ``local_processes`` and
-            ``local_processes_known``.
-        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
-            patterns.
-
-    Returns:
-        list[Symptom]: One symptom per unreachable probe target, possibly empty.
-    """
+    """Emit ``local_server_unreachable`` for each failed local HTTP probe."""
     if not data.local_server_health:
         return []
     server_seen = any(proc.get("is_server") for proc in data.local_processes)
@@ -212,22 +137,7 @@ def _server_unreachable(data: SourceData, cfg: LocalHealthConfig) -> list[Sympto
 
 
 def _benchmark_client_seen(data: SourceData, cfg: LocalHealthConfig) -> bool:
-    """Report whether a load generator that needs *this session's* server runs.
-
-    The process probe reads a whole-host ``ps``, so on a shared node another
-    session's load generator is in the snapshot too — and it vouches for a port
-    it has never sent a request to, turning this session's idle stretch back
-    into an outage. Only a client that can be tied to this session counts.
-
-    Args:
-        data (SourceData): Collected source data including ``local_processes``.
-        cfg (LocalHealthConfig): Thresholds; provides the benchmark-client
-            patterns and the session anchor.
-
-    Returns:
-        bool: ``True`` when a probed process matches a configured
-            benchmark-client pattern and belongs to this session.
-    """
+    """Report whether a load generator that needs *this session's* server runs."""
     anchor = os.path.realpath(cfg.session_dir) if cfg.session_dir else ""
     for proc in data.local_processes:
         if not isinstance(proc, dict):
@@ -241,24 +151,7 @@ def _benchmark_client_seen(data: SourceData, cfg: LocalHealthConfig) -> bool:
 
 
 def _in_session(proc: dict[str, Any], anchor: str) -> bool:
-    """Report whether a probed process can be tied to the session at ``anchor``.
-
-    The harness is launched with its working directory inside the session and
-    children inherit it, so the cwd is the anchor; a client that names a path
-    under the session on its command line (``--result-dir``) counts too, for the
-    launch paths that chdir elsewhere. Both readings go through
-    :func:`_under_session` so neither can drift into accepting a path that only
-    starts with the session's.
-
-    Args:
-        proc (dict[str, Any]): One ``local_processes`` entry.
-        anchor (str): Resolved session directory, or ``""`` when the session is
-            unknown — nothing to compare against, so every match counts and the
-            check stays host-wide.
-
-    Returns:
-        bool: ``True`` when the process belongs to this session.
-    """
+    """Report whether a probed process can be tied to the session at ``anchor``."""
     if not anchor:
         return True
     if _under_session(str(proc.get("cwd") or ""), anchor):
@@ -267,37 +160,12 @@ def _in_session(proc: dict[str, Any], anchor: str) -> bool:
 
 
 def _under_session(path: str, anchor: str) -> bool:
-    """Report whether ``path`` is the session directory or something inside it.
-
-    Compared a path component at a time, never as a string prefix: a co-tenant's
-    ``<session>-retry`` — a retry, a backup, or any sibling an operator names
-    after ours — starts with the session path without being in the session, and
-    a prefix test would let it vouch for its own port.
-
-    Args:
-        path (str): Candidate path; ``""`` belongs to nobody.
-        anchor (str): Resolved session directory.
-
-    Returns:
-        bool: ``True`` when ``path`` lies at or under ``anchor``.
-    """
+    """Report whether ``path`` is the session directory or something inside it."""
     return bool(path) and Path(path).is_relative_to(anchor)
 
 
 def _command_line_paths(cmd: str) -> Iterator[str]:
-    """Yield the path-shaped pieces of a command line.
-
-    Each whitespace-separated token, plus what follows the first ``=`` in it, so
-    ``--result-dir /run/x`` and ``--result-dir=/run/x`` read the same. Tokens are
-    yielded whole rather than searched for a substring, which is what lets the
-    caller apply a directory boundary to them.
-
-    Args:
-        cmd (str): The process command line.
-
-    Yields:
-        str: One candidate path per token, and its ``key=value`` value.
-    """
+    """Yield the path-shaped pieces of a command line."""
     for token in cmd.split():
         yield token
         _, sep, value = token.partition("=")
@@ -306,17 +174,7 @@ def _command_line_paths(cmd: str) -> Iterator[str]:
 
 
 def _log_error_symptoms(data: SourceData) -> list[Symptom]:
-    """Emit ``log_error_pattern`` symptoms grouped by matched log pattern.
-
-    Patterns in :data:`_HIGH_SEVERITY_PATTERNS` fire HIGH; all others MEDIUM.
-
-    Args:
-        data (SourceData): Collected source data including
-            ``local_log_errors``.
-
-    Returns:
-        list[Symptom]: One symptom per matched pattern, possibly empty.
-    """
+    """Emit ``log_error_pattern`` symptoms grouped by matched log pattern."""
     if not data.local_log_errors:
         return []
     by_pattern: dict[str, list[dict[str, Any]]] = {}
@@ -355,15 +213,7 @@ def _gpu_thermal_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``gpu_thermal_high`` for GPUs over the warn/crit temperature.
-
-    Args:
-        data (SourceData): Collected source data including ``local_gpu``.
-        cfg (LocalHealthConfig): Thresholds (provides warn/crit temperatures).
-
-    Returns:
-        list[Symptom]: One symptom per over-temperature GPU, possibly empty.
-    """
+    """Emit ``gpu_thermal_high`` for GPUs over the warn/crit temperature."""
     gpus = data.local_gpu.get("gpus") if isinstance(data.local_gpu, dict) else None
     if not isinstance(gpus, list):
         return []
@@ -404,18 +254,7 @@ def _disk_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress.
-
-    SHM is handled separately with stricter thresholds, so it is skipped
-    here to avoid double-firing.
-
-    Args:
-        data: Collected source data (per-mountpoint disk stats).
-        cfg: Local-health configuration thresholds.
-
-    Returns:
-        Symptoms for stressed mountpoints, possibly empty.
-    """
+    """Emit ``disk_pressure`` for non-SHM mountpoints under capacity stress."""
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
     out: list[Symptom] = []
@@ -468,19 +307,7 @@ def _shm_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``shm_pressure`` (stricter thresholds) for SHM mountpoints.
-
-    SGLang/vLLM crash hard when /dev/shm fills; this surfaces the pressure
-    before the next server start fails with ``shared memory allocation
-    failed``.
-
-    Args:
-        data: Collected source data (per-mountpoint disk stats).
-        cfg: Local-health configuration thresholds.
-
-    Returns:
-        Symptoms for stressed SHM mountpoints, possibly empty.
-    """
+    """Emit ``shm_pressure`` (stricter thresholds) for SHM mountpoints."""
     if not isinstance(data.local_disk, dict) or not data.local_disk:
         return []
     out: list[Symptom] = []
@@ -532,18 +359,7 @@ def _shm_pressure_symptoms(
 
 
 def _ray_head_dead_symptoms(data: SourceData) -> list[Symptom]:
-    """Emit ``ray_head_dead`` (HIGH) when the Ray head is unhealthy.
-
-    Fires when ``data.local_ray`` reports ``healthy=False``; silent when the
-    probe slot is empty or healthy. Prompts Orchestration to prune
-    kernel_opt.
-
-    Args:
-        data: Collected source data (Ray head probe).
-
-    Returns:
-        A list with one :class:`Symptom` when unhealthy, else empty.
-    """
+    """Emit ``ray_head_dead`` (HIGH) when the Ray head is unhealthy."""
     ray_info = data.local_ray
     if not ray_info:
         return []
@@ -575,18 +391,7 @@ def _fd_pressure_symptoms(
     data: SourceData,
     cfg: LocalHealthConfig,
 ) -> list[Symptom]:
-    """Emit ``fd_pressure`` when Coordinator FD usage nears the limit.
-
-    Leaked sockets hitting ``ulimit -n`` surface as agent_stall(kernel)
-    whose real cause is here.
-
-    Args:
-        data: Collected source data (file-descriptor usage).
-        cfg: Local-health configuration thresholds.
-
-    Returns:
-        A list with one :class:`Symptom` when FD pressure trips, else empty.
-    """
+    """Emit ``fd_pressure`` when Coordinator FD usage nears the limit."""
     fd_info = data.local_fd
     if not fd_info:
         return []

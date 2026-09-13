@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The whole third-tier attempt, from gate to verdict.
-
-Five checkpoints, and failing any of them ends the attempt without affecting
-the tuning run that hosts it. In order, because each is cheaper than the next
-and rules out a different kind of wrong:
-
-    gate      -- is this even our problem, and did an operator allow it
-    generate  -- can a script be authored at all
-    contract  -- does its output have the agreed shape
-    sandbox   -- does it run here without taking the box down
-    referee   -- are its candidates actually faster, on our clock
-
-The referee is last and decisive. Everything before it can be gamed by a script
-that reports what it was asked to report; nothing before it establishes that a
-single kernel got faster. That is why a generated tuner's own numbers are read
-only to be discarded.
-
-One retry, with the rejection reason handed back. More would be a search over
-authorings, which is a different and much more expensive activity than writing
-one tuner for one gap.
-"""
+"""The whole third-tier attempt, from gate to verdict."""
 
 from __future__ import annotations
 
@@ -56,11 +36,10 @@ class Tier3Outcome:
     table: str = ""
     script: str = ""
     digest: str = ""
+    #: Explicit verified-row path; callers must not reconstruct this module's layout.
+    output_csv: str = ""
     judgements: list[Judgement] = field(default_factory=list)
-    #: Whether an operator has signed this exact script off. Named for the
-    #: signature and not for "trusted" because CodeQL's clear-text-storage
-    #: query classifies any field whose name contains "trusted" as a secret,
-    #: and this one is serialised into ``tier3_outcome.json``. It is a bool.
+    #: Avoid "trusted" in this serialized bool's name: CodeQL treats it as secret data.
     operator_signed: bool = False
 
     @property
@@ -76,6 +55,7 @@ class Tier3Outcome:
             "table": self.table,
             "script": self.script,
             "digest": self.digest,
+            "output_csv": self.output_csv,
             "operator_signed": self.operator_signed,
             "improved_shapes": self.improved_shapes,
             "judgements": [j.to_dict() for j in self.judgements],
@@ -96,28 +76,31 @@ def attempt_generated_tuner(
     sync: Callable[[], Any] | None = None,
     decision: GateDecision | None = None,
 ) -> Tier3Outcome:
-    """Try to produce a verified generated tuner for the strongest gap.
-
-    The three ``make_*`` callables are how a caller supplies the only things
-    that cannot be written generically: what the unmodified path is, how to
-    dispatch a proposed candidate, and how to check its numerics. Without them
-    the attempt stops before the referee, because an unverified candidate is
-    exactly what this tier must never emit.
-    """
+    """Try to produce a verified generated tuner for the strongest gap."""
     decision = decision or should_generate(gaps)
     outcome = Tier3Outcome(stage="gate", reason="; ".join(decision.reasons))
     if not decision.allowed or decision.gap is None:
         return outcome
 
     gap = decision.gap
-    outcome.attempted = True
     outcome.table = gap.table
+    if make_baseline is None or make_dispatch is None:
+        # Stop before paying for generation and sandboxing when re-timing is impossible.
+        outcome.reason = (
+            f"no dispatch was supplied for {gap.table}, so nothing written for it could be "
+            "re-timed; an unverified generated tuner is not emitted, and generating one to "
+            "throw away costs a model call and a sandbox run"
+        )
+        return outcome
+
+    outcome.attempted = True
     work_dir = work_root / "tier3" / gap.table.replace(".", "_")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     shapes = demand_shapes_for(gap)
     mandate = build_mandate(gap, shapes, gpu=gpu, framework=framework)
     mandate.output_csv = str(work_dir / "out.csv")
+    outcome.output_csv = mandate.output_csv
     mandate.candidates_json = str(work_dir / "candidates.json")
     write_mandate(mandate, work_dir / "mandate.json")
 
@@ -159,13 +142,6 @@ def attempt_generated_tuner(
         break
 
     outcome.stage = "referee"
-    if make_baseline is None or make_dispatch is None:
-        outcome.reason = (
-            "no dispatch was supplied, so the candidates cannot be re-timed; "
-            "an unverified generated tuner is not emitted"
-        )
-        return outcome
-
     candidates = load_candidates(mandate.candidates_json, mandate)
     if not candidates:
         outcome.reason = "the script proposed no candidates to re-time"

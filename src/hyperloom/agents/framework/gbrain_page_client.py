@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Minimal gbrain MCP page client for the standalone ``fa`` package.
-
-Deliberately avoids importing ``hyperloom.inference_optimizer`` /
-``hyperloom.orchestrator`` so framework-agent has no reverse dependency on the
-orchestrator layer (shared ``hyperloom.common`` helpers are fine). The MCP/SSE
-contract mirrors the orchestrator's retained GBrain KG MCP transport.
-
-Exposes only the read surface PR KB consumption needs: ``get_page`` /
-``query`` (MCP ``search`` tool) / ``list_pages``. Failures raise
-:class:`GbrainPageError`; callers treat that as "source unavailable". An absent
-page is not a failure: ``get_page`` returns ``None`` for it, so a cold KB does
-not read as an outage.
-"""
+"""Minimal gbrain MCP page client for the standalone ``fa`` package."""
 
 from __future__ import annotations
 
@@ -36,11 +24,7 @@ class GbrainPageError(RuntimeError):
 
 
 def _is_page_missing(exc: Exception) -> bool:
-    """Whether a gbrain tool error is an absent page rather than a real failure.
-
-    gbrain reports an absent slug as an in-band ``isError``, which ``call``
-    surfaces as an exception like any other tool error.
-    """
+    """Whether a gbrain tool error is an absent page rather than a real failure."""
     return "page_not_found" in str(exc)
 
 
@@ -186,15 +170,7 @@ def _as_hit_list(res: Any) -> list[dict[str, Any]]:
 
 
 def build_gbrain_page_client_from_env() -> GbrainPageClient | None:
-    """Build a client from ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``; ``None`` if unset.
-
-    A configured URL whose scheme is not ``http``/``https`` is refused (logged
-    and ``None``) so a bad ``GBRAIN_BASE_URL`` cannot reach ``urlopen``. One
-    ``urllib.parse`` cannot parse at all (an unterminated IPv6 literal raises
-    ``ValueError`` from under the scheme check) is refused the same way: every
-    caller of this builder reads ``None`` as "source unconfigured", so a typo in
-    the environment must not propagate as an exception.
-    """
+    """Build a client from ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``; ``None`` if unset."""
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     if not base_url or not token:

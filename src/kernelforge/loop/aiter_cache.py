@@ -61,13 +61,7 @@ def configure_aiter_cache_isolation(
     *,
     max_cache_bytes: int = DEFAULT_AITER_CACHE_MAX_BYTES,
 ) -> AiterCacheIsolation:
-    """Route every AITER-adjacent runtime compiler to one private Forge tree.
-
-    Three of them reach the run's workspace: ``cpp_itfs`` (``AITER_ROOT_DIR``),
-    ``compile_ops`` (``AITER_JIT_DIR``) and FlyDSL
-    (``FLYDSL_RUNTIME_CACHE_DIR``). Missing any one leaves its build products in
-    a git-visible directory -- see the FlyDSL note below for what that costs.
-    """
+    """Route every AITER-adjacent runtime compiler to one private Forge tree."""
     cache_root = (experiments_dir / "aiter_cache").resolve()
     max_cache_bytes = max(0, int(max_cache_bytes))
     target_cache_bytes = min(
@@ -102,28 +96,10 @@ def configure_aiter_cache_isolation(
         },
     )
 
-    # cpp_itfs uses AITER_ROOT_DIR/build while compile_ops uses
-    # AITER_JIT_DIR/build. Both must be redirected; setting only the latter
-    # leaves paged-attention locks in ~/.aiter/build.
+    # cpp_itfs uses AITER_ROOT_DIR/build while compile_ops uses AITER_JIT_DIR/build.
     os.environ["AITER_ROOT_DIR"] = str(aiter_root_dir)
     os.environ["AITER_JIT_DIR"] = str(aiter_jit_dir)
-    # THREE runtime compilers reach this tree, not two. FlyDSL is the third, and
-    # it was the one left out: `aiter/__init__.py` points FLYDSL_RUNTIME_CACHE_DIR
-    # at `<aiter package>/jit/flydsl_cache` on import, and that package lives
-    # inside the run's workspace, so every FlyDSL kernel wrote its cache into a
-    # git-visible directory the workspace .gitignore does not cover.
-    #
-    # That is not merely untidy. The guard the default backend grew in #22 fails
-    # a session on any new non-ignored file, and FlyDSL names each cache entry
-    # after a hash of the kernel source -- so every edit the agent makes creates
-    # a *new* directory, which `allow_dirty_baseline` cannot forgive because it
-    # only pardons state that predates the session. Across 2026-08-23-1200 and
-    # 08-24-0000 this voided 16 iterations outright (correctness and benchmark
-    # both skipped) and burned 840 minutes; on one run it took 43% of the budget.
-    #
-    # aiter only sets the variable when it is absent, and FlyDSL re-reads it from
-    # the environment on every access (`flydsl.utils.env.OptStr` is a descriptor),
-    # so claiming it here is sufficient regardless of import order.
+    # THREE runtime compilers reach this tree, not two.
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(flydsl_cache_dir)
     os.environ["FORGE_AITER_CACHE_ROOT"] = str(cache_root)
     os.environ["FORGE_AITER_CACHE_OWNER_PID"] = str(owner_pid)
@@ -143,31 +119,7 @@ def configure_aiter_cache_isolation(
 
 
 def child_cache_environment(cache_root: Path) -> dict[str, str]:
-    """Create one private build cache and return the env that selects it.
-
-    All three runtime compilers are redirected exactly as
-    :func:`configure_aiter_cache_isolation` redirects them -- ``cpp_itfs`` reads
-    ``AITER_ROOT_DIR``, ``compile_ops`` reads ``AITER_JIT_DIR`` and FlyDSL reads
-    ``FLYDSL_RUNTIME_CACHE_DIR`` -- but the
-    values are returned instead of written to ``os.environ``, so a caller that
-    is one of several running concurrently in this process cannot overwrite what
-    the others are using. The caller applies them to one spawned subprocess.
-
-    ``FORGE_AITER_CACHE_ROOT`` names the private root so a source-keyed
-    activation inside that subprocess shards under it rather than under the
-    shared cache. ``FORGE_AITER_CACHE_OWNER_PID`` stays this process's pid,
-    because this process creates the root and is the one that removes it.
-
-    No prebuilt AITER module is seeded into the shard (see
-    :func:`seed_prebuilt_modules`), so a subprocess that edits a source compiles
-    that source instead of importing a ``.so`` built from another one. The
-    FlyDSL shard *is* seeded, because its entries are keyed by a hash of the
-    kernel source: an edit lands on a different key and compiles, so a warm
-    entry can never stand in for it the way a name-keyed ``.so`` can.
-
-    Creating the directories here is what makes a failure loud -- the caller
-    gets an ``OSError`` rather than a cache root it cannot use.
-    """
+    """Create one private build cache and return the env that selects it."""
     cache_root = Path(cache_root).resolve()
     aiter_root_dir = cache_root / "cpp_itfs"
     aiter_jit_dir = cache_root / "jit"
@@ -331,10 +283,8 @@ def activate_aiter_cache_for_sources(
     aiter_root_dir.mkdir(parents=True, exist_ok=True)
     aiter_jit_dir.mkdir(parents=True, exist_ok=True)
     flydsl_cache_dir.mkdir(parents=True, exist_ok=True)
-    # Every source shard is a fresh directory, so without seeding each one
-    # cold-compiles the kernels the edit never touched. Content addressing is
-    # what makes that safe: the edited kernel hashes to a key no seeded entry
-    # occupies.
+    # Every source shard is a fresh directory, so without seeding each one cold-compiles the kernels the edit never
+    # touched.
     _seed_flydsl_cache(flydsl_cache_dir)
     owner_file = cache_root / _OWNER_FILE
     owner_pid = os.getpid()
@@ -354,10 +304,7 @@ def activate_aiter_cache_for_sources(
     )
     os.environ["AITER_ROOT_DIR"] = str(aiter_root_dir)
     os.environ["AITER_JIT_DIR"] = str(aiter_jit_dir)
-    # Shard FlyDSL with the rest. Its entries are content-addressed, so sharing
-    # one directory would be correct -- but concurrent lanes each write a `.lock`
-    # beside the entry they build, and the lane copies are what this shard keeps
-    # apart in the first place.
+    # Shard FlyDSL with the rest.
     os.environ["FLYDSL_RUNTIME_CACHE_DIR"] = str(flydsl_cache_dir)
     os.environ["FORGE_AITER_CACHE_OWNER_PID"] = str(owner_pid)
     os.environ.pop("AITER_REBUILD", None)
@@ -381,15 +328,7 @@ def activate_aiter_cache_for_sources(
 
 
 def _global_aiter_jit_dirs() -> list[Path]:
-    """Locate all prebuilt JIT directories where warm ``.so`` may live.
-
-    Checked in order: an explicit ``FORGE_AITER_WARM_JIT_DIR`` override (returned
-    alone), then the installed package's own ``aiter/jit``, then ``~/.aiter/jit``.
-    Both package and user dirs are returned so the caller can pick the one that
-    actually holds the relevant content; stopping at the first existing dir would
-    always return the package dir and never reach the user cache, which is where
-    read-only wheel installs store compiled modules.
-    """
+    """Locate all prebuilt JIT directories where warm ``.so`` may live."""
     override = os.environ.get("FORGE_AITER_WARM_JIT_DIR", "").strip()
     if override:
         candidate = Path(override).expanduser()
@@ -436,23 +375,7 @@ def _seed_flydsl_cache(target: Path) -> None:
 
 
 def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
-    """Symlink the package's prebuilt AITER modules into a fresh BASELINE shard.
-
-    aiter's ``get_module`` imports a module by name from ``AITER_JIT_DIR`` and
-    never validates the ``.so`` against source content (aiter/jit/core.py:
-    ``importlib.import_module(md_name)``). An empty isolated shard therefore
-    cold-compiles the full CK instance-factory TU (measured >26 min, gfx950)
-    on first use, which blows the preflight timeout.
-
-    For the baseline task-preparation preflight the kernel source is pristine —
-    byte-identical to what the shipped ``.so`` were built from — so pointing the
-    shard at those prebuilt modules is correct AND skips the compile entirely.
-
-    NEVER call this for an edited-source shard: aiter would import the stale
-    ``.so`` in place of the edit and silently measure the wrong kernel. Callers
-    must invoke this only on the pristine baseline shard (different edits get a
-    fresh content-keyed shard dir and compile normally).
-    """
+    """Symlink the package's prebuilt AITER modules into a fresh BASELINE shard."""
     stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "src": "", "errors": 0}
     global_dirs = _global_aiter_jit_dirs()
     global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (
@@ -471,10 +394,8 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
     for so in candidates:
         dest = jit_dir / so.name
         if dest.is_symlink() and not dest.exists():
-            # Dangling symlink (target vanished): exists()==False but is_symlink()
-            # ==True, so without this it would be treated as "already present" and
-            # skipped forever, leaving aiter with a broken link that imports
-            # nothing. Remove it so we re-link to the current prebuilt .so below.
+            # Dangling symlink (target vanished): exists()==False but is_symlink() ==True, so without this it would be
+            # treated as "already present" and skipped forever, leaving aiter with a broken link that imports nothing.
             with contextlib.suppress(OSError):
                 dest.unlink()
         if dest.exists() or dest.is_symlink():
@@ -486,11 +407,8 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
         except OSError:
             stats["errors"] += 1
     if stats["seeded"] == 0:
-        # Zero seeds means the baseline preflight will cold-compile the full CK
-        # instance-factory TU (>26 min, gfx950) and blow its timeout. Surface it
-        # loudly rather than let the silent slow path look like a hang: the warm
-        # dir was empty/missing or FORGE_AITER_WARM_JIT_DIR points somewhere
-        # without prebuilt modules.
+        # Zero seeds means the baseline preflight will cold-compile the full CK instance-factory TU (>26 min, gfx950)
+        # and blow its timeout.
         log.warning(
             "seed_prebuilt_modules: seeded 0 modules from %s (skipped=%d, "
             "errors=%d); baseline preflight will cold-compile and may time out. "

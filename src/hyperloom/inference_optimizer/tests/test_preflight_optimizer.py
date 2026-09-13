@@ -65,6 +65,18 @@ def test_main_propagates_busy_gpu_to_exit_code(
     assert preflight.main() == 2
 
 
+def test_exit_bypasses_interpreter_teardown(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate's status must not be reachable by an atexit handler.
+
+    A ROCm torch teardown forces status 0, so a plain ``sys.exit`` loses every
+    violation the checks above detect.
+    """
+    left_with: list[int] = []
+    monkeypatch.setattr(preflight.os, "_exit", left_with.append)
+    preflight._exit(2)
+    assert left_with == [2]
+
+
 def test_main_returns_zero_when_every_check_passes(
     preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

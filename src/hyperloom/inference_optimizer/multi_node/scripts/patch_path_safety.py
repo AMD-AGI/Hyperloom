@@ -1,8 +1,7 @@
 """Path constraints for kernel patch apply/revert on inference pods (stdlib only).
 
 Shared by ``kernel_node_ops.py`` (Infera SSH) and ``kernel_patch_multinode.py``
-(RayJob). Restricts patch targets to vLLM/SGLang/AITER install roots, keeps
-backups under ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default
+(RayJob). Keeps backups under ``$HYPERLOOM_MN_KERNEL_BACKUP_DIR`` (default
 ``/var/kernel_patch_backups``), and hosts the atomic write both apply paths use.
 """
 
@@ -10,99 +9,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import sys
 import tempfile
 from pathlib import Path
 
 _DEFAULT_KERNEL_BACKUP_ROOT = "/var/kernel_patch_backups"
-
-# Superset of orchestrator.framework.paths._STATIC_PATCH_FALLBACK_ROOTS
-# (adds the /sgl-workspace/* image roots).
-_DEFAULT_PATCH_TARGET_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-    "/opt/venv/lib/python3.10/site-packages/aiter/",
-    "/opt/venv/lib/python3.10/site-packages/aiter_meta/",
-    "/opt/venv/lib/python3.10/site-packages/sglang/",
-    "/opt/venv/lib/python3.10/site-packages/vllm/",
-    "/opt/venv/lib/python3.12/site-packages/aiter/",
-    "/opt/venv/lib/python3.12/site-packages/aiter_meta/",
-    "/opt/venv/lib/python3.12/site-packages/sglang/",
-    "/opt/venv/lib/python3.12/site-packages/vllm/",
-    "/usr/local/lib/python3.12/dist-packages/aiter/",
-    "/usr/local/lib/python3.12/dist-packages/aiter_meta/",
-    "/usr/local/lib/python3.12/dist-packages/sglang/",
-    "/usr/local/lib/python3.12/dist-packages/vllm/",
-    "/usr/local/lib/python3.10/dist-packages/aiter/",
-    "/usr/local/lib/python3.10/dist-packages/aiter_meta/",
-    "/usr/local/lib/python3.10/dist-packages/sglang/",
-    "/usr/local/lib/python3.10/dist-packages/vllm/",
-)
-_ALLOWED_PATCH_PACKAGES = frozenset({"aiter", "aiter_meta", "sglang", "vllm"})
-_ALLOWED_EDITABLE_ROOTS = frozenset({"/sgl-workspace/aiter", "/sgl-workspace/sglang", "/sgl-workspace/vllm"})
-
-
-def _normalize_root(path: str) -> str:
-    """Normalize a root path to a trailing-slash form.
-
-    Args:
-        path: Raw path string.
-
-    Returns:
-        str: Stripped path with a trailing slash, or empty when blank.
-    """
-    p = str(path or "").strip()
-    if not p:
-        return ""
-    return p if p.endswith("/") else f"{p}/"
-
-
-def _merge_roots(*groups: tuple[str, ...]) -> tuple[str, ...]:
-    """Merge root groups, dropping blanks and duplicates.
-
-    Args:
-        *groups: One or more ordered root groups.
-
-    Returns:
-        tuple[str, ...]: De-duplicated roots in first-seen order.
-    """
-    seen: set[str] = set()
-    out: list[str] = []
-    for group in groups:
-        for root in group:
-            if root and root not in seen:
-                seen.add(root)
-                out.append(root)
-    return tuple(out)
-
-
-def resolve_patch_target_roots() -> tuple[str, ...]:
-    """Return allowed framework roots for patch targets.
-
-    Merges static defaults with ``$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS``.
-
-    Returns:
-        tuple[str, ...]: Normalized framework root prefixes.
-    """
-    env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots: list[str] = []
-    for raw in env.split(":") if env else ():
-        candidate = Path(raw.strip())
-        if not candidate.is_absolute():
-            sys.stderr.write(f"WARN ignoring unsafe framework source root for pod patching: {raw!r}\n")
-            continue
-        resolved = candidate.resolve()
-        is_package = resolved.name in _ALLOWED_PATCH_PACKAGES and resolved.parent.name in {
-            "site-packages",
-            "dist-packages",
-        }
-        is_editable = str(resolved) in _ALLOWED_EDITABLE_ROOTS
-        if is_package or is_editable:
-            env_roots.append(_normalize_root(str(resolved)))
-        else:
-            sys.stderr.write(f"WARN ignoring unsafe framework source root for pod patching: {raw!r}\n")
-    return _merge_roots(_DEFAULT_PATCH_TARGET_ROOTS, tuple(env_roots))
 
 
 def resolve_kernel_backup_root() -> Path:
@@ -130,26 +40,6 @@ def _path_under_root(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return path.resolve() == root.resolve()
-
-
-def assert_target_path_allowed(target: Path, *, must_exist: bool = False) -> None:
-    """Raise ValueError when ``target`` is outside framework patch roots.
-
-    Args:
-        target: Pod-side file path to patch or restore.
-        must_exist: When true, require that ``target`` is an existing file.
-
-    Raises:
-        ValueError: When the path is disallowed or missing (if required).
-    """
-    resolved = target.resolve()
-    if must_exist and not resolved.is_file():
-        raise ValueError(f"target_path does not exist: {target}")
-    roots = [Path(r.rstrip("/")).resolve() for r in resolve_patch_target_roots() if r]
-    for root in roots:
-        if _path_under_root(resolved, root):
-            return
-    raise ValueError(f"target_path {target} not under framework patch roots")
 
 
 def assert_backup_dir_allowed(backup_dir: Path) -> None:
@@ -180,24 +70,9 @@ def assert_backup_path_allowed(backup: Path) -> None:
         raise ValueError(f"backup_path {backup} not under {root}")
 
 
-def assert_revert_paths_allowed(target: Path, backup: Path) -> None:
-    """Validate revert target and backup paths before restoring from backup.
-
-    Args:
-        target: Pod-side file path to restore.
-        backup: Recorded backup file from the matching apply.
-
-    Raises:
-        ValueError: When either path is outside its allowed root.
-    """
-    assert_target_path_allowed(target, must_exist=False)
-    assert_backup_path_allowed(backup)
-
-
 def assert_aiter_jit_build_allowed(jit_build: Path) -> None:
     """Validate an AITER ``jit/build`` path before recursive mutation."""
     resolved = jit_build.resolve()
-    assert_target_path_allowed(resolved, must_exist=False)
     if (
         resolved.name != "build"
         or resolved.parent.name != "jit"

@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pre-launch / pre-action feasibility signals (C1 / C2 / C3) — "doomed before it starts".
-
-* **C1 ``model_gpu_infeasible``** — the ``(model_name, precision, tp, gpu_type,
-  max_model_len, conc)`` tuple cannot fit in available HBM. Fires once per session.
-* **C2 ``amdahl_kernel_ceiling_low``** — Triton-optimizable tier too small for kernel_opt
-  to move E2E: ``E2E_ceiling = 1 / ((1 - p) + p / s)``. Re-fires when breakdown mtime changes.
-* **C3 ``cold_start_budget_exhausted``** — aiter JIT cache empty AND remaining budget shorter
-  than one cold-start, so the next baseline is SIGTERM'd mid-``hipcc``.
-
-C1 latches on the manifest fingerprint and C2 on the breakdown mtime, so both stay
-quiet on unchanged input; C3 is stateless and re-fires on every tick while the
-condition holds.
-"""
+"""Pre-launch / pre-action feasibility signals (C1 / C2 / C3) — \"doomed before it starts\"."""
 
 from __future__ import annotations
 
@@ -30,9 +18,7 @@ if TYPE_CHECKING:
 from .symptom import Symptom, SymptomSeverity
 
 
-# ---------------------------------------------------------------------------
 # Static physics tables — conservative engineering values.
-# ---------------------------------------------------------------------------
 
 # HBM GiB per GPU device (not aggregate); NVIDIA refs included for ``--compare-against-gpu``.
 GPU_HBM_GIB: dict[str, float] = {
@@ -74,15 +60,7 @@ _PARAM_BILLIONS_RE: re.Pattern[str] = re.compile(r"(?<![A-Za-z0-9])(?P<n>\d+(?:\
 
 
 def extract_params_billions(model_name: str) -> float | None:
-    """Best-effort parse of ``-<N>B`` parameter count from a model name.
-
-    Args:
-        model_name: The model name to parse.
-
-    Returns:
-        The parameter count in billions (first match), or ``None`` when
-        absent or unparseable.
-    """
+    """Best-effort parse of ``-<N>B`` parameter count from a model name."""
     if not model_name:
         return None
     match = _PARAM_BILLIONS_RE.search(model_name)
@@ -112,17 +90,7 @@ def compute_headroom_gib(
     *,
     activation_buf_gib: float = DEFAULT_ACTIVATION_BUF_GIB,
 ) -> HeadroomBreakdown | None:
-    """Project per-GPU HBM headroom from manifest metadata.
-
-    Args:
-        manifest: Run manifest with model / workload / GPU metadata.
-        activation_buf_gib: Reserved activation buffer per GPU, in GiB.
-
-    Returns:
-        A :class:`HeadroomBreakdown`, or ``None`` when a required field
-        (model size, precision, gpu_type, ``tp``) is unresolved — the C1
-        detector treats ``None`` as "skip — not enough data to judge".
-    """
+    """Project per-GPU HBM headroom from manifest metadata."""
     if not isinstance(manifest, dict) or not manifest:
         return None
     params_b = extract_params_billions(str(manifest.get("model_name") or ""))
@@ -179,17 +147,7 @@ def amdahl_e2e_ceiling(
     optimizable_pct: float,
     single_kernel_speedup: float,
 ) -> float:
-    """Compute Amdahl's-law best-case end-to-end speedup ratio.
-
-    The caller converts to a percentage via ``(ratio - 1.0) * 100``.
-
-    Args:
-        optimizable_pct: Percent of runtime that is optimizable (0-100).
-        single_kernel_speedup: Speedup factor for the optimizable portion.
-
-    Returns:
-        The best-case E2E speedup ratio (``1.0`` means no speedup).
-    """
+    """Compute Amdahl's-law best-case end-to-end speedup ratio."""
     p = max(0.0, min(1.0, optimizable_pct / 100.0))
     s = max(1.0, float(single_kernel_speedup))
     serial = 1.0 - p
@@ -198,9 +156,7 @@ def amdahl_e2e_ceiling(
     return 1.0 / (serial + p / s)
 
 
-# ===========================================================================
 # C1 — Model-GPU fit detector
-# ===========================================================================
 
 
 @dataclass
@@ -213,9 +169,7 @@ class ModelGpuFitConfig:
 
 
 class ModelGpuFitDetector:
-    """Stateful: emit ``model_gpu_infeasible`` at most once per session, keyed off the
-    immutable manifest fingerprint ``(model_name, gpu_type, tp, precision, max_model_len, conc)``.
-    """
+    """Stateful: emit ``model_gpu_infeasible`` at most once per session, keyed off the immutable manifest fingerprint ``(model_name, gpu_type, tp, precision, max_model_len, conc)``."""
 
     def __init__(
         self,
@@ -223,14 +177,7 @@ class ModelGpuFitDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore any persisted dedup state.
-
-        Args:
-            config (ModelGpuFitConfig | None): Tunables; defaults to
-                :class:`ModelGpuFitConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view
-                used to load/persist the fired fingerprint across ticks.
-        """
+        """Initialise the detector and restore any persisted dedup state."""
         self._config = config or ModelGpuFitConfig()
         self._state_view = state_view
         # Disk-backed dedup so "fire once per session" survives the subprocess-per-tick transport.
@@ -257,21 +204,7 @@ class ModelGpuFitDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Emit ``model_gpu_infeasible`` once per session if the model won't fit.
-
-        Computes the per-GPU HBM headroom from the manifest and fires when it
-        falls below the configured threshold. The fingerprint is recorded so
-        subsequent ticks with the same manifest stay quiet.
-
-        Args:
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data including the local
-                manifest used for the feasibility check.
-
-        Returns:
-            list[Symptom]: A single ``model_gpu_infeasible`` symptom when the
-                model is infeasible, otherwise an empty list.
-        """
+        """Emit ``model_gpu_infeasible`` once per session if the model won't fit."""
         manifest = data.local_manifest
         if not isinstance(manifest, dict) or not manifest:
             return []
@@ -300,17 +233,7 @@ class ModelGpuFitDetector:
         manifest: dict[str, Any],
         breakdown: HeadroomBreakdown,
     ) -> Symptom:
-        """Construct the ``model_gpu_infeasible`` symptom from the projection.
-
-        Args:
-            manifest (dict[str, Any]): Session manifest, used to populate
-                evidence (model name, GPU type, tp, workload).
-            breakdown (HeadroomBreakdown): Computed per-GPU HBM budget.
-
-        Returns:
-            Symptom: A HIGH-severity symptom describing the OOM-at-start risk
-                with full evidence and a TP/GPU remediation suggestion.
-        """
+        """Construct the ``model_gpu_infeasible`` symptom from the projection."""
         cfg = self._config
         return Symptom(
             name="model_gpu_infeasible",
@@ -351,16 +274,7 @@ class ModelGpuFitDetector:
 
 
 def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
-    """Build a stable dedup key from the feasibility-relevant manifest fields.
-
-    Args:
-        manifest (dict[str, Any]): Session manifest.
-
-    Returns:
-        tuple[Any, ...]: A tuple of ``(model_name, model_class, gpu_type, tp,
-            precision, max_model_len, conc)`` suitable for equality comparison
-            across ticks.
-    """
+    """Build a stable dedup key from the feasibility-relevant manifest fields."""
     workload = manifest.get("workload") or {}
     return (
         str(manifest.get("model_name") or ""),
@@ -374,16 +288,7 @@ def _manifest_fingerprint(manifest: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
-    """Recommend the smallest power-of-two TP that clears the HBM budget.
-
-    Operator hint only; assumes weights dominate KV and ignores KV scaling.
-
-    Args:
-        breakdown: The per-GPU headroom breakdown.
-
-    Returns:
-        A suggested tensor-parallel degree (power of two).
-    """
+    """Recommend the smallest power-of-two TP that clears the HBM budget."""
     if breakdown.hbm_gib <= 0 or breakdown.weights_gib <= 0:
         return 8
     # Weights shrink ~linearly with TP; ignore KV scaling for the hint.
@@ -397,9 +302,7 @@ def _recommend_tp(breakdown: HeadroomBreakdown) -> int:
     return max(out, 2)
 
 
-# ===========================================================================
 # C2 — Amdahl kernel-ceiling detector
-# ===========================================================================
 
 
 @dataclass
@@ -423,14 +326,7 @@ class AmdahlCeilingDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore the persisted fire mtime.
-
-        Args:
-            config (AmdahlCeilingConfig | None): Tunables; defaults to
-                :class:`AmdahlCeilingConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view used
-                to load/persist the last fired ``kernel_breakdown.json`` mtime.
-        """
+        """Initialise the detector and restore the persisted fire mtime."""
         self._config = config or AmdahlCeilingConfig()
         self._state_view = state_view
         # Disk-backed dedup; ``fired_mtime`` re-evaluates only on a fresh kernel_breakdown.json.
@@ -449,21 +345,7 @@ class AmdahlCeilingDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Fire ``amdahl_kernel_ceiling_low`` when kernel opt can't move E2E.
-
-        Re-evaluates only when the kernel breakdown file's mtime advances,
-        computes the Amdahl E2E ceiling for the optimizable tier, and fires
-        when that ceiling falls below the configured percentage.
-
-        Args:
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data including the local
-                kernel breakdown.
-
-        Returns:
-            list[Symptom]: A single ``amdahl_kernel_ceiling_low`` symptom when
-                the ceiling is too low, otherwise an empty list.
-        """
+        """Fire ``amdahl_kernel_ceiling_low`` when kernel opt can't move E2E."""
         breakdown = data.local_kernel_breakdown
         if not isinstance(breakdown, dict) or not breakdown:
             return []
@@ -506,18 +388,7 @@ class AmdahlCeilingDetector:
         ceiling_pct: float,
         breakdown: dict[str, Any],
     ) -> Symptom:
-        """Construct the ``amdahl_kernel_ceiling_low`` symptom.
-
-        Args:
-            tier_pcts (dict[str, float]): Per-tier percentage of GPU time.
-            optimizable_pct (float): Summed percentage across optimizable tiers.
-            ceiling_pct (float): Computed best-case E2E percentage gain.
-            breakdown (dict[str, Any]): Raw kernel breakdown, used for evidence.
-
-        Returns:
-            Symptom: A HIGH-severity symptom recommending kernel_opt be pruned
-                in favour of higher-ceiling branches.
-        """
+        """Construct the ``amdahl_kernel_ceiling_low`` symptom."""
         cfg = self._config
         return Symptom(
             name="amdahl_kernel_ceiling_low",
@@ -544,9 +415,7 @@ class AmdahlCeilingDetector:
         )
 
 
-# ===========================================================================
 # C3 — Cold-start budget exhaustion (stateless cross-signal)
-# ===========================================================================
 
 
 @dataclass
@@ -562,17 +431,7 @@ class ColdStartConfig:
 
 
 def _resolve_cold_start_minutes(cfg: ColdStartConfig) -> float:
-    """Resolve the cold-start cycle duration in minutes.
-
-    Uses the explicit config value when set, otherwise reads the
-    ``INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC`` env var (default 3600s).
-
-    Args:
-        cfg (ColdStartConfig): Cold-start tunables.
-
-    Returns:
-        float: Estimated cold-start cycle length in minutes.
-    """
+    """Resolve the cold-start cycle duration in minutes."""
     if cfg.cold_start_minutes is not None:
         return float(cfg.cold_start_minutes)
     raw = os.environ.get(
@@ -591,22 +450,7 @@ def evaluate_cold_start_signals(
     *,
     config: ColdStartConfig | None = None,
 ) -> list[Symptom]:
-    """Fire ``cold_start_budget_exhausted`` when a cold JIT cache won't finish.
-
-    Detects the C3 failure mode: the aiter JIT cache is cold and the remaining
-    wall-clock budget is shorter than one cold-start compile cycle, so the next
-    baseline would be SIGTERM'd mid-``hipcc``.
-
-    Args:
-        ctx (ReactorContext): Reactor context, providing budget/phase state.
-        data (SourceData): Collected source data including ``local_aiter_jit``.
-        config (ColdStartConfig | None): Tunables; defaults to
-            :class:`ColdStartConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: A single ``cold_start_budget_exhausted`` symptom when the
-            cache is cold and budget is insufficient, otherwise an empty list.
-    """
+    """Fire ``cold_start_budget_exhausted`` when a cold JIT cache won't finish."""
     cfg = config or ColdStartConfig()
     snap = ctx.shared_state
     if snap.budget_minutes < cfg.min_budget_minutes:

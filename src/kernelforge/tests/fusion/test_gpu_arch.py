@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The author must be told the arch the run is actually on.
-
-Tile shapes, warp counts and intrinsics are chosen per ISA, so naming one chip
-in the prompt while running on another asks the author to tune for hardware
-that is not there.
-"""
+"""The author must be told the arch the run is actually on."""
 
 from __future__ import annotations
 
@@ -33,8 +28,7 @@ def test_canon_arch_folds_marketing_names_and_rejects_unknown():
     assert canon_arch("MI300X") == "gfx942"
     assert canon_arch("mi355x") == "gfx950"
     assert canon_arch("AMD Instinct MI355X") == "gfx950"
-    # Unresolvable arch must be empty: naming the wrong ISA is worse than
-    # naming none at all.
+    # Unresolvable arch must be empty: naming the wrong ISA is worse than naming none at all.
     assert canon_arch("") == ""
     assert canon_arch("some-new-gpu") == ""
 

@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator-event-driven signals.
-
-Watches repeated ``policy_denied`` observations from the same source
-(misconfigured / systemically-rejected agent → MEDIUM alert),
-``delegated_result`` failures clustering on one action family (stuck
-branch → ``prune_branch``), ``recover_unsuccessful`` recovery outcomes,
-and ``idempotency_replay`` (repeated idempotency keys). Reads both
-``ctx.inbox`` and ``data.coordinator_events``.
-"""
+"""Coordinator-event-driven signals."""
 
 from __future__ import annotations
 
@@ -29,13 +21,13 @@ class EventConfig:
 
     policy_denied_threshold: int = 3
     delegated_failure_threshold: int = 2
-    # Sustained-failure count at/above which repeated_failure escalates to HIGH
-    # so the action ladder emits prune_branch (first hits stay advisory MEDIUM).
+    # Sustained-failure count at/above which repeated_failure escalates to HIGH so the action ladder emits
+    # prune_branch (first hits stay advisory MEDIUM).
     delegated_failure_prune_threshold: int = 4
     # Lookback over inbox + coordinator_events for the most recent recover result.
     recover_lookback_events: int = 50
-    # ``idempotency_replay``: fire when >= threshold distinct idempotency_keys
-    # share the same action+payload hash within one tick.
+    # ``idempotency_replay``: fire when >= threshold distinct idempotency_keys share the same action+payload hash
+    # within one tick.
     idempotency_replay_threshold: int = 2
 
 
@@ -45,23 +37,7 @@ def evaluate_event_signals(
     *,
     config: EventConfig | None = None,
 ) -> list[Symptom]:
-    """Evaluate all Coordinator-event-driven signals for this tick.
-
-    Combines inbox items and ``data.coordinator_events`` via the shared event
-    view (sorted by seq, cross-source duplicates removed) and runs the
-    policy-denied, delegated-failure, recover-unsuccessful, and
-    idempotency-replay rules.
-
-    Args:
-        ctx (ReactorContext): Reactor context providing the inbox.
-        data (SourceData): Collected source data including coordinator events.
-        config (EventConfig | None): Tunables; defaults to :class:`EventConfig`
-            when ``None``.
-
-    Returns:
-        list[Symptom]: All event-driven symptoms found this tick, possibly
-            empty.
-    """
+    """Evaluate all Coordinator-event-driven signals for this tick."""
     cfg = config or EventConfig()
     view = build_event_view(ctx.inbox, data.coordinator_events)
 
@@ -77,16 +53,7 @@ def _policy_denied_symptoms(
     events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Fire ``repeated_policy_denied`` for sources over the denial threshold.
-
-    Args:
-        events: Shared event view for this tick.
-        cfg (EventConfig): Tunables (provides the policy-denied threshold).
-
-    Returns:
-        list[Symptom]: One ``repeated_policy_denied`` symptom per offending
-            source, possibly empty.
-    """
+    """Fire ``repeated_policy_denied`` for sources over the denial threshold."""
     sources: Counter[str] = Counter()
     rules: Counter[str] = Counter()
     for ev in events:
@@ -130,16 +97,7 @@ def _delegated_failure_symptoms(
     events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Fire ``repeated_failure`` for action families over the failure threshold.
-
-    Args:
-        events: Shared event view for this tick.
-        cfg (EventConfig): Tunables (provides the delegated-failure threshold).
-
-    Returns:
-        list[Symptom]: One ``repeated_failure`` symptom per offending action
-            family, possibly empty.
-    """
+    """Fire ``repeated_failure`` for action families over the failure threshold."""
     family_counts: Counter[str] = Counter()
     last_evidence: dict[str, dict[str, Any]] = {}
     for ev in events:
@@ -184,19 +142,7 @@ def _idempotency_replay_symptoms(
     ctx: ReactorContext,
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Detect distinct-key, same-payload ``delegate`` proposals in inbox.
-
-    Coordinator dedup keys only off ``idempotency_key``, so an LLM minting fresh keys
-    per attempt with identical payload slips through. Fire when one action+payload hash
-    carries ``>= idempotency_replay_threshold`` distinct keys within a tick.
-
-    Args:
-        ctx: Reactor context (supplies the inbox).
-        cfg: Event configuration (replay threshold).
-
-    Returns:
-        Symptoms for offending action+payload groups, possibly empty.
-    """
+    """Detect distinct-key, same-payload ``delegate`` proposals in inbox."""
     if not ctx.inbox:
         return []
     import hashlib  # local import
@@ -265,20 +211,7 @@ def _recover_unsuccessful_symptoms(
     events: list[EventRow],
     cfg: EventConfig,
 ) -> list[Symptom]:
-    """Emit ``recover_unsuccessful`` when the latest recover needs review.
-
-    Fires (HIGH) when the latest recover hit ``state == "needs_review"`` —
-    cleanup failed to free VRAM, terminal for this budget. Inspects only the
-    latest recover ``delegated_result``; earlier successes are not
-    second-guessed.
-
-    Args:
-        events: Shared event view in chronological order.
-        cfg: Event configuration (recover lookback window).
-
-    Returns:
-        A list with one :class:`Symptom` when it fires, else empty.
-    """
+    """Emit ``recover_unsuccessful`` when the latest recover needs review."""
     head = events[-cfg.recover_lookback_events :] if events else []
     latest: dict[str, Any] | None = None
     for ev in head:
@@ -320,17 +253,7 @@ def _recover_unsuccessful_symptoms(
 
 
 def _is_recover_payload(payload: dict[str, Any]) -> bool:
-    """Best-effort check that a ``delegated_result`` came from ``recover``.
-
-    Recognized via ``kind`` / ``action_name`` / ``family`` or recover-only
-    executor fields.
-
-    Args:
-        payload: A ``delegated_result`` payload.
-
-    Returns:
-        ``True`` if the payload appears to be from a recover action.
-    """
+    """Best-effort check that a ``delegated_result`` came from ``recover``."""
     if str(payload.get("kind") or "").strip() == "recover":
         return True
     if str(payload.get("action_name") or "").strip() == "recover":

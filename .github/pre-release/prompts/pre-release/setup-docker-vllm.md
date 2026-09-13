@@ -46,12 +46,12 @@ suggestion:
   "latest" build, do not substitute a different tag from your memory, from Docker Hub, or
   from anywhere other than the skill file. The pinned tag is the one the release is gated
   on; a different tag is a **failure**, even if it also pulls successfully.
-- Read the tag by extracting it **from the skill file itself** rather than typing it out,
-  e.g. (the demo skill's path is in `HYPERLOOM_SKILL_PATH` in `.env`; otherwise it is the
-  `SKILL.md` of the demo skill you are running):
+- Read the tag by extracting it **from the skill file itself** rather than typing it out.
+  Use `E2E_DEMO_SKILL_PATH` from `.env` — not `HYPERLOOM_SKILL_PATH`, which the setup
+  backend rewrites to the optimizer skill:
 
   ```bash
-  HYPERLOOM_IMAGE="$(grep -E '^- `vllm`' "$HYPERLOOM_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
+  HYPERLOOM_IMAGE="$(grep -E '^- `vllm`' "$E2E_DEMO_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
   echo "using image: $HYPERLOOM_IMAGE"
   ```
 

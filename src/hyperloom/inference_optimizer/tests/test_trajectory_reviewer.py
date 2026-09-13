@@ -197,8 +197,8 @@ def test_load_journal_entries_swallows_errors(tmp_path, monkeypatch):
 
 def test_build_trajectory_digest_snaps_without_direction_returns_empty(tmp_path):
     """Snapshots present but no dominant direction + no dead/stall -> ""."""
-    # A snapshot dominant_direction cannot resolve, with no stall and no
-    # exhausted clusters, produces no lines -> empty string.
+    # A snapshot dominant_direction cannot resolve, with no stall and no exhausted clusters, produces no lines ->
+    # empty string.
     state = _FakeState(
         macro_cycle=0,
         explore_search={"winners_history": [{"cycle": 0}]},

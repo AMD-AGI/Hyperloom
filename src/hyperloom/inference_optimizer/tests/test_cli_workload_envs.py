@@ -26,8 +26,8 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 
 
-# ``_export_workload_envs_for_optimize`` writes TP/CONC/EP straight into
-# ``os.environ``, which ``monkeypatch`` cannot undo, so restore them here.
+# ``_export_workload_envs_for_optimize`` writes TP/CONC/EP straight into ``os.environ``, which ``monkeypatch`` cannot
+# undo, so restore them here.
 _EXPORTED_WORKLOAD_ENVS = ("TP", "CONC", "EP")
 
 
@@ -141,9 +141,9 @@ def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
 
 
 def test_single_node_exports_resolved_workload_envs(monkeypatch):
-    """Resolved workload knobs project into env unconditionally so SharedState,
-    manifest, and the materialized YAML agree (issue #903). The resolver has
-    already folded flag > resume-state > default into ``args``/``*_resolved``."""
+    """Resolved workload knobs project into env unconditionally so SharedState, manifest, and the materialized YAML
+    agree (issue #903).
+    """
     for key in ("TP", "CONC", "EP"):
         monkeypatch.delenv(key, raising=False)
 
@@ -214,21 +214,11 @@ def test_operator_server_args_dedup_vllm_single_value_flags(tmp_path, monkeypatc
 
 
 def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
-    """JSON-valued flags appended via extra_server_args stay valid JSON.
-
-    The GEMM shape-capture path appends ``current_best.extra_server_args`` (which
-    can carry ``--compilation-config`` / ``--speculative-config`` JSON blobs) onto
-    the reused baseline config. A prior shlex round-trip in that merge stripped
-    the double quotes -> ``{cudagraph_mode:FULL}`` -> vLLM ``json.loads`` rejects
-    it at boot -> server never starts -> ``shape_capture_failed`` (no CSV). The
-    materialized config must therefore carry VALID JSON. Regression guard.
-    """
+    """JSON-valued flags appended via extra_server_args stay valid JSON."""
     src = tmp_path / "cfg.yaml"
     _write_yaml_with_envs(src, "vllm", {"EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"})
-    # The extra_server_args reaching shape-capture already had their JSON quotes
-    # stripped by an upstream shlex round-trip (observed in the session configs),
-    # so materialize receives the unquoted-bareword form. It must not pass this
-    # broken JSON through to the launch config; the repair restores valid JSON.
+    # The extra_server_args reaching shape-capture already had their JSON quotes stripped by an upstream shlex
+    # round-trip (observed in the session configs), so materialize receives the unquoted-bareword form.
     out = materialize_config_with_envs(
         src,
         tmp_path / "out",
@@ -245,8 +235,7 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
 
 
 def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):
-    """The shape-capture materialization path must remove its inherited port
-    without corrupting a sibling JSON-valued server flag."""
+    """The shape-capture materialization path must remove its inherited port without corrupting a sibling JSON-valued server flag."""
     src = tmp_path / "cfg.yaml"
     _write_yaml_with_envs(
         src,
@@ -313,16 +302,16 @@ def test_env_max_model_len_wins_over_auto(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("tokens", "expected"),
     [
-        # The platform hands pod env through --extra-env, so the secret sits in
-        # the value rather than in the flag name.
+        # The platform hands pod env through --extra-env, so the secret sits in the value rather than in the flag
+        # name.
         (["--extra-env", "HF_TOKEN=hf_live"], "--extra-env HF_TOKEN=***"),
         (["--extra-env=HF_TOKEN=hf_live"], "--extra-env=HF_TOKEN=***"),
         (["--api-key", "sk-live"], "--api-key ***"),
         (["--api-key=sk-live"], "--api-key=***"),
         (["--extra-env", "OPENAI_API_KEY=sk-live"], "--extra-env OPENAI_API_KEY=***"),
         (["--extra-env", "AWS_SECRET_ACCESS_KEY=abc"], "--extra-env AWS_SECRET_ACCESS_KEY=***"),
-        # Non-secret flags stay fully readable: a misspelled real flag lands here
-        # too, and redacting its value would hide the mistake.
+        # Non-secret flags stay fully readable: a misspelled real flag lands here too, and redacting its value would
+        # hide the mistake.
         (["--pod-cpu", "8"], "--pod-cpu 8"),
         (["--gpus-per-nod", "4"], "--gpus-per-nod 4"),
         (["--extra-env", "LOG_LEVEL=debug"], "--extra-env LOG_LEVEL=debug"),
@@ -332,9 +321,5 @@ def test_env_max_model_len_wins_over_auto(tmp_path, monkeypatch):
     ],
 )
 def test_unknown_args_are_logged_without_credential_values(tokens, expected):
-    """Unrecognised argv is warned about verbatim, which used to print secrets.
-
-    The platform forwards one FLAGS block to both itself and ``optimize``, so its
-    own flags -- including pod credentials -- always land in the unknown list.
-    """
+    """Unrecognised argv is warned about verbatim, which used to print secrets."""
     assert _redact_unknown_args(tokens) == expected

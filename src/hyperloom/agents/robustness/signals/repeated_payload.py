@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Detect same-fingerprint action retries (``same_payload_loop``).
-
-Hashes the action-defining subset of each ``delegated_result`` payload
-(from coordinator_events + inbox) and fires ``same_payload_loop`` when a
-family produces N consecutive same-hash results with no intervening
-success. Per-family hash dimensions live in ``_FAMILY_PROJECTIONS``;
-unknown actions fall back to a generic ``params`` projection.
-"""
+"""Detect same-fingerprint action retries (``same_payload_loop``)."""
 
 from __future__ import annotations
 
@@ -71,11 +64,7 @@ _HASH_BLACKLIST: frozenset[str] = frozenset(
 
 @dataclass
 class RepeatedPayloadConfig:
-    """Tunables for :func:`evaluate_repeated_payload_signals`.
-
-    ``streak_threshold`` is the consecutive same-hash failures before
-    firing; ``lookback_events`` caps the event walk.
-    """
+    """Tunables for :func:`evaluate_repeated_payload_signals`."""
 
     streak_threshold: int = 3
     lookback_events: int = 80
@@ -87,22 +76,7 @@ def evaluate_repeated_payload_signals(
     *,
     config: RepeatedPayloadConfig | None = None,
 ) -> list[Symptom]:
-    """Fire ``same_payload_loop`` for action families stuck retrying one payload.
-
-    Walks the combined inbox + coordinator event stream, groups consecutive
-    same-fingerprint failures per family, and emits a symptom once a streak
-    reaches the configured threshold.
-
-    Args:
-        ctx (ReactorContext): Reactor context providing the inbox.
-        data (SourceData): Collected source data including coordinator events.
-        config (RepeatedPayloadConfig | None): Tunables; defaults to
-            :class:`RepeatedPayloadConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: One ``same_payload_loop`` symptom per offending family,
-            possibly empty.
-    """
+    """Fire ``same_payload_loop`` for action families stuck retrying one payload."""
     cfg = config or RepeatedPayloadConfig()
     view = build_event_view(ctx.inbox, data.coordinator_events)
     events = _gather_events(view, cfg)
@@ -118,24 +92,13 @@ def evaluate_repeated_payload_signals(
     return out
 
 
-# ---------------------------------------------------------------------------
 # Streak detection
-# ---------------------------------------------------------------------------
 
 
 def _walk_streaks(
     events: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Group consecutive same-hash failures per family.
-
-    A ``succeeded`` entry resets the streak for its family.
-
-    Args:
-        events: Time-ordered ``delegated_result`` rows.
-
-    Returns:
-        Mapping of family to its current run of same-hash failure events.
-    """
+    """Group consecutive same-hash failures per family."""
     by_family: dict[str, list[dict[str, Any]]] = {}
     current_hash: dict[str, str | None] = {}
     for ev in events:
@@ -158,24 +121,14 @@ def _walk_streaks(
     return by_family
 
 
-# ---------------------------------------------------------------------------
 # Event normalisation
-# ---------------------------------------------------------------------------
 
 
 def _gather_events(
     view: list[EventRow],
     cfg: RepeatedPayloadConfig,
 ) -> list[dict[str, Any]]:
-    """Project the view's ``delegated_result`` rows into streak-walker shape.
-
-    Args:
-        view: Shared event view for this tick.
-        cfg: Repeated-payload configuration (lookback window).
-
-    Returns:
-        The projected rows, oldest first, trimmed to ``lookback_events``.
-    """
+    """Project the view's ``delegated_result`` rows into streak-walker shape."""
     combined: list[dict[str, Any]] = []
     for ev in view:
         if ev.topic != "delegated_result":
@@ -197,25 +150,11 @@ def _gather_events(
     return combined
 
 
-# ---------------------------------------------------------------------------
 # Hashing
-# ---------------------------------------------------------------------------
 
 
 def _hash_for(family: str, event: dict[str, Any]) -> str | None:
-    """Compute the action-defining fingerprint for an event payload.
-
-    Projects the family-specific (or generic) subset of the payload, strips
-    blacklisted churn keys, and hashes the canonical JSON.
-
-    Args:
-        family (str): The action family used to pick the projection.
-        event (dict[str, Any]): A normalised event row carrying the payload.
-
-    Returns:
-        str | None: A hex SHA-1 fingerprint, or ``None`` when the payload is not
-            a usable dict.
-    """
+    """Compute the action-defining fingerprint for an event payload."""
     payload = event.get("payload") or {}
     if not isinstance(payload, dict):
         return None
@@ -229,16 +168,7 @@ def _hash_for(family: str, event: dict[str, Any]) -> str | None:
 
 
 def _walk_path(payload: dict[str, Any], path: str) -> Any:
-    """Walk a dotted ``a.b.c`` path against nested dicts.
-
-    Args:
-        payload: The mapping to traverse.
-        path: Dot-separated key path.
-
-    Returns:
-        The value at the path, or ``None`` if any segment is missing or a
-        non-dict is encountered.
-    """
+    """Walk a dotted ``a.b.c`` path against nested dicts."""
     cur: Any = payload
     for token in path.split("."):
         if not isinstance(cur, dict):
@@ -248,14 +178,7 @@ def _walk_path(payload: dict[str, Any], path: str) -> Any:
 
 
 def _strip_blacklisted(value: Any) -> Any:
-    """Recursively drop ``_HASH_BLACKLIST`` keys from dicts.
-
-    Args:
-        value (Any): A value that may be a dict, list, or scalar.
-
-    Returns:
-        Any: The value with all blacklisted keys removed from nested dicts.
-    """
+    """Recursively drop ``_HASH_BLACKLIST`` keys from dicts."""
     if isinstance(value, dict):
         return {k: _strip_blacklisted(v) for k, v in value.items() if k not in _HASH_BLACKLIST}
     if isinstance(value, list):
@@ -263,9 +186,7 @@ def _strip_blacklisted(value: Any) -> Any:
     return value
 
 
-# ---------------------------------------------------------------------------
 # Symptom builder
-# ---------------------------------------------------------------------------
 
 
 def _build_symptom(
@@ -273,17 +194,7 @@ def _build_symptom(
     streak_events: list[dict[str, Any]],
     cfg: RepeatedPayloadConfig,
 ) -> Symptom | None:
-    """Build the ``same_payload_loop`` symptom for a detected streak.
-
-    Args:
-        family (str): The looping action family.
-        streak_events (list[dict[str, Any]]): Consecutive same-hash failures.
-        cfg (RepeatedPayloadConfig): Tunables (provides the streak threshold).
-
-    Returns:
-        Symptom | None: A HIGH-severity ``same_payload_loop`` symptom, or
-            ``None`` when ``streak_events`` is empty.
-    """
+    """Build the ``same_payload_loop`` symptom for a detected streak."""
     if not streak_events:
         return None
     count = len(streak_events)

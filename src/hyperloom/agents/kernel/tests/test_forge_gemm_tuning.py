@@ -82,13 +82,7 @@ def test_preflight_and_inner_cli_use_the_same_interpreter():
 
 
 def test_build_cmd_forwards_the_moe_untuned_csv():
-    """The runtime-derived MoE key reaches forge only through this option.
-
-    The orchestrator derives the CSV from the dispatch tuple in the server log;
-    without the option forge infers the key from the model config instead --
-    the exact failure this lane exists to remove, and one that leaves no trace
-    because the tuning still reports success.
-    """
+    """The runtime-derived MoE key reaches forge only through this option."""
     cmd = forge_gemm_tuning._build_cmd(_payload())
 
     assert cmd[cmd.index("--moe-untuned-csv") + 1] == "/tmp/untuned_fmoe_from_runtime.csv"
@@ -103,13 +97,7 @@ def test_build_cmd_omits_the_moe_untuned_csv_when_absent():
 
 
 def test_build_cmd_asserts_every_option_it_can_emit():
-    """Meta-guard: an option added to _build_cmd must be asserted in this file.
-
-    This file is the only guard on the agent-tool argv, and it had drifted to
-    covering 10 of the options it emits -- which is how the MoE CSV option went
-    unasserted while being the whole point of this lane. Comparing the emitted
-    flags against a declared set makes the next omission fail here.
-    """
+    """Meta-guard: an option added to _build_cmd must be asserted in this file."""
     emitted = {tok for tok in forge_gemm_tuning._build_cmd(_payload()) if tok.startswith("--")}
     declared = {
         "--model-path",

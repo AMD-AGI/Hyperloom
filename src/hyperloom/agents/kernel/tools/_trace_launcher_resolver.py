@@ -5,34 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Resolve a device kernel to its Python launcher frame, straight from the trace.
-
-Motivation: TraceLens cannot attribute a hand-written Triton kernel. Such a
-kernel is launched through ``triton.jit`` and never passes the ATen dispatcher,
-so it has no ``cpu_op`` parent; TraceLens files it as a ``(Synthetic Op)`` with
-``launcher_path = "Not found"``. The information is nonetheless present in the
-trace: ``with_stack`` profiling records the full ``python_function`` chain down
-to the launch, ending at the user frame that called the kernel.
-
-This module recovers that frame deterministically, which is strictly better than
-the name-grep fallback it precedes: it yields a line number and function name,
-and it cannot produce grep's false positives (a test file or a CPU implementation
-that merely mentions the kernel name).
-
-Design constraints:
-
-* **Streaming, two passes.** ``python_function`` dominates a trace (order 10^6
-  events, ~95% of the file). Pass 1 reads only ``kernel`` and ``cuda_runtime``
-  (order 10^4) to pick probe timestamps; pass 2 walks the frames but retains
-  only those enclosing a probe, so peak memory stays flat.
-* **Eager probes only.** A CUDA-graph replay launch has no per-kernel
-  Python frame -- its stack ends at ``torch/cuda/graphs.py: replay`` -- so
-  graph-launch probes are rejected even when that marker is absent. The same
-  kernel is the same source on both paths, so one eager sample covers graph
-  launches too; a replay-only kernel falls through to the grep tier.
-* **Fail soft.** Any error yields an empty mapping; the caller falls back to the
-  existing grep resolution.
-"""
+"""Resolve a device kernel to its Python launcher frame, straight from the trace."""
 
 from __future__ import annotations
 
@@ -50,35 +23,18 @@ _CAT_KERNEL = "kernel"
 _CAT_RUNTIME = "cuda_runtime"
 _CAT_PYTHON = "python_function"
 
-# Substring shared by hipGraphLaunch, cudaGraphLaunch and cuGraphLaunch,
-# including decorated API names emitted by some Kineto versions.
+# Substring shared by hipGraphLaunch, cudaGraphLaunch and cuGraphLaunch, including decorated API names emitted by some
+# Kineto versions.
 _GRAPH_LAUNCH_MARKER = "graphlaunch"
 
-# Substring shared by every kernel-dispatch runtime API across HIP and CUDA
-# (hipModuleLaunchKernel, cudaLaunchKernel, hipGraphLaunch, ...). Correlated
-# runtime events that are not launches -- memcpy, synchronize, malloc -- can
-# never be a kernel's dispatch point, and keeping them would size the probe
-# map by total runtime events rather than by launches.
+# Substring shared by every kernel-dispatch runtime API across HIP and CUDA (hipModuleLaunchKernel, cudaLaunchKernel,
+# hipGraphLaunch, ...).
 _LAUNCH_API_MARKER = "launch"
 
 # A ``python_function`` name of the form "<path>(<line>): <func>".
 _FRAME_RE = re.compile(r"^(?P<path>.+?)\((?P<line>\d+)\):\s*(?P<func>.+)$")
 
-# Frames between the user's call site and the launch: launcher plumbing that is
-# never the kernel's source. Walking outward, these are skipped.
-#
-# Every JIT toolchain contributes one of these. A JIT-built op's innermost Python
-# frame is the compile-and-dispatch wrapper, not its kernel:
-#   * triton  -> ``triton/runtime/jit.py: run``
-#   * aiter   -> ``aiter/jit/core.py: wrapper``
-#   * FlyDSL  -> ``flydsl/compiler/jit_executor.py: __call__``
-# Those files are build machinery shared by every kernel the toolchain compiles,
-# so admitting one both aims a backend at unpatchable code and collapses distinct
-# kernels onto a single source (two MoE GEMMs both resolving to jit_executor.py).
-#
-# Scope matters: only ``flydsl/compiler/`` is plumbing. A kernel *written* in
-# FlyDSL is a legitimate target -- ``classify_patchability`` accepts
-# ``source_type="flydsl"`` -- so ``aiter/ops/flydsl/`` must stay visible.
+# Frames between the user's call site and the launch: launcher plumbing that is never the kernel's source.
 _SKIP_FRAME_RE = re.compile(
     r"(?:"
     r"triton/runtime/|triton/backends/|triton/compiler/"
@@ -92,10 +48,7 @@ _SKIP_FRAME_RE = re.compile(
     r")"
 )
 
-# Generic decorator frames. Path-based skipping cannot catch these: a guard or
-# retry decorator lives in an ordinary repo file, yet its body is plumbing. The
-# function name is the stable signal (TraceLens keeps an equivalent list for its
-# own entry-point search).
+# Generic decorator frames.
 _WRAPPER_FUNC_NAMES = frozenset(
     {
         "call",
@@ -115,17 +68,14 @@ _WRAPPER_FUNC_NAMES = frozenset(
     }
 )
 
-# Reaching this frame means the launch came from a graph replay: everything
-# further out belongs to the replay call site, not to the kernel.
+# Reaching this frame means the launch came from a graph replay: everything further out belongs to the replay call
+# site, not to the kernel.
 _GRAPH_REPLAY_MARKER = "torch/cuda/graphs.py"
 
-# Probe budget per kernel. Oversampled relative to ``max_samples_per_kernel``
-# because some probes land on frames that resolve to nothing.
+# Probe budget per kernel.
 _PROBE_OVERSAMPLE = 4
 
-# Shortest elided symbol prefix allowed to match. Below this a prefix carries no
-# identity (``_ZN5...`` matches an entire namespace); real TraceLens elisions run
-# far longer, so this only rejects degenerate input.
+# Shortest elided symbol prefix allowed to match.
 _MIN_ELIDED_PREFIX = 16
 
 
@@ -146,11 +96,7 @@ class LauncherFrame:
 
 
 def _event_pid(ev: dict) -> int:
-    """Process id of a trace event; 0 when the trace omits one.
-
-    Single-process traces frequently drop ``pid``, and a constant default keeps
-    those keyed consistently while still separating ranks in a merged trace.
-    """
+    """Process id of a trace event; 0 when the trace omits one."""
     try:
         return int(ev.get("pid") or 0)
     except (TypeError, ValueError):
@@ -195,26 +141,7 @@ def _has_elided_prefix_boundary(event_name: str, prefix: str) -> bool:
 
 
 def _match_kernel(event_name: str, wanted: Iterable[str]) -> str | None:
-    """Return the wanted kernel name contained in ``event_name``, if any.
-
-    Non-exact matches require symbol boundaries, allowing known decorations such
-    as template arguments and ``.kd`` while rejecting identifier suffixes.
-
-    A long mangled symbol is additionally elided by TraceLens with a trailing
-    ellipsis while the trace keeps the full name, so an elided name falls back to
-    matching on its prefix. That fallback needs a floor: a stub like ``_ZN5...``
-    is a prefix of every symbol in the namespace and would bind an arbitrary
-    kernel. Sibling template instantiations can still both match a shared prefix,
-    which is harmless -- they are the same source file.
-
-    Overlapping names are decided rather than raced. ``wanted`` is a set, so
-    returning the first substring hit made ``moe_gemm1`` and ``moe_gemm1_0``
-    bind ``moe_gemm1_0.kd`` differently per ``PYTHONHASHSEED``, and a wrong
-    binding here reaches the candidate ahead of grep. Every candidate is
-    therefore collected and ranked: an exact hit wins, otherwise the longest and
-    so most specific symbol does, and a genuine tie between equally specific
-    symbols resolves to nothing rather than to whichever the set yielded first.
-    """
+    """Return the wanted kernel name contained in ``event_name``, if any."""
     exact: list[str] = []
     decorated: list[str] = []
     elided: list[str] = []
@@ -225,19 +152,16 @@ def _match_kernel(event_name: str, wanted: Iterable[str]) -> str | None:
             exact.append(name)
         elif _has_symbol_boundaries(event_name, name):
             decorated.append(name)
-        # Gate on _is_elided, not on "rstrip changed something": a single
-        # trailing dot also changes the string, and treating it as elided here
-        # while _is_elided rejects it would let the name skip the ambiguity
-        # check and bind to an arbitrary sibling symbol.
+        # Gate on _is_elided, not on "rstrip changed something": a single trailing dot also changes the string, and
+        # treating it as elided here while _is_elided rejects it would let the name skip the ambiguity check and bind
+        # to an arbitrary sibling symbol.
         elif _is_elided(name):
             probe = name.rstrip(". ")
             if len(probe) >= _MIN_ELIDED_PREFIX and _has_elided_prefix_boundary(event_name, probe):
                 elided.append(name)
     if exact:
         return exact[0]
-    # Decorated hits outrank elided-prefix hits: the latter is a fallback for a
-    # symbol the trace only shows truncated. A tie inside the stronger bucket
-    # must not fall through to the weaker one.
+    # Decorated hits outrank elided-prefix hits: the latter is a fallback for a symbol the trace only shows truncated.
     for bucket in (decorated, elided):
         if not bucket:
             continue
@@ -254,21 +178,8 @@ def _collect_probes(
     *,
     stream_errors: list[str] | None = None,
 ) -> dict[str, list[tuple[int, int, float, str]]]:
-    """Pass 1: pick ``(tid, ts, launch_api)`` probes for each wanted kernel.
-
-    Reads only ``kernel`` and ``cuda_runtime`` events. Eager launches are
-    preferred over graph replays (see module docstring).
-    """
-    # Keyed by correlation alone. The two sides of a launch are recorded by
-    # different processes in Kineto's model -- the kernel against the device,
-    # the runtime call against the host -- so pairing on (pid, correlation)
-    # never matches on a real trace. Correlation is the field designed to span
-    # that boundary, and it is unique within one profiled process.
-    #
-    # A merged multi-process trace restarts correlation ids per rank, which a
-    # bare id cannot separate. That is handled by detecting the collision
-    # (below) and dropping the id rather than by keying on a pid that means
-    # different things on either side of the pair.
+    """Pass 1: pick ``(tid, ts, launch_api)`` probes for each wanted kernel."""
+    # Keyed by correlation alone.
     corr_to_kernel: dict[Any, str] = {}
     exact_corr: set[Any] = set()
     runtimes: dict[Any, tuple[int, int, float, str]] = {}
@@ -291,8 +202,7 @@ def _collect_probes(
                     continue
                 previous = corr_to_kernel.get(corr)
                 if previous is not None and previous != matched:
-                    # Two different kernels answer to this id: a merged trace
-                    # reused it across ranks. Neither binding can be trusted.
+                    # Two different kernels answer to this id: a merged trace reused it across ranks.
                     ambiguous_corr.add(corr)
                 else:
                     corr_to_kernel[corr] = matched
@@ -300,10 +210,9 @@ def _collect_probes(
                         exact_corr.add(corr)
             elif cat == _CAT_RUNTIME:
                 api_name = str(ev.get("name") or "")
-                # Kernel and runtime events arrive in no guaranteed order, so
-                # this cannot filter on corr_to_kernel yet; gating on the launch
-                # marker bounds the map by launches instead of by every
-                # correlated runtime call in the trace.
+                # Kernel and runtime events arrive in no guaranteed order, so this cannot filter on corr_to_kernel
+                # yet; gating on the launch marker bounds the map by launches instead of by every correlated runtime
+                # call in the trace.
                 if _LAUNCH_API_MARKER not in api_name.lower():
                     continue
                 corr = (ev.get("args") or {}).get("correlation")
@@ -311,8 +220,8 @@ def _collect_probes(
                     continue
                 pid = _event_pid(ev)
                 if corr in runtimes:
-                    # A second host-side launch claiming the same id: only a
-                    # merged trace does this, and it makes the id useless.
+                    # A second host-side launch claiming the same id: only a merged trace does this, and it makes the
+                    # id useless.
                     ambiguous_corr.add(corr)
                     continue
                 runtimes[corr] = (
@@ -322,8 +231,8 @@ def _collect_probes(
                     api_name,
                 )
 
-    # Any non-exact name spanning distinct complete symbols is ambiguous: the
-    # launcher of one could be reported as the launcher of another.
+    # Any non-exact name spanning distinct complete symbols is ambiguous: the launcher of one could be reported as the
+    # launcher of another.
     ambiguous = {name for name, symbols in matched_symbols.items() if len(symbols) > 1}
     if ambiguous:
         corr_to_kernel = {
@@ -337,9 +246,7 @@ def _collect_probes(
         rt = runtimes.get(key)
         if rt is None:
             continue
-        # A graph replay has one Python frame for the whole graph, never a
-        # per-kernel launcher. API identity is stronger than a fragile stack
-        # marker, which is absent for inductor and framework-native replays.
+        # A graph replay has one Python frame for the whole graph, never a per-kernel launcher.
         if _is_graph_launch(rt[3]):
             continue
         if len(eager[kernel]) < probe_budget:
@@ -360,19 +267,7 @@ def _collect_enclosing_frames(
     *,
     stream_errors: list[str] | None = None,
 ) -> dict[tuple[int, int, float], list[tuple[float, float, str]]]:
-    """Pass 2: gather the ``python_function`` frames enclosing each probe.
-
-    Only frames whose ``[ts, ts+dur]`` span covers a probe are retained, keeping
-    memory proportional to the probe count rather than to the trace.
-
-    Probes are keyed by ``(pid, tid, ts)``. pid is part of the key because a
-    merged multi-process trace reuses thread ids across ranks, and without it
-    one rank's frames would answer for another's launch. Two launches from the
-    same thread inside one microsecond still share a bucket -- legitimately, as
-    a microsecond-granular trace holds one call-stack snapshot for both; where
-    their real call sites differ the trace cannot tell them apart, and the vote
-    across several probes is what keeps that from silently deciding a source.
-    """
+    """Pass 2: gather the ``python_function`` frames enclosing each probe."""
     # Per (pid, tid) sorted probe timestamps, for a bisect membership test.
     by_thread: dict[tuple[int, int], list[float]] = defaultdict(list)
     for samples in probes.values():
@@ -400,10 +295,8 @@ def _collect_enclosing_frames(
                 continue
             name = str(ev.get("name") or "")
             for ts in stamps[lo:hi]:
-                # Keep ``dur``: profiler timestamps are microsecond-granular, so
-                # adjacent frames on a fast call chain routinely share a ``ts``.
-                # Start time alone cannot order them and the tie would resolve
-                # by trace write order, picking an arbitrary nesting level.
+                # Keep ``dur``: profiler timestamps are microsecond-granular, so adjacent frames on a fast call chain
+                # routinely share a ``ts``.
                 enclosing[(pid, tid, ts)].append((start, dur, name))
     return enclosing
 
@@ -411,16 +304,7 @@ def _collect_enclosing_frames(
 def _innermost_user_frame(
     frames: list[tuple[float, float, str]],
 ) -> tuple[str, int, str] | None:
-    """Pick the innermost user ``.py`` frame from one probe's enclosing frames.
-
-    Ordered innermost-first by ``(start, -dur)``: a later start is deeper, and
-    among frames starting in the same microsecond the narrower span is the
-    nested one. Sorting on start alone would leave same-``ts`` frames in trace
-    write order and collapse different kernels onto one source.
-
-    Launcher plumbing is skipped; hitting the graph-replay marker means this
-    probe carries no per-kernel call site.
-    """
+    """Pick the innermost user ``.py`` frame from one probe's enclosing frames."""
     ordered = sorted(frames, key=lambda item: (item[0], -item[1]), reverse=True)
     for _start, _dur, name in ordered:
         if _GRAPH_REPLAY_MARKER in name:
@@ -461,30 +345,13 @@ def resolve_launchers_from_trace(
     log: Any = None,
     file_errors: list[str] | None = None,
 ) -> dict[str, LauncherFrame]:
-    """Resolve device kernel names to their Python launcher frames.
-
-    Args:
-        trace_files: Candidate trace files, most representative first. At most
-            ``max_trace_files`` are read, and scanning also stops early once
-            every kernel is resolved or a file adds nothing new -- a single
-            rank's trace normally suffices.
-        kernel_names: Device kernel symbols to resolve.
-        max_samples_per_kernel: Probes to agree on per kernel; the majority frame
-            wins.
-        max_trace_files: Hard ceiling on files read, bounding this tier's cost
-            against a capture folder holding dozens of them.
-        log: Optional ``callable(str)`` for diagnostics.
-
-    Returns:
-        Kernel name -> resolved launcher. Kernels with no eager sample (pure
-        graph replay) or no usable frame are omitted, never guessed.
-    """
+    """Resolve device kernel names to their Python launcher frames."""
     wanted = {str(k) for k in kernel_names if str(k).strip()}
     if not wanted or not trace_files:
         return {}
 
-    # Per-file failures are reported out, not just logged: swallowing them made
-    # an unreadable trace indistinguishable from "nothing needed resolving".
+    # Per-file failures are reported out, not just logged: swallowing them made an unreadable trace indistinguishable
+    # from "nothing needed resolving".
     if file_errors is None:
         file_errors = []
     resolved: dict[str, LauncherFrame] = {}
@@ -533,10 +400,9 @@ def resolve_launchers_from_trace(
             )
             _report_stream_errors(trace_file, frame_stream_errors)
         except (EOFError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
-            # Fail soft per file so one malformed trace cannot take the tier
-            # down: a non-dict ``args`` raises AttributeError, a truncated
-            # gzip raises OSError, and either would otherwise surface as the
-            # whole tier silently returning nothing.
+            # Fail soft per file so one malformed trace cannot take the tier down: a non-dict ``args`` raises
+            # AttributeError, a truncated gzip raises OSError, and either would otherwise surface as the whole tier
+            # silently returning nothing.
             note = f"{trace_file.name}: {type(exc).__name__}: {exc}"
             file_errors.append(note)
             if callable(log):
@@ -561,11 +427,7 @@ def resolve_launchers_from_trace(
                 continue
             ranked = votes.most_common(2)
             (path, line, func), count = ranked[0]
-            # A plurality is not agreement. With probes split across distinct
-            # frames, most_common() returns whichever was inserted first, which
-            # is trace order rather than evidence. Require a strict win: a tie
-            # at the top means the probes disagree, and the grep tier is a
-            # better answer than an arbitrary one.
+            # A plurality is not agreement.
             if len(ranked) > 1 and ranked[1][1] == count:
                 if callable(log):
                     log(

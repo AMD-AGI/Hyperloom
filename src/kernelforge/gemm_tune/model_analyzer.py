@@ -34,8 +34,8 @@ class ModelProfile:
     # Attention heads
     num_attention_heads: int = 0
     num_key_value_heads: int = 0
-    # Per-head dims (0 = derive head_dim from hidden_size // num_attention_heads).
-    # v_head_dim may differ from the qk head_dim (e.g. MiMo, DeepSeek MLA).
+    # Per-head dims (0 = derive head_dim from hidden_size // num_attention_heads). v_head_dim may differ from the qk
+    # head_dim (e.g. MiMo, DeepSeek MLA).
     head_dim: int = 0
     v_head_dim: int = 0
     # MLA (deepseek_v3) low-rank attention dims (0 when the model is not MLA).
@@ -65,20 +65,7 @@ class ModelProfile:
 
     @property
     def unquantized_linear_modules(self) -> list[str]:
-        """Linear modules the checkpoint deliberately left at the model dtype.
-
-        Quantization is decided per module, not per model. A checkpoint labelled
-        ``mxfp4`` or ``fp8`` normally keeps ``lm_head`` and the attention
-        projections in bf16 -- they are the numerically sensitive ones, and on a
-        MoE model they are a rounding error of the weight bytes anyway (experts
-        carry ~99% of the parameters). Quark writes that list as ``exclude``;
-        AWQ/GPTQ call it ``modules_to_not_convert``.
-
-        Norm layers are dropped: they are in the same list but are not GEMMs.
-
-        Returns:
-            Module names, empty when the config records no exclusions.
-        """
+        """Linear modules the checkpoint deliberately left at the model dtype."""
         qconfig = self.raw_config.get("quantization_config")
         if not isinstance(qconfig, dict):
             return []
@@ -90,15 +77,7 @@ class ModelProfile:
 
     @property
     def keeps_dense_layers_at_model_dtype(self) -> bool:
-        """Whether substantial dense GEMMs stay at model dtype after quantization.
-
-        The router asks this because ``precision`` cannot answer it: that field
-        describes the weight format of the quantized majority, while the
-        untouched minority is what the dense GEMM path actually dispatches.
-        ``lm_head`` alone is excluded: one output projection per forward does
-        not justify competing with the quantized dense tuner for a shared time
-        budget. Runtime evidence can still request bf16 tuning explicitly.
-        """
+        """Whether substantial dense GEMMs stay at model dtype after quantization."""
         return any(name.rsplit(".", 1)[-1].lower() != "lm_head" for name in self.unquantized_linear_modules)
 
     @property
@@ -116,14 +95,7 @@ class ModelProfile:
 
 
 def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:
-    """Return the sub-dict that holds LLM params (MoE, dimensions, etc.).
-
-    VL / multi-modal models (Qwen3VLMoe, Qwen3_5MoeForConditionalGeneration,
-    etc.) nest the language model config under keys like ``text_config``,
-    ``language_config``, or ``llm_config``.  Pure LLMs keep everything at the
-    top level.  We return a merged view: nested values override top-level ones
-    so that callers always find the right fields.
-    """
+    """Return the sub-dict that holds LLM params (MoE, dimensions, etc.)."""
     for key in ("text_config", "language_config", "llm_config"):
         nested = config.get(key)
         if isinstance(nested, dict) and nested:
@@ -169,18 +141,7 @@ def _extract_quant_info(config: dict[str, Any]) -> tuple[str, int, int]:
 
 
 def analyze_model(model_path: str) -> ModelProfile:
-    """Read config.json from model_path and build a ModelProfile.
-
-    Args:
-        model_path: Path to model directory (must contain config.json).
-
-    Returns:
-        ModelProfile with all extracted fields.
-
-    Raises:
-        FileNotFoundError: If config.json does not exist.
-        json.JSONDecodeError: If config.json is malformed.
-    """
+    """Read config.json from model_path and build a ModelProfile."""
     config_file = Path(model_path) / "config.json"
     if not config_file.is_file():
         raise FileNotFoundError(f"config.json not found at {config_file}")
@@ -192,7 +153,6 @@ def analyze_model(model_path: str) -> ModelProfile:
     arch = architectures[0] if architectures else config.get("model_type", "")
 
     # For VL / multi-modal models, the LLM params live inside a nested config.
-    # Merge the nested dict so downstream lookups find MoE / dimension fields.
     llm_cfg = _resolve_llm_config(config)
 
     # MoE detection — check multiple field names across model families
@@ -220,8 +180,7 @@ def analyze_model(model_path: str) -> ModelProfile:
     num_attention_heads = int(llm_cfg.get("num_attention_heads", 0))
     num_key_value_heads = int(llm_cfg.get("num_key_value_heads", num_attention_heads))
 
-    # Per-head dims. ``head_dim`` is the qk head dim (config-explicit or derived);
-    # ``v_head_dim`` defaults to it when not separately specified.
+    # Per-head dims.
     head_dim = int(llm_cfg.get("head_dim", 0))
     v_head_dim = int(llm_cfg.get("v_head_dim", 0))
     # MLA low-rank dims (deepseek_v3 family); 0 when absent.
@@ -235,8 +194,8 @@ def analyze_model(model_path: str) -> ModelProfile:
     # Quantization
     quant_method, quant_bits, quant_group_size = _extract_quant_info(config)
 
-    # Gate/up fusion heuristic: almost all modern MoE models use fused gate+up
-    # Exception: some very old models or custom architectures
+    # Gate/up fusion heuristic: almost all modern MoE models use fused gate+up Exception: some very old models or
+    # custom architectures
     use_g1u1 = True
 
     profile = ModelProfile(

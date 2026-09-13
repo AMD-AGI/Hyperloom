@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Gluon kernel backend registration, the triton<->gluon knowledge pairing, and detection.
-
-Gluon is Triton's low-level dialect, not a separate toolchain: same frontend,
-same JIT, same lowering, same cache. Two consequences are load-bearing enough to
-lock down here.
-
-First, the two backends carry each other's knowledge layer. A Triton campaign
-has to know that dropping to Gluon is an available move rather than a different
-project, and a Gluon kernel still needs the shared compile-pipeline and
-ISA-verification cards that only exist under ``languages/triton/``. The pairing
-is also what lets ``languages/gluon/`` stay thin instead of restating the
-substrate -- so if it silently breaks, the Gluon tree becomes wrong rather than
-merely smaller.
-
-Second, detection order. A Gluon file necessarily imports triton and routinely
-keeps a ``@triton.jit`` sibling as its fallback, in a directory named after
-triton -- aiter's paged-MQA-logits ships exactly that shape. Matching Triton
-first would send every such kernel to the wrong kernel_backend.
-"""
+"""Gluon kernel backend registration, the triton<->gluon knowledge pairing, and detection."""
 
 from __future__ import annotations
 
@@ -135,12 +117,7 @@ class TestKnowledgeBuilderAcceptsASequence:
 
 
 class TestKnowledgeTree:
-    """The cards the prompts route to must exist and be reachable.
-
-    ``build_forge_knowledge`` loads ``INDEX.md`` whole and leaves the rest on
-    disk, so a card the index names but that is not there is a dangling pointer
-    the agent only discovers mid-session.
-    """
+    """The cards the prompts route to must exist and be reachable."""
 
     @pytest.fixture()
     def gluon_root(self, config) -> Path:
@@ -182,8 +159,7 @@ def add_kernel(x_ptr, y_ptr, n, BLOCK: gl.constexpr):
     gl.store(y_ptr + idx, gl.load(x_ptr + idx, mask=idx < n), mask=idx < n)
 """
 
-# The shape aiter ships: one file, one public entry, a Gluon path and a
-# @triton.jit fallback selected at dispatch.
+# The shape aiter ships: one file, one public entry, a Gluon path and a @triton.jit fallback selected at dispatch.
 _MIXED_KERNEL = (
     _GLUON_KERNEL
     + """
@@ -230,11 +206,7 @@ class TestInferKernelBackend:
         assert infer_kernel_backend([path]) == "gluon"
 
     def test_a_gluon_kernel_under_a_triton_directory_still_infers_gluon(self, tmp_path):
-        """The directory name is not the language.
-
-        aiter keeps Gluon kernels under ``ops/triton/``, and this is the shape
-        that would fool a path heuristic. Detection reads the source instead.
-        """
+        """The directory name is not the language."""
         path = tmp_path / "ops" / "triton" / "attention" / "k.py"
         path.parent.mkdir(parents=True)
         path.write_text(_GLUON_KERNEL)
@@ -247,19 +219,7 @@ class TestInferKernelBackend:
         assert infer_kernel_backend([path]) == "triton"
 
     def test_the_aiter_framework_arm_still_outranks_the_language(self, tmp_path):
-        """Pre-existing precedence, locked here because Gluon makes it visible.
-
-        ``infer_kernel_backend`` picks the FRAMEWORK kernel backend for anything under aiter,
-        whatever language the kernel is written in -- that is how Triton and HIP
-        kernels in aiter have always been routed, and Gluon does not change it.
-
-        The consequence is worth knowing: ``aiter`` has no language layer
-        (``resolve_language_dirs("aiter", ...) == ()``), so an aiter-hosted
-        Gluon kernel gets the framework cards and no Gluon authoring cards. Pass
-        ``--kernel-backend gluon`` explicitly for such a campaign, or accept that
-        the language knowledge is absent. Changing the precedence would re-route
-        every existing aiter campaign, so it is deliberately left alone.
-        """
+        """Pre-existing precedence, locked here because Gluon makes it visible."""
         path = tmp_path / "aiter" / "ops" / "triton" / "attention" / "k.py"
         path.parent.mkdir(parents=True)
         path.write_text(_GLUON_KERNEL)
@@ -270,13 +230,7 @@ class TestInferKernelBackend:
 
 
 class TestTritonEscalationHint:
-    """A Triton campaign must be told the drop to Gluon is a move it can make.
-
-    The prompt used to answer a codegen ceiling with "suggest CK or FlyDSL",
-    which reads as "stop and recommend a different project". Converged autotune
-    plus low MFMA utilization is a scheduling limit, and the response is one
-    level down in the same toolchain.
-    """
+    """A Triton campaign must be told the drop to Gluon is a move it can make."""
 
     @pytest.fixture()
     def triton_prompt(self, config) -> str:
@@ -288,8 +242,8 @@ class TestTritonEscalationHint:
     def test_states_the_trigger(self, triton_prompt):
         """Converged search + idle matrix core, explicitly not 'hardware limit'."""
         assert "Autotune converged" in triton_prompt
-        # Matched on the collapsed text: the prompt is hard-wrapped, so any
-        # phrase long enough to be meaningful spans a newline in the source.
+        # Matched on the collapsed text: the prompt is hard-wrapped, so any phrase long enough to be meaningful spans
+        # a newline in the source.
         collapsed = " ".join(triton_prompt.split())
         assert "matrix core far from peak is NOT" in collapsed
 
@@ -301,17 +255,7 @@ class TestTritonEscalationHint:
 
 
 class TestAiterKernelBackendRoutesToAuthoringKnowledge:
-    """aiter has no language layer, so it must at least name the route.
-
-    ``resolve_language_dirs("aiter", ...)`` is empty by design -- aiter kernels
-    are written in six different languages and inlining all six maps would swamp
-    the prompt. But the prompt used to list only ``framework/aiter/``,
-    ``hardware/`` and ``common_methodology/``, so a campaign that decided it
-    needed to author a kernel had no route from the prompt to any authoring
-    folder at all. That is not Gluon-specific; Gluon only made it visible,
-    because aiter is where production Gluon lives (``ops/triton/`` holds Gluon
-    kernels behind a ``@triton.jit`` fallback).
-    """
+    """aiter has no language layer, so it must at least name the route."""
 
     @pytest.fixture()
     def aiter_prompt(self, config) -> str:

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bottom-up PerfModel roofline and the HF metadata it reads.
-
-The op formulas mirror TraceLens PerfModel, so they are pinned against the
-arithmetic in their own docstrings rather than against recorded outputs: a
-recorded number cannot tell a corrected formula apart from a broken one.
-"""
+"""The bottom-up PerfModel roofline and the HF metadata it reads."""
 
 from __future__ import annotations
 
@@ -315,12 +310,7 @@ def test_quant_config_weight_bytes_reads_compressed_tensors_bit_widths():
 
 
 def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
-    """Per-layer groups need not agree, and dict order must not decide.
-
-    A Quark MoE checkpoint stores the routed experts at fp4 and the attention
-    projections at fp8. Returning whichever group iterated first declared that
-    precision for the whole model -- and the answer flipped with dict order.
-    """
+    """Per-layer groups need not agree, and dict order must not decide."""
     cfg = {
         "quant_method": "quark",
         "layer_quant_config": {
@@ -337,8 +327,8 @@ def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
 
 
 def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
-    # Undercounting weight bytes raises the roofline and reports a real
-    # regression as "already at ceiling", so a tie resolves upward.
+    # Undercounting weight bytes raises the roofline and reports a real regression as "already at ceiling", so a tie
+    # resolves upward.
     cfg = {
         "quant_method": "quark",
         "layer_quant_config": {
@@ -461,12 +451,7 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
 
 
 def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
-    """Regression: reading only ``quant_method`` sized MXFP4 experts at bf16.
-
-    The 4x overcount pushed ``total_expert_bytes`` past the checkpoint size,
-    tripping the sanity guard and degrading a 512-expert model to dense — which
-    dropped the MoE op from the breakdown entirely.
-    """
+    """Regression: reading only ``quant_method`` sized MXFP4 experts at bf16."""
     cfg = {
         **_DENSE_CFG,
         "num_experts": 512,
@@ -722,8 +707,6 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert dtype.compute_precision_tag == "fp32"
 
     # 1-vs-2: server_args_quantization must beat quantization_config when both present.
-    # A pre-quantized meta (weight_dtype_bytes=0.5 fp4) + recognised --quantization fp8
-    # → branch 1 must win even though branch 2 would also fire.
     quant_vs_prequant_state = _state(
         tmp_path / "quant_vs_prequant",
         _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8"),
@@ -736,7 +719,6 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert quant_vs_prequant.compute_precision_tag == "fp8"
 
     # 2-vs-3: quantization_config must beat server_args_dtype when both present.
-    # A pre-quantized fp8 meta + --dtype float32 → branch 2 must win over branch 3.
     prequant_vs_dtype_state = _state(
         tmp_path / "prequant_vs_dtype",
         _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
@@ -755,8 +737,8 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert fallback.activation_dtype_bytes == 2.0
     assert fallback.compute_precision_tag == "bf16"
 
-    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take
-    # quantization_config (which a `<= 2.0` widening would incorrectly do).
+    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take quantization_config (which a `<= 2.0`
+    # widening would incorrectly do).
     meta_eq_2 = rc.resolve_runtime_dtype(
         _state(tmp_path / "meta_eq_2", _serving_benchmark(tmp_path / "m")),
         _dense_meta(weight_dtype_bytes=2.0),
@@ -786,9 +768,8 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
 
 
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
-    # Patch vendor to a *different* positive value (500.0) so swapping the
-    # operands of `achievable or vendor` would change the result.  With vendor==0
-    # both orderings yield 100.0 and the precedence isn't pinned.
+    # Patch vendor to a *different* positive value (500.0) so swapping the operands of `achievable or vendor` would
+    # change the result.
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
 
@@ -884,14 +865,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     ],
 )
 def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
-    """The nested path must consult both tables, exactly as the flat one does.
-
-    These eight tags live only in ``_QUANT_WEIGHT_BYTES``, and Quark writes
-    precisely them on ``global_quant_config.weight.dtype`` -- often with no
-    ``num_bits`` beside them. Checking ``_DTYPE_BYTES`` alone returned 0.0, the
-    caller fell back to the checkpoint dtype, and an fp8 checkpoint was costed
-    as bf16: the 2x weight-IO overcount this function exists to remove.
-    """
+    """The nested path must consult both tables, exactly as the flat one does."""
     cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": tag}}}
     assert rc._resolve_quant_config_weight_bytes(cfg) == expected
 

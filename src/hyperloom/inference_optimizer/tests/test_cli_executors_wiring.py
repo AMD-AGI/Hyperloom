@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`.
-
-Cover the specialist-executor factory (subprocess and in-process branches) and
-the ``_register_executors`` wiring without launching any real ``claude``
-subprocess.
-"""
+"""Unit tests for :mod:`hyperloom.inference_optimizer.cli.executors`."""
 
 from __future__ import annotations
 
@@ -116,8 +111,8 @@ def test_register_executors_wires_full_set():
     for kind in _REAL_EXECUTORS_FULL:
         assert kind in reg
     assert "target_analysis" in reg
-    # Both arms land their diffs through this one kind; a missing key silently
-    # drops every discovered PR candidate and every authored patch.
+    # Both arms land their diffs through this one kind; a missing key silently drops every discovered PR candidate and
+    # every authored patch.
     assert "integrate_patch" in reg
     assert "framework_agent" not in reg
     assert "framework" not in reg
@@ -125,14 +120,7 @@ def test_register_executors_wires_full_set():
 
 
 def test_register_executors_covers_every_phase_allowed_action():
-    """Every action a phase may enqueue resolves to a registered executor.
-
-    ``SubAgentRunner.run_task`` fails a task with ``no_executor`` when
-    ``task.kind`` has no registry entry, so a name that drifts between the
-    enqueue site and the registration site turns into a silent phase-wide
-    failure. Deriving the expectation from ``PHASE_ALLOWED_ACTIONS`` keeps the
-    two in lockstep instead of re-listing kinds by hand.
-    """
+    """Every action a phase may enqueue resolves to a registered executor."""
     from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
 
     coord = _fake_coordinator()
@@ -146,8 +134,8 @@ def test_register_executors_covers_every_phase_allowed_action():
     expected: set[str] = set()
     for actions in PHASE_ALLOWED_ACTIONS.values():
         expected |= set(actions)
-    # Kernel-owned actions never become tasks: PolicyGate denies delegate /
-    # propose_action for them, and the Coordinator routes them over the bus.
+    # Kernel-owned actions never become tasks: PolicyGate denies delegate / propose_action for them, and the
+    # Coordinator routes them over the bus.
     expected -= KERNEL_AGENT_OWNED_ACTIONS
     missing = sorted(kind for kind in expected if kind not in reg)
     assert not missing, f"phase-allowed actions with no executor: {missing}"
@@ -184,15 +172,7 @@ def _fully_wired_registry() -> dict[str, object]:
 
 
 def test_every_coordinator_internal_action_has_an_executor():
-    """Producer/consumer binding for the kinds the Coordinator enqueues itself.
-
-    These actions are never proposed by an agent, so a missing executor
-    surfaces only as a silently failed task at runtime. That is how the
-    FRAMEWORK phase came to enqueue ``framework_agent`` against a registry
-    that only knew ``framework``, failing every discovered PR candidate. The
-    expectation is read off the production vocabulary, so adding an action
-    cannot leave this guard behind.
-    """
+    """Producer/consumer binding for the kinds the Coordinator enqueues itself."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         COORDINATOR_INTERNAL_ACTIONS,
     )
@@ -204,15 +184,7 @@ def test_every_coordinator_internal_action_has_an_executor():
 
 
 def test_no_executor_is_registered_under_an_unknown_action_name():
-    """The reverse direction: a stale key left behind by a rename.
-
-    A registration whose name is not in the action catalogue can never be
-    enqueued, so it is dead weight that also makes the real gap harder to see.
-
-    An internal-only kind may deliberately have no entry -- ``targeted_build``
-    stays out to keep itself off ``_RUNS_ACTIONS`` -- so the exemption is
-    derived from ``INTERNAL_ONLY_ACTION_NAMES`` instead of spelled out here.
-    """
+    """The reverse direction: a stale key left behind by a rename."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
         ACTION_CATALOGUE,
         INTERNAL_ONLY_ACTION_NAMES,
@@ -227,11 +199,7 @@ def test_no_executor_is_registered_under_an_unknown_action_name():
 
 
 def test_conditional_registrations_are_exactly_the_documented_exceptions():
-    """Pin which kinds may legitimately be absent, so the exception set cannot drift.
-
-    Only one condition removes an executor now: a zero research-lane capacity
-    drops the specialist. Anything else disappearing is a wiring bug.
-    """
+    """Pin which kinds may legitimately be absent, so the exception set cannot drift."""
     minimal = _fake_coordinator()
     _register_executors(minimal, specialist_executor=None, session_dir=None)
 

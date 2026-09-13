@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Both arms must truncate at the same place, and say so in the fingerprint.
-
-The accuracy gate is differential: it subtracts the candidate's score from the
-baseline's. That subtraction is only meaningful when both arms evaluated under
-the same generation bounds, so two gaps left by the bounds work are pinned here.
-
-* The baseline arm verified that the bounds shim installed and failed loudly
-  when it could not; the grid arm called the same installer, discarded the
-  result, and only called it at all when ``$INFERENCEX_PATH`` happened to be
-  set -- while the baseline arm also accepts env discovery. A bounded baseline
-  could therefore be compared against an unbounded candidate.
-* The bounds knobs decide where each answer is cut off, but did not participate
-  in the eval-contract fingerprint, so changing one left the contract looking
-  identical to a run that scored under different rules.
-"""
+"""Both arms must truncate at the same place, and say so in the fingerprint."""
 
 from __future__ import annotations
 
@@ -100,9 +86,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
     return ws
 
 
-# ---------------------------------------------------------------------------
 # Eval-contract fingerprint: the bounds knobs are part of the contract
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -114,13 +98,7 @@ def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
     ],
 )
 def test_a_bounds_knob_change_changes_the_eval_contract_fingerprint(tmp_path, knob, changed):
-    """Two runs that truncate differently must not claim the same eval contract.
-
-    The enablement re-run path compares fingerprints to decide whether a
-    recorded accuracy still applies. A knob that moves the truncation point but
-    leaves the digest alone would let a score taken under one bound be reused to
-    satisfy a different one.
-    """
+    """Two runs that truncate differently must not claim the same eval contract."""
     before = _write_config(tmp_path / "before.yaml", **{knob: "4096"})
     after = _write_config(tmp_path / "after.yaml", **{knob: changed})
 
@@ -139,28 +117,17 @@ def test_an_absent_bounds_knob_matches_itself(tmp_path):
 
 
 def test_a_tunable_server_arg_stays_out_of_the_fingerprint(tmp_path):
-    """The digest must survive the very thing the optimizer is allowed to change.
-
-    Server args are what a candidate tunes; folding them in would make every
-    candidate look like a different eval contract and defeat drift detection.
-    """
+    """The digest must survive the very thing the optimizer is allowed to change."""
     before = _write_config(tmp_path / "before.yaml", EXTRA_SGLANG_ARGS="--chunked-prefill-size 2048")
     after = _write_config(tmp_path / "after.yaml", EXTRA_SGLANG_ARGS="--chunked-prefill-size 8192")
     assert eval_contract_fingerprint(config_path=before) == eval_contract_fingerprint(config_path=after)
 
 
-# ---------------------------------------------------------------------------
 # Grid arm: assert the bounds landed, on the same terms as the baseline arm
-# ---------------------------------------------------------------------------
 
 
 def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path, monkeypatch):
-    """The install must be attempted via env discovery, as the baseline arm does.
-
-    Gating it on ``$INFERENCEX_PATH`` is what let a session whose checkout is
-    only reachable through ``$MAGPIE_PATH/InferenceX`` bench candidates with no
-    bounds while its baseline had them.
-    """
+    """The install must be attempted via env discovery, as the baseline arm does."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     calls: list[object] = []
@@ -189,11 +156,7 @@ def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path
 
 
 def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_path, monkeypatch):
-    """Present-and-unpatchable is a broken contract, so nothing may be benched.
-
-    Same verdict the baseline arm already reaches. Benching anyway would score
-    this variant against a baseline that stopped generating somewhere else.
-    """
+    """Present-and-unpatchable is a broken contract, so nothing may be benched."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
     launched: list[object] = []
 
@@ -219,11 +182,7 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
 
 
 def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch):
-    """Target absent is an unrecognized layout, not a broken contract.
-
-    The baseline arm warns rather than failing here, so the grid arm must too --
-    otherwise an InferenceX laid out somewhere unrecognized fails every variant.
-    """
+    """Target absent is an unrecognized layout, not a broken contract."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
 
     with (
@@ -246,11 +205,7 @@ def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch
 
 
 def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path, monkeypatch):
-    """No eval this round means no eval contract to keep symmetric.
-
-    A throughput-only round is graded on throughput; failing it over an eval
-    shim it never loads would drop candidates for an irrelevant reason.
-    """
+    """No eval this round means no eval contract to keep symmetric."""
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
 
     with (
@@ -274,12 +229,7 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
 
 @pytest.mark.asyncio
 async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp_path):
-    """The ledger must name the cause, using the baseline arm's own class.
-
-    Nothing launches, so the generic path would find no ``benchmark_*`` dir and
-    file this as ``no_benchmark_workspace`` -- a missing-directory message
-    hiding an eval-contract gap.
-    """
+    """The ledger must name the cause, using the baseline arm's own class."""
     base = _write_config(tmp_path / "base.yaml")
 
     with (
@@ -304,9 +254,7 @@ async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp
     assert results[0].returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE
 
 
-# ---------------------------------------------------------------------------
 # The shared RUN_EVAL reader both arms now key off
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("spelling", ["false", "0", "no", "off", ""])
@@ -321,11 +269,7 @@ def test_run_eval_absent_reads_as_enabled(tmp_path):
 
 
 def test_an_unreadable_config_reads_as_eval_enabled(tmp_path):
-    """Fail closed: an unreadable config must not silently skip the eval guards.
-
-    Reading "disabled" from a config that could not be parsed would turn the
-    bounds check off precisely when least is known about the run.
-    """
+    """Fail closed: an unreadable config must not silently skip the eval guards."""
     assert materialized_run_eval_disabled(tmp_path / "does_not_exist.yaml") is False
 
     broken = tmp_path / "broken.yaml"
@@ -334,14 +278,7 @@ def test_an_unreadable_config_reads_as_eval_enabled(tmp_path):
 
 
 def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
-    """All three arms reach one reader, none of them through an import cycle.
-
-    ``_workload_envs`` imports ``_grid_runner`` at module scope, so hosting the
-    reader there forced the grid arm to import it from inside a function. It sits
-    in ``_accuracy_gate`` instead, whose leaf property — it imports no executor
-    sibling — is what lets the grid, the baseline and the env materializer all
-    import it at module scope. Keep that property or the cycle comes back.
-    """
+    """All three arms reach one reader, none of them through an import cycle."""
     import ast
     from pathlib import Path as _Path
 
@@ -358,6 +295,6 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
 
     for arm in (_grid_runner, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__
-    # The env materializer decides the same question from raw envs rather than a
-    # written config, so it shares the spellings instead of the reader.
+    # The env materializer decides the same question from raw envs rather than a written config, so it shares the
+    # spellings instead of the reader.
     assert _workload_envs._RUN_EVAL_FALSE_VALUES is _accuracy_gate._RUN_EVAL_FALSE_VALUES

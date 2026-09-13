@@ -1,26 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Check whether a tuned artifact was actually read by the server.
-
-Three things being true at once -- the artifact exists, the env var is set, and
-e2e throughput went up -- still does not mean the tuning did anything. Two
-independent ways for it to mean nothing have both been observed:
-
-* **the keys are unreachable**: the table has rows, but none of them match the
-  (M, N, K, ...) the runtime asks for;
-* **the table never arrived**: the artifact was written, but the merge step did
-  not pick it up and the server loaded its bundled default.
-
-Neither is a tuner-selection problem, so no amount of choosing the right tuner
-detects them. This is a separate, deterministic check on the serving log.
-
-The one trap it has to avoid: aiter logs a *miss* unconditionally but a *hit*
-only when ``AITER_LOG_TUNED_CONFIG=1``. Reading "no hit lines" as "zero hits"
-would mark every arm that ran without the flag as a failed apply -- and a scan
-of 60 production logs found the flag set in none of them. So "we cannot tell"
-is a distinct verdict from "it was not used", and only the latter reverts.
-"""
+"""Check whether a tuned artifact was actually read by the server."""
 
 from __future__ import annotations
 
@@ -71,10 +52,8 @@ def _parse(server_log: Path) -> dict | None:
     try:
         from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
-        # Warning, not info: kernelforge ships in this same wheel, so an
-        # ImportError here is a broken install rather than a supported
-        # configuration. At info level the run silently loses apply
-        # verification and looks identical to one where it passed.
+        # Warning, not info: kernelforge ships in this same wheel, so an ImportError here is a broken install rather
+        # than a supported configuration.
         log.warning(
             "kernelforge.gemm_tune is not importable, so apply verification is "
             "skipped for this run -- it ships with Hyperloom, so this means an "
@@ -96,22 +75,7 @@ def verify_applied(
     hit_logging: bool | None = None,
     runtime_table_names: list[str] | None = None,
 ) -> ApplyVerdict:
-    """Decide whether the tuned artifacts were merged and read.
-
-    Args:
-        server_log: The serving log written by the run under test.
-        artifact_paths: Tuned CSVs that were supposed to be deployed.
-        hit_logging: Whether ``AITER_LOG_TUNED_CONFIG`` was on for this run.
-            ``None`` means unknown, which keeps a zero-hit result inconclusive.
-        runtime_table_names: Canonical table names the runtime resolves these
-            artifacts under (e.g. ``bf16_tuned_gemm.csv``). Needed because the
-            file we deploy is named after the candidate, not after the table.
-
-    Returns:
-        A verdict. ``blocks_keep`` is true only for the cases that are
-        positively wrong; everything else, including "cannot tell", leaves the
-        decision to the caller.
-    """
+    """Decide whether the tuned artifacts were merged and read."""
     path = Path(server_log)
     if not path.is_file():
         return ApplyVerdict("unknown", detail=f"no serving log at {path}")
@@ -126,18 +90,7 @@ def verify_applied(
     merged = [str(m) for m in (report.get("merged_tables") or [])]
     consulted = [str(c) for c in (report.get("consulted_tables") or [])]
 
-    # 1. Did the artifact reach the server at all?
-    #
-    #    Judge by the tables the lookups actually named, not by the merge line.
-    #    Setting AITER_CONFIG_* -- which is exactly what a candidate run does --
-    #    makes aiter skip the merge step entirely: it prints no merge line and
-    #    resolves against the override, so the lookup is the only place the path
-    #    appears. Reading an absent merge line as "not merged" would have
-    #    reverted every candidate.
-    #
-    #    Both names are accepted because both are legitimate: the deployed file
-    #    is named after the candidate when it is an override, and after the
-    #    table when the server merged it into its own config directory.
+    # 1.
     wanted = [str(a) for a in (artifact_paths or []) if str(a).strip()]
     if wanted and (consulted or merged):
         seen = {Path(p).name for p in consulted} | {Path(m).name for m in merged}
@@ -158,8 +111,7 @@ def verify_applied(
                     ),
                 )
 
-    # 2. Was anything read? Hit lines are gated behind AITER_LOG_TUNED_CONFIG,
-    #    so their absence is only informative when the flag was on.
+    # 2.
     if hits > 0:
         return ApplyVerdict(
             "served",
@@ -169,10 +121,7 @@ def verify_applied(
             detail=f"{hits} lookup(s) hit the tuned table",
         )
     if misses > 0:
-        # Misses logged and no hits. With hit logging on, that is a real zero --
-        # the case this gate exists for. Without it, "never read" and "not
-        # recorded" are the same picture, and a scan of 60 production logs found
-        # the flag set in none of them, so the default has to stay inconclusive.
+        # Misses logged and no hits.
         if hit_logging:
             return ApplyVerdict(
                 "zero_hit",

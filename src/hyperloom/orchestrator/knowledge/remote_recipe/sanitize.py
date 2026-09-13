@@ -38,8 +38,6 @@ _EMBEDDED_WINDOWS_PATH_RE = re.compile(
 )
 
 # Shared replay should carry optimization knobs, not arbitrary process state.
-# Prefixes are deliberately narrow and can be extended when a new producer
-# introduces a reviewed, replayable environment family.
 PUBLISH_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
     {
         "GPU_MAX_HW_QUEUES",
@@ -246,35 +244,17 @@ def _sanitize_value(value: Any, *, key: str = "", allow_absolute: bool = False) 
         value = os.fspath(value)
     if isinstance(value, str):
         if _is_absolute_path_text(value):
-            # Everywhere but the host-origin subtree, an absolute path is a leak
-            # of the producing machine. There it is the payload: a later session
-            # cannot look for the checkout a KEEP was taken from without being
-            # told where that was.
+            # Everywhere but the host-origin subtree, an absolute path is a leak of the producing machine.
             return value if allow_absolute else _DROP
         if _PATH_KEY_RE.search(key) and ("/" in value or "\\" in value):
-            # Relative bundle references remain replayable; absolute values were
-            # removed above.
+            # Relative bundle references remain replayable; absolute values were removed above.
             return value
         return _redact_embedded_paths(redact_secret_values(value))
     return value
 
 
 def sanitize_shared_knowledge(knowledge: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a publishable copy with secrets and host paths removed.
-
-    Host paths survive in exactly one place, the :data:`HOST_ORIGIN_KEY` subtree,
-    because a KEEP that cannot say which checkout it came from cannot be replayed
-    on an image that lays that checkout out somewhere else.
-
-    The exemption is scoped precisely: inside the subtree an absolute-path string
-    is returned verbatim, which means the value-level scrubbing every other
-    string gets -- ``redact_secret_values`` and embedded-path redaction -- is
-    bypassed for it (that is the whole point: the path must survive intact).
-    Key-level dropping is *not* relaxed there: a secret-named key is still
-    removed inside the subtree exactly as it is everywhere else. So do not put a
-    credential-bearing value under this key expecting the path exemption to also
-    launder its content -- it will not.
-    """
+    """Return a publishable copy with secrets and host paths removed."""
     cleaned = _sanitize_value(dict(knowledge))
     return cleaned if isinstance(cleaned, dict) else {}
 

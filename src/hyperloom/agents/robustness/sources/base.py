@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Source protocol + DegradeRouter.
-
-DegradeRouter wraps a single source with a backoff state machine.  After
-``fail_threshold`` consecutive failures the source is marked DEGRADED and
-skipped for ``recheck_interval_s`` seconds; successful ticks restore it to
-HEALTHY.  While DEGRADED, ``collect`` returns an empty ``SourceData`` with
-``local_processes_known=False`` so downstream signals do not interpret "no
-process data" as evidence that nothing is running.
-
-State machine::
-
-    HEALTHY  --(fail_streak >= fail_threshold)-->  DEGRADED
-    DEGRADED --(success after recheck_interval_s)--> HEALTHY
-"""
+"""Source protocol + DegradeRouter."""
 
 from __future__ import annotations
 
@@ -29,73 +16,50 @@ log = logging.getLogger(__name__)
 
 
 class HealthState(str, Enum):
-    """Routing state of the source inside the DegradeRouter.
-
-    Attributes:
-        HEALTHY (str): Source is being consulted normally.
-        DEGRADED (str): Source failed enough times to be skipped; it is
-            reprobed periodically.
-    """
+    """Routing state of the source inside the DegradeRouter."""
 
     HEALTHY = "healthy"
     DEGRADED = "degraded"
 
 
 class SourceUnavailable(RuntimeError):
-    """Raised by a :class:`Source` when its backing service is not reachable.
-
-    DegradeRouter counts it toward the degrade threshold without a traceback;
-    an unexpected exception counts the same but is logged with one.
-    """
+    """Raised by a :class:`Source` when its backing service is not reachable."""
 
 
 @dataclass
 class SourceData:
-    """Per-tick snapshot the reactor consumes.
-
-    Every field defaults to an empty container so downstream signals
-    treat "no data" uniformly.
-    """
+    """Per-tick snapshot the reactor consumes."""
 
     local_gpu: dict[str, Any] = field(default_factory=dict)
     local_processes: list[dict[str, Any]] = field(default_factory=list)
-    # ``False`` when the process probe could not answer (``ps`` missing, timed
-    # out, disabled). An empty ``local_processes`` then means "we do not know
-    # what is running", not "nothing is running", and a consumer must not read
-    # the absence of a process as evidence.
+    # ``False`` when the process probe could not answer (``ps`` missing, timed out, disabled).
     local_processes_known: bool = True
     local_disk: dict[str, Any] = field(default_factory=dict)
     local_log_tail: list[str] = field(default_factory=list)
     local_log_errors: list[dict[str, Any]] = field(default_factory=list)
     local_server_health: list[dict[str, Any]] = field(default_factory=list)
-    # LocalProbe extras: local_ray ``{healthy, reason, stderr, returncode}``;
-    # local_fd ``{pid, used, limit, used_pct}``; local_aiter_jit ``{jit_dir, so_count, build_count}``.
+    # LocalProbe extras: local_ray ``{healthy, reason, stderr, returncode}``; local_fd ``{pid, used, limit,
+    # used_pct}``; local_aiter_jit ``{jit_dir, so_count, build_count}``.
     local_ray: dict[str, Any] = field(default_factory=dict)
     local_fd: dict[str, Any] = field(default_factory=dict)
     local_aiter_jit: dict[str, Any] = field(default_factory=dict)
     # Decision-audit: ``recent_integrate``, ``ci_metrics`` ({} if absent), ``oob_attempts``.
     local_decision_audit: dict[str, Any] = field(default_factory=dict)
-    # Preflight inputs (signals/preflight.py): ``local_manifest`` raw manifest.json;
-    # ``local_kernel_breakdown`` ``{tier_pcts, total_kernels, total_gpu_pct, mtime}``.
+    # Preflight inputs (signals/preflight.py): ``local_manifest`` raw manifest.json; ``local_kernel_breakdown``
+    # ``{tier_pcts, total_kernels, total_gpu_pct, mtime}``.
     local_manifest: dict[str, Any] = field(default_factory=dict)
     local_kernel_breakdown: dict[str, Any] = field(default_factory=dict)
     # Critic health: ``recent_judges`` + ``workdir_count`` (subdirs under critic-workdir/).
     local_critic_health: dict[str, Any] = field(default_factory=dict)
-    # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path},
-    # ``agents`` {<role>: {inbox_bytes, outbox_bytes}}, ``coordinator``
-    # {recorded_pid, alive, pid_file}.
+    # State-integrity slots: ``state_json``, ``wal`` {wal_bytes, db_bytes, db_path}, ``agents`` {<role>: {inbox_bytes,
+    # outbox_bytes}}, ``coordinator`` {recorded_pid, alive, pid_file}.
     local_state_integrity: dict[str, Any] = field(default_factory=dict)
-    # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for
-    # TRACELENS_ROOT / TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
+    # External-deps: ``gateway`` (OPENAI_BASE_URL/models), ``mounts`` (stat latency for TRACELENS_ROOT /
+    # TRACELENS_INTERNAL_ROOT / INFERENCEX_PATH), ``tracelens_cli``.
     local_external_deps: dict[str, Any] = field(default_factory=dict)
     # Coordinator bus events: ``{id, agent, topic, payload, ts}``, oldest first.
-    # ``id`` is the ``events.seq`` key detectors dedupe inbox items against.
     coordinator_events: list[dict[str, Any]] = field(default_factory=list)
-    # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task,
-    # oldest_progress_unix, oldest_task}}}``.
-    # A composite task reports a heartbeat per internal unit, so this answers
-    # "is *this agent's* dispatched work still moving" for an agent that is
-    # legitimately quiet while it waits on one.
+    # In-flight work: ``{running, by_agent: {agent: {last_progress_unix, task, oldest_progress_unix, oldest_task}}}``.
     local_task_progress: dict[str, Any] = field(default_factory=dict)
 
 
@@ -106,30 +70,11 @@ class Source(Protocol):
     name: str
 
     async def fetch(self, ctx: Any) -> SourceData:
-        """Return a snapshot or raise :class:`SourceUnavailable`.
-
-        Args:
-            ctx (Any): The per-tick reactor context (clock, shared
-                state, session id, etc.).
-
-        Returns:
-            SourceData: The snapshot collected for this tick.
-
-        Raises:
-            SourceUnavailable: When the backing service is unreachable.
-        """
+        """Return a snapshot or raise :class:`SourceUnavailable`."""
 
 
 class DegradeRouter:
-    """Single-source router with a backoff state machine.
-
-    Consults the source each tick while HEALTHY; after ``fail_threshold``
-    consecutive failures transitions to DEGRADED and returns empty
-    ``SourceData`` (with ``local_processes_known=False``) until
-    ``recheck_interval_s`` seconds elapse, at which point one reprobe is
-    attempted.  A successful reprobe restores HEALTHY; a failed one keeps
-    the source DEGRADED and resets the recheck timer.
-    """
+    """Single-source router with a backoff state machine."""
 
     def __init__(
         self,
@@ -139,17 +84,7 @@ class DegradeRouter:
         recheck_interval_s: float = 30.0,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        """Initialise the router.
-
-        Args:
-            primary (Source): The sole source consulted each tick.
-            fail_threshold (int): Consecutive primary failures required
-                to mark it DEGRADED; clamped to at least 1.
-            recheck_interval_s (float): Seconds between primary reprobes
-                once DEGRADED; clamped to at least 0.
-            clock (Callable[[], float] | None): Optional time source;
-                defaults to :func:`time.monotonic`.
-        """
+        """Initialise the router."""
         self._primary = primary
         self._fail_threshold = max(1, int(fail_threshold))
         self._recheck_interval_s = max(0.0, float(recheck_interval_s))
@@ -159,20 +94,7 @@ class DegradeRouter:
         self._last_recheck = 0.0
 
     async def collect(self, ctx: Any) -> SourceData:
-        """Fetch one tick of source data with backoff on repeated failure.
-
-        Returns an empty ``SourceData(local_processes_known=False)`` while
-        the primary is DEGRADED so downstream probe-derived rules stay
-        quiet rather than misfiring.
-
-        Args:
-            ctx (Any): The per-tick reactor context passed to the source's
-                ``fetch``.
-
-        Returns:
-            SourceData: The snapshot from the primary, or an empty
-            snapshot while DEGRADED.
-        """
+        """Fetch one tick of source data with backoff on repeated failure."""
         if not self._should_try_primary():
             return SourceData(local_processes_known=False)
 

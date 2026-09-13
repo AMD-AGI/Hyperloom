@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Launch-shape persistence across ``--resume``.
-
-``--server-args``, ``--extra-env``, ``--nodes`` and the robustness flags are
-rebuilt from argv on every boot, so a resume that re-passes none of them takes
-them from SharedState instead of dropping to the defaults.
-"""
+"""Launch-shape persistence across ``--resume``."""
 
 from __future__ import annotations
 
@@ -37,8 +32,8 @@ def test_parse_operator_extra_env_missing_attr_is_empty():
 
 def test_export_operator_launch_shape_sets_env(monkeypatch):
     """Both handoff variables are projected for downstream in-process executors."""
-    # setenv, not delenv: the helper writes os.environ directly, so monkeypatch
-    # has to have recorded the pre-test value to undo the write on teardown.
+    # setenv, not delenv: the helper writes os.environ directly, so monkeypatch has to have recorded the pre-test
+    # value to undo the write on teardown.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", "")
 
@@ -79,10 +74,7 @@ def test_robustness_options_explicit_flag_wins_over_persisted():
 
 
 def test_robustness_options_unrelated_flag_leaves_the_rest_persisted():
-    """One unrelated ``--robustness-*`` flag must not reopen the probe the launch closed.
-
-    Whole-mapping substitution reintroduced this branch's own bug one flag later.
-    """
+    """One unrelated ``--robustness-*`` flag must not reopen the probe the launch closed."""
     state = SharedState(session_id="s", robustness_options={"auto_probe_inference_server": False})
     args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None, robustness_llm_rca=True)
 

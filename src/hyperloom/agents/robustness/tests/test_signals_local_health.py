@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray
-+ D1 log-pattern extensions)."""
+"""Unit tests for the local-health signal rule (server/log/gpu/disk/shm/fd/ray + D1 log-pattern extensions)."""
 
 from __future__ import annotations
 
@@ -80,15 +79,7 @@ def test_a_refused_port_with_no_server_behind_it_is_not_a_fault():
 
 
 def test_a_server_that_died_under_a_running_benchmark_is_still_a_fault():
-    """A benchmark client hammering the port proves a server was meant to answer it.
-
-    "Probed successfully, saw no server" is the gap between two variants, but it
-    is also a server that crashed while its own client kept sending requests —
-    the one snapshot where suppressing the alert hides the outage.
-
-    No session directory is configured here, so the client check has nothing to
-    attribute against and stays host-wide.
-    """
+    """A benchmark client hammering the port proves a server was meant to answer it."""
     data = SourceData(
         local_processes=[
             {"pid": 7, "rss_mb": 12.0, "cmd": "python -m Magpie.bench", "is_server": False},
@@ -148,20 +139,7 @@ def test_only_this_sessions_benchmark_client_vouches_for_a_dead_server(
     client_cmd,
     vouches,
 ):
-    """A client vouches for a refused port only when it belongs to this session.
-
-    The harness runs with its cwd inside the session and children inherit it, so
-    the cwd is the anchor; a launch path that chdirs elsewhere still names a path
-    under the session on its command line, which is the second anchor. Anything
-    else is somebody else's traffic — including the sibling directory whose name
-    merely starts with ours (``<session>-retry``), which a substring test reads
-    as inside the session. The command line is held to that boundary in both
-    spellings of the flag, since the two are read by different code.
-
-    A client with neither anchor is indistinguishable from a co-tenant's and
-    must not vouch either; every launch path in this repo carries one, which is
-    what the grid-runner cwd test holds it to.
-    """
+    """A client vouches for a refused port only when it belongs to this session."""
     ours = tmp_path / "session-a"
     dirs = {"ours": ours, "theirs": tmp_path / "session-b", "sibling": tmp_path / "session-a-retry"}
     data = _client_snapshot(
@@ -207,16 +185,7 @@ def test_a_seen_server_is_recorded_in_the_evidence():
 
 
 def test_all_targets_down_suggests_the_real_dispatchable_action():
-    """The HIGH suggestion must not point at ``server_lifecycle`` -- PolicyGate
-    rejects it as unknown_action; action_ladder routes this symptom to a real
-    ``delegate(recover, force_gpu_cleanup=True)``, and the suggestion text
-    reaching the orchestration prompt must say so instead.
-
-    A live server process is included so the idle-server-detection added
-    upstream (a refused port with no server and no benchmark client behind it
-    is treated as an expected idle stretch, not a fault) doesn't suppress the
-    symptom this test exists to check.
-    """
+    """The HIGH suggestion must not point at ``server_lifecycle`` -- PolicyGate rejects it as unknown_action; action_ladder routes this symptom to a real ``delegate(recover, force_gpu_cleanup=True)``, and the suggestion text reaching the orchestration prompt must say so instead."""
     data = SourceData(
         local_processes=_live_server(),
         local_server_health=[

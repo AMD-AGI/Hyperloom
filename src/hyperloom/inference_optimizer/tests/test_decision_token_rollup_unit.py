@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Token rollup arithmetic for the ``decision_trace`` / ``token_usage`` sections.
+"""Token rollup arithmetic for the ``decision_trace.jsonl`` per-decision totals.
 
 Pins the counter families apart: visible prompt/completion, cache, and hidden
 reasoning output. ``grand_total`` is documented as the all-in spend, so a
@@ -11,7 +11,7 @@ counting only what the model actually said.
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.breakdown.collectors import decision as dc
+from hyperloom.orchestrator.trace import decision_trace as dc
 
 
 def test_bucket_rolls_up_reasoning_tokens_separately():

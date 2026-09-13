@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for :mod:`hyperloom.orchestrator.bus.storage.schema`.
-
-Covers fresh-DB creation, ``set_lane_capacity`` / ``get_lane_capacity``, and
-the rollback-on-failure guards in ``set_lane_capacity`` / ``ensure_schema``.
-"""
+"""Unit tests for :mod:`hyperloom.orchestrator.bus.storage.schema`."""
 
 from __future__ import annotations
 

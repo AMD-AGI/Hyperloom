@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Long-run resilience and periodic soft restart acceptance tests.
-
-Covers:
-* ``TaskRegistry.reclaim_expired_running`` (lease-expiry watchdog): orphaned
-  running tasks → failed, idempotent, fresh / no-ttl tasks untouched.
-* the cycle-boundary soft restart runs at the SWEEP reloop (to FRAMEWORK_AGENT,
-  else EXPLORE): resets the orchestration conversation, reclaims orphaned tasks,
-  and PRESERVES the global best + negative ledger (no data loss, no duplicate
-  tasks).
-* the soft restart honours its opt-out env flag.
-
-All deterministic + offline.
-"""
+"""Long-run resilience and periodic soft restart acceptance tests."""
 
 from __future__ import annotations
 
@@ -157,7 +145,6 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert c._orchestration_seeded is False
     assert (await c.tasks.get(t.task_id)).state == "failed"
 
 
@@ -217,7 +204,7 @@ async def test_soft_restart_summary_idempotent(cyclic_coordinator):
     summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert summary is not None
     assert summary["new_cycle"] == 1
-    assert summary["conversation_reset"] is True
+    assert summary["memory_captured"] is True
     again = await c._run_cycle_soft_restart(prior_cycle=1, new_cycle=2)
     assert again["running_tasks_reclaimed"] == 0
 

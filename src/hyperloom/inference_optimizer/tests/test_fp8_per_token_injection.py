@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""sglang ``SGLANG_USE_AITER_FP8_PER_TOKEN`` injection tests.
-
-Hyperloom injects the env from its env-materialization choke point, strictly
-scoped to sglang + fp8 + gfx942 + per-channel weight/per-token dynamic act,
-never clobbering an operator-set value. Exercised at both the pure
-config-detection layer and the ``materialize_config_with_envs`` layer.
-"""
+"""sglang ``SGLANG_USE_AITER_FP8_PER_TOKEN`` injection tests."""
 
 from __future__ import annotations
 
@@ -57,11 +51,7 @@ def _write_model_config(dir_path: Path, config: dict) -> str:
 
 
 def _write_safetensors(path: Path, tensors: dict[str, list[int]]) -> None:
-    """Write a minimal valid ``.safetensors`` file (header + zeroed data).
-
-    ``tensors`` maps tensor name -> shape. Only the header (which carries the
-    shape the gate inspects) needs to be correct; payload bytes are zeros.
-    """
+    """Write a minimal valid ``.safetensors`` file (header + zeroed data)."""
     header: dict[str, object] = {}
     blob = b""
     offset = 0
@@ -85,11 +75,7 @@ def _write_safetensors(path: Path, tensors: dict[str, list[int]]) -> None:
 
 
 def _write_fp8_weights(dir_path: Path, *, per_channel: bool) -> None:
-    """Drop a safetensors shard carrying a representative ``weight_scale`` tensor.
-
-    Per-channel -> shape ``[out_features, 1]`` (numel > 1); per-tensor -> scalar
-    ``[]`` (numel == 1).
-    """
+    """Drop a safetensors shard carrying a representative ``weight_scale`` tensor."""
     shape = [16, 1] if per_channel else []
     _write_safetensors(
         dir_path / "model.safetensors",

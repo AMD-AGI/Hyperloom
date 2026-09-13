@@ -1,34 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-r"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields.
-
-The Coordinator hands every reactor a prompt with
-the following layout:
-
-```
-=== Shared session state ===
-<key=value tokens, possibly across several lines>
-
-=== Knowledge base hints ===
-<free text; legacy — no longer emitted, still tolerated by the parser>
-
-=== Inbox for <agent> (newest last) ===
-  seq=<int> msg_id=<hex> from=<agent> topic=<topic> payload=<python-repr-dict>
-  ...
-```
-
-The Critic mock backend also uses the exact regex
-``r"^\s*seq=(\d+)\s+msg_id=([a-f0-9]+)\s+from=(\w+)\s+topic=proposal\s+payload=(.*)$"``
-to spot proposals; we keep behaviour identical so a real Critic agent
-remains drop-in compatible.
-
-Intentionally tolerant: unknown sections go to ``extras``; shared-state is
-best-effort ``key=value`` tokens; payloads try :func:`ast.literal_eval`
-(the ``str(dict)`` form) then :func:`json.loads`. Unparseable rows are kept
-for audit but excluded from ``proposals`` so the Critic never verdicts a
-proposal it could not parse.
-"""
+"""Parse the Coordinator-style ``_compose_prompt`` text into structured fields."""
 
 from __future__ import annotations
 
@@ -73,11 +46,7 @@ class InboxRow:
     raw_payload: str
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the row as a plain JSON-serialisable dict.
-
-        Returns:
-            dict[str, Any]: All row fields keyed by name.
-        """
+        """Return the row as a plain JSON-serialisable dict."""
         return {
             "seq": self.seq,
             "msg_id": self.msg_id,
@@ -90,20 +59,7 @@ class InboxRow:
 
 @dataclass
 class ParsedPrompt:
-    """Structured view of a Coordinator-style prompt.
-
-    Attributes:
-        agent_name: Inferred from the inbox section title (e.g. ``critic``).
-        shared_state: ``key -> value`` tokens parsed from the shared state
-            section. Values are kept as strings; the caller may coerce.
-        inbox: All inbox rows, including non-proposal topics.
-        proposals: Subset of ``inbox`` whose ``topic == "proposal"`` and
-            whose payload parsed cleanly. Already converted to
-            :class:`Proposal` for downstream convenience.
-        kb_hints_text: Raw KB hints section (orchestration only); ``""`` if
-            absent.
-        extras: Any other ``=== Title ===`` section, mapped title -> raw text.
-    """
+    """Structured view of a Coordinator-style prompt."""
 
     agent_name: str | None = None
     shared_state: dict[str, str] = field(default_factory=dict)
@@ -113,12 +69,7 @@ class ParsedPrompt:
     extras: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the parsed prompt as a plain JSON-serialisable dict.
-
-        Returns:
-            dict[str, Any]: All fields, with nested rows/proposals converted
-            to dicts via their own ``to_dict``.
-        """
+        """Return the parsed prompt as a plain JSON-serialisable dict."""
         return {
             "agent_name": self.agent_name,
             "shared_state": dict(self.shared_state),
@@ -129,26 +80,12 @@ class ParsedPrompt:
         }
 
 
-# ---------------------------------------------------------------------------
 # Shared-state token parser
-# ---------------------------------------------------------------------------
 _TOKEN_RE = re.compile(r"(?P<key>[A-Za-z_][A-Za-z0-9_]*)=")
 
 
 def _parse_shared_state(text: str) -> dict[str, str]:
-    """Best-effort ``key=value`` token parser.
-
-    The Coordinator's ``shared_state.to_prompt_summary()`` emits whitespace-
-    separated tokens. We tolerate values that contain spaces or symbols by
-    consuming until the next ``key=`` token start. Quoted values and
-    multi-token values both round-trip back to a single string.
-
-    Args:
-        text (str): The raw shared-state section text (possibly multi-line).
-
-    Returns:
-        dict[str, str]: Parsed ``key -> value`` token pairs.
-    """
+    """Best-effort ``key=value`` token parser."""
     out: dict[str, str] = {}
     cleaned = " ".join(line.strip() for line in text.splitlines() if line.strip())
     if not cleaned:
@@ -166,21 +103,9 @@ def _parse_shared_state(text: str) -> dict[str, str]:
     return out
 
 
-# ---------------------------------------------------------------------------
 # Payload parser
-# ---------------------------------------------------------------------------
 def _try_parse_payload(raw: str) -> dict[str, Any] | None:
-    """Return a dict if ``raw`` parses as either ``ast.literal_eval`` or JSON.
-
-    Prefers the Python ``repr`` form (single quotes) and falls back to JSON.
-
-    Args:
-        raw (str): The raw payload text from an inbox row.
-
-    Returns:
-        dict[str, Any] | None: The parsed dict, or ``None`` when ``raw`` is
-        empty or does not parse to a dict.
-    """
+    """Return a dict if ``raw`` parses as either ``ast.literal_eval`` or JSON."""
     raw = raw.strip()
     if not raw:
         return None
@@ -201,22 +126,9 @@ def _try_parse_payload(raw: str) -> dict[str, Any] | None:
     return None
 
 
-# ---------------------------------------------------------------------------
 # Section iterator
-# ---------------------------------------------------------------------------
 def _iter_sections(text: str) -> Iterable[tuple[str | None, list[str]]]:
-    """Yield ``(title, lines)`` tuples in source order.
-
-    Lines before the first ``=== ===`` marker are emitted with title=``None``
-    so the caller can either ignore them or surface them as preamble.
-
-    Args:
-        text (str): The full prompt text to split into sections.
-
-    Yields:
-        tuple[str | None, list[str]]: A section title (``None`` for preamble)
-        paired with its raw lines.
-    """
+    """Yield ``(title, lines)`` tuples in source order."""
     current_title: str | None = None
     current_lines: list[str] = []
     for line in text.splitlines():
@@ -233,15 +145,7 @@ def _iter_sections(text: str) -> Iterable[tuple[str | None, list[str]]]:
 
 
 def _agent_from_inbox_title(title: str) -> str | None:
-    """Extract ``critic`` from titles like ``Inbox for critic (newest last)``.
-
-    Args:
-        title (str): A section title to inspect.
-
-    Returns:
-        str | None: The agent name, or ``None`` when ``title`` is not an
-        inbox section or yields no name.
-    """
+    """Extract ``critic`` from titles like ``Inbox for critic (newest last)``."""
     if not title.startswith(_INBOX_PREFIX):
         return None
     rest = title[len(_INBOX_PREFIX) :].strip()
@@ -254,19 +158,7 @@ def _agent_from_inbox_title(title: str) -> str | None:
 
 # ---------------------------------------------------------------------------
 def parse_inbox_prompt(text: str) -> ParsedPrompt:
-    """Parse a Coordinator-style prompt into :class:`ParsedPrompt`.
-
-    Args:
-        text (str): The raw Coordinator prompt text.
-
-    Returns:
-        ParsedPrompt: The structured view with shared state, inbox rows,
-        proposals, KB hints, and any unknown sections preserved in
-        ``extras``.
-
-    Raises:
-        InboxParseError: If the input is not a string.
-    """
+    """Parse a Coordinator-style prompt into :class:`ParsedPrompt`."""
     if not isinstance(text, str):
         raise InboxParseError(f"prompt must be str, got {type(text).__name__}")
     parsed = ParsedPrompt()
@@ -302,15 +194,7 @@ def parse_inbox_prompt(text: str) -> ParsedPrompt:
 
 
 def _parse_inbox_row(raw: str) -> InboxRow | None:
-    """Parse a single inbox line into an :class:`InboxRow`.
-
-    Args:
-        raw (str): One raw inbox line.
-
-    Returns:
-        InboxRow | None: The parsed row, or ``None`` when ``raw`` does not
-        match the expected inbox-row layout.
-    """
+    """Parse a single inbox line into an :class:`InboxRow`."""
     m = _INBOX_ROW_RE.match(raw)
     if not m:
         return None
@@ -327,17 +211,7 @@ def _parse_inbox_row(raw: str) -> InboxRow | None:
 
 
 def _proposal_from_row(row: InboxRow) -> Proposal:
-    """Build a :class:`Proposal` from a parsed proposal inbox row.
-
-    Pulls ``action_name`` and ``predicted_gain_pct`` out of the payload as
-    typed convenience fields.
-
-    Args:
-        row (InboxRow): A row whose ``topic == "proposal"``.
-
-    Returns:
-        Proposal: The structured proposal.
-    """
+    """Build a :class:`Proposal` from a parsed proposal inbox row."""
     payload = dict(row.payload or {})
     action_name = payload.get("action_name") if isinstance(payload.get("action_name"), str) else None
     gain_raw = payload.get("predicted_gain_pct")

@@ -15,9 +15,7 @@ from hyperloom.orchestrator.framework.build_actions import (
 )
 
 
-# ---------------------------------------------------------------------------
 # TargetedBuildAction round-trip
-# ---------------------------------------------------------------------------
 
 
 def test_targeted_build_action_round_trip():
@@ -70,9 +68,7 @@ def test_targeted_build_action_from_none():
     assert b.component == "aiter"
 
 
-# ---------------------------------------------------------------------------
 # BuildResult round-trip + failure-class
-# ---------------------------------------------------------------------------
 
 
 def test_build_result_ok_round_trip():
@@ -111,9 +107,7 @@ def test_build_result_from_state_normalizes_bad_failure_class():
     assert r.failure_class == "ok"
 
 
-# ---------------------------------------------------------------------------
 # build_novelty_key — repeat vs novel
-# ---------------------------------------------------------------------------
 
 
 def _action(**kw):
@@ -150,9 +144,7 @@ def test_novelty_key_novel_repo_and_capability_differ():
     assert build_novelty_key(a) != build_novelty_key(c)
 
 
-# ---------------------------------------------------------------------------
 # resolve_build_ref
-# ---------------------------------------------------------------------------
 
 from hyperloom.orchestrator.framework.build_actions import resolve_build_ref
 
@@ -201,14 +193,7 @@ def test_resolve_empty_candidate_skipped():
     assert resolve_build_ref("", "https://github.com/ROCm/aiter") == ("", "", "")
 
 
-# An issue is a discussion thread, not a branch. GitHub publishes
-# refs/pull/{n}/head for a PR but nothing checkoutable for an issue, so an
-# ``issue:{n}`` string reaching ``git worktree add`` verbatim aborts the build
-# with ``fatal: invalid reference``. Observed live: an enablement specialist
-# cited upstream vllm issue 41292 as the rationale for a from-source build and
-# the build died in ~2 minutes during workspace preparation. Resolution must
-# strip the issue number to an empty ref (falling back to tag autoselect) while
-# keeping the citation as provenance.
+# An issue is a discussion thread, not a branch.
 
 
 def test_resolve_bare_issue_ref_falls_back_to_autoselect():

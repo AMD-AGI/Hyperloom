@@ -1,9 +1,4 @@
-"""Shared ``runtime.cli`` subprocess bridge for the sibling-agent backends.
-
-Owns the command assembly and timeout / spawn / non-zero-rc → BackendError
-mapping shared by critic_agent and robustness_agent; callers keep only their own
-phase pre-validation and per-agent constants.
-"""
+"""Shared ``runtime.cli`` subprocess bridge for the sibling-agent backends."""
 
 from __future__ import annotations
 
@@ -18,12 +13,7 @@ from .base import BackendError
 
 @dataclass
 class RuntimeCall:
-    """One ``runtime.cli`` invocation, captured for tests + logging.
-
-    Shared by the sibling-agent backends (critic sets ``review_path``,
-    robustness leaves it unset), so ``phase`` is a plain ``str`` and
-    ``review_path`` is optional.
-    """
+    """One ``runtime.cli`` invocation, captured for tests + logging."""
 
     phase: str
     request_path: Path
@@ -50,10 +40,7 @@ def invoke_runtime_cli(
     extra_args: Sequence[str] = (),
     stderr_truncate: int = 500,
 ) -> None:
-    """Run ``python -m <module> <call.phase> --request ... --out ... <extra_args>``.
-
-    Raises BackendError if the subprocess times out, cannot start, or exits non-zero.
-    """
+    """Run ``python -m <module> <call.phase> --request ... --out ... <extra_args>``."""
     cmd = [
         sys.executable,
         "-m",

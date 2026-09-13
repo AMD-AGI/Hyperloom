@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The unset-USER_DATA_PATH default must suit the host it lands on.
-
-``/workspace`` is a container convention: the ROCm images ship it writable, and
-a bare-metal host off root has neither the directory nor permission to create
-it, so the installers' ``mkdir -p`` aborted under ``set -e``.
-
-Three copies of this resolver exist because the modules holding them are barred
-from importing one another -- ``tools/`` scripts run standalone on remote nodes
-and the ``fa`` CLI must not depend on inference_optimizer. Nothing but a test
-keeps them in step.
-"""
+"""The unset-USER_DATA_PATH default must suit the host it lands on."""
 
 from __future__ import annotations
 
@@ -49,12 +39,7 @@ def test_keeps_the_pod_local_path_when_workspace_is_writable(name, resolve, monk
 
 @pytest.mark.parametrize("name,resolve", _RESOLVERS, ids=[n for n, _ in _RESOLVERS])
 def test_a_creatable_workspace_is_still_used(name, resolve, monkeypatch):
-    """``/workspace`` absent but creatable must not divert the run.
-
-    ``os.access`` is False for a path that does not exist, so testing the target
-    itself sends root -- who could have created it, and whose earlier runs did --
-    to <cwd>/session, and its existing sessions appear to vanish.
-    """
+    """``/workspace`` absent but creatable must not divert the run."""
     monkeypatch.setattr(os.path, "exists", lambda p: str(p) == "/")
     monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/")
     monkeypatch.setattr(os, "access", lambda path, _mode: str(path) == "/")

@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Code-localization logic: closure gate + diff synthesis.
-
-Given a localization stack action (PR backport or vendored files), this module
-decides whether the change is a Python-only dependency closure safe to localize
-here, or a compiled / build-backend change that must defer to a targeted build.
-Diff fetch/synthesis flows through injectable shims so the pure closure/synthesis
-logic is CI-testable without network.
-
-Pure-Python: no subprocess, no filesystem writes, no network here.
-"""
+"""Code-localization logic: closure gate + diff synthesis."""
 
 from __future__ import annotations
 
@@ -20,8 +11,8 @@ from pathlib import PurePosixPath
 from typing import Callable
 
 
-# A closure that touches any of these is a compiled / build-backend change and
-# must defer to a targeted build, never localized+booted here.
+# A closure that touches any of these is a compiled / build-backend change and must defer to a targeted build, never
+# localized+booted here.
 _COMPILED_SUFFIXES: frozenset[str] = frozenset(
     {".cpp", ".cc", ".cxx", ".c", ".cu", ".cuh", ".hip", ".pyx", ".pxd", ".h", ".hpp"}
 )
@@ -40,14 +31,7 @@ EMPTY = "empty"
 
 @dataclass(frozen=True)
 class ClosureVerdict:
-    """Outcome of classifying a localization closure.
-
-    Attributes:
-        kind: ``python_only`` / ``needs_rung5`` / ``empty``.
-        reason: Human-readable justification.
-        compiled_paths: The compiled / build-backend paths that forced
-            ``needs_rung5`` (empty otherwise).
-    """
+    """Outcome of classifying a localization closure."""
 
     kind: str
     reason: str = ""
@@ -70,15 +54,7 @@ def _is_compiled_or_build(path: str) -> bool:
 
 
 def classify_closure(paths: list[str]) -> ClosureVerdict:
-    """Classify a set of touched paths as localizable or targeted-build-deferred.
-
-    Args:
-        paths: Repo-relative paths the closure touches.
-
-    Returns:
-        ClosureVerdict: ``empty`` when no paths; ``needs_rung5`` when any path
-        is a compiled source / build-backend file; ``python_only`` otherwise.
-    """
+    """Classify a set of touched paths as localizable or targeted-build-deferred."""
     clean = [str(p).strip() for p in (paths or []) if str(p).strip()]
     if not clean:
         return ClosureVerdict(kind=EMPTY, reason="no files in closure")
@@ -108,16 +84,7 @@ def parse_diff_paths(diff_text: str) -> list[str]:
 
 
 def synthesize_vendor_diff(files: list[tuple[str, str, str]]) -> str:
-    """Build a ``git apply``-ready unified diff from raw file contents.
-
-    Args:
-        files: ``(rel_path, old_text, new_text)`` triples. An empty ``old_text``
-            with non-empty ``new_text`` is an add; a non-empty ``old_text`` with
-            empty ``new_text`` is a delete.
-
-    Returns:
-        str: Concatenated unified-diff text (empty when nothing usable).
-    """
+    """Build a ``git apply``-ready unified diff from raw file contents."""
     out: list[str] = []
     for rel, old, new in files or []:
         rel_s = str(rel or "").strip().lstrip("/")
@@ -160,24 +127,7 @@ def build_localization_diff(
     fetch_raw_file: Callable[[str, str, str], str],
     framework_root: object = None,
 ) -> tuple[str, list[str], ClosureVerdict]:
-    """Fetch/synthesize the localization diff and classify its closure.
-
-    Dispatches on ``action.kind``: ``pr_backport`` fetches the merged PR's diff;
-    ``vendor_files`` fetches each ``localized_paths`` entry at ``action.ref`` and
-    synthesizes an add/replace diff. Fetch flows through injectable shims.
-
-    Args:
-        action: An ``EnablementStackAction`` (duck-typed: ``kind`` / ``repo_url``
-            / ``ref`` / ``pr_number`` / ``localized_paths``).
-        fetch_pr_patches: ``(repo_slug, pr_number) -> unified_diff`` shim.
-        fetch_raw_file: ``(repo_slug, ref, path) -> file_contents`` shim.
-        framework_root: Unused here (reserved for old-content diffs); kept for
-            call-site symmetry.
-
-    Returns:
-        tuple[str, list[str], ClosureVerdict]: ``(diff_text, touched_paths, verdict)``.
-        ``diff_text`` is ``""`` on fetch failure (verdict then ``empty``).
-    """
+    """Fetch/synthesize the localization diff and classify its closure."""
     kind = str(getattr(action, "kind", "") or "")
     repo_url = str(getattr(action, "repo_url", "") or "")
     slug = _repo_slug_safe(repo_url)

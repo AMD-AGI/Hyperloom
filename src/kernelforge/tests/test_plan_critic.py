@@ -333,12 +333,7 @@ async def test_critic_error_detail_is_single_line_and_bounded(tmp_path):
 
 
 def test_a_lane_not_worth_its_session_can_be_named_with_its_reason():
-    """The finding existed before the vocabulary did.
-
-    Six production reviews said outright that a specific lane was not worth its
-    Implementer session, and every one of those rounds ran every lane: a round
-    verdict of ACCEPT/REVISE/REPLACE has no way to say "two of these three".
-    """
+    """The finding existed before the vocabulary did."""
     ruling = parse_plan_critic_width_block(
         "VERDICT: REVISE\n\nThe division buys lane 1 twice.\n\n```json\n"
         + json.dumps(
@@ -368,11 +363,7 @@ def test_a_lane_not_worth_its_session_can_be_named_with_its_reason():
 
 
 def test_the_width_block_is_read_from_the_end_past_json_the_prose_quotes():
-    """A kernel review quotes JSON; the first object in it is not the ruling.
-
-    Taking the first complete object would hand the round an autotune config
-    and report the ruling the review actually gave as missing.
-    """
+    """A kernel review quotes JSON; the first object in it is not the ruling."""
     ruling = parse_plan_critic_width_block(
         "VERDICT: REVISE\n\n"
         'Lane 2 pins {"BLOCK_M": 128, "num_warps": 8}, which lane 1 autotunes.\n'
@@ -404,8 +395,7 @@ def test_narrowing_that_cannot_be_read_is_named_not_discarded(entry, problem):
     assert ruling.status == "answered"
     assert len(ruling.notes) == 1
     assert problem in ruling.notes[0]
-    # The note names the entry and stops there. What the round does about it is
-    # the round's answer to give, in `status` and in what it dropped.
+    # The note names the entry and stops there.
     assert "kept" not in ruling.notes[0]
     assert ruling.unread is True
 
@@ -422,9 +412,7 @@ def test_a_lane_is_dropped_once_or_the_second_entry_is_reported():
     assert [drop.reason for drop in ruling.drops] == ["it duplicates lane 1"]
     assert len(ruling.notes) == 1
     assert ruling.notes[0].startswith("lane drop repeats a lane")
-    # Nothing was lost with it: the entry before it dropped that lane. A note
-    # that had concluded "so its lane is kept" would have said the opposite of
-    # the drop standing beside it.
+    # Nothing was lost with it: the entry before it dropped that lane.
     assert ruling.unread is False
 
 
@@ -474,9 +462,7 @@ def test_a_block_that_was_never_readable_is_told_apart_from_one_that_was(
     assert ruling.drops == ()
     assert ruling.status == status
     assert problem in ruling.notes[0]
-    # The note says what was seen in the review. It does not say what the round
-    # will do, because at this point one repair pass has yet to run and the
-    # round has yet to rule -- the note is composed before either has answered.
+    # The note says what was seen in the review.
     assert "keeps every lane" not in ruling.notes[0]
     assert ruling.unread is True
 
@@ -556,8 +542,8 @@ async def test_the_reviews_narrowing_reaches_the_round(tmp_path):
     assert [drop.lane_id for drop in outcome.lane_drops] == [2]
     assert len(outcome.narrowing_notes) == 1
     assert outcome.narrowing_notes[0].startswith("lane drop states no reason")
-    # A block that was read is never repaired: the review answered, and the one
-    # entry it got wrong is its decision to have gotten wrong.
+    # A block that was read is never repaired: the review answered, and the one entry it got wrong is its decision to
+    # have gotten wrong.
     assert len(backend.specs) == 1
     persisted = outcome.to_dict()
     assert persisted["lane_drops"] == [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]
@@ -567,13 +553,7 @@ async def test_the_reviews_narrowing_reaches_the_round(tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_drop_stated_only_in_prose_is_recovered_by_one_repair(tmp_path):
-    """The case the DROP LANE regex lost outright.
-
-    A review that writes its ruling as a sentence matched neither the directive
-    pattern nor the pattern that reported unreadable directives, so it produced
-    no drop and no note. With the block required, the same review is one
-    repair pass away from the decision it made in its prose.
-    """
+    """The case the DROP LANE regex lost outright."""
     backend = _QueuedBackend(
         AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(
@@ -618,13 +598,7 @@ async def test_a_recovered_width_ruling_is_not_logged_as_a_failure(
     tmp_path,
     caplog,
 ):
-    """Every note was logged as a failure, including on the path that worked.
-
-    Block absent, repair pass restated it, one lane to drop -- and the review
-    warned twice that the narrowing had not been applied, which was decided
-    nowhere and was about to be contradicted by the round. A warning an
-    operator learns is wrong costs more than the line it occupies.
-    """
+    """Every note was logged as a failure, including on the path that worked."""
     backend = _QueuedBackend(
         AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(
@@ -664,13 +638,7 @@ async def test_a_width_ruling_nothing_recovered_is_still_a_warning(
     tmp_path,
     caplog,
 ):
-    """The reading that genuinely lost a decision has to stay readable.
-
-    The review stated a drop in prose only and the repair pass came back with
-    nothing either, so the round is about to run a lane the review said was not
-    worth its session and nobody can say which. That is the case the warning
-    exists for.
-    """
+    """The reading that genuinely lost a decision has to stay readable."""
     backend = _QueuedBackend(
         AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(text="I could not tell what the review wanted."),
@@ -700,12 +668,7 @@ async def test_an_entry_the_block_wasted_is_warned_about_as_that(
     tmp_path,
     caplog,
 ):
-    """A block that was read can still lose a decision, and says which.
-
-    The review named two lanes and gave the second no reason, so that drop is
-    gone while the first is applied. The warning names the entry rather than
-    reporting the round as unnarrowed, which the drop beside it disproves.
-    """
+    """A block that was read can still lose a decision, and says which."""
     backend = _Backend(
         AgentRunResult(
             text=(
@@ -741,13 +704,7 @@ async def test_an_entry_the_block_wasted_is_warned_about_as_that(
 async def test_a_drop_stated_only_in_prose_that_repair_misses_is_still_named(
     tmp_path,
 ):
-    """The one outcome that must never be silence.
-
-    Repair is the only thing standing between a prose-only ruling and a round
-    that runs the lane anyway. When it fails, the round runs the lane -- and
-    says, in the diagnostics it persists, that it was asked something it could
-    not read.
-    """
+    """The one outcome that must never be silence."""
     backend = _QueuedBackend(
         AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         RuntimeError("provider crashed"),
@@ -840,12 +797,7 @@ def test_a_one_plan_review_keeps_the_budget_it_always_had():
 
 
 def test_a_round_of_several_plans_is_several_times_the_reading():
-    """A budget sized for one plan fails a round open, losing its verdict.
-
-    Measured on a real two-lane round: eleven minutes of review against a
-    ten-minute budget, so the verdict -- which had found one lane not worth its
-    session -- never reached the round.
-    """
+    """A budget sized for one plan fails a round open, losing its verdict."""
     critic = PlanCriticAgent(
         backend=_Backend(AgentRunResult(text="")),
         timeout_sec=600,

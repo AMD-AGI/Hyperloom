@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR KB page parsing + diff synthesis (consumer side).
-
-Reads the markdown pages the ``Primus-Claw/pr-kb`` worker writes to gbrain
-(``pr-kb-meta/ pr-kb-files/ pr-kb-index/``) and adapts them to the shapes
-framework-agent already consumes:
-
-* :func:`parse_index_prs` — candidate discovery inputs (P2).
-
-All helpers are defensive: missing keys / unparseable blocks yield empty
-results so callers fall back to PR Monitor / GitHub.
-"""
+"""PR KB page parsing + diff synthesis (consumer side)."""
 
 from __future__ import annotations
 
@@ -25,11 +15,7 @@ log = logging.getLogger(__name__)
 
 
 def _page_markdown(page: dict[str, Any]) -> str:
-    """Extract page body markdown across known gbrain key spellings.
-
-    ``compiled_truth`` is the field ``get_page`` returns on this gbrain
-    deployment; the rest are defensive fallbacks.
-    """
+    """Extract page body markdown across known gbrain key spellings."""
     for key in ("compiled_truth", "markdown", "content", "body", "text", "page_content"):
         val = page.get(key)
         if isinstance(val, str) and val.strip():
@@ -57,17 +43,7 @@ def _extract_fenced_json(markdown: str, marker: str) -> Any:
 
 
 def synthesize_unified_diff(patches: list[dict[str, Any]]) -> str:
-    """Build a git-style unified diff from PR KB ``Patches JSON`` entries.
-
-    Skips entries flagged ``patch_omitted`` (binary / too large). Returns an
-    empty string when nothing usable remains.
-
-    Args:
-        patches: The parsed ``## Patches JSON`` list.
-
-    Returns:
-        Concatenated unified-diff text (empty when no usable patch).
-    """
+    """Build a git-style unified diff from PR KB ``Patches JSON`` entries."""
     out: list[str] = []
     for entry in patches:
         if not isinstance(entry, dict) or entry.get("patch_omitted"):

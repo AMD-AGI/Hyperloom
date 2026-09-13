@@ -1,19 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Overlay loadability and overlay identity for the GEAK revalidation.
-
-``canonical_fingerprint`` covers ``(args, envs)`` only, so the 2b rebench needs
-its own evidence that an authored kernel was installed and that the installed
-kernel is the one that was dispatched. Two traps found on
-``/shared_nfs/hyperloom-claw`` are guarded here:
-
-* GEAK emits a *config-only* overlay -- ``{"modules": [], "rebinds": []}`` plus
-  a note -- which imports cleanly and installs nothing. Counting it as loadable
-  labels a pure config win as a kernel win.
-* ``_overlay_manifest.json`` names the bind *target*, not the kernel body.
-  Three unrelated sessions in the campaign share one manifest digest because
-  all three patch ``sglang.kernels.ops.attention.decode_attention``.
-"""
+"""Overlay loadability and overlay identity for the GEAK revalidation."""
 
 from __future__ import annotations
 

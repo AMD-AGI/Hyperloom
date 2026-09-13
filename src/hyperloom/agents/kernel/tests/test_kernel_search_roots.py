@@ -5,22 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Guards on the framework roots the grep tier searches for kernel source.
-
-A root list pinned to one container's layout (``/sgl-workspace/...`` and a
-python3.10 venv) fails silently anywhere else: on a host that installs the
-frameworks under ``dist-packages`` or a different Python minor, every root is
-absent, so the grep tier searches nothing, no kernel resolves, and the
-validation gate rejects every path outside those absent roots. The run still
-succeeds -- it reports zero routable kernels, which reads exactly like a trace
-with nothing worth optimizing, and kernel-opt sits idle with no work to
-dispatch.
-
-These tests pin the properties that keep that failure mode out: roots are
-discovered at runtime, non-existent ones never survive, a host with nothing
-installed says so instead of looking healthy, and the per-run cache can be
-dropped so a long-lived process is not stuck with what it saw at import.
-"""
+"""Guards on the framework roots the grep tier searches for kernel source."""
 
 from __future__ import annotations
 
@@ -102,13 +87,7 @@ class TestDiscoverKernelSearchRoots:
         assert tl.kernel_search_roots() == (str(checkout),)
 
     def test_an_empty_central_answer_still_reaches_local_discovery(self, monkeypatch, tmp_path):
-        """ "The resolver imported" is not "the resolver found something".
-
-        The branch used to be an either/or, so a resolver that returned nothing
-        ended the search: the run greps no directory at all and reports every hot
-        kernel as non-routable, which is the failure this module exists to keep
-        out -- reached through the resolver rather than around it.
-        """
+        """\"The resolver imported\" is not \"the resolver found something\"."""
         located = tmp_path / "sgl_kernel"
         located.mkdir()
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: ())
@@ -123,11 +102,7 @@ class TestDiscoverKernelSearchRoots:
         assert tl.kernel_search_roots() == (str(located),)
 
     def test_a_central_answer_is_not_widened_by_the_fallback(self, monkeypatch, tmp_path):
-        """The resolver stays authoritative whenever it has an answer.
-
-        Otherwise this would quietly re-add the roots the centralised resolver
-        deliberately excludes, and the two would disagree again.
-        """
+        """The resolver stays authoritative whenever it has an answer."""
         central = tmp_path / "vllm"
         central.mkdir()
         local = tmp_path / "aiter"
@@ -153,12 +128,7 @@ class TestDiscoverKernelSearchRoots:
 
 
 class TestRefreshKernelSearchRoots:
-    """A framework installed after import must still become searchable.
-
-    The orchestrator imports this module and outlives any single analysis run,
-    so a value fixed at import time would keep a run blind to a framework the
-    FRAMEWORK phase installed since.
-    """
+    """A framework installed after import must still become searchable."""
 
     def test_a_root_that_appears_later_is_picked_up(self, monkeypatch, tmp_path):
         appears = tmp_path / "aiter"
@@ -174,15 +144,7 @@ class TestRefreshKernelSearchRoots:
         assert tl.kernel_search_roots() == (str(appears),)
 
     def test_everything_derived_from_the_roots_is_dropped_with_them(self, monkeypatch, tmp_path):
-        """A stale derived cache reproduces the bug one step further on.
-
-        ``_harness_search_bases`` is cached for the same run and computed from
-        these roots, so refreshing one alone leaves the second analysis in a
-        long-lived orchestrator grepping the newly installed framework while
-        resolving harnesses against bases discovered when it was absent --
-        ``benchmark_files`` comes back empty and the invocation spec reaches the
-        backend with no benchmark to run.
-        """
+        """A stale derived cache reproduces the bug one step further on."""
         checkout = tmp_path / "sgl-workspace" / "aiter"
         monkeypatch.setattr(tl, "_resolve_kernel_search_roots", lambda: (str(checkout),))
         tl.kernel_search_roots.cache_clear()
@@ -200,15 +162,7 @@ class TestRefreshKernelSearchRoots:
 
 
 class TestThePackageListHasOneOwner:
-    """Two lists of kernel-source packages is one list that goes stale.
-
-    This tool named ``sgl_kernel`` while the resolver it defers to did not, and
-    because the resolver imports successfully in every non-standalone run, the
-    local list was never consulted: a standalone ``sgl_kernel`` wheel appeared
-    in the "looked for" message and was never actually searched. That is the
-    failure this whole module exists to prevent, reached through a second
-    definition of the same fact.
-    """
+    """Two lists of kernel-source packages is one list that goes stale."""
 
     def test_the_tool_defers_to_the_orchestrator_list(self):
         from hyperloom.orchestrator.framework.paths import FRAMEWORK_SOURCE_PACKAGES

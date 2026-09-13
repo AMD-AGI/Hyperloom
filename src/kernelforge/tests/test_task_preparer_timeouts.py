@@ -1,15 +1,4 @@
-"""Regression guards for the forge preflight/prepare timeout knobs.
-
-Two things are locked in here:
-
-1. ``_deadline_timeout`` clamps a per-subprocess timeout to the shared absolute
-   wall-clock deadline (never below 1s, never above the phase default).
-2. The raised default timeouts stay raised. They were bumped well above the old
-   120-300s values because a cold CK JIT compile on gfx950 runs for many minutes
-   and the low defaults made every first-run preflight time out. A future edit
-   that accidentally lowers them back would silently reintroduce that failure,
-   so assert the committed defaults when the env override is absent.
-"""
+"""Regression guards for the forge preflight/prepare timeout knobs."""
 
 from __future__ import annotations
 
@@ -18,9 +7,7 @@ import os
 from kernelforge.loop import task_preparer
 
 
-# ---------------------------------------------------------------------------
 # _deadline_timeout clamp
-# ---------------------------------------------------------------------------
 
 
 def test_deadline_zero_returns_default():
@@ -46,9 +33,7 @@ def test_deadline_past_floors_at_one_second(monkeypatch):
     assert task_preparer._deadline_timeout(500.0, 900) == 1.0
 
 
-# ---------------------------------------------------------------------------
 # Raised defaults stay raised (only when not env-overridden)
-# ---------------------------------------------------------------------------
 
 
 def test_prepare_defaults_stay_raised():

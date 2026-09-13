@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared data structures + registry for ``session_breakdown`` section renderers.
-
-A renderer is a deterministic function turning one breakdown section into
-a :class:`RenderedSection`. Numbers stay deterministic; the LLM only
-narrates ``key_facts``.
-"""
+"""Shared data structures + registry for ``session_breakdown`` section renderers."""
 
 from __future__ import annotations
 
@@ -23,33 +18,169 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "as_dict",
+    "close_of",
+    "critic_iterations_of",
+    "dict_rows",
+    "events_of",
+    "outcome_of",
     "register_renderer",
     "render_section",
+    "robustness_turns_of",
+    "session_of",
+    "stop_reason_of",
+    "task_config_of",
+    "timeline_of",
+    "validation_of",
 ]
 
 
 def as_dict(value: Any) -> dict[str, Any]:
-    """Narrow a breakdown section to a mapping, since no producer is schema-checked.
+    """Narrow a breakdown section to a mapping, since no producer is schema-checked."""
+    return value if isinstance(value, dict) else {}
+
+
+def dict_rows(value: Any) -> list[dict[str, Any]]:
+    """Narrow a recorded row array to the mappings in it.
 
     Args:
-        value: A breakdown section value.
+        value: A row array as read off an event's ``ext``.
 
     Returns:
-        ``value`` when it is a dict, otherwise ``{}``.
+        The entries that are dicts, in order; ``[]`` when the value is not a
+        list.
     """
-    return value if isinstance(value, dict) else {}
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def timeline_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The ordered event timeline.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``timeline``, oldest event first, or ``[]`` when absent.
+    """
+    return dict_rows(as_dict(breakdown).get("timeline"))
+
+
+def events_of(breakdown: Any, event_type: str) -> list[dict[str, Any]]:
+    """Every timeline event of one type, in timeline order.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        event_type: The ``type`` to select on.
+
+    Returns:
+        The matching events, oldest first.
+    """
+    return [event for event in timeline_of(breakdown) if str(event.get("type") or "") == event_type]
+
+
+def session_of(breakdown: Any) -> dict[str, Any]:
+    """The session identity and lifecycle block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.session``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("session") or {}
+
+
+def task_config_of(breakdown: Any) -> dict[str, Any]:
+    """The launch-time workload and model configuration block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.task_config``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("task_config") or {}
+
+
+def outcome_of(breakdown: Any) -> dict[str, Any]:
+    """The session result block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``outcome``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("outcome"))
+
+
+def validation_of(breakdown: Any) -> dict[str, Any]:
+    """The stack ledger's reconciliation of its parts against the whole.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``outcome.validation``, or ``{}`` when absent.
+    """
+    return as_dict(outcome_of(breakdown).get("validation"))
+
+
+def close_of(breakdown: Any) -> dict[str, Any]:
+    """What the session settled at close.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``close``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("close"))
+
+
+def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The critic agent's own review passes, in the order it ran them.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``critic.iterations``, or ``[]`` when the critic never ran.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("critic")).get("iterations"))
+
+
+def robustness_turns_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The robustness agent's turns, in turn order.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``robustness.turns``, or ``[]`` when the agent never took a turn.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("robustness")).get("turns"))
+
+
+def stop_reason_of(breakdown: Any) -> str:
+    """Why the run ended.
+
+    The reason is an outcome of the session rather than part of its identity,
+    so it lives on ``outcome`` and not alongside the session ids.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        The stop reason, or ``""`` when the run recorded none.
+    """
+    return str(as_dict(as_dict(breakdown).get("outcome")).get("stop_reason") or "")
 
 
 @dataclass(frozen=True)
 class Decision:
-    """One structured verdict surfaced by a renderer.
-
-    Fixed-kind renderers emit ``kept`` / ``reverted`` / ``rejected`` /
-    ``attempted`` / ``not_attempted``. ``capability_summary`` additionally
-    forwards the raw per-capability status verbatim as ``kind``, so values
-    such as ``tried`` / ``completed`` / ``stale_validated`` also reach
-    consumers; ``reporters/llm_prompt.py``'s allowlist does not cover them.
-    """
+    """One structured verdict surfaced by a renderer."""
 
     kind: str
     subject: str
@@ -59,14 +190,7 @@ class Decision:
 
 @dataclass(frozen=True)
 class RenderedSection:
-    """A single section's render output.
-
-    ``markdown_block`` is preserved verbatim; the LLM only sees
-    ``key_facts`` / ``decisions`` / ``warnings``. ``skipped`` drops the section
-    from the report body entirely -- its ``warnings`` and ``key_facts`` still
-    reach the reader, through ``GlobalFacts.data_quality_flags``, so that a
-    section nobody ran cannot be mistaken for a section that ran clean.
-    """
+    """A single section's render output."""
 
     section_id: str
     title: str
@@ -85,25 +209,10 @@ REGISTRY: list[tuple[str, RendererFn]] = []
 
 
 def register_renderer(section_id: str) -> Callable[[RendererFn], RendererFn]:
-    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry).
-
-    Args:
-        section_id: Identifier under which the decorated renderer is stored.
-
-    Returns:
-        A decorator that registers the renderer function and returns it
-        unchanged.
-    """
+    """Decorator: register ``fn`` under ``section_id`` (re-registration replaces the prior entry)."""
 
     def _wrap(fn: RendererFn) -> RendererFn:
-        """Register ``fn`` under ``section_id`` and return it unchanged.
-
-        Args:
-            fn (RendererFn): The renderer function being decorated.
-
-        Returns:
-            RendererFn: The same function, after registration.
-        """
+        """Register ``fn`` under ``section_id`` and return it unchanged."""
         for i, (sid, _) in enumerate(REGISTRY):
             if sid == section_id:
                 REGISTRY[i] = (section_id, fn)
@@ -119,19 +228,7 @@ def render_section(
     fn: RendererFn,
     breakdown: dict[str, Any],
 ) -> RenderedSection:
-    """Run one renderer so a failing section costs itself, not the report.
-
-    The failure is reported as a data-quality warning, which the compose
-    layer renders in the section body and the executive summary.
-
-    Args:
-        section_id: Registry id of the renderer, used for the fallback title.
-        fn: The renderer to invoke.
-        breakdown: The parsed ``session_breakdown.json`` dict.
-
-    Returns:
-        The renderer's section, or a placeholder naming the failure.
-    """
+    """Run one renderer so a failing section costs itself, not the report."""
     try:
         return fn(breakdown)
     except Exception as exc:  # noqa: BLE001 — one bad section must not lose the report
@@ -145,16 +242,7 @@ def render_section(
 
 # Small markdown helpers.
 def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
-    """Render a GitHub-flavored markdown table; empty rows yield ``""``.
-
-    Args:
-        headers (list[str]): Column header labels.
-        rows (Iterable[list[Any]]): Row values; each inner list is rendered as
-            one table row via :func:`_md_cell`.
-
-    Returns:
-        str: The markdown table text, or an empty string when there are no rows.
-    """
+    """Render a GitHub-flavored markdown table; empty rows yield ``\"\"``."""
     rows = list(rows)
     if not rows:
         return ""
@@ -165,17 +253,7 @@ def md_table(headers: list[str], rows: Iterable[list[Any]]) -> str:
 
 
 def md_kv_list(items: list[tuple[str, Any]]) -> str:
-    """Render ``[(k, v), ...]`` as a bullet list, skipping ``None`` /
-    empty-string values.
-
-    Args:
-        items (list[tuple[str, Any]]): Key/value pairs to render as bold-keyed
-            bullet points; entries whose value is ``None``, ``""`` or ``[]``
-            are omitted.
-
-    Returns:
-        str: The newline-joined markdown bullet list.
-    """
+    """Render ``[(k, v), ...]`` as a bullet list, skipping ``None`` / empty-string values."""
     out = []
     for k, v in items:
         if v in (None, "", []):
@@ -185,18 +263,7 @@ def md_kv_list(items: list[tuple[str, Any]]) -> str:
 
 
 def _md_cell(v: Any) -> str:
-    """Format a single value for display inside a markdown table cell.
-
-    Handles ``None`` (em dash), booleans (check/cross marks), floats
-    (compact numeric formatting, NaN as em dash), sequences (comma-joined)
-    and escapes pipe/newline characters in strings.
-
-    Args:
-        v (Any): The value to format.
-
-    Returns:
-        str: A markdown-safe cell string.
-    """
+    """Format a single value for display inside a markdown table cell."""
     if v is None:
         return "—"
     if isinstance(v, bool):
@@ -212,16 +279,7 @@ def _md_cell(v: Any) -> str:
 
 
 def fmt_pct(v: Any, *, plus: bool = False) -> str:
-    """Format a numeric value as a percentage string.
-
-    Args:
-        v (Any): The value to format; non-numeric or ``None`` yields an em dash.
-        plus (bool): If ``True``, prefix a ``+`` for strictly positive values.
-
-    Returns:
-        str: A string like ``"+12.34%"`` / ``"12.34%"``, or ``"—"`` when the
-            value is missing or non-numeric.
-    """
+    """Format a numeric value as a percentage string."""
     if v is None:
         return "—"
     try:

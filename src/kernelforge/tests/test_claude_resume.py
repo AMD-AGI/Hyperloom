@@ -1,10 +1,4 @@
-"""Claude backend session continuation + the read-only lesson summarizer.
-
-GPU-free and SDK-free: the SDK's ``query`` and options type are replaced with
-fakes, so these tests pin the contract the lesson summarizer depends on —
-capturing a session id, passing ``resume`` through to the SDK, and resuming
-under a policy that differs from the session being continued.
-"""
+"""Claude backend session continuation + the read-only lesson summarizer."""
 
 from __future__ import annotations
 
@@ -184,13 +178,12 @@ def test_run_does_not_pass_a_resume_option():
     assert "resume" not in captured["options"].kwargs
 
 
-def test_opus_5_uses_max_effort_adaptive_thinking_and_fallback():
+def test_opus_5_uses_the_runtime_effort_and_adaptive_thinking():
     captured: dict = {}
     backend = _backend(
         [_result_message(session_id="s-opus-48")],
         captured,
     )
-    backend.runtime.fallback_model = "claude-opus-4-8"
     policy = AgentToolPolicy(
         read=True,
         write=True,
@@ -211,8 +204,10 @@ def test_opus_5_uses_max_effort_adaptive_thinking_and_fallback():
 
     kwargs = captured["options"].kwargs
     assert kwargs["model"] == "claude-opus-5"
-    assert kwargs["fallback_model"] == "claude-opus-4-8"
-    assert kwargs["effort"] == "max"
+    # The spec asked for ``max``; the runtime says ``high`` and the runtime wins.
+    # An effort written at a call site is this repository's opinion, and the one
+    # on the runtime is the operator's decision about the run in front of them.
+    assert kwargs["effort"] == "high"
     assert kwargs["thinking"] == {"type": "adaptive"}
 
 
@@ -357,16 +352,18 @@ def test_summarizer_resumes_read_only_and_without_hooks():
     assert session_id == "sess-1"
     assert feedback == "record your lesson"
     assert usage == "usage-obj"
-    # The in-session gate's Stop hook would otherwise block the summarizing turn
-    # and push the agent back into editing the kernel.
+    # The in-session gate's Stop hook would otherwise block the summarizing turn and push the agent back into editing
+    # the kernel.
     assert spec.hooks is None
     assert spec.writable is False
-    assert spec.reasoning_effort == "high"
+    # The summarizer names no effort of its own any more: ``resolved()`` fills
+    # it from the runtime, so the summarising turn runs at the campaign effort.
+    assert spec.reasoning_effort == ""
     assert spec.tool_policy.write is False
     assert spec.tool_policy.shell is False
     assert spec.protected_globs == ["*"]
-    # Providers that guard the worktree before resuming must not refuse to start
-    # over the pending candidate diff or leftover build artifacts.
+    # Providers that guard the worktree before resuming must not refuse to start over the pending candidate diff or
+    # leftover build artifacts.
     assert spec.allow_dirty_targets is True
     assert spec.allow_untracked is True
     assert spec.read_only_resume is True

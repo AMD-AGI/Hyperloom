@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The record type comes from the shape's dtype, not from the checkpoint precision.
-
-``ctx.precision`` describes how the WEIGHTS are stored; it says nothing about
-what the dense GEMM runs in. On the fleet's ``Qwen3.8-2.4T-A95B-Quark-MXFP4``
-every one of the 21056 dense aiter lookups in a real serving log is
-``dtype='torch.bfloat16'`` while ``ctx.precision`` is ``mxfp4``. Keying the
-TunableOp record type off the precision alone found nothing and threw the whole
-demand file away, then reported it as ``input_missing`` -- which reads as "the
-upstream never sent data" when the data was there and understood.
-"""
+"""The record type comes from the shape's dtype, not from the checkpoint precision."""
 
 from __future__ import annotations
 
@@ -106,8 +97,7 @@ class TestTheShapeDtypeDecidesTheRecordType:
         assert lines == [f"{FP16},tn_1536_16_7168_ld_7168_7168_1536"]
 
     def test_the_shape_dtype_wins_over_the_checkpoint_precision(self, tmp_path):
-        # Not merely a fallback: where the two disagree, only the logged dtype
-        # describes the GEMM that actually ran.
+        # Not merely a fallback: where the two disagree, only the logged dtype describes the GEMM that actually ran.
         lines = _records(tmp_path, [_key(16, 1536, 7168, "torch.bfloat16")], precision="fp16")
         assert lines == [f"{BF16},tn_1536_16_7168_ld_7168_7168_1536"]
 
@@ -127,8 +117,7 @@ class TestTheShapeDtypeDecidesTheRecordType:
 
 class TestUnsupportedDtypesAreSkippedNotGuessed:
     def test_an_unrecognised_dtype_is_dropped_rather_than_coerced(self, tmp_path):
-        # TunableOp keys on the record type. Writing an fp8 shape under a bf16
-        # record type would tune something the runtime never looks up.
+        # TunableOp keys on the record type.
         lines = _records(
             tmp_path,
             [
@@ -163,11 +152,7 @@ class TestTheStatusSaysWhatActuallyHappened:
 
 class TestTheBudgetIsAppliedAfterTheDtypeFilter:
     def test_bf16_shapes_below_the_first_64_are_not_starved_out(self, tmp_path):
-        # Demand is ranked, and the dtype filter drops what this tuner has no
-        # record type for. Fetching exactly the budget and filtering afterwards
-        # let a run whose top 64 shapes are all fp8 come out empty while bf16
-        # shapes sat just below the cut -- and then report it as "skipped, no
-        # record type", which is true of the sample and false of the demand.
+        # Demand is ranked, and the dtype filter drops what this tuner has no record type for.
         keys = [_key(m, 512, 4096, "torch.float8_e4m3fn") for m in range(1, 65)]
         keys += [_key(m, 512, 4096, "torch.bfloat16") for m in range(100, 104)]
         lines = _records(tmp_path, keys, precision="fp8")

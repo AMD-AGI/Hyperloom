@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import io as _common_io
+from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
@@ -41,6 +42,7 @@ from .domains import (
     normalize_dispatch_tags,
 )
 from .subprocess_ import (
+    UNBOUNDED_REAP_CAP_SEC,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
@@ -58,6 +60,26 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+
+def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
+    """Read the dispatch deadline off a task context.
+
+    Args:
+        ctx: The specialist task context carrying dispatcher-supplied extras.
+
+    Returns:
+        Deadline | None: The dispatch deadline; ``None`` is the only spelling
+        of unbounded. A duration is never coerced into one, since re-anchoring
+        it here would move the bound.
+
+    Raises:
+        TypeError: When ``specialist_deadline`` is neither a Deadline nor None.
+    """
+    value = ctx.extra.get("specialist_deadline")
+    if value is None or isinstance(value, Deadline):
+        return value
+    raise TypeError(f"specialist_deadline must be a Deadline or None, got {type(value).__name__}")
 
 
 def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
@@ -145,7 +167,7 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 
 
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
-    """Return the allowlisted source trees other than ``base``.
+    """Return the configured source trees other than ``base``.
 
     Grounding falls back to these when the worktree base does not hold a
     patch's targets, which is the normal case for a specialist that patches a
@@ -162,7 +184,7 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
         base: The checkout the specialist worktree branched off, if any.
 
     Returns:
-        The remaining roots that exist, in allowlist order.
+        The remaining roots that exist, in discovery order.
     """
     base_resolved = base.resolve() if base else None
     out: list[Path] = []
@@ -391,7 +413,7 @@ def build_empty_specialist_done(
 ) -> dict[str, Any]:
     """Return the canonical empty ``specialist_done`` payload.
 
-    Shape: ``empty=true``, ``proposal_set=[]``, non-empty summary.
+    Shape: ``proposal_set=[]`` with a non-empty summary and reason.
 
     Args:
         gap_canonical_id: Canonical id of the gap the specialist addressed.
@@ -406,7 +428,6 @@ def build_empty_specialist_done(
         "gap_canonical_id": gap_canonical_id,
         "domain": domain,
         "proposal_set": [],
-        "empty": True,
         "summary": (reason or "specialist exited empty")[:480],
         "reason": reason or "specialist exited empty",
         "confidence": float(max(0.0, min(1.0, confidence))),
@@ -566,7 +587,7 @@ class SpecialistRunner:
             notes.append(f"worktree_setup_failed:{worktree_err}")
         workspace_for_prompt = worktree or workspace
 
-        allocated_gpu_ids = tuple(int(g) for g in ((ctx.extra or {}).get("gpu_ids") or []))
+        allocated_gpu_ids = tuple(int(g) for g in (ctx.extra.get("gpu_ids") or []))
 
         if prompt_inputs is None:
             prompt_inputs = SpecialistPromptInputs(
@@ -587,7 +608,9 @@ class SpecialistRunner:
                 warm_start_lessons=list(params.get("warm_start_lessons") or []),
                 pr_monitor_available=bool(params.get("pr_monitor_available", True)),
                 framework=str(params.get("framework") or ""),
+                session_framework_tree=str(params.get("session_framework_tree") or ""),
                 framework_source_roots=tuple(params.get("framework_source_roots") or ()),
+                worktree_base=str(worktree_base or ""),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
@@ -615,6 +638,10 @@ class SpecialistRunner:
                 isl=int(params.get("isl") or 0),
                 osl=int(params.get("osl") or 0),
                 max_model_len=int(params.get("max_model_len") or 0),
+                # benchmark_mode selects the AgentX prompt blocks; the corpus
+                # shape supplies their numbers.
+                benchmark_mode=str(params.get("benchmark_mode") or ""),
+                agentx_corpus_shape=dict(params.get("agentx_corpus_shape") or {}),
                 # Runtime fingerprint to flag version-mismatched lessons.
                 framework_version=str(params.get("framework_version") or ""),
                 workspace_path=(str(workspace_for_prompt) if workspace_for_prompt else ""),
@@ -626,8 +653,11 @@ class SpecialistRunner:
                 task_description=task_description,
                 # Coordinator-injected note when this is a bounded auto-retry.
                 auto_retry_reason=str(params.get("_auto_retry_reason") or ""),
-                # WS1 wall-clock budget so the specialist can self-throttle.
-                wall_budget_sec=float((ctx.extra or {}).get("wall_budget_sec") or 0.0),
+                # The same instant the reaper kills at, as a duration.
+                wall_budget_sec=seconds_until(
+                    _ctx_deadline(ctx),
+                    unbounded_cap=UNBOUNDED_REAP_CAP_SEC,
+                ),
                 started_at_iso=datetime.now(timezone.utc).isoformat(),
                 baseline_tput=float(params.get("baseline_tput") or 0.0),
                 current_tput=float(params.get("current_tput") or 0.0),
@@ -669,8 +699,7 @@ class SpecialistRunner:
         Returns ``(None, None)`` when unavailable.
         """
         try:
-            extra = getattr(ctx, "extra", None) or {}
-            ss = extra.get("shared_state")
+            ss = (ctx.extra if ctx is not None else {}).get("shared_state")
             if ss is None:
                 return None, None
             tick = ss.tick
@@ -1018,8 +1047,8 @@ class SpecialistRunner:
                 else:
                     tool_violations.append(intent.type.value)
 
-            # WS1 incremental checkpoint: rewrite the partial after every turn so
-            # a budget kill leaves the best-so-far result on disk.
+            # Rewrite the partial after every turn so a deadline kill leaves
+            # the best-so-far result on disk.
             if specialist_done_intent is not None:
                 self._write_specialist_done_partial(
                     workspace,
@@ -1108,11 +1137,8 @@ class SpecialistRunner:
             max_turns=prep.max_turns,
             status="subprocess_starting",
         )
-        # WS1: explicit wall-clock budget injected by the Coordinator; when
-        # present it overrides the legacy ``max_turns × per_turn`` ceiling.
-        wall_budget_raw = (ctx.extra or {}).get("wall_budget_sec")
-        wall_budget_sec = float(wall_budget_raw) if wall_budget_raw else None
-        # Ray-managed GPU execution (§12 T4): when the dispatcher acquired a
+        deadline = _ctx_deadline(ctx)
+        # Ray-managed GPU execution: when the dispatcher acquired a
         # GpuSpecialistLease, run the whole subprocess inside its num_gpus actor
         # so any GPU command lands within Ray's assigned devices. ``None`` keeps
         # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
@@ -1125,10 +1151,10 @@ class SpecialistRunner:
             user_prompt=prep.user_prompt,
             disallowed_tools=SPECIALIST_TOOL_DENYLIST,
             max_turns=prep.max_turns,
-            gpu_ids=tuple((ctx.extra or {}).get("gpu_ids") or ()),
-            wall_budget_sec=wall_budget_sec,
-            gpu_lease=(ctx.extra or {}).get("gpu_specialist_lease"),
-            progress_cb=(ctx.extra or {}).get("specialist_progress_cb"),
+            gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
+            deadline=deadline,
+            gpu_lease=ctx.extra.get("gpu_specialist_lease"),
+            progress_cb=ctx.extra.get("specialist_progress_cb"),
         )
         self._append_transcript(
             workspace,
@@ -1270,7 +1296,7 @@ class SpecialistRunner:
         gap = prep.gap
         workspace = prep.workspace
         notes = list(extra_notes)
-        gpu_ids = [int(g) for g in ((ctx.extra or {}).get("gpu_ids") or [])]
+        gpu_ids = [int(g) for g in (ctx.extra.get("gpu_ids") or [])]
 
         if specialist_done_payload is None:
             reason = backend_error or (
@@ -1305,8 +1331,6 @@ class SpecialistRunner:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
             done_payload["proposal_set"] = []
-        if "empty" not in done_payload:
-            done_payload["empty"] = not bool(done_payload["proposal_set"])
         if "summary" not in done_payload:
             done_payload["summary"] = "specialist emitted done without summary"[:480]
         # Reconcile self-reported ``patches_written`` against the filesystem:
@@ -1387,21 +1411,11 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
+        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=explicit_root,
-        )
-        # A set dropped for targets no tree holds is a distinct outcome from
-        # "the specialist wrote none", and the next round has to be told which.
-        all_dropped_by_grounding = bool(
-            deduped
-            and not kept
-            and all(
-                d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
-                for d in dropped
-            )
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1410,7 +1424,7 @@ class SpecialistRunner:
         forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
         safety = _patch_safety.PatchSafetyReport(
             kept_patches=kept,
-            dropped=dropped,
+            ungrounded=ungrounded,
             grounding=grounding,
             numeric_warnings=numeric_warnings,
             forbidden_fields=forbidden_fields,
@@ -1419,12 +1433,10 @@ class SpecialistRunner:
         done_payload["patch_grounding"] = grounding
         if collected_roots:
             done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
-        if all_dropped_by_grounding:
-            done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
+        if ungrounded:
+            done_payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
         if spans_roots:
             done_payload["patches_span_multiple_roots"] = True
-        if not kept:
-            done_payload["empty"] = not bool(done_payload.get("proposal_set"))
         notes.extend(safety.notes())
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt
@@ -1505,13 +1517,13 @@ class SpecialistRunner:
         under the session directory.
 
         Args:
-            ctx: Runner context for the current dispatch.
+            ctx: Runner context for the current dispatch; an unset ``extra``
+                resolves against the session directory.
 
         Returns:
             The workspace path, or ``None`` if no session directory is set.
         """
-        extra = getattr(ctx, "extra", None) or {}
-        ws = extra.get("workspace")
+        ws = (ctx.extra or {}).get("workspace")
         if ws:
             p = Path(str(ws))
             p.mkdir(parents=True, exist_ok=True)

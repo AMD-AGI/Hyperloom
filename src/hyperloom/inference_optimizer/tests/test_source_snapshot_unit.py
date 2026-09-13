@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the per-KEEP source-layer snapshot contract
-(``hyperloom.orchestrator.source_snapshot``): ``_safe_rel`` path sanitation,
-``snapshot_source_layer`` capture (upsert/delete/missing), and
-``snapshot_is_complete``."""
+"""Unit coverage for the per-KEEP source-layer snapshot contract (``hyperloom.orchestrator.source_snapshot``): ``_safe_rel`` path sanitation, ``snapshot_source_layer`` capture (upsert/delete/missing), and ``snapshot_is_complete``."""
 
 from __future__ import annotations
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the framework-agent explorer's pure metadata helpers.
-
-``explorer.py`` normalizes PR-detail payloads (from pr-monitor / GitHub,
-whose shapes vary) into ``Candidate`` fields, and applies ``PrFilter``. These
-extractors and the filter are pure functions over plain dicts/dataclasses, so
-they are covered here directly without any network or worktree setup.
-"""
+"""Unit tests for the framework-agent explorer's pure metadata helpers."""
 
 from __future__ import annotations
 

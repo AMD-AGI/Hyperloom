@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI-level contract for claiming a framework compile pass.
-
-Covers the guarantees that cannot be shown by unit-testing text replacement: the
-edited install is always restored, a patch is only exported when a same-shape
-disabled/enabled A/B actually paid off, pre-existing edits are neither lost nor
-smuggled into the patch, and the manifest says which of those happened.
-"""
+"""CLI-level contract for claiming a framework compile pass."""
 
 from __future__ import annotations
 
@@ -37,11 +31,7 @@ MODEL_BODY = (
 
 
 def _trace(path, add_dur: int = 4):
-    """Launch-bound decode trace whose rmsnorm+rope share triggers qk_norm_rope.
-
-    A bigger ``add_dur`` additionally triggers the residual add+rmsnorm patterns,
-    giving a run BOTH a compile_pass and authoring candidates.
-    """
+    """Launch-bound decode trace whose rmsnorm+rope share triggers qk_norm_rope."""
     events = []
     ts = 0
     for _ in range(4):
@@ -262,8 +252,8 @@ class TestPreExistingEdits:
         # Restored to the PRE-RUN bytes, not to some pristine upstream copy.
         assert hz.config_file.read_text(encoding="utf-8") == dirty
         patch = (hz.out / "fusion.patch").read_text()
-        # It may appear as diff CONTEXT, but must never be claimed as part of the
-        # change (that is what would smuggle an unrelated edit downstream).
+        # It may appear as diff CONTEXT, but must never be claimed as part of the change (that is what would smuggle
+        # an unrelated edit downstream).
         changed = [ln for ln in patch.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
         assert not any("operator's own local edit" in ln for ln in changed), changed
         assert f"+    {FLAG}: bool = True" in patch
@@ -290,11 +280,7 @@ class TestNoValidate:
 
 class TestFuseAllCombination:
     def test_mixed_candidates_claim_the_compile_pass_first(self, hz):
-        """One run cannot do both, and the flag is on by default.
-
-        Refusing would fail a run the caller has no way to fix, so the cheaper
-        claim goes first and the authored candidates wait for a later round.
-        """
+        """One run cannot do both, and the flag is on by default."""
         hz.make_mixed()
         res = hz.run("--fuse-all-confirmed")
         assert res.exit_code == 0, res.output

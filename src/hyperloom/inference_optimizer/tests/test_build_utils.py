@@ -21,18 +21,14 @@ from hyperloom.orchestrator.framework.build_utils import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _completed(stdout="", stderr="", returncode=0):
     return SimpleNamespace(stdout=stdout, stderr=stderr, returncode=returncode)
 
 
-# ---------------------------------------------------------------------------
 # coerce_build_argv
-# ---------------------------------------------------------------------------
 
 
 def test_coerce_list_passthrough():
@@ -79,9 +75,7 @@ def test_coerce_allows_safe_args():
     assert argv[0] == "python"
 
 
-# ---------------------------------------------------------------------------
 # run_argv
-# ---------------------------------------------------------------------------
 
 
 def test_run_argv_ok():
@@ -127,9 +121,7 @@ def test_run_argv_truncates_output():
     assert len(r.stderr_tail) == 4000
 
 
-# ---------------------------------------------------------------------------
 # write_rocm_torch_constraints
-# ---------------------------------------------------------------------------
 
 
 def _make_constraint_runner(hip_rc=0, torch_ver="2.10.0+git8514f05", triton_ver="3.1.0"):
@@ -178,9 +170,7 @@ def test_write_rocm_torch_constraints_no_triton(tmp_path):
     assert "triton" not in content
 
 
-# ---------------------------------------------------------------------------
 # check_rocm_toolchain_alignment
-# ---------------------------------------------------------------------------
 
 
 def _toolchain_run(hipcc_path="/opt/rocm/bin/hipcc", rocm_path="/opt/rocm", header_ok=True, hip_major=7):
@@ -235,9 +225,7 @@ def test_toolchain_bad_header(tmp_path):
     assert "compatible" in msg.lower() or "toolchain" in msg.lower()
 
 
-# ---------------------------------------------------------------------------
 # probe_torch_abi
-# ---------------------------------------------------------------------------
 
 
 def test_probe_torch_abi_rocm():
@@ -268,9 +256,7 @@ def test_probe_torch_abi_failure():
     assert info["is_rocm"] is False
 
 
-# ---------------------------------------------------------------------------
 # sort_tags_desc
-# ---------------------------------------------------------------------------
 
 
 def test_sort_tags_desc_basic():

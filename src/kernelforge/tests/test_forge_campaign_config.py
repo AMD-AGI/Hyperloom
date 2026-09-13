@@ -101,16 +101,9 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
 
 
 def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeypatch):
-    """The address must not move when the loop writes its first GPU kernel.
-
-    A run that turns eager code into a kernel would otherwise file its result
-    under the name of the kernel it just invented, at an address no read
-    resolves to, and the write would report success while the experience became
-    unreachable.
-    """
+    """The address must not move when the loop writes its first GPU kernel."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path, "eager")
-    # Eager source declares no GPU kernel at all, so the operator can only come
-    # from the entry point the driver calls.
+    # Eager source declares no GPU kernel at all, so the operator can only come from the entry point the driver calls.
     kernel.write_text("def dynamic_quant(x):\n    return x / x.abs().max()\n")
     program = tmp_path / "eager-program.md"
     program.write_text("# Optimize dynamic_quant\n")
@@ -131,8 +124,7 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
     store = CampaignConfigStore(str(workspace))
     store.save(config, program_md=program.read_text())
 
-    # The loop now does what it exists to do: it writes a kernel, under a name
-    # nobody declared. Neither the campaign nor the address may follow it.
+    # The loop now does what it exists to do: it writes a kernel, under a name nobody declared.
     optimized = "import triton\n\n\n@triton.jit\ndef _partial_amax_kernel(x):\n    return x\n"
     kernel.write_text(optimized)
 
@@ -442,12 +434,7 @@ def test_create_campaign_falls_back_from_unsupported_kernel_backend(
 
 
 def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
-    """A driver outside the workspace must not be rejected at config time.
-
-    Task preparation stages/publishes external drivers transactionally, so the
-    fresh-campaign CLI has to let that path through; rejecting it here aborted
-    the run before prep could stage anything ("driver must be inside workspace").
-    """
+    """A driver outside the workspace must not be rejected at config time."""
     workspace, kernel, helper, _ = _git_workspace(tmp_path)
     external = tmp_path / "forge-run" / "forge_autogen_driver.py"
     external.parent.mkdir()
@@ -464,8 +451,8 @@ def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
     )
 
     assert config.driver_path == external.resolve().as_posix()
-    # The digest must be of the external file, and `workspace / driver_path`
-    # (how every consumer rebuilds the path) must still land on it.
+    # The digest must be of the external file, and `workspace / driver_path` (how every consumer rebuilds the path)
+    # must still land on it.
     assert config.driver_sha256 == hashlib.sha256(external.read_bytes()).hexdigest()
     assert (workspace / config.driver_path).resolve() == external.resolve()
 
@@ -555,13 +542,7 @@ def test_from_dict_requires_a_json_object():
 
 
 def test_from_dict_rejects_the_retired_pre_rename_key(tmp_path, monkeypatch):
-    """The old backend key is a hard error now, not a silent migration.
-
-    ``from_dict`` rejects unknown fields on purpose. A config carrying the old
-    key therefore refuses to load and names the field, which is the outcome we
-    want once the back-compat shim is gone: the operator is told what to edit
-    rather than watching the campaign resume on the fallback backend.
-    """
+    """The old backend key is a hard error now, not a silent migration."""
     payload = _campaign_payload(tmp_path, monkeypatch)
     retired_key = "fel" + "low"
     payload[retired_key] = payload.pop("kernel_backend")
@@ -898,8 +879,8 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
 
     assert signature == config.implementation_signature
     assert identity == config.implementation_identity
-    # Without the lineage there is nothing pristine to read, so the working tree
-    # wins -- which is exactly why the campaign snapshots base_commit.
+    # Without the lineage there is nothing pristine to read, so the working tree wins -- which is exactly why the
+    # campaign snapshots base_commit.
     drifted, _identity = derive_campaign_implementation_contract(
         workspace_dir=str(workspace),
         kernel_path=config.kernel_path,

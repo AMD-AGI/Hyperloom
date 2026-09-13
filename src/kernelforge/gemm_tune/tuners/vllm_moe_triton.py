@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""vLLM MoE Triton fused_moe deterministic tile parameter sweep.
-
-Codified from GEAK's successful approach: sweep BLOCK_SIZE_M/N/K, GROUP_SIZE_M,
-num_warps, num_stages, waves_per_eu, SPLIT_K for each batch size, benchmark
-each config, and pick the best.
-
-Output: JSON config folder compatible with VLLM_TUNED_CONFIG_FOLDER.
-"""
+"""vLLM MoE Triton fused_moe deterministic tile parameter sweep."""
 
 from __future__ import annotations
 
@@ -25,8 +18,7 @@ from ..shapes import compute_vllm_moe_batch_sizes
 
 log = logging.getLogger(__name__)
 
-# Known-good configs carried over from GEAK results. They stay first in every
-# search space so a truncated run still measures the configs we already trust.
+# Known-good configs carried over from GEAK results.
 _SEED_CONFIGS: list[dict[str, int]] = [
     {
         "BLOCK_SIZE_M": 16,
@@ -108,17 +100,7 @@ _SEED_CONFIGS: list[dict[str, int]] = [
         "waves_per_eu": 0,
         "SPLIT_K": 1,
     },
-    # Measured winners on the BK=256 axis. Widening --thorough alone did not
-    # deliver them: Hyperloom only asks for thorough at session_max_min >= 1440
-    # and mp >= 4, so almost every session runs the default list and would still
-    # never see this axis. The generated space is what found them; these three
-    # are here so the default search can reach them too.
-    #
-    # DeepSeek-V4-Flash-bf16 (E=256, topk=6, K=4096, N=2048): best at M=32, 256
-    # and 1024, worth 1.0975x-1.1235x. Independently on Mixtral-8x7B (E=8,
-    # N=14336) the M=1 and M=32 winners were also BK=256, and the seed list
-    # above kept only 1 of 4 shapes there (avg 0.949x, i.e. a regression) while
-    # a space containing BK=256 kept 3 of 4.
+    # Measured winners on the BK=256 axis.
     {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 64,
@@ -152,13 +134,6 @@ _SEED_CONFIGS: list[dict[str, int]] = [
 ]
 
 # BLOCK_SIZE_K=256 is why this is a generated space rather than a fixed list.
-# Measured on DeepSeek-V4-Flash-bf16 (E=256, topk=6, K=4096, N=2048, vLLM
-# 0.27.1, timing invoke_fused_moe_triton_kernel directly): the best config at
-# M=32, 256 and 1024 used BK=256 every single time, worth 1.0975x-1.1235x over
-# the eight seeds above. Those seeds top out at BK=128, so that axis was never
-# searched -- and a fixed list cannot be wrong about a value it never contains.
-# The three winners now also sit in _SEED_CONFIGS so the default search reaches
-# them; the grid stays because the axis matters beyond those three points.
 _AXES: dict[str, tuple[int, ...]] = {
     "BLOCK_SIZE_M": (16, 32, 64, 128),
     "BLOCK_SIZE_N": (64, 128, 256),
@@ -169,9 +144,8 @@ _AXES: dict[str, tuple[int, ...]] = {
     "waves_per_eu": (0, 2),
 }
 
-# The measurement above sampled 160 points of this grid; keep that as the
-# default budget so --thorough reproduces a search we have evidence for.
-# Override for a wider sweep at the cost of machine time.
+# The measurement above sampled 160 points of this grid; keep that as the default budget so --thorough reproduces a
+# search we have evidence for.
 _THOROUGH_CAP_ENV = "FORGE_MOE_TRITON_MAX_CONFIGS"
 _DEFAULT_THOROUGH_CAP = 160
 
@@ -194,16 +168,7 @@ def _thorough_cap() -> int:
 
 
 def build_search_space(thorough: bool) -> list[dict[str, int]]:
-    """Configs to sweep.
-
-    ``--thorough`` used to be inert here: the caller passed the fixed list in
-    both modes, so asking for a thorough search changed nothing. It now widens
-    the space for real, seeds first so a capped run keeps the trusted configs.
-
-    Invalid combinations are not filtered out — the sweep script already times
-    each config in isolation and skips the ones that fail to compile or run, so
-    guessing hardware limits here would only risk excluding a winner.
-    """
+    """Configs to sweep."""
     if not thorough:
         return [dict(c) for c in _SEED_CONFIGS]
 
@@ -214,10 +179,9 @@ def build_search_space(thorough: bool) -> list[dict[str, int]]:
         if key not in seen:
             seen.add(key)
             space.append(cfg)
-    # A cap below the seed count would truncate inside the seed prefix, which
-    # contradicts the reason the seeds are first: a capped run is supposed to
-    # keep the configs already measured to work and give up only the generated
-    # ones. Thorough therefore never searches less than fast does.
+    # A cap below the seed count would truncate inside the seed prefix, which contradicts the reason the seeds are
+    # first: a capped run is supposed to keep the configs already measured to work and give up only the generated
+    # ones.
     return space[: max(_thorough_cap(), len(_SEED_CONFIGS))]
 
 
@@ -230,11 +194,7 @@ def _generate_sweep_script(
     gpu_id: str,
     configs: list[dict[str, int]],
 ) -> Path:
-    """Generate a standalone Python script that performs the Triton MoE sweep.
-
-    This script imports vllm's fused_moe internals, runs each config, and
-    writes results to a JSON file.
-    """
+    """Generate a standalone Python script that performs the Triton MoE sweep."""
     script_path = work_dir / "vllm_moe_sweep.py"
     config_path = work_dir / "sweep_config.json"
 
@@ -569,8 +529,7 @@ class VllmMoeTritonTuner(BaseTuner):
 
         sweep_data = json.loads(sweep_results_path.read_text(encoding="utf-8"))
 
-        # Write config file in vLLM expected format:
-        # E=<experts>,N=<N>,device_name=<gpu>,dtype=<dtype>.json
+        # Write config file in vLLM expected format: E=<experts>,N=<N>,device_name=<gpu>,dtype=<dtype>.json
         E = profile.num_experts
         N = profile.effective_moe_intermediate
         gpu_name = self.ctx.gpu_type.replace(" ", "_").upper()

@@ -30,22 +30,15 @@ class TuneResult:
     # Metrics
     total_shapes: int = 0
     improved_shapes: int = 0
-    # Shapes handed to the tuner. Compared against total_shapes (rows actually
-    # produced) to detect a partial run: aiter's own "tune N shapes" line and its
-    # exit code both misreport this, so row count is the only reliable signal.
+    # Shapes handed to the tuner.
     expected_shapes: int = 0
-    # Shapes that were tuned but have no comparable untuned baseline, so
-    # improved_shapes cannot count them. Distinguishes "compared, did not win"
-    # from "never had anything to compare against".
+    # Shapes that were tuned but have no comparable untuned baseline, so improved_shapes cannot count them.
     unverified_shapes: int = 0
     best_micro_speedup: float = 1.0
     avg_micro_speedup: float = 1.0
     # Per-shape detail (list of dicts with keys: token/M, default_us, tuned_us, speedup)
     shape_results: list[dict[str, Any]] = field(default_factory=list)
-    # Rows removed from the deployed artifact because the tuner's own accuracy
-    # check found them wrong. Reported rather than silently dropped: "this shape
-    # has no tuned entry" and "this shape had one and it computed the wrong
-    # answer" are different facts, and only the second says a backend is broken.
+    # Rows removed from the deployed artifact because the tuner's own accuracy check found them wrong.
     dropped_inaccurate: list[dict[str, Any]] = field(default_factory=list)
     # Timing
     elapsed_s: float = 0.0
@@ -54,12 +47,8 @@ class TuneResult:
     error_class: str = ""
     # Skip reason (from router)
     skip_reason: str = ""
-    # Where the tuned shapes/keys came from: "runtime_observed" when the caller
-    # supplied them from a live dispatch log, "config_derived" when this tuner
-    # inferred them from the model config. Recorded because an inferred key can
-    # disagree with what the serving framework dispatches, and the resulting
-    # unreachable table is otherwise indistinguishable from a tuning that simply
-    # did not pay off.
+    # Where the tuned shapes/keys came from: "runtime_observed" when the caller supplied them from a live dispatch
+    # log, "config_derived" when this tuner inferred them from the model config.
     key_source: str = ""
 
     @property
@@ -88,10 +77,8 @@ class TuneResult:
             d["avg_micro_speedup"] = round(self.avg_micro_speedup, 4)
         if self.expected_shapes:
             d["expected_shapes"] = self.expected_shapes
-            # A row the accuracy check removed was tuned; it is missing from the
-            # artifact but it was not missed by the run. Counting it as
-            # "missing" made a completed batch read as a truncated one, which is
-            # the same conflation the partial_output gate used to make.
+            # A row the accuracy check removed was tuned; it is missing from the artifact but it was not missed by the
+            # run.
             if self.dropped_inaccurate:
                 d["filtered_shapes"] = len(self.dropped_inaccurate)
             d["missing_shapes"] = max(self.expected_shapes - self.total_shapes - len(self.dropped_inaccurate), 0)
@@ -132,27 +119,18 @@ class TuneContext:
     thorough: bool = False  # Full search: all libtypes, more shapes, no per-shape timeout
     # Optional input files
     untuned_csv: Path | None = None
-    # MoE shapes are kept in their own field because the dense and MoE untuned
-    # CSVs are different schemas (M,N,K versus token,model_dim,inter_dim,...).
-    # Sharing one field would hand each tuner family the other's table.
+    # MoE shapes are kept in their own field because the dense and MoE untuned CSVs are different schemas (M,N,K
+    # versus token,model_dim,inter_dim,...).
     moe_untuned_csv: Path | None = None
     shapes_json: Path | None = None
-    # Weighted, variant-discriminating TraceShapeManifest (Hyperloom WP-1). When
-    # supplied it is the preferred dense-shape source (real replay-weighted
-    # shapes); see tuners._aiter_dense_common._resolve_input_csv.
+    # Weighted, variant-discriminating TraceShapeManifest (Hyperloom WP-1).
     shapes_manifest: Path | None = None
-    # demand.json from kernelforge.gemm_tune.evidence: the keys the runtime actually
-    # looked up and missed. Preferred over anything derived from config.json,
-    # which measured 0.4% coverage of real lookups.
+    # demand.json from kernelforge.gemm_tune.evidence: the keys the runtime actually looked up and missed.
     demand_json: Path | None = None
     tunableop_input: Path | None = None
     kernel_signature_log: Path | None = None
-    # The token counts the log shows this particular tuner's kernel actually
-    # serving, as opposed to ``tokens``, which is the run's coverage sweep. Set
-    # from TunerSpec.token_hint. A tuner that has one should treat it as the
-    # allowed set (intersect), not merely as a budget: on a MoE model the
-    # 1-stage and Triton paths serve token counts that CK never sees, and
-    # tuning those spends the budget on kernels that will not be dispatched.
+    # The token counts the log shows this particular tuner's kernel actually serving, as opposed to ``tokens``, which
+    # is the run's coverage sweep.
     token_hint: list[int] | None = None
     gpu_ids: str = ""
     # Additional env overrides from caller
@@ -180,12 +158,7 @@ class BaseTuner(ABC):
         """Execute tuning. Returns TuneResult."""
 
     def execute(self) -> TuneResult:
-        """Validate then run, converting any failure into a TuneResult.
-
-        ``validate`` is inside the guard because implementations derive shapes
-        there, which puts raw config values through ``int()``. A raise outside it
-        would leave the CLI with no sentinel JSON for the caller to read.
-        """
+        """Validate then run, converting any failure into a TuneResult."""
         started = time.time()
         try:
             err = self.validate()

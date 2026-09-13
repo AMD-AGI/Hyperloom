@@ -2,29 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Render a markdown session report from a ``session_breakdown.json``.
-
-Usage::
-
-    # Deterministic only (no LLM):
-    python -m hyperloom.inference_optimizer.tools.dump_session_report \\
-        --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \\
-        --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
-
-    # With LLM-polished prose (OpenAI-compatible endpoint):
-    HYPERLOOM_REPORT_LLM_BACKEND=openai \\
-    OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1 \\
-    OPENAI_API_KEY=... \\
-    python -m hyperloom.inference_optimizer.tools.dump_session_report \\
-        --input  /shared/hyperloom-sessions/<user>/<sid>/session_breakdown.json \\
-        --output /shared/hyperloom-sessions/<user>/<sid>/session_report.md
-
-When --output is omitted the report is written to
-``<session_dir>/session_report.md`` next to the input file. Pass
-``--debug-dump`` to also persist the LLM user prompt and raw response as
-``session_report_prompt.json`` / ``session_report_llm_raw.txt`` so
-hallucinations can be audited after the fact.
-"""
+"""Render a markdown session report from a ``session_breakdown.json``."""
 
 from __future__ import annotations
 
@@ -42,16 +20,7 @@ log = logging.getLogger("dump_session_report")
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for the session-report CLI.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse; defaults to
-            ``sys.argv`` when ``None``.
-
-    Returns:
-        argparse.Namespace: Parsed arguments with ``input``, ``output``,
-        ``no_llm``, and ``debug_dump`` attributes.
-    """
+    """Parse command-line arguments for the session-report CLI."""
     p = argparse.ArgumentParser(
         description="Render a Hyperloom session_breakdown.json to markdown.",
     )
@@ -69,34 +38,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _resolve_output(input_path: Path, requested: Path | None) -> Path:
-    """Resolve the markdown output path for the report.
-
-    Args:
-        input_path (Path): Path to the input ``session_breakdown.json``.
-        requested (Path | None): Explicitly requested output path, if any.
-
-    Returns:
-        Path: ``requested`` when provided, otherwise ``session_report.md`` next
-        to the input file.
-    """
+    """Resolve the markdown output path for the report."""
     if requested is not None:
         return requested
     return input_path.parent / "session_report.md"
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Render a session breakdown to a markdown report.
-
-    Loads the breakdown JSON, optionally builds an LLM client from the
-    environment, renders the report, and writes it (plus optional debug dumps).
-
-    Args:
-        argv (list[str] | None): Argument vector to parse; defaults to
-            ``sys.argv`` when ``None``.
-
-    Returns:
-        int: ``0`` on success, or ``2`` when the input is missing/unparseable.
-    """
+    """Render a session breakdown to a markdown report."""
     logging.basicConfig(
         level=os.environ.get("HYPERLOOM_LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

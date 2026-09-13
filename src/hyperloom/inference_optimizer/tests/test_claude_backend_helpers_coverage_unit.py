@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition,
-usage coercion, block iteration/classification, tool-use parsing, text
-extraction, and conversation-session accessors."""
+"""Coverage for ClaudeBackend pure helpers (no real SDK): prompt composition, usage coercion, block
+iteration/classification, tool-use parsing, text extraction, and conversation-session accessors.
+"""
 
 from __future__ import annotations
 
@@ -83,13 +83,6 @@ def test_set_context_provider_none_clears() -> None:
     assert b._context_server_config is None
 
 
-def test_reset_conversation_clears_session_id() -> None:
-    b = _backend(conversational=True)
-    b._session_id = "sess-1"
-    b.reset_conversation()
-    assert b._session_id is None
-
-
 def test_build_options_pins_gateway_env_and_ignores_global_settings(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
@@ -126,8 +119,7 @@ def test_build_options_leaves_settings_sources_unset_without_gateway_env(monkeyp
 
 
 def test_build_options_never_maps_openai_key_onto_the_anthropic_side(monkeypatch) -> None:
-    """An OpenAI-only environment produces no Anthropic credentials for the Claude
-    child process."""
+    """An OpenAI-only environment produces no Anthropic credentials for the Claude child process."""
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)

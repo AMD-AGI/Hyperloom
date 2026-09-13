@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Executor for ``targeted_build`` task rows.
-
-Runs compiled-component builds through the standard sub_agent_runner path so
-the in-flight asyncio.Task is registered in ``_inflight_actions`` (reachable
-by ``cancel_inflight_actions`` at shutdown). This coroutine owns the build for
-its whole life: ``asyncio.wait_for`` is the only wall-clock budget, and one
-teardown covers every way out of the wait.
-
-attempt_root is always ``session_dir / "enablement" / "builds" / task_id``.
-This derivation must stay identical to the fallback in
-``framework.py:_maybe_route_build_outcomes`` or succeeded builds are judged
-``artifact_unreadable`` and reverted.
-"""
+"""Executor for ``targeted_build`` task rows."""
 
 from __future__ import annotations
 
@@ -21,6 +9,8 @@ import asyncio
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ...enablement.recipe.build_inputs import build_driver_for, build_input_record
 from ...framework.build_actions import BuildResult, TargetedBuildAction
@@ -45,11 +35,7 @@ class TargetedBuildExecutor:
         return str(session_dir / "enablement" / "builds" / task_id)
 
     async def __call__(self, ctx: "RunnerContext") -> dict[str, Any]:
-        """Spawn and await a targeted build.
-
-        Raises RuntimeError on a failed or timed-out build so
-        sub_agent_runner writes the ``failed`` terminal state.
-        """
+        """Spawn and await a targeted build."""
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
@@ -63,9 +49,8 @@ class TargetedBuildExecutor:
             command=_driver_command(action, attempt_root),
         )
 
-        # The build outlives this coroutine unless killed, and the lane is
-        # released as it unwinds, so every exit from here must reach the
-        # teardown -- cancel and a failed sentinel write included.
+        # The build outlives this coroutine unless killed, and the lane is released as it unwinds, so every exit from
+        # here must reach the teardown -- cancel and a failed sentinel write included.
         try:
             if shared_state is not None:
                 shared_state.pending_targeted_build = handle.to_sentinel(task.task_id)
@@ -91,7 +76,12 @@ class TargetedBuildExecutor:
                 shared_state.pending_targeted_build = {}
                 shared_state.save(session_dir)
 
-        self._record_result(result, shared_state, action=action)
+        self._record_result(
+            result,
+            shared_state,
+            action=action,
+            task_id=str(task.task_id or ""),
+        )
         if not result.ok:
             raise RuntimeError(
                 f"targeted_build failed: failure_class={result.failure_class!r}"
@@ -100,7 +90,13 @@ class TargetedBuildExecutor:
         return result.to_state()
 
     @staticmethod
-    def _record_result(result: Any, shared_state: Any, *, action: Any = None) -> None:
+    def _record_result(
+        result: Any,
+        shared_state: Any,
+        *,
+        action: Any = None,
+        task_id: str = "",
+    ) -> None:
         """Append the build result to the manifest; record failure carrier.
 
         The inputs are recorded here because this is the one point where the
@@ -108,18 +104,22 @@ class TargetedBuildExecutor:
         cleared on finish, so a succeeded build's own recipe is otherwise
         unrecoverable from the row it leaves behind.
         """
-        if shared_state is None:
-            return
-        manifest = list(getattr(shared_state.enablement, "build_manifest", []) or [])
-        row = result.to_state()
+        entry = result.to_state()
         if action is not None:
-            row["build_driver"] = build_driver_for(action)
-            row["build_inputs"] = build_input_record(
+            entry["build_driver"] = build_driver_for(action)
+            entry["build_inputs"] = build_input_record(
                 action,
                 installed_versions=getattr(result, "installed_versions", {}) or {},
                 ambient_env=os.environ,
             )
-        manifest.append(row)
+        # Recorded on the timeline whether or not there is a SharedState to
+        # append to: a build dispatched without one still ran, and the manifest
+        # is only where the *lane* reads its own history from.
+        enablement_event.record_build(task_id=task_id, entry=entry)
+        if shared_state is None:
+            return
+        manifest = list(getattr(shared_state.enablement, "build_manifest", []) or [])
+        manifest.append(entry)
         shared_state.enablement.build_manifest = manifest
         if not result.ok:
             shared_state.enablement.last_build_failure = {

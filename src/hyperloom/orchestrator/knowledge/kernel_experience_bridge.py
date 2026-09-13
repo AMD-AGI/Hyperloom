@@ -31,11 +31,7 @@ class KernelExperienceStatus:
 
 @dataclass
 class KernelExperienceBridge:
-    """Configure KernelForge and collect its already-produced result metadata.
-
-    The bridge intentionally owns no kernel-experience CRUD, ranking, or local
-    knowledge implementation. KernelForge remains the data-plane owner.
-    """
+    """Configure KernelForge and collect its already-produced result metadata."""
 
     config: KnowledgeConfig
     audit_hook: Any = None

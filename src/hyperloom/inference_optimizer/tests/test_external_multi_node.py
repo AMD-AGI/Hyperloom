@@ -77,12 +77,7 @@ def test_backend_follows_handoff_shape_without_an_explicit_env(
     head_ip: str,
     expected: str,
 ) -> None:
-    """``state["backend"]`` routes every hyperloom-mn subcommand to SSH or Ray.
-
-    The platform can export the ``HYPERLOOM_MN_EXT_*`` block without the
-    companion backend var, so a hardcoded default sent those subcommands at the
-    wrong control plane; the hand-off itself has to decide.
-    """
+    """``state[\"backend\"]`` routes every hyperloom-mn subcommand to SSH or Ray."""
     if explicit:
         monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", explicit)
     else:
@@ -122,16 +117,7 @@ def test_external_pod_ssh_ports_follow_the_lws_ordinal(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Each pod of a multi-node role listens on ``base + role_offset + ordinal``.
-
-    Regression guard. ``mn-idle.sh`` is launched with
-    ``MN_SSH_PORT=$(( role_base + ${LWS_WORKER_INDEX:-0} ))``, so the pods of one
-    LeaderWorkerSet group listen on consecutive ports. External mode used to hand
-    the same ``role_base`` to every IP in a role, which is invisible while a role
-    has a single pod but makes every non-leader unreachable as soon as the role
-    spans nodes. The platform supplies the IP lists in LWS ordinal order (leader
-    first), so the list index IS the ordinal.
-    """
+    """Each pod of a multi-node role listens on ``base + role_offset + ordinal``."""
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SSH_PORT", "2222")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_PREFILL_IPS", "10.0.1.1,10.0.1.2")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_DECODE_IPS", "10.0.2.1,10.0.2.2")
@@ -199,12 +185,7 @@ def test_load_multi_node_state_honours_handoff_alongside_safe_creds(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The platform sandbox case: LLM creds and a cluster hand-off coexist.
-
-    SAFE_API_* authenticate the LLM gateway and are set in essentially every
-    platform sandbox, so gating the hand-off on them made multi-node unusable
-    exactly where the integration runs. The hand-off must still win here.
-    """
+    """The platform sandbox case: LLM creds and a cluster hand-off coexist."""
     monkeypatch.setenv("SAFE_API_URL", "http://safe")
     monkeypatch.setenv("OPENAI_API_KEY", "key")
     state_path = resolve_state_file()
@@ -286,15 +267,9 @@ def test_rayjob_with_head_ip_is_not_reported_benchmark_only(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """rayjob restarts through the Ray dashboard, with no SSH anywhere.
-
-    Keying the adoption line on SSH labelled this fully controllable cluster
-    "benchmark-only" -- the same words the genuinely uncontrollable one gets --
-    so the one line an operator reads to learn whether the run can tune anything
-    said the opposite of the truth.
-    """
-    # The distinguishing shape: a real rayjob hand-off carries HEAD_IP and no SSH
-    # material at all, so keying on SSH flips the verdict while control is intact.
+    """rayjob restarts through the Ray dashboard, with no SSH anywhere."""
+    # The distinguishing shape: a real rayjob hand-off carries HEAD_IP and no SSH material at all, so keying on SSH
+    # flips the verdict while control is intact.
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
@@ -313,15 +288,9 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Benchmark-only is legal but must not pass for a real optimization run.
-
-    Without server control every candidate re-measures the one unchanged server,
-    so the run still reports gains no config produced. That was a single info
-    line from the per-round restart helper; adoption has to say it where the
-    operator is actually looking.
-    """
-    # A rayjob hand-off carries neither the SSH key nor the pod IPs; only
-    # SERVICE_URL is guaranteed, and HEAD_IP is the documented opt-in.
+    """Benchmark-only is legal but must not pass for a real optimization run."""
+    # A rayjob hand-off carries neither the SSH key nor the pod IPs; only SERVICE_URL is guaranteed, and HEAD_IP is
+    # the documented opt-in.
     monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SSH_KEY", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
@@ -337,8 +306,8 @@ def test_rayjob_without_head_ip_warns_results_are_meaningless(
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
-        # A ClusterIP name resolves only inside the cluster; the head pod is the
-        # way in from outside it, on the URL's own port.
+        # A ClusterIP name resolves only inside the cluster; the head pod is the way in from outside it, on the URL's
+        # own port.
         (
             {"service_url": "http://wid.ns.svc.cluster.local:8000", "head_pod_ip": "10.0.2.1"},
             "http://10.0.2.1:8000",
@@ -359,12 +328,7 @@ def test_reachable_service_url_prefers_the_head_pod_over_a_clusterip_name(
     state: dict[str, object],
     expected: str,
 ) -> None:
-    """One definition of "where the frontend answers" for every caller.
-
-    The rewrite was copy-pasted into the benchmark env builder and the
-    post-restart health wait, so the two could drift into disagreeing about
-    which endpoint a run is actually talking to.
-    """
+    """One definition of \"where the frontend answers\" for every caller."""
     assert ext.reachable_service_url(state) == expected
 
 
@@ -398,13 +362,7 @@ def test_bookkeeping_carries_over_within_the_same_handoff(_external_env: Path) -
 
 
 def test_pd_leg_urls_carry_over_within_the_same_handoff(_external_env: Path) -> None:
-    """PD leg URLs lack the ``last_`` prefix but must survive a reload too.
-
-    They are read from the launcher summary and describe this cluster's legs.
-    Dropping them made the CLI's mid-restart checkpoint persist a state without
-    them, so a later launch failure wiped them on disk, and the PD serving/resume
-    probe then saw no legs and could never resume.
-    """
+    """PD leg URLs lack the ``last_`` prefix but must survive a reload too."""
     _write_disk_state(
         pd_prefill_url="http://10.32.17.187:30000",
         pd_decode_url="http://10.32.17.185:30001",
@@ -444,15 +402,7 @@ def test_bookkeeping_is_dropped_when_the_cluster_was_replaced(
     field: str,
     value: object,
 ) -> None:
-    """A state file outlives the cluster it describes, so identity must be checked.
-
-    ``last_restart_submission_id`` names a job on one Ray cluster and
-    ``last_server_pid_dir`` names PIDs on one set of pods. Carrying either onto a
-    replacement cluster hands the resume fast path a launch identity that was
-    never valid here, letting it skip a relaunch for a server this cluster never
-    started. The merge only tested the ``external`` flag, which a stale file from
-    a previous hand-off also carries.
-    """
+    """A state file outlives the cluster it describes, so identity must be checked."""
     _write_disk_state(**{field: value})
 
     state = ext.load_multi_node_state()
@@ -469,14 +419,7 @@ def test_unset_nodes_stays_single_pod_and_says_so(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """An unstated count is reported, never inferred.
-
-    ``nodes`` is passed verbatim to the framework as ``--nnodes``, which then
-    waits for exactly that many ranks, so guessing high hangs the launch instead
-    of degrading it. Guessing low only takes the single-pod path, which is
-    recoverable once it is visible -- so the run stays at 1 and names the pods it
-    saw, rather than inventing a size the caller never stated.
-    """
+    """An unstated count is reported, never inferred."""
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
     with caplog.at_level(logging.WARNING):
@@ -509,8 +452,7 @@ def test_a_single_pod_handoff_without_nodes_warns_about_nothing(
         # On contract: the unused list is empty either way.
         ("disaggregated", {"HYPERLOOM_MN_EXT_PREFILL_IPS": "a,b", "HYPERLOOM_MN_EXT_DECODE_IPS": "c,d"}, 4),
         ("aggregated", {"HYPERLOOM_MN_EXT_WORKER_IPS": "a,b,c,d"}, 4),
-        # Off contract: the worker list repeats the PD pods. Summing all three
-        # reported eight pods for a cluster of four.
+        # Off contract: the worker list repeats the PD pods.
         (
             "disaggregated",
             {
@@ -532,12 +474,7 @@ def test_pod_count_follows_the_mode_that_will_use_the_pods(
     env: dict[str, str],
     expected: int,
 ) -> None:
-    """The three IP lists are alternatives, and the mode picks between them.
-
-    ``gpu_ssh_targets_from_state`` selects prefill+decode or worker by mode, and
-    SKILL.md documents the same split, so a count that adds all three describes
-    a cluster nobody has.
-    """
+    """The three IP lists are alternatives, and the mode picks between them."""
     for role in ("PREFILL", "DECODE", "WORKER"):
         monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
     monkeypatch.setenv("PD_MODE", pd_mode)
@@ -556,13 +493,7 @@ def test_stated_single_node_survives_a_multi_pod_handoff(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The single-node guarantee outranks the hand-off's shape.
-
-    ``is_multi_node()`` reads ``state["nodes"]`` before it reads the environment,
-    so deriving a larger count from the handed-over pod IPs would drag a
-    single-node run onto the multi-node path in any sandbox that exports them for
-    an unrelated cluster. A stated value is therefore honoured verbatim.
-    """
+    """The single-node guarantee outranks the hand-off's shape."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
 
     assert ext.build_external_state_from_env()["nodes"] == 1
@@ -572,13 +503,7 @@ def test_a_rayjob_handoff_takes_its_node_count_only_from_the_flag(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A rayjob hand-off names its cluster by head IP and never by pod, so its
-    size can only come from the caller.
-
-    Nothing in ``HYPERLOOM_MN_EXT_HEAD_IP`` says how large the cluster is -- it
-    is a Service address -- which is why inferring a count from the hand-off
-    could never have helped this backend.
-    """
+    """A rayjob hand-off names its cluster by head IP and never by pod, so its size can only come from the caller."""
     monkeypatch.delenv("HYPERLOOM_MN_EXT_PREFILL_IPS", raising=False)
     monkeypatch.delenv("HYPERLOOM_MN_EXT_DECODE_IPS", raising=False)
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
@@ -598,13 +523,7 @@ def test_a_rayjob_handoff_takes_its_node_count_only_from_the_flag(
     ],
 )
 def test_kill_entrypoints_quote_state_derived_paths(builder: str, build: object) -> None:
-    """A PID path reaches the pod as one argument, whatever it contains.
-
-    These paths come from ``--pid-file`` or the state file's
-    ``last_server_pid_dir``, and were interpolated raw while the neighbouring
-    restart entrypoint quoted the same values. A directory with a space split
-    into two arguments and the kill silently addressed the wrong path.
-    """
+    """A PID path reaches the pod as one argument, whatever it contains."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     entrypoint = build(getattr(mncli, builder), "/tmp/my pids/rank.pid")  # type: ignore[operator]
@@ -663,15 +582,7 @@ _PD_FINGERPRINT_ARGS = {
     ],
 )
 def test_a_changed_pd_flag_the_launcher_serves_blocks_a_resume(field: str, changed: object) -> None:
-    """Every PD flag the launch entrypoint forwards must keep a resume from matching.
-
-    The fast path compares this record as a whole, so a forwarded flag left
-    out of it lets a round that changed the topology reuse the previous launch
-    and benchmark the previous topology under this round's config -- a plausible
-    number rather than a visible failure. This is the list that says which
-    changes are allowed to resume, so widening it is a behaviour change and
-    should break here first.
-    """
+    """Every PD flag the launch entrypoint forwards must keep a resume from matching."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     reference = mncli._rayjob_topology_fingerprint(argparse.Namespace(**_PD_FINGERPRINT_ARGS), 2)
@@ -786,11 +697,7 @@ def test_probe_thresholds_survive_a_junk_environment(monkeypatch: pytest.MonkeyP
 
 
 def test_cluster_is_serving_survives_a_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An unreachable endpoint is a "not serving" answer, never an exception.
-
-    The caller treats any raise as a failed probe, but letting one escape here
-    would bypass the liveness check that decides whether a relaunch is safe.
-    """
+    """An unreachable endpoint is a \"not serving\" answer, never an exception."""
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
     class _Exploding:
@@ -835,8 +742,7 @@ def test_cluster_is_serving_accepts_a_cluster_that_generates_tokens(monkeypatch:
         ({"health": 503}, "the group is not up"),
         ({"models": ()}, "the workers died during the weight load, so nothing registered"),
         ({"completion_status": 503}, "registered but refusing traffic"),
-        # The case a status-only check calls healthy: a broken PD KV handoff
-        # answers 200 with an empty completion.
+        # The case a status-only check calls healthy: a broken PD KV handoff answers 200 with an empty completion.
         ({"completion_tokens": 0}, "200 with no tokens generated"),
     ],
 )
@@ -879,12 +785,7 @@ def test_pd_disaggregated_rejects_a_single_dead_leg(monkeypatch: pytest.MonkeyPa
 
 
 def test_serving_probe_budget_is_shared_by_every_request_it_makes(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The budget is for the probe, not for each call inside it.
-
-    PD asks up to four times over: both legs, /v1/models, then a completion. A
-    per-request timeout would let a slow cluster spend several multiples of the
-    stated budget while the caller believes it bounded the wait.
-    """
+    """The budget is for the probe, not for each call inside it."""
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
     budgets: list[float] = []
@@ -909,12 +810,7 @@ def test_serving_probe_stops_once_its_budget_is_spent(monkeypatch: pytest.Monkey
 
 
 def test_unresolvable_endpoints_short_circuit_without_asking(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Not knowing where to look is not evidence, and must cost no request.
-
-    A PD state with no recorded leg URLs cannot be verified. Returning False is
-    only half of it: issuing a request to a nonsense URL would spend the whole
-    probe budget on a connection that was never going to resolve.
-    """
+    """Not knowing where to look is not evidence, and must cost no request."""
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
     seen: list[str] = []
@@ -930,8 +826,7 @@ def test_unresolvable_endpoints_short_circuit_without_asking(monkeypatch: pytest
     [
         (True, False, False),
         (False, False, True),
-        # The launch opted out of waiting, so a terminal-OK driver proves
-        # nothing and the probe is not consulted.
+        # The launch opted out of waiting, so a terminal-OK driver proves nothing and the probe is not consulted.
         (True, True, True),
     ],
 )
@@ -942,13 +837,7 @@ def test_resume_needs_a_cluster_that_still_serves(
     no_wait_health: bool,
     expect_relaunch: bool,
 ) -> None:
-    """A terminal-OK driver means this cluster served once, not that it still does.
-
-    The driver waits for the servers it spawned before exiting, so SUCCEEDED is
-    a claim about a moment that has passed. Resuming on it alone returned 0 with
-    nothing serving after a crash. Asking the endpoint settles it -- and where
-    the launch waived that wait, there is no claim to check, so no resume.
-    """
+    """A terminal-OK driver means this cluster served once, not that it still does."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
@@ -962,11 +851,8 @@ def test_resume_needs_a_cluster_that_still_serves(
         last_restart_ep=1,
         last_restart_pd_mode="aggregated",
         last_restart_extra_args="",
-        # The resume fast path matches on the whole topology record, so seeding
-        # the per-field keys alone is not a prior launch it will recognise.
-        # Spelled out rather than built from the helper: changing what the
-        # fingerprint covers changes which restarts may resume, and that should
-        # break this test rather than silently follow it.
+        # The resume fast path matches on the whole topology record, so seeding the per-field keys alone is not a
+        # prior launch it will recognise.
         last_restart_topology={
             "framework": "sglang",
             "model": "/models/test",
@@ -1028,15 +914,7 @@ def test_an_infera_handoff_left_on_the_default_backend_is_rejected(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Forgetting --mn-backend infera must fail here, not minutes later.
-
-    --mn-backend defaults to rayjob and overwrites whatever the hand-off's shape
-    implies, so an infera cluster whose operator omitted the flag was adopted as
-    rayjob. Nothing caught it: server_control reads yes, because SSH control is
-    real -- it is simply not the control this backend uses. The run then died
-    inside a per-round restart on a head_pod_ip nobody had asked for, well after
-    the adoption line said the cluster was fine.
-    """
+    """Forgetting --mn-backend infera must fail here, not minutes later."""
     monkeypatch.delenv("HYPERLOOM_MN_EXT_HEAD_IP", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
 
@@ -1055,12 +933,7 @@ def test_a_genuine_benchmark_only_handoff_still_proceeds(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No HEAD_IP and no SSH is the documented benchmark-only mode, not an error.
-
-    The new guard keys on the hand-off carrying SSH control instead, so it
-    separates "you meant infera" from "this cluster genuinely cannot be
-    restarted".
-    """
+    """No HEAD_IP and no SSH is the documented benchmark-only mode, not an error."""
     from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
@@ -1083,16 +956,7 @@ def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Benchmark-only must survive the adoption it was just promised.
-
-    Adoption printed "Continuing in benchmark-only mode" and then submitted the
-    head-pod bootstrap anyway. ``cmd_bootstrap`` opens with
-    ``_require_state("head_pod_ip")``, which is exactly the field this mode
-    omits, so the run died on the line that said it would continue.
-
-    ``cmd_bootstrap`` is deliberately left unstubbed: stubbing it to return 0 is
-    what hid the abort from the existing adoption tests.
-    """
+    """Benchmark-only must survive the adoption it was just promised."""
     from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
@@ -1116,13 +980,7 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A kill must drop the launch id it just invalidated.
-
-    ``last_restart_submission_id`` names the fan-out driver, which reaches
-    SUCCEEDED once the ranks are spawned and stays there whether the detached
-    servers live or die. A kill ends exactly that launch, so keeping the id would
-    leave the state claiming a launch this cluster no longer has.
-    """
+    """A kill must drop the launch id it just invalidated."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.2.1")
@@ -1150,13 +1008,7 @@ def test_adopting_a_rayjob_bootstraps_and_replays_patches(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Adoption still owes the cluster its session-side setup.
-
-    Regression guard. Removing the create path took the three steps that lived
-    inside it with it -- none of them provision anything, so a handed-over
-    RayJob silently came up without the BYOI bootstrap (no framework venv on
-    PATH for later Ray Dashboard jobs) and without its applied patches.
-    """
+    """Adoption still owes the cluster its session-side setup."""
     from hyperloom.inference_optimizer.cli import multi_node as mn
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
@@ -1215,14 +1067,7 @@ def test_missing_handoff_exits_config_error_not_transient(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """An unset hand-off is not something a retry can fix.
-
-    The guard used to raise a bare RuntimeError, and ``main`` classifies those by
-    message substring; this one matched nothing and fell through to
-    EXIT_TRANSIENT, so the caller retried a permanently misconfigured run. The
-    message is asserted too: the later ``missing required keys`` failure also
-    maps to EXIT_CONFIG_ERROR, so the code alone does not prove the guard fired.
-    """
+    """An unset hand-off is not something a retry can fix."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     session = tmp_path / "session"
@@ -1241,12 +1086,7 @@ def test_bootstrap_accepts_handed_over_rayjob_without_rayjob_id(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A handed-over RayJob has head_pod_ip but no rayjob_id; bootstrap must run.
-
-    Nothing writes rayjob_id now that the platform owns cluster creation, so
-    demanding it in the state guard rejected every external RayJob before the
-    first bootstrap could submit anything.
-    """
+    """A handed-over RayJob has head_pod_ip but no rayjob_id; bootstrap must run."""
     from hyperloom.inference_optimizer.multi_node import cli as mncli
 
     session = tmp_path / "session"

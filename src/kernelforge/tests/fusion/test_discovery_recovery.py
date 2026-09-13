@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Discovery must not turn its own failures into "no fusion opportunity".
-
-Two of them: a response the gateway cut off mid-proposal, and a turn budget so
-small that using the tools discovery was given always ends the session.
-"""
+"""Discovery must not turn its own failures into \"no fusion opportunity\"."""
 
 from __future__ import annotations
 
@@ -129,12 +125,7 @@ PROPOSALS = '```json\n[{"name": "qk_norm_rope", "op_chain": "q_norm -> rope"}]\n
 
 
 def test_proposals_survive_a_session_that_hit_the_turn_ceiling(tmp_path) -> None:
-    """Discovery spends turns by design; brushing the ceiling is not a failure.
-
-    Observed on Qwen3-14B-FP8: five attempts each ended ``turn_cap``, every
-    answer was dropped, and the run published ``llm_unavailable`` having done
-    the analysis five times.
-    """
+    """Discovery spends turns by design; brushing the ceiling is not a failure."""
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text=PROPOSALS, end_reason="turn_cap")], calls),

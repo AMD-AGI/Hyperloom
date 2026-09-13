@@ -131,11 +131,7 @@ def test_infera_probe_removes_its_scratch_known_hosts(monkeypatch, tmp_path, ssh
 
 
 def test_infera_probe_parses_output_despite_a_nonzero_exit(monkeypatch, tmp_path):
-    """_PROBE_CMD's `||` fallback can print a usable name and still exit non-zero.
-
-    Gating the parse on the exit status would discard that answer, so a non-zero
-    return is only logged.
-    """
+    """_PROBE_CMD's `||` fallback can print a usable name and still exit non-zero."""
     _track_scratch_dirs(monkeypatch, tmp_path)
     monkeypatch.setattr(
         gpu_probe.ssh_client,

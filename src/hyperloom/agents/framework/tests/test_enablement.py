@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.enablement (failure classifier + request model).
-
-Pure-Python, GPU-free: canned log string in → structured
-:class:`FailureSignature` out.
-"""
+"""Tests for hyperloom.agents.framework.enablement (failure classifier + request model)."""
 
 from __future__ import annotations
 
@@ -31,9 +27,7 @@ from hyperloom.agents.framework.enablement import (
     EnablementRequest,
     FailureSignature,
     _extract_offending_file,
-    _failure_identity,
     classify_failure,
-    enablement_made_progress,
     is_targeted_build_candidate,
     runnable_decision,
 )
@@ -49,8 +43,7 @@ def test_accuracy_below_floor_kind() -> None:
 
 
 def test_generation_pathology_outranks_accuracy_below_floor() -> None:
-    """The probe's evidence carries the below-floor phrasing too, but a truncated
-    eval is a different repair from a model that answered and got them wrong."""
+    """The probe's evidence carries the below-floor phrasing too, but a truncated eval is a different repair from a model that answered and got them wrong."""
     sig = classify_failure(
         "baseline accuracy did not meet floor: accuracy=0.0 floor=0.05 task=gsm8k; "
         "eval_generation_pathology: 128/128 sampled responses stopped at the 16384-token cap"
@@ -65,8 +58,7 @@ def test_eval_runtime_failure_kind() -> None:
 
 
 def test_eval_crash_with_import_error_classifies_as_import_error() -> None:
-    """The generic eval rule is lowest priority: a real root cause in the same
-    log (import/serve-flag) must win over eval_runtime_failure."""
+    """The generic eval rule is lowest priority: a real root cause in the same log (import/serve-flag) must win over eval_runtime_failure."""
     log = "run_eval failed with exit code 1\nModuleNotFoundError: No module named 'lm_eval'"
     assert classify_failure(log).kind == IMPORT_ERROR
     log2 = "run_eval failed with exit code 1\nvllm: error: unrecognized arguments: --bad"
@@ -85,9 +77,7 @@ def test_missing_model_arch() -> None:
 
 
 def test_missing_model_arch_transformers_unrecognized() -> None:
-    """Transformers 'does not recognize this architecture' (the DeepSeek-V4
-    brand-new-arch-on-old-stack signature, wrapped in a vLLM ModelConfig
-    ValidationError) -> missing_model_arch with the model_type as symbol."""
+    """Transformers 'does not recognize this architecture' (the DeepSeek-V4 brand-new-arch-on-old-stack signature, wrapped in a vLLM ModelConfig ValidationError) -> missing_model_arch with the model_type as symbol."""
     log = (
         "pydantic_core._pydantic_core.ValidationError: 1 validation error for ModelConfig\n"
         "  Value error, The checkpoint you are trying to load has model type "
@@ -164,55 +154,6 @@ def test_shape_mismatch_and_missing_weight_are_distinct() -> None:
     assert gap1.kind != gap2.kind
 
 
-def test_enablement_made_progress_different_kind() -> None:
-    """A patch that moves the boot to a different actionable failure = progress."""
-    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
-    after = classify_failure(
-        "ValueError: Following weights were not initialized from checkpoint: {'m.indexer.k_norm.weight'}"
-    )
-    assert enablement_made_progress(before, after) is True
-
-
-def test_enablement_no_progress_same_failure() -> None:
-    """The identical unfixed failure re-appearing is NOT progress."""
-    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
-    after = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
-    assert enablement_made_progress(before, after) is False
-
-
-def test_enablement_no_progress_clean_boot() -> None:
-    """A clean boot (non-actionable UNKNOWN after) is runnable, not 'progress'."""
-    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
-    after = FailureSignature(kind=UNKNOWN)
-    assert enablement_made_progress(before, after) is False
-
-
-def test_enablement_progress_first_actionable_when_no_prior() -> None:
-    """With no prior actionable signature, any actionable post-patch failure is a step."""
-    after = classify_failure("ValueError: weights were not initialized from checkpoint")
-    assert enablement_made_progress(None, after) is True
-
-
-def test_enablement_progress_unknown_to_different_unknown() -> None:
-    """Q1: two DIFFERENT unknown failures still count as progress (taxonomy-independent)."""
-    before = classify_failure("novel error A raised in foo.py during widget init")
-    after = classify_failure("completely different novel error B in bar.py during frobnicate")
-    assert enablement_made_progress(before, after) is True
-
-
-def test_enablement_no_progress_same_unknown_text() -> None:
-    """Q1: the same unknown failure re-appearing (even numeric operands vary) is NOT progress."""
-    before = classify_failure("weird failure at offset 128 in module qux")
-    after = classify_failure("weird failure at offset 256 in module qux")
-    assert enablement_made_progress(before, after) is False
-
-
-def test_enablement_no_progress_clean_boot_unknown_signature() -> None:
-    """A bare UNKNOWN signature (no error text) is a clean boot, not progress."""
-    before = classify_failure("RuntimeError: start (0) + length (704) exceeds dimension size (576).")
-    assert enablement_made_progress(before, FailureSignature(kind=UNKNOWN)) is False
-
-
 def test_enablement_setup_guidance_in_mandate() -> None:
     """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
     from hyperloom.agents.framework.enablement import EnablementRequest
@@ -232,14 +173,7 @@ def test_enablement_setup_guidance_in_mandate() -> None:
 
 
 def test_enablement_progress_contract_in_mandate() -> None:
-    """Serial-enablement contract: the mandate must tell the specialist that a
-    patch which only ADVANCES the boot one step is a valid KEPT deliverable, so
-    a large gap yields incremental progress instead of a wholesale empty=true.
-
-    This is the specialist-side counterpart of ``enablement_made_progress`` /
-    integrate_patch ``status="advanced"`` — without it the incremental stacking
-    machinery is never fed any patches (observed on DeepSeek-V4-Flash: every
-    round returned empty=true and nothing was ever stacked)."""
+    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty exit."""
     from hyperloom.agents.framework.enablement import EnablementRequest
     from hyperloom.agents.framework.enablement_ops import (
         ENABLEMENT_PROGRESS_GUIDANCE,
@@ -258,10 +192,10 @@ def test_enablement_progress_contract_in_mandate() -> None:
     )
     m = build_mandate(req)
     assert "PROGRESS DELIVERABLE" in m.task_description
-    # The contract must explicitly permit an advance-one-step patch and reserve
-    # empty=true for "cannot advance even one step".
+    # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
+    # advance even one step".
     assert "ADVANCES the boot" in m.task_description
-    assert "empty=true" in m.task_description
+    assert "proposal_set=[]" in m.task_description
     assert ENABLEMENT_PROGRESS_GUIDANCE
 
 
@@ -328,8 +262,7 @@ def test_offending_file_from_inline_cpp_path() -> None:
 
 
 def test_hip_symbol_beats_import_error_ordering() -> None:
-    """An ImportError caused by an undefined HIP symbol resolves to the more
-    actionable hip_kernel_missing, not the generic import_error."""
+    """An ImportError caused by an undefined HIP symbol resolves to the more actionable hip_kernel_missing, not the generic import_error."""
     log = "ImportError: /lib/_C.so: undefined symbol: hipLaunchKernel"
     sig = classify_failure(log)
     assert sig.kind == HIP_KERNEL_MISSING
@@ -339,9 +272,7 @@ def test_hip_symbol_beats_import_error_ordering() -> None:
 
 
 def test_stacked_import_error_masking_hip_symbol() -> None:
-    """A stacked traceback (ImportError wrapping an undefined HIP symbol) keeps
-    the actionable hip_kernel_missing as primary and surfaces import_error as a
-    secondary kind rather than discarding it."""
+    """A stacked traceback (ImportError wrapping an undefined HIP symbol) keeps the actionable hip_kernel_missing as primary and surfaces import_error as a secondary kind rather than discarding it."""
     log = (
         "Traceback (most recent call last):\n"
         '  File "/opt/vllm/_custom_ops.py", line 5, in <module>\n'
@@ -364,8 +295,7 @@ def test_single_signature_has_empty_secondary() -> None:
 
 
 def test_offending_file_prefers_frame_near_primary_hit() -> None:
-    """With two matching rules, the offending file is taken near the primary
-    (earlier, more-specific) hit rather than the last frame overall."""
+    """With two matching rules, the offending file is taken near the primary (earlier, more-specific) hit rather than the last frame overall."""
     log = (
         "Traceback (most recent call last):\n"
         '  File "/opt/vllm/loader.py", line 3, in load\n'
@@ -411,74 +341,46 @@ def test_request_requires_core_fields(missing: str) -> None:
 # --- runnable_decision (the enablement gate) -------------------------------
 
 
-def test_runnable_pass_probe_only() -> None:
-    """Probe exit 0 with no correctness check -> runs."""
-    runs, reason = runnable_decision(probe_returncode=0, correctness_ok=None)
+def test_runnable_pass_boot_only() -> None:
+    """The server came up, with no correctness check -> runs."""
+    runs, reason = runnable_decision(booted=True, correctness_ok=None)
     assert runs is True
-    assert "launches" in reason
+    assert "comes up" in reason
 
 
 def test_runnable_pass_with_correctness() -> None:
-    """Probe exit 0 + correctness pass -> runs, reason mentions correctness."""
-    runs, reason = runnable_decision(probe_returncode=0, correctness_ok=True)
+    """Booted + correctness pass -> runs, reason mentions correctness."""
+    runs, reason = runnable_decision(booted=True, correctness_ok=True)
     assert runs is True
     assert "correctness" in reason
 
 
-def test_runnable_fail_nonzero_probe() -> None:
-    """Non-zero probe exit -> still not runnable."""
-    runs, reason = runnable_decision(probe_returncode=1, correctness_ok=None)
+def test_runnable_fail_did_not_boot() -> None:
+    """A boot that did not reach a serving server -> still not runnable."""
+    runs, reason = runnable_decision(booted=False, correctness_ok=None)
     assert runs is False
     assert "still not runnable" in reason
 
 
 def test_runnable_fail_timeout() -> None:
-    """Probe timeout is a hard fail regardless of return code."""
-    runs, reason = runnable_decision(probe_returncode=0, correctness_ok=True, probe_timed_out=True)
+    """A bring-up reaped on its budget is a hard fail whatever else was seen."""
+    runs, reason = runnable_decision(booted=True, correctness_ok=True, boot_timed_out=True)
     assert runs is False
-    assert "timed out" in reason
+    assert "reaped on its budget" in reason
 
 
-def test_runnable_fail_probe_not_run() -> None:
-    """A missing probe result cannot be promoted."""
-    runs, reason = runnable_decision(probe_returncode=None, correctness_ok=None)
+def test_runnable_fail_without_an_observation() -> None:
+    """No boot observation means the question was never answered, so no KEEP."""
+    runs, reason = runnable_decision(booted=None, correctness_ok=None)
     assert runs is False
-    assert "did not run" in reason
+    assert "no boot observation" in reason
 
 
 def test_runnable_fail_correctness() -> None:
     """Boots but fails correctness -> rejected."""
-    runs, reason = runnable_decision(probe_returncode=0, correctness_ok=False)
+    runs, reason = runnable_decision(booted=True, correctness_ok=False)
     assert runs is False
     assert "correctness check failed" in reason
-
-
-def test_runnable_fail_same_signature_persists() -> None:
-    """Same actionable failure after the patch -> not fixed even if probe rc==0."""
-    before = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
-    after = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
-    runs, reason = runnable_decision(
-        probe_returncode=0,
-        correctness_ok=None,
-        before_signature=before,
-        after_signature=after,
-    )
-    assert runs is False
-    assert "persists after patch" in reason
-
-
-def test_runnable_pass_when_post_signature_clean() -> None:
-    """A clean (unknown) post-patch signature does not block a rc==0 probe."""
-    before = classify_failure("ValueError: Model architecture 'FooForCausalLM' is not supported")
-    after = classify_failure("server ready on port 30000")
-    assert after.kind == UNKNOWN
-    runs, _ = runnable_decision(
-        probe_returncode=0,
-        correctness_ok=True,
-        before_signature=before,
-        after_signature=after,
-    )
-    assert runs is True
 
 
 # --- New kinds: tokenizer_error, serve_flag, resource_constraint -----------
@@ -615,7 +517,7 @@ def test_targeted_build_candidate_none_signature() -> None:
     assert is_targeted_build_candidate(None) is False  # type: ignore[arg-type]
 
 
-# --- _extract_offending_file / _failure_identity ---------------------------
+# --- _extract_offending_file -----------------------------------------------
 
 
 def test_extract_offending_file_falls_back_to_last_traceback_frame() -> None:
@@ -627,11 +529,6 @@ def test_extract_offending_file_falls_back_to_last_traceback_frame() -> None:
         "RuntimeError: boom"
     )
     assert _extract_offending_file(text) == "/opt/vllm/last.py"
-
-
-def test_failure_identity_none_signature_is_empty_triple() -> None:
-    """A ``None`` signature yields three empty strings (dedup key for no-sig)."""
-    assert _failure_identity(None) == ("", "", "")
 
 
 def test_failure_signature_to_dict_round_trips_fields() -> None:

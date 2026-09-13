@@ -1,7 +1,4 @@
-"""Build repository, path, and keyword inputs for PR Monitor queries.
-
-Repository resolution must succeed before discovery can run.
-"""
+"""Build repository, path, and keyword inputs for PR Monitor queries."""
 
 from __future__ import annotations
 
@@ -17,12 +14,10 @@ REASON_NO_CANDIDATE = "no_candidate"
 REASON_SKIPPED_DEADLINE = "skipped_deadline"
 REASON_SERVICE_UNREACHABLE = "service_unreachable"
 REASON_CONTRACT_ERROR = "contract_error"
-# The subsystem itself failed locally (filesystem, parsing) rather than the
-# service being unavailable.
+# The subsystem itself failed locally (filesystem, parsing) rather than the service being unavailable.
 REASON_LOCAL_FAILURE = "local_failure"
 
-# Repositories the service is expected to track. Drift against /repos is worth
-# a warning because it means the server-side ConfigMap moved.
+# Repositories the service is expected to track.
 PR_REPOS_EXPECTED: tuple[str, ...] = (
     "ROCm/aiter",
     "ROCm/ATOM",
@@ -48,8 +43,8 @@ KERNEL_BACKEND_REPO_MAP: dict[str, str] = {
     "aiter": "ROCm/aiter",
     "flydsl": "ROCm/FlyDSL",
     "triton": "triton-lang/triton",
-    # Gluon ships inside Triton (``triton.experimental.gluon``), so its PRs,
-    # its breakage and its API churn all live in the same repository.
+    # Gluon ships inside Triton (``triton.experimental.gluon``), so its PRs, its breakage and its API churn all live
+    # in the same repository.
     "gluon": "triton-lang/triton",
     "hip": "ROCm/hip",
 }
@@ -222,9 +217,7 @@ def extract_keywords(
 
     for source in (operator_name, *target_functions, bottleneck):
         tokens = _tokens(source)
-        # Bigrams use tokens adjacent in the original text. Filtering stopwords
-        # first would splice together words that never co-occur ("fused rms"
-        # from "fused_add_rms_norm"), and the server matches verbatim.
+        # Bigrams use tokens adjacent in the original text.
         for first, second in zip(tokens, tokens[1:]):
             if first in _STOPWORDS and second in _STOPWORDS:
                 continue

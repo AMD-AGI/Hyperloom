@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Wall-clock budget signals.
-
-Two complementary axes:
-
-* Percentage ladder, gated on no validated gain: ``budget_strategy_drift``
-  (burn_pct >= 0.5), ``budget_burn_no_gain`` (>= 0.70), ``deadline_imminent``
-  (>= 0.85, HIGH alert signalling Orchestration to wind down).
-* Absolute-time backstop, fires regardless of gain: ``deadline_warning``
-  (remaining <= 30min, downgraded HIGH -> MEDIUM when a validated gain exists)
-  and ``deadline_hard_cutoff`` (remaining <= 5min, always HIGH).
-
-Both axes are suppressed for sub-``min_budget_minutes`` sessions and during the
-closing phase.
-
-Reads the Coordinator time-budget block via :class:`SharedStateSnapshot`; silent when absent.
-The two axes intentionally overlap; absolute-time is the fallback when the percentage gate is
-silenced by healthy gain.
-"""
+"""Wall-clock budget signals."""
 
 from __future__ import annotations
 
@@ -30,11 +13,7 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class BudgetConfig:
-    """Tunables for :func:`evaluate_budget_signals`.
-
-    Escalating percentage ladder (``strategy_drift_pct < warn_pct < imminent_pct``)
-    plus two absolute-time thresholds (``deadline_warning_minutes >= deadline_hard_cutoff_minutes``).
-    """
+    """Tunables for :func:`evaluate_budget_signals`."""
 
     # Budget used past this with no validated gain → cheaper actions take over from kernel_opt.
     strategy_drift_pct: float = 0.5
@@ -46,8 +25,8 @@ class BudgetConfig:
     deadline_hard_cutoff_minutes: float = 5.0
     # Below this budget every signal is suppressed (sub-30-min smoke test).
     min_budget_minutes: float = 30.0
-    # Validated gain (%) above which the percentage ladder is suppressed;
-    # absolute-time signals are only downgraded HIGH→MEDIUM, not silenced.
+    # Validated gain (%) above which the percentage ladder is suppressed; absolute-time signals are only downgraded
+    # HIGH→MEDIUM, not silenced.
     productive_gain_pct: float = 0.5
 
 
@@ -56,23 +35,7 @@ def evaluate_budget_signals(
     *,
     config: BudgetConfig | None = None,
 ) -> list[Symptom]:
-    """Evaluate the wall-clock budget ladder and absolute-time deadline rules.
-
-    Computes burn percentage and remaining time from the shared-state snapshot
-    and emits the appropriate percentage-based and time-anchored symptoms.
-    Stays silent on sub-``min_budget_minutes`` sessions and during the closing
-    phase.
-
-    Args:
-        ctx (ReactorContext): Reactor context providing the shared-state
-            snapshot.
-        config (BudgetConfig | None): Tunables; defaults to :class:`BudgetConfig`
-            when ``None``.
-
-    Returns:
-        list[Symptom]: Any budget/deadline symptoms for this tick, possibly
-            empty.
-    """
+    """Evaluate the wall-clock budget ladder and absolute-time deadline rules."""
     cfg = config or BudgetConfig()
     snap: SharedStateSnapshot = ctx.shared_state
     budget = float(snap.budget_minutes or 0.0)
@@ -88,8 +51,7 @@ def evaluate_budget_signals(
     burn_pct = elapsed / budget
     validated = float(snap.cumulative_gain_validated or 0.0)
 
-    # Absolute-time signals checked first; they bypass the
-    # ``productive_gain_pct`` gate. Dedup collapses any overlap below.
+    # Absolute-time signals checked first; they bypass the ``productive_gain_pct`` gate.
     absolute_signals: list[Symptom] = []
     if remaining <= cfg.deadline_hard_cutoff_minutes:
         absolute_signals.append(_hard_cutoff_symptom(snap, remaining=remaining, cfg=cfg))
@@ -125,16 +87,7 @@ def _imminent_symptom(
     burn_pct: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """Build the HIGH ``deadline_imminent`` wind-down symptom.
-
-    Args:
-        snap (SharedStateSnapshot): Current shared-state snapshot.
-        burn_pct (float): Fraction of the budget already consumed.
-        cfg (BudgetConfig): Budget tunables.
-
-    Returns:
-        Symptom: A HIGH-severity symptom signalling Orchestration to finalize.
-    """
+    """Build the HIGH ``deadline_imminent`` wind-down symptom."""
     return Symptom(
         name="deadline_imminent",
         severity=SymptomSeverity.HIGH,
@@ -167,16 +120,7 @@ def _burn_no_gain_symptom(
     burn_pct: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """Build the MEDIUM ``budget_burn_no_gain`` mid-stage warning symptom.
-
-    Args:
-        snap (SharedStateSnapshot): Current shared-state snapshot.
-        burn_pct (float): Fraction of the budget already consumed.
-        cfg (BudgetConfig): Budget tunables.
-
-    Returns:
-        Symptom: A MEDIUM-severity symptom nudging a strategy change.
-    """
+    """Build the MEDIUM ``budget_burn_no_gain`` mid-stage warning symptom."""
     return Symptom(
         name="budget_burn_no_gain",
         severity=SymptomSeverity.MEDIUM,
@@ -205,18 +149,7 @@ def _strategy_drift_symptom(
     burn_pct: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """H2 early-warning symptom: budget half-burnt with nothing to ship.
-
-    MEDIUM severity (diagnose only).
-
-    Args:
-        snap: Current shared-state snapshot.
-        burn_pct: Fraction of the wall-clock budget consumed.
-        cfg: Budget configuration thresholds.
-
-    Returns:
-        The constructed :class:`Symptom`.
-    """
+    """H2 early-warning symptom: budget half-burnt with nothing to ship."""
     return Symptom(
         name="budget_strategy_drift",
         severity=SymptomSeverity.MEDIUM,
@@ -247,19 +180,7 @@ def _deadline_warning_symptom(
     validated: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time warning symptom (deadline approaching).
-
-    MEDIUM severity when validated gain exists, HIGH without.
-
-    Args:
-        snap: Current shared-state snapshot.
-        remaining: Minutes remaining in the budget.
-        validated: Cumulative validated gain percentage.
-        cfg: Budget configuration thresholds.
-
-    Returns:
-        The constructed :class:`Symptom`.
-    """
+    """H1 absolute-time warning symptom (deadline approaching)."""
     if validated < cfg.productive_gain_pct:
         severity = SymptomSeverity.HIGH
         tail = "validated_gain still 0; wind the session down now"
@@ -297,18 +218,7 @@ def _hard_cutoff_symptom(
     remaining: float,
     cfg: BudgetConfig,
 ) -> Symptom:
-    """H1 absolute-time emergency-cutoff symptom (deadline imminent).
-
-    Always HIGH severity and suggests delegating to the final report.
-
-    Args:
-        snap: Current shared-state snapshot.
-        remaining: Minutes remaining in the budget.
-        cfg: Budget configuration thresholds.
-
-    Returns:
-        The constructed :class:`Symptom`.
-    """
+    """H1 absolute-time emergency-cutoff symptom (deadline imminent)."""
     return Symptom(
         name="deadline_hard_cutoff",
         severity=SymptomSeverity.HIGH,

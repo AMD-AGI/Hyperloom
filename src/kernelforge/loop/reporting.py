@@ -17,39 +17,16 @@ from kernelforge.llm.git import git
 from kernelforge.loop.scoring import aggregate_regression_detail
 from kernelforge.durable_io import atomic_write_text, fsync_directory
 
-# v2 adds `aggregate_regression` and derives `total_improved` from it, so a v1
-# manifest is missing a field this publisher always writes. Publication identity
-# is a whole-dict comparison, which reads that difference as a conflicting
-# publication of the same iteration rather than as the upgrade it is.
+# v2 adds `aggregate_regression` and derives `total_improved` from it, so a v1 manifest is missing a field this
+# publisher always writes.
 MANIFEST_SCHEMA_VERSION = 2
 
-# What every published best version must contain. Named once because two places
-# ask the question and they have to agree: publication refuses to accept a
-# version missing any of these, and reconciliation reads the same list to decide
-# a bundle is already whole and needs no republishing. Answering differently
-# would let reconciliation call a bundle complete that publication would reject.
+# What every published best version must contain.
 BEST_BUNDLE_FILES = ("forge.patch", "validation.txt", "benchmark.json")
 
 
 def _round_budget_lines(summary: object) -> list[str]:
-    """Render what the campaign's rounds cost, for the report's reader.
-
-    Planning is the largest single thing a round buys and was, until it was
-    measured here, the one part of the budget nobody could see without reading
-    a log. A campaign that ended because no round fit the time left says so
-    here too: from the outside that is indistinguishable from a campaign that
-    ran out of ideas, and the two call for opposite responses.
-
-    Every duration here is campaign-cumulative -- it spans every session the
-    campaign has run, not the one that wrote this report -- and is labelled so.
-    The share is read from the summary rather than computed here, and this
-    renderer deliberately has no clock to compute one from: the numerator and
-    the denominator have to describe the same span, and only the writer of the
-    summary knows they do. A summary carrying no share is rendered without one.
-    Dividing cumulative planning by whatever span was nearest to hand is how a
-    resumed 10-minute session against 45 minutes of cumulative planning came to
-    publish "450% of the run".
-    """
+    """Render what the campaign's rounds cost, for the report's reader."""
     if not isinstance(summary, dict) or not summary:
         return []
     lines = ["", "## Round Budget", ""]
@@ -61,8 +38,8 @@ def _round_budget_lines(summary: object) -> list[str]:
     lines.append(f"- Planning wall-clock (campaign total): {planning_sec / 60:.1f} min")
     lines.append(f"- Round wall-clock (campaign total): {total_sec / 60:.1f} min")
     if campaign_sec > 0:
-        # Printed beside the share so a reader can check the division that
-        # produced it against the two numbers it was made from.
+        # Printed beside the share so a reader can check the division that produced it against the two numbers it was
+        # made from.
         lines.append(f"- Campaign wall-clock: {campaign_sec / 60:.1f} min")
     share = summary.get("planning_share_pct")
     if isinstance(share, (int, float)) and not isinstance(share, bool):
@@ -95,8 +72,7 @@ class BestResultPublisher:
 
     @classmethod
     def _fsync_tree(cls, root: Path) -> None:
-        """fsync every file and directory under ``root`` (bottom of the bundle
-        must be durable before the top-level rename makes it visible)."""
+        """fsync every file and directory under ``root`` (bottom of the bundle must be durable before the top-level rename makes it visible)."""
         for dirpath, _dirnames, filenames in os.walk(root):
             for name in filenames:
                 file_path = Path(dirpath) / name
@@ -152,10 +128,7 @@ class BestResultPublisher:
                 sources[str(relative)] = result.stdout
         return sources
 
-    # Manifest keys that describe when a publication was made rather than what
-    # it is. Both move on their own while the KEEP behind them does not, so
-    # comparing them would report a conflict every time a campaign republishes
-    # the same best result.
+    # Manifest keys that describe when a publication was made rather than what it is.
     _VOLATILE_MANIFEST_KEYS = frozenset({"published_at", "round_budget"})
 
     @classmethod
@@ -247,13 +220,7 @@ class BestResultPublisher:
 
     @staticmethod
     def _render_report(manifest: dict) -> str:
-        """Render the human-facing view of one published manifest.
-
-        The manifest may withhold the improvement badge over a contradiction
-        between the score and the aggregate wall times, and this report is the
-        artifact an operator opens, so the verdict and its reason are stated
-        here rather than left to whoever reads the JSON.
-        """
+        """Render the human-facing view of one published manifest."""
         changed = manifest.get("changed_files") or []
         aggregate_regression = str(manifest["aggregate_regression"])
         lines = [
@@ -316,12 +283,7 @@ class BestResultPublisher:
         patch: str,
         round_budget: dict | None = None,
     ) -> dict:
-        """Publish one KEEP and atomically point the campaign at it.
-
-        ``round_budget`` is what the campaign's rounds have cost so far. It
-        describes the run rather than this result, so it is written into the
-        manifest but kept out of publication identity.
-        """
+        """Publish one KEEP and atomically point the campaign at it."""
         self.best_root.mkdir(parents=True, exist_ok=True)
         version_name = f"iter_{iteration:03d}"
         sources = self._source_files(
@@ -338,10 +300,9 @@ class BestResultPublisher:
             or resolved_search_start_speedup <= 0.0
         ):
             raise ValueError("mean case speedups must be finite and positive")
-        # The manifest is the artifact downstream reporting reads, so it has to
-        # carry the same contradiction the CLI result already names: a KEEP
-        # decided on the mean of per-case speedups can still be slower in
-        # aggregate wall time, and that must not ship as an improvement.
+        # The manifest is the artifact downstream reporting reads, so it has to carry the same contradiction the CLI
+        # result already names: a KEEP decided on the mean of per-case speedups can still be slower in aggregate wall
+        # time, and that must not ship as an improvement.
         aggregate_regression = aggregate_regression_detail(
             baseline_ms=baseline_wall_ms,
             best_ms=best_wall_ms,
@@ -452,9 +413,8 @@ class BestResultPublisher:
                     temporary / "publication.json",
                     json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 )
-                # Make the whole bundle durable before it becomes visible, then
-                # fsync the parent so the rename itself survives a crash
-                # (mirrors archive.record's fsync discipline).
+                # Make the whole bundle durable before it becomes visible, then fsync the parent so the rename itself
+                # survives a crash (mirrors archive.record's fsync discipline).
                 self._fsync_tree(temporary)
                 os.replace(temporary, version_dir)
                 fsync_directory(self.best_root)
@@ -467,10 +427,9 @@ class BestResultPublisher:
             current_iteration = int(current.get("iteration", 0) or 0)
             if current_iteration > iteration:
                 raise ValueError(f"best manifest is ahead of iteration {iteration}: {current_iteration}")
-            # Only manifests written under the same schema are comparable: an
-            # older one differs by construction, so comparing it would report a
-            # conflict on every republish across an upgrade and leave the stale
-            # manifest -- and the verdict it was written with -- published.
+            # Only manifests written under the same schema are comparable: an older one differs by construction, so
+            # comparing it would report a conflict on every republish across an upgrade and leave the stale manifest
+            # -- and the verdict it was written with -- published.
             if (
                 current_iteration == iteration
                 and int(current.get("schema_version", 0) or 0) == MANIFEST_SCHEMA_VERSION
@@ -481,25 +440,14 @@ class BestResultPublisher:
             manifest = {**manifest, "round_budget": dict(round_budget)}
         payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
 
-        # The manifest is the atomic commit point. Derived human/machine views
-        # are regenerated only after it points at a complete immutable bundle.
+        # The manifest is the atomic commit point.
         atomic_write_text(self.manifest_path, payload)
         atomic_write_text(self.result_path, payload)
         atomic_write_text(self.report_path, self._render_report(manifest))
         return manifest
 
     def refresh_round_budget(self, round_budget: dict) -> bool:
-        """Restate the campaign's round costs on an already-published best.
-
-        The last KEEP of a campaign is usually published well before the run
-        ends, so the totals it carried were the totals at that moment. This
-        rewrites them once the campaign is over -- including the refusal that
-        ended it, which nothing published earlier could have known about.
-
-        Best-effort by contract: nothing here changes which result is
-        published, so a workspace that cannot take the rewrite keeps the
-        report it already had.
-        """
+        """Restate the campaign's round costs on an already-published best."""
         if not round_budget or not self.manifest_path.is_file():
             return False
         try:
@@ -514,19 +462,7 @@ class BestResultPublisher:
         return True
 
     def describes_current_best(self, *, iteration: int, commit_hash: str) -> bool:
-        """Report whether the published manifest already is this best.
-
-        Reconciliation rebuilds and republishes run_state.best to repair a
-        manifest that a crash left behind. On a resumed session it recomputes
-        fields the stored manifest does not carry identically -- session_index,
-        experiment_id -- so republishing an already-current best tripped the
-        same-iteration conflict guard and set persistence_degraded, while the
-        KEEP, the git state and run_state.best were all intact. Two consecutive
-        resumed sessions in the 12-hour run ended degraded for exactly that
-        harmless divergence. Skipping the republish when the manifest already
-        names the same (iteration, commit_hash) behind a complete bundle mirrors
-        the fresh path's idempotency and keeps a clean resume clean.
-        """
+        """Report whether the published manifest already is this best."""
         if not self.manifest_path.is_file():
             return False
         try:
@@ -535,8 +471,8 @@ class BestResultPublisher:
             return False
         if int(manifest.get("schema_version", 0) or 0) != MANIFEST_SCHEMA_VERSION:
             return False
-        # iteration 0 is a legitimate best (a warm-started baseline), so it must
-        # not be read through an "or -1" default that a falsy 0 would trip.
+        # iteration 0 is a legitimate best (a warm-started baseline), so it must not be read through an "or -1"
+        # default that a falsy 0 would trip.
         try:
             stored_iteration = int(manifest["iteration"])
         except (KeyError, TypeError, ValueError):

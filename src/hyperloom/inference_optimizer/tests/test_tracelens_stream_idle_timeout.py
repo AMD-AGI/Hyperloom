@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The TraceLens SDK stream watchdog must not kill a running tool call.
-
-Session 20260803T091144Z lost its roofline to this. The transcript shows the
-agent announcing the trace size, issuing a ``Bash`` ``ToolUseBlock`` for
-``TraceLens_generate_perf_report_pytorch``, then a ``TaskStartedMessage`` — and
-nothing more, because the SDK is silent while a tool runs. The 300s
-between-messages bound fired exactly 300s after the tool started and the failure
-was reported as ``(gateway stall)``, though the gateway answered every probe and
-the same command run by hand was still working 25 minutes later.
-
-The fakes below mirror only what the runner reads: the message/block class names
-and ``message.content``.
-"""
+"""The TraceLens SDK stream watchdog must not kill a running tool call."""
 
 from __future__ import annotations
 

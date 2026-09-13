@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the untagged-call warning in ``llm_config``.
-
-An empty ``component`` is how a call site that nobody instrumented looks from
-inside the tagging helpers, and for a long time it was skipped in silence. The
-spend still reached the gateway, it simply arrived naming no producer, and
-nothing in the logs pointed at the code that made it. These tests pin that the
-skip is now audible, that it names the caller rather than the helper it passed
-through, and that it stays quiet for a deployment that emits no attribution.
-"""
+"""Unit tests for the untagged-call warning in ``llm_config``."""
 
 from __future__ import annotations
 

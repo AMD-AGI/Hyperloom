@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Patch grounding must survive a checkout owned by another uid.
-
-Unlike the other git call sites, a refusal here does not surface as an error:
-``git apply --check`` exits non-zero and the patch is recorded as STALE, so a
-perfectly good patch is discarded and the reason field carries git's ownership
-complaint instead of a diff conflict.
-
-``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the test
-needs no root and no foreign-owned directory.
-"""
+"""Patch grounding must survive a checkout owned by another uid."""
 
 from __future__ import annotations
 

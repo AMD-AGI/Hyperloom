@@ -108,14 +108,7 @@ async def test_preflight_rejects_driver_that_benchmarks_undeclared_cases(
     tmp_path,
     monkeypatch,
 ):
-    """The declared suite is the contract in both directions.
-
-    A driver that measures cases the task never declared is certified here and
-    then scored on all of them: the baseline takes the case table from what the
-    driver prints, so the extra cases enter the mean the KEEP/REVERT decision is
-    made against. The suite being optimized is then not the suite that was asked
-    for, and nothing downstream can tell.
-    """
+    """The declared suite is the contract in both directions."""
     driver = tmp_path / "driver.py"
     driver.write_text("# driver\n", encoding="utf-8")
     _passing_stages(monkeypatch, {"case_001": 1.0, "case_002": 2.0, "case_099": 3.0})
@@ -199,14 +192,7 @@ def test_an_unusable_explicit_spec_fails_instead_of_disabling_the_gate(
     name,
     contents,
 ):
-    """Refuse to run when the operator named a suite that cannot be read.
-
-    An empty result means "this task declares no suite", which switches the
-    driver's case check off entirely. Returning it for a spec that was supplied
-    and could not be used spends the whole run optimizing and scoring a case set
-    nobody verified, and says so in one log line among thousands. The operator
-    named the file; a name that does not resolve is an error, not a default.
-    """
+    """Refuse to run when the operator named a suite that cannot be read."""
     spec = tmp_path / name
     if contents is not None:
         spec.write_text(contents, encoding="utf-8")
@@ -274,18 +260,7 @@ def test_prepare_agent_owns_the_driver_it_is_asked_to_author(
     tmp_path,
     monkeypatch,
 ):
-    """Declare the driver as this turn's target, never as protected state.
-
-    Preparation exists to write the driver, and it materializes its own
-    scaffolding -- the reference bundle's harness and the durable invocation
-    spec -- before the agent starts. Two declarations used to contradict that
-    job. Naming the driver as ``driver_script`` marked the file being authored
-    as one whose content must survive the turn, so the agent's rewrite was
-    reported as a protected file changed and rolled back. Judging the worktree
-    against HEAD read the scaffolding as files this turn had created, which
-    failed every attempt with "protected files created:
-    .forge_task_reference/...". Three attempts, no driver, budget spent.
-    """
+    """Declare the driver as this turn's target, never as protected state."""
     captured: dict[str, object] = {}
 
     class FakeBackend:
@@ -418,16 +393,7 @@ def test_required_git_workspace_reports_setup_failures(
 
 
 def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
-    """Persist the declared spec even when preparation is skipped.
-
-    A driver that already conforms skips preparation, and preparation is what
-    placed the spec next to the driver. The spec is a durable runtime input --
-    a driver that derives its cases from the task reads it while benchmarking --
-    so skipping the copy leaves that driver reading whatever path the operator
-    passed, on a machine and at a time nobody controls. An external spec edited
-    later then silently changes the measured suite, and a resumed campaign
-    measures something its own baseline never did.
-    """
+    """Persist the declared spec even when preparation is skipped."""
     from kernelforge.cli import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
@@ -509,12 +475,7 @@ def test_materializes_only_valid_object_specs(tmp_path):
 
 
 def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path):
-    """An external bundle already carries its spec beside the driver.
-
-    Rewriting it canonically would change bytes the external transaction guards
-    as a read-only caller input, so an equivalent payload already in place is
-    authoritative as-is.
-    """
+    """An external bundle already carries its spec beside the driver."""
     durable_dir = tmp_path / "artifacts"
     durable_dir.mkdir()
     source = tmp_path / "invocation_spec_gemm.json"
@@ -534,15 +495,7 @@ def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path)
 
 
 def test_a_conflicting_file_beside_the_driver_is_never_overwritten(tmp_path):
-    """Refuse the destination rather than replace a caller's own file.
-
-    The destination is the driver's directory, which belongs to the caller, and
-    the name is taken from the source. A file already there holding something
-    else is not this function's to replace: preparation's rollback restores the
-    driver and Git-tracked state, so an untracked file overwritten here is gone
-    for good. Preparation continues without the spec, which the caller already
-    reports.
-    """
+    """Refuse the destination rather than replace a caller's own file."""
     durable_dir = tmp_path / "artifacts"
     durable_dir.mkdir()
     source = tmp_path / "invocation_spec_gemm.json"
@@ -561,11 +514,7 @@ def test_a_conflicting_file_beside_the_driver_is_never_overwritten(tmp_path):
 
 
 def test_a_symlinked_destination_is_never_written_through(tmp_path):
-    """Refuse a symlink rather than write to wherever it points.
-
-    Writing through it would edit a file outside the directory this function was
-    given, which nothing in preparation can restore.
-    """
+    """Refuse a symlink rather than write to wherever it points."""
     durable_dir = tmp_path / "artifacts"
     durable_dir.mkdir()
     outside = tmp_path / "somebody_elses.json"
@@ -675,19 +624,18 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     assert result.ok is True
     prompt = captured["prompt"]
     assert "BUILD THE DRIVER FROM THIS" in prompt
-    # Inlined, so the agent has the evidence without spending a tool call, but
-    # the path stays: the driver may read the same file at runtime.
+    # Inlined, so the agent has the evidence without spending a tool call, but the path stays: the driver may read the
+    # same file at runtime.
     assert "### The specification, verbatim" in prompt
     for token in ('"scaled_gemm"', '"CASE_ID": "case_001"', "17408"):
         assert token in prompt
     assert "./invocation_spec_scaled_gemm.json" in prompt
-    # The durable spec has to be introduced before the temporary bundle, wherever
-    # either block ends up: it is the authoritative input, so a reference-bundle
-    # path above it competes for the agent's attention.
+    # The durable spec has to be introduced before the temporary bundle, wherever either block ends up: it is the
+    # authoritative input, so a reference-bundle path above it competes for the agent's attention.
     assert prompt.index("Invocation specification") < prompt.index(task_preparer.REFERENCE_SUBDIR)
     assert captured["expected_case_ids"] == ["case_001"]
-    # The specification is a durable task artifact: the driver may read it at
-    # runtime, so it outlives preparation and enters the pristine commit.
+    # The specification is a durable task artifact: the driver may read it at runtime, so it outlives preparation and
+    # enters the pristine commit.
     assert json.loads(materialized.read_text(encoding="utf-8")) == payload
     assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
 
@@ -955,13 +903,7 @@ def test_timeout_salvages_driver_when_preflight_passes(tmp_path, monkeypatch):
 
 
 def test_the_note_carries_the_specification_verbatim(tmp_path):
-    """Handed over whole rather than summarised.
-
-    Every selective rendering has to decide what an absent field looks like, and
-    both ways of deciding mislead: a heading over nothing claims the field is
-    known and empty, while dropping the heading leaves no trace it exists. In the
-    raw JSON an absent key is unambiguously absent.
-    """
+    """Handed over whole rather than summarised."""
     spec = {
         "invocation": {
             "launcher_locator": "aiter/ops/gemm_op_a8w8.py(651): gemm_a8w8_blockscale",
@@ -983,9 +925,7 @@ def test_the_note_carries_the_specification_verbatim(tmp_path):
 
 
 def test_the_note_demands_the_deployment_shapes_not_a_toy_size(tmp_path):
-    """A kernel tuned at a size the workload never serves can report a large
-    speedup that disappears end to end; that is the failure this text targets.
-    """
+    """A kernel tuned at a size the workload never serves can report a large speedup that disappears end to end; that is the failure this text targets."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(json.dumps({"invocation": {"arguments": []}}), encoding="utf-8")
 
@@ -997,10 +937,7 @@ def test_the_note_demands_the_deployment_shapes_not_a_toy_size(tmp_path):
 
 
 def test_an_absent_field_is_shown_as_absent_rather_than_as_an_empty_one(tmp_path):
-    """A graph replay has no CPU-side parent op, so the profiler records no
-    arguments and the key is simply missing. The agent has to be able to see
-    that it is missing, which is what the raw document gives it.
-    """
+    """A graph replay has no CPU-side parent op, so the profiler records no arguments and the key is simply missing."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text(
         json.dumps({"schema_version": 2, "missing_fields": ["inputs"]}, indent=2),
@@ -1029,14 +966,7 @@ def test_an_oversized_spec_is_referenced_rather_than_inlined(tmp_path):
 
 
 def test_an_empty_spec_says_it_is_empty_rather_than_too_large(tmp_path):
-    """Three states, three messages.
-
-    ``_invocation_spec_text`` refuses for three unrelated reasons and used to
-    return a bare ``""`` for all of them, so the note called an empty file too
-    large. That is the same defect this branch removed from the quick
-    reference -- a renderer that cannot tell absent from empty states one when
-    it means the other -- reappearing one level up.
-    """
+    """Three states, three messages."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text("", encoding="utf-8")
 
@@ -1059,16 +989,7 @@ def test_a_whitespace_only_spec_counts_as_empty(tmp_path):
 
 
 def test_a_malformed_spec_is_inlined_verbatim_rather_than_dropped(tmp_path):
-    """Content is deliberately NOT validated as JSON.
-
-    The old quick reference parsed the document and rendered nothing when
-    ``json.loads`` failed, which told the agent only that no evidence arrived.
-    Handing the bytes over unchanged is the point of this branch: they are the
-    same bytes the driver will read at runtime, so a corrupt document is worth
-    more to the agent visible than hidden. Pinned because the reasoning is not
-    obvious from the code, and because "validate it" is the natural review
-    instinct.
-    """
+    """Content is deliberately NOT validated as JSON."""
     spec_path = tmp_path / "invocation_spec.json"
     spec_path.write_text('{"invocation": {"arguments": [', encoding="utf-8")
 
@@ -1082,12 +1003,7 @@ def test_a_malformed_spec_is_inlined_verbatim_rather_than_dropped(tmp_path):
 
 
 def test_an_unreadable_spec_still_produces_a_usable_note(tmp_path):
-    """The document is evidence, not a precondition; losing it must not take the
-    instruction with it.
-
-    It must also not be described as too large, which is what a single empty
-    return value made the note say.
-    """
+    """The document is evidence, not a precondition; losing it must not take the instruction with it."""
     missing = tmp_path / "gone.json"
 
     note = task_preparer._invocation_spec_note(missing, tmp_path)

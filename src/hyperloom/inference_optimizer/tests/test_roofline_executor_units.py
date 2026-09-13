@@ -104,8 +104,7 @@ def test_extract_returns_none_when_warnings_not_a_list():
 
 
 def test_extract_skips_non_dict_warning_entries():
-    # A non-dict entry in the warnings list is skipped; a valid entry after it
-    # is still honoured.
+    # A non-dict entry in the warnings list is skipped; a valid entry after it is still honoured.
     res = {
         "status": "failed",
         "trace_health_warnings": [
@@ -123,8 +122,8 @@ def test_extract_skips_non_dict_warning_entries():
 
 
 def test_extract_skips_warning_when_modes_not_a_list():
-    # The recovery warning names an alternate field that is not a list -> skip
-    # it; a later well-formed warning still matches.
+    # The recovery warning names an alternate field that is not a list -> skip it; a later well-formed warning still
+    # matches.
     res = {
         "status": "failed",
         "trace_health_warnings": [
@@ -195,8 +194,7 @@ def test_profile_server_log_tail_reads_newest_log(tmp_path):
 
 
 def test_profile_server_log_tail_swallows_oserror(monkeypatch, tmp_path):
-    # _find_server_logs succeeds but read_bytes raises OSError -> best-effort
-    # "" instead of propagating.
+    # _find_server_logs succeeds but read_bytes raises OSError -> best-effort "" instead of propagating.
     trace_dir = tmp_path / "torch_trace"
     trace_dir.mkdir()
     log = trace_dir / "server.log"
@@ -233,8 +231,7 @@ def test_profile_server_log_tail_empty_when_no_logs(tmp_path):
 # Exception-path cuda-graph escalation
 @pytest.mark.asyncio
 async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path):
-    """profile_executor raises an exception whose repr carries the cuda-graph
-    capture signature -> next attempt boots eager."""
+    """profile_executor raises an exception whose repr carries the cuda-graph capture signature -> next attempt boots eager."""
     seen: list[dict] = []
     calls = {"n": 0}
 
@@ -314,8 +311,7 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
 # Auto-retry returns non-dict
 @pytest.mark.asyncio
 async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
-    """First trace_analyze fails with a recovery hint; the auto-retry then
-    returns a non-dict -> fail with cleared cache."""
+    """First trace_analyze fails with a recovery hint; the auto-retry then returns a non-dict -> fail with cleared cache."""
     fail = {
         "status": "failed",
         "error": "steady_state_chunk_empty",
@@ -365,8 +361,7 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
 # Lifecycle save fast-paths: START and END
 @pytest.mark.asyncio
 async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
-    """A real session dir with state.json present triggers both the START
-    save and the END save."""
+    """A real session dir with state.json present triggers both the START save and the END save."""
     session_dir = tmp_path / "sess"
     state = _state()
     _seed_session_dir(session_dir, state)
@@ -395,8 +390,7 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
 # Lifecycle START defensive except
 @pytest.mark.asyncio
 async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path):
-    """record_lifecycle_event raising on the START emit must not abort the
-    run."""
+    """record_lifecycle_event raising on the START emit must not abort the run."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")

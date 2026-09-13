@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Aiter JIT-cache regression detector.
-
-Cross-tick view of aiter's ``jit/`` ``.so`` cache, warning before the next
-cold-start hits the ``hipcc`` timeout. Catches cache-regressed-mid-session
-and build-dir-stuck; tracks prior ``so_count`` itself since LocalProbe is stateless.
-"""
+"""Aiter JIT-cache regression detector."""
 
 from __future__ import annotations
 
@@ -43,15 +38,7 @@ class AiterJitDetector:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the detector and restore cross-tick JIT counters.
-
-        Args:
-            config (AiterJitConfig | None): Tunables; defaults to
-                :class:`AiterJitConfig` when ``None``.
-            state_view (DetectorStateView | None): Disk-backed state view used to
-                load/persist ``last_so_count``, ``last_build_count`` and the
-                stale-build streak.
-        """
+        """Initialise the detector and restore cross-tick JIT counters."""
         self._config = config or AiterJitConfig()
         self._state_view = state_view
         # Disk-backed cross-tick state for the regression check.
@@ -84,20 +71,7 @@ class AiterJitDetector:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Evaluate the JIT-cache regression and stuck-build rules for this tick.
-
-        Updates the cross-tick counters and emits symptoms when the cache
-        regresses below the cold threshold or the build dir stays stuck.
-
-        Args:
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data including
-                ``local_aiter_jit``.
-
-        Returns:
-            list[Symptom]: Any ``aiter_jit_regressed`` / ``aiter_jit_build_stuck``
-                symptoms for this tick, possibly empty.
-        """
+        """Evaluate the JIT-cache regression and stuck-build rules for this tick."""
         info = data.local_aiter_jit
         if not isinstance(info, dict) or not info:
             # No JIT data this tick — keep counters.
@@ -141,15 +115,7 @@ class AiterJitDetector:
         *,
         prev: int,
     ) -> Symptom:
-        """Build the ``aiter_jit_regressed`` symptom for a cache that went cold.
-
-        Args:
-            info (dict[str, Any]): Current aiter JIT probe sample.
-            prev (int): The previous tick's ``so_count`` used as the baseline.
-
-        Returns:
-            Symptom: A HIGH-severity symptom warning of an impending cold-start.
-        """
+        """Build the ``aiter_jit_regressed`` symptom for a cache that went cold."""
         cfg = self._config
         return Symptom(
             name="aiter_jit_regressed",
@@ -176,15 +142,7 @@ class AiterJitDetector:
         )
 
     def _build_stuck_symptom(self, info: dict[str, Any]) -> Symptom:
-        """Build the ``aiter_jit_build_stuck`` symptom for a stalled build dir.
-
-        Args:
-            info (dict[str, Any]): Current aiter JIT probe sample.
-
-        Returns:
-            Symptom: A MEDIUM-severity symptom indicating a likely crashed
-                mid-build ``hipcc`` invocation.
-        """
+        """Build the ``aiter_jit_build_stuck`` symptom for a stalled build dir."""
         cfg = self._config
         return Symptom(
             name="aiter_jit_build_stuck",

@@ -49,15 +49,7 @@ def safe_operator_id(value: object) -> str:
 
 
 def operator_directory_name(value: object) -> str:
-    """Encode a canonical operator ID as one portable filesystem segment.
-
-    ``%`` is escaped before ``:`` so the encoding stays injective: without it a
-    literal ``%3A`` in an ID and an encoded colon would name the same directory,
-    and two operators would then share one version store and one public pointer.
-    Canonical IDs cannot currently contain ``%`` -- every dimension is validated
-    against a character set that excludes it -- but this function only requires
-    :func:`safe_operator_id`, which does not.
-    """
+    """Encode a canonical operator ID as one portable filesystem segment."""
     operator_id = safe_operator_id(value)
     encoded = operator_id.replace("%", "%25").replace(":", "%3A")
     if len(encoded.encode("utf-8")) <= 240:
@@ -122,6 +114,16 @@ class ControllerLayout:
 
     def patch_dir(self, operator_id: str) -> Path:
         return self.patches_root / operator_directory_name(operator_id)
+
+    def preparation_audit_dir(self, operator_id: str) -> Path:
+        """Where one task's driver-preparation record is kept.
+
+        Outside the workspace on purpose. The agent's own audit is written
+        under the workspace, which is deleted when a borrowed repository is
+        handed back, so a task that failed because its driver could not be
+        prepared would otherwise leave nothing to read.
+        """
+        return self.controller_root / "preparation" / operator_directory_name(operator_id)
 
     @staticmethod
     def is_published_task_dir(path: Path) -> bool:

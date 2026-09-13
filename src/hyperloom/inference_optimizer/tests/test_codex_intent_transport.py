@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Codex intent transport: one schema, derived from the role's own intent set.
-
-Regression cover for a measured OpenAI-only run in which the Coordinator
-emitted 0 valid ``request`` intents over 256 turns. The Claude path derives the
-legal ``intent_type`` list programmatically from :class:`IntentType`, while the
-Codex path hand-wrote 5 of the 12 intents the orchestration role may emit, so
-``request`` (the only way to reach the kernel agent) had no transport at all.
-The model fell back to ``propose_action``, which PolicyGate denied 44 times
-with ``rule=kernel_owned_by_kernel_agent``.
-
-These tests pin the properties that make that drift impossible: the enum comes
-from the role record, the schema satisfies the provider's strict structured
-output rules, the shared transport text carries no other role's contract, and a
-``request`` intent survives the whole round trip.
-"""
+"""Codex intent transport: one schema, derived from the role's own intent set."""
 
 from __future__ import annotations
 
@@ -61,7 +47,6 @@ def _object_nodes(node: Any) -> list[dict[str, Any]]:
     return found
 
 
-# ---------------------------------------------------------------------------
 # Drift guard: the enum is the role's intent set, never a hand-written literal.
 
 
@@ -106,7 +91,6 @@ def test_empty_intent_set_is_rejected() -> None:
         build_intent_envelope_schema(frozenset())
 
 
-# ---------------------------------------------------------------------------
 # Provider constraint: OpenAI strict structured outputs.
 
 
@@ -133,7 +117,6 @@ def test_schema_is_json_serializable() -> None:
     assert json.loads(json.dumps(schema)) == schema
 
 
-# ---------------------------------------------------------------------------
 # No cross-role contamination in the shared transport text.
 
 
@@ -159,7 +142,6 @@ def test_critic_transport_contract_carries_no_orchestration_text() -> None:
         assert token not in instructions
 
 
-# ---------------------------------------------------------------------------
 # End-to-end round trip through the backend with a mocked Codex SDK.
 
 
@@ -186,12 +168,7 @@ def _backend(tmp_path: Path) -> CodexBackend:
 
 
 def _stub_turn(monkeypatch: pytest.MonkeyPatch, result: CodexSessionResult | BaseException) -> dict[str, Any]:
-    """Replace the SDK session with a recorder returning ``result``.
-
-    Patches the real :class:`CodexSession` methods rather than substituting a
-    fake class, so the recorded developer instructions and schema are the ones
-    the backend actually configured.
-    """
+    """Replace the SDK session with a recorder returning ``result``."""
     captured: dict[str, Any] = {}
 
     async def _start(session: CodexSession) -> None:
@@ -311,7 +288,6 @@ async def test_in_band_turn_error_is_reported_as_an_llm_call_failure(
         await _backend(tmp_path).run("p")
 
 
-# ---------------------------------------------------------------------------
 # The session wrapper actually forwards the schema to the SDK.
 
 

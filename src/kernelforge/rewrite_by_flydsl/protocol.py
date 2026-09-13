@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The public producer contract for framework apply-back.
-
-The single place the rewrite protocol is defined: the version handshake a
-consumer queries before committing to an integration, the rule turning a logical
-operator identity into a legal Python builder symbol, the environment a
-measurement driver is invoked with, and the apply-back manifest and validator.
-
-It imports only from :mod:`kernelforge.loop.path_ownership`, which itself
-imports nothing but stdlib, so the contract can be read without pulling in
-agent, GPU, or git machinery.
-"""
+"""The public producer contract for framework apply-back."""
 
 from __future__ import annotations
 
@@ -27,23 +17,17 @@ DRIVER_CONTRACT_VERSIONS = (1,)
 
 SUPPORTED_FRAMEWORKS = ("aiter", "vllm", "sglang")
 
-# Languages this producer can read a kernel in and port to FlyDSL. Every entry
-# needs readable source, so a prebuilt binary or hand-written ASM is absent.
+# Languages this producer can read a kernel in and port to FlyDSL.
 SUPPORTED_SOURCE_LANGUAGES = ("triton", "hip", "cuda", "cpp")
 
-# The curated candidate kinds a consumer's profiler assigns, which routinely
-# disagree with the file's language: a traced Triton kernel is reported as
-# ``python`` with ``kernel_kind=triton``.
+# The curated candidate kinds a consumer's profiler assigns, which routinely disagree with the file's language: a
+# traced Triton kernel is reported as ``python`` with ``kernel_kind=triton``.
 SUPPORTED_SOURCE_KINDS = ("triton", "hip_cpp")
 
-# This producer can author or repair a non-conforming measurement driver from
-# the caller's invocation evidence. A consumer that cannot synthesize a faithful
-# driver for an operator reads this to decide whether handing the work over is
-# an option, so it is advertised rather than assumed.
+# This producer can author or repair a non-conforming measurement driver from the caller's invocation evidence.
 DRIVER_PREPARATION_SUPPORTED = True
 
-# The outer rewrite exposes the same result sentinel as forge-loop so callers
-# consume one backend-neutral contract.
+# The outer rewrite exposes the same result sentinel as forge-loop so callers consume one backend-neutral contract.
 RESULT_SENTINEL = "__FORGE_RESULT__"
 
 ARTIFACT_KIND_FRAMEWORK_APPLYBACK = "framework_applyback"
@@ -51,21 +35,19 @@ ARTIFACT_KIND_FRAMEWORK_APPLYBACK = "framework_applyback"
 # Correctness proven by the producer covers the standalone FlyDSL reference only.
 VALIDATION_SCOPE_REFERENCE = "reference"
 
-# Framework integration is validated by the consumer against a real serving
-# workload, so the producer may only ever publish the pending status.
+# Framework integration is validated by the consumer against a real serving workload, so the producer may only ever
+# publish the pending status.
 INTEGRATION_VALIDATION_PENDING = "pending"
 PRODUCER_INTEGRATION_STATUSES = (INTEGRATION_VALIDATION_PENDING,)
 
 # Producer-owned environment injected into every measurement driver invocation.
-# A driver reads the candidate path and builder symbol from here instead of
-# hardcoding producer file names or re-deriving the symbol.
 ENV_SOURCE_KERNEL = "KERNELFORGE_REWRITE_SOURCE_KERNEL"
 ENV_CANDIDATE_KERNEL = "KERNELFORGE_REWRITE_CANDIDATE_KERNEL"
 ENV_BUILDER_SYMBOL = "KERNELFORGE_REWRITE_BUILDER_SYMBOL"
 ENV_LOGICAL_OP = "KERNELFORGE_REWRITE_LOGICAL_OP"
 
-# A readable slug stays short enough to keep the generated symbol legible; the
-# digest, not the readable part, is what makes it unique.
+# A readable slug stays short enough to keep the generated symbol legible; the digest, not the readable part, is what
+# makes it unique.
 _MAX_SLUG_CHARS = 40
 _DIGEST_CHARS = 6
 _PLAIN_IDENTIFIER = re.compile(r"[A-Za-z_][0-9A-Za-z_]*")
@@ -86,14 +68,7 @@ def capabilities() -> dict:
 
 
 def operator_slug(logical_op_name: str) -> str:
-    """Derive a stable, legal identifier fragment from a logical operator name.
-
-    A name that is already a plain ASCII identifier is used verbatim, so tasks
-    and knowledge-base records keyed on simple names keep their symbol. Anything
-    carrying a namespace, template, or punctuation is sanitized and suffixed
-    with a digest of the original name, so distinct identities that sanitize
-    alike still receive distinct symbols.
-    """
+    """Derive a stable, legal identifier fragment from a logical operator name."""
     raw = str(logical_op_name or "").strip()
     if not raw:
         raise ValueError("logical operator name must not be empty")
@@ -151,9 +126,7 @@ _REQUIRED_MANIFEST_FIELDS: dict[str, type | tuple[type, ...]] = {
     "patch_path": str,
 }
 
-# ``correctness_passed`` meant "the standalone reference passed" while reading
-# like "the framework patch passed". It is replaced by the explicit
-# validation_scope / reference_correctness_passed / integration_validation_* set.
+# ``correctness_passed`` meant "the standalone reference passed" while reading like "the framework patch passed".
 _FORBIDDEN_MANIFEST_FIELDS = ("correctness_passed",)
 
 _RELATIVE_PATH_FIELDS = ("artifact_dir", "patch_path")
@@ -187,12 +160,7 @@ def _check_relative(field: str, value: str) -> None:
 
 
 def validate_applyback_manifest(payload: dict) -> dict:
-    """Return ``payload`` if it is a publishable apply-back manifest, else raise.
-
-    Publication calls this before anything reaches disk, so a manifest that
-    misdeclares its schema, omits a contract field, or claims an integration
-    result the producer cannot prove fails the apply-back instead of shipping.
-    """
+    """Return ``payload`` if it is a publishable apply-back manifest, else raise."""
     if not isinstance(payload, dict):
         raise ValueError("apply-back manifest must be a JSON object")
 

@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR candidate source dispatcher.
-
-Routes :class:`ExploreRequest` to one or more backends per
-``request.search_modes`` and merges into a deduplicated :class:`Candidate`
-list. Backends: ``gbrain_pr_kb`` (gbrain PR KB pages, best-effort, ``[]`` on
-failure), ``pr_monitor`` (PR Monitor REST, hard-fail on errors) and
-``github`` (Search, best-effort, ``[]`` on failure).
-
-Contract: empty ``search_modes`` -> ``[]``; a mode requested without its
-config -> :class:`SourceConfigError`; per-mode errors propagate per the
-backend's policy.
-"""
+"""PR candidate source dispatcher."""
 
 from __future__ import annotations
 
@@ -39,15 +28,7 @@ class SourceConfigError(RuntimeError):
 
 
 def _dedupe(items: Iterable[Candidate]) -> list[Candidate]:
-    """Stable-deduplicate candidates by ref, preserving first-seen order.
-
-    Args:
-        items (Iterable[Candidate]): Candidates to deduplicate.
-
-    Returns:
-        list[Candidate]: Candidates with duplicate refs removed, first-seen
-            order preserved.
-    """
+    """Stable-deduplicate candidates by ref, preserving first-seen order."""
     seen: set[str] = set()
     out: list[Candidate] = []
     for item in items:
@@ -65,18 +46,7 @@ def _pr_to_candidate(
     *,
     score: float = 0.0,
 ) -> Candidate:
-    """Convert a GitHubPr (any backend) into a downstream Candidate.
-
-    Args:
-        pr: The source PR record.
-        repo_url: Repository URL the PR belongs to.
-        source: Source label recorded on the candidate (e.g. ``"github"``).
-        score: Gap-relevance value from :func:`_rank_by_keyword_overlap`;
-            ``0.0`` for paths that skip ranking.
-
-    Returns:
-        The downstream :class:`Candidate`.
-    """
+    """Convert a GitHubPr (any backend) into a downstream Candidate."""
     return Candidate(
         ref=pr.ref,
         repo=repo_url,
@@ -90,44 +60,21 @@ def _pr_to_candidate(
 _log = get_logger(__name__)
 
 
-# Error policies for a search backend. ``_HARD_FAIL`` lets the backend's
-# exceptions propagate (a misconfigured / unreachable *required* source aborts
-# the whole enumeration); ``_BEST_EFFORT`` degrades any failure to ``[]`` so an
-# optional source never fails the run.
+# Error policies for a search backend.
 _HARD_FAIL = "hard_fail"
 _BEST_EFFORT = "best_effort"
 
 
 @dataclass(frozen=True)
 class BackendSpec:
-    """A PR-source backend: its mode name, runner, and error policy.
-
-    Attributes:
-        name (str): The ``search_mode`` id this backend serves (also the
-            ``Candidate.source`` label its runner stamps).
-        run (Callable): Maps an :class:`ExploreRequest` to that backend's
-            candidates.
-        error_policy (str): :data:`_HARD_FAIL` or :data:`_BEST_EFFORT`.
-    """
+    """A PR-source backend: its mode name, runner, and error policy."""
 
     name: str
     run: Callable[[ExploreRequest], list[Candidate]]
     error_policy: str
 
     def invoke(self, request: ExploreRequest) -> list[Candidate]:
-        """Run the backend under its error policy.
-
-        Best-effort backends swallow any exception and return ``[]``; hard-fail
-        backends let their exceptions propagate (``SourceConfigError`` for
-        missing config, ``PRMonitorError`` for transport).
-
-        Args:
-            request (ExploreRequest): The request to dispatch to this backend.
-
-        Returns:
-            list[Candidate]: The backend's candidates, or ``[]`` when a
-                best-effort backend failed.
-        """
+        """Run the backend under its error policy."""
         if self.error_policy == _BEST_EFFORT:
             try:
                 return self.run(request)
@@ -136,9 +83,7 @@ class BackendSpec:
         return self.run(request)
 
 
-# Registry of PR-source backends keyed by ``search_mode``. Runners are resolved
-# by name at call time (via the module-level ``_run_*`` functions) so a test can
-# monkeypatch an individual backend and have the dispatch pick it up.
+# Registry of PR-source backends keyed by ``search_mode``.
 _SEARCH_BACKENDS: dict[str, BackendSpec] = {
     "gbrain_pr_kb": BackendSpec("gbrain_pr_kb", lambda req: _run_pr_kb(req), _BEST_EFFORT),
     "pr_monitor": BackendSpec("pr_monitor", lambda req: _run_pr_monitor(req), _HARD_FAIL),
@@ -147,30 +92,7 @@ _SEARCH_BACKENDS: dict[str, BackendSpec] = {
 
 
 def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
-    """Enumerate candidates per ``request.search_modes`` and union the results.
-
-    Order:
-      1. Explicit ``candidate_refs`` (always first; source='explicit').
-      2. For each enabled mode in ``request.search_modes``: query the
-         backend, map to Candidate(source=mode), append.
-      3. Deduplicate by ref, preserving the first occurrence.
-
-    Hard-fails when ``pr_monitor`` is requested without configuration,
-    or when the pr_monitor transport fails.
-
-    Args:
-        request (ExploreRequest): Request carrying explicit refs, search modes,
-            repo URL, and search configuration.
-
-    Returns:
-        list[Candidate]: Deduplicated candidates unioned across explicit refs
-            and every enabled search mode.
-
-    Raises:
-        SourceConfigError: If an unknown search mode is requested, or
-            ``pr_monitor`` is requested without configuration.
-        PRMonitorError: If a pr_monitor query fails.
-    """
+    """Enumerate candidates per ``request.search_modes`` and union the results."""
     out: list[Candidate] = []
 
     for ref in request.candidate_refs:
@@ -206,34 +128,14 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
 
 def _run_pr_kb(request: ExploreRequest) -> list[Candidate]:
-    """Query the gbrain PR KB; best-effort - empty list on any failure.
-
-    Delegates to :func:`hyperloom.agents.framework.sources.pr_kb.enumerate_pr_kb`,
-    which is disabled/degrades to ``[]`` when PR KB is off or gbrain is
-    unreachable.
-
-    Args:
-        request (ExploreRequest): Request supplying repo URL + gap description.
-
-    Returns:
-        list[Candidate]: gbrain_pr_kb candidates, or ``[]`` on any failure.
-    """
+    """Query the gbrain PR KB; best-effort - empty list on any failure."""
     from .pr_kb import enumerate_pr_kb
 
     return enumerate_pr_kb(request)
 
 
 def _run_github(request: ExploreRequest) -> list[Candidate]:
-    """Query anonymous GitHub Search; best-effort - empty list on failure.
-
-    Args:
-        request (ExploreRequest): Request supplying repo URL, gap description,
-            and candidate cap.
-
-    Returns:
-        list[Candidate]: Candidates from GitHub Search, or an empty list on any
-            failure.
-    """
+    """Query anonymous GitHub Search; best-effort - empty list on failure."""
     prs = github_backend.search_perf_prs(
         request.repo_url,
         gap_description=request.gap_description,
@@ -244,18 +146,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
 
 
 def _resolve_keywords(request: ExploreRequest) -> list[str]:
-    """Resolve the keyword list for pr_monitor search + client rerank.
-
-    Priority: (1) ``request.keywords`` non-empty -> used verbatim (lowercased,
-    bypasses extract_keywords); (2) ``gap_description`` -> auto-extract via
-    :func:`extract_keywords`; (3) else ``[]`` (label-only path).
-
-    Args:
-        request: The explore request carrying keywords / gap description.
-
-    Returns:
-        The resolved keyword list (possibly empty).
-    """
+    """Resolve the keyword list for pr_monitor search + client rerank."""
     if request.keywords:
         return [k.lower() for k in request.keywords if k.strip()]
     if (request.gap_description or "").strip():
@@ -264,19 +155,7 @@ def _resolve_keywords(request: ExploreRequest) -> list[str]:
 
 
 def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[GitHubPr]:
-    """Stable-rerank PRs by anti-aware keyword score.
-
-    Uses :func:`score_title_with_anti_signal` so wrong-axis PRs (e.g.
-    ``MegaMoE`` when gap calls for ``dense``) are demoted below correct-axis
-    PRs. Zero-score PRs drop to the tail but are not filtered out.
-
-    Args:
-        prs: PRs to rerank.
-        keywords: Active keywords driving the score.
-
-    Returns:
-        PRs sorted by descending score; ties preserve upstream order.
-    """
+    """Stable-rerank PRs by anti-aware keyword score."""
     if not keywords:
         return list(prs)
     return sorted(
@@ -287,23 +166,7 @@ def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[G
 
 
 def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
-    """Query pr_monitor with gap-aware ranking.
-
-    With non-empty keywords, prefer the free-text ``/v1/search/prs`` endpoint
-    (over-fetch, then client-rerank by title overlap, trim to
-    ``max_search_candidates``); fall back to ``list_perf_prs`` if search is
-    unimplemented. With no keywords, use the cheap label-only path.
-
-    Args:
-        request: The explore request carrying the PR Monitor config.
-
-    Returns:
-        Candidates from PR Monitor, ranked when keywords are present.
-
-    Raises:
-        SourceConfigError: If ``pr_monitor`` is requested without config.
-        PRMonitorError: On PR Monitor transport errors.
-    """
+    """Query pr_monitor with gap-aware ranking."""
     cfg = request.pr_monitor
     if cfg is None:
         raise SourceConfigError(
@@ -314,10 +177,8 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)
 
-    # Step 4: optionally broaden PR-state coverage. merged/closed PRs are the
-    # backport-relevant ones that may already be in the local dev build;
-    # semantic audit downstream judges + dedups them. Default remains open-only
-    # for perf discovery; enablement explicitly requests "all".
+    # Step 4: optionally broaden PR-state coverage. merged/closed PRs are the backport-relevant ones that may already
+    # be in the local dev build; semantic audit downstream judges + dedups them.
     states = request.pr_states
     broad = any(s in ("merged", "closed", "all") for s in states)
     search_state = "all" if broad else "open"
@@ -359,8 +220,8 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
             **list_state_kwargs,
         )
 
-    # /v1/search/prs uses word-AND matching; a long query can filter the pool to
-    # zero, so fall back to label-only listing + client rerank.
+    # /v1/search/prs uses word-AND matching; a long query can filter the pool to zero, so fall back to label-only
+    # listing + client rerank.
     if not prs:
         prs = list_perf_prs(
             request.repo_url,

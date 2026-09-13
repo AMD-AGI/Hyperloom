@@ -1,11 +1,4 @@
-"""Unknown CLI arguments are rejected, and the rejection cannot print a secret.
-
-Primus-Claw parses ONE hand-authored prompt FLAGS block for both itself and this
-CLI, so the flags it consumes on its own side must parse here. They are declared
-as inert no-ops rather than waved through wholesale: the block is written by
-hand, so a typo is likelier than in generated argv, and tolerating every unknown
-argument would let a misspelled knob run for hours on its default.
-"""
+"""Unknown CLI arguments are rejected, and the rejection cannot print a secret."""
 
 from __future__ import annotations
 
@@ -82,11 +75,7 @@ def test_unambiguous_abbreviations_still_work():
 
 
 def test_rejection_message_masks_credentials(capsys):
-    """argparse prints the offending tokens verbatim; a pod token must not leak.
-
-    This is the path a *future* platform flag takes, before Hyperloom declares
-    it -- exactly when the value is most likely to be a live credential.
-    """
+    """argparse prints the offending tokens verbatim; a pod token must not leak."""
     with pytest.raises(SystemExit):
         _parse("--new-platform-flag", "HF_TOKEN=hf_live_value")
 

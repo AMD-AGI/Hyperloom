@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``)
-and unified-diff parsing (``_audit_common``).
-
-Both modules are pure over plain dicts / dataclasses, so they are exercised
-directly here without any network, worktree, or gbrain/pr_monitor backend.
-"""
+"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``) and unified-diff parsing (``_audit_common``)."""
 
 from __future__ import annotations
 
@@ -21,9 +16,7 @@ from hyperloom.agents.framework.decision import (
 from hyperloom.agents.framework.models import Candidate
 
 
-# --------------------------------------------------------------------------
 # decision.py
-# --------------------------------------------------------------------------
 def test_prior_score_cold_start_and_min_samples() -> None:
     # No ledger -> cold start.
     assert prior_score({"framework": "vllm"}, ledger=[]) == 0.0
@@ -109,9 +102,7 @@ def test_candidate_score_and_winner_decision() -> None:
     assert winner_decision(req, 101.0, 0.80, "")[0] is False  # ratio below floor
 
 
-# --------------------------------------------------------------------------
 # _audit_common.py
-# --------------------------------------------------------------------------
 def test_parse_unified_diff_with_and_without_git_header() -> None:
     patch = (
         "diff --git a/src/foo.py b/src/foo.py\n"

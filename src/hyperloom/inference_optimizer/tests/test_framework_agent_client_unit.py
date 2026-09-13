@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What the source arm still shares with the framework agent.
-
-The Coordinator no longer shells out to ``fa phase-*`` -- discovery is a
-specialist -- so what is left to cover is the repo lookup, the scriptable
-framework specs it feeds, and that the agent CLI itself still starts.
-"""
+"""What the source arm still shares with the framework agent."""
 
 from __future__ import annotations
 

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the forge-loop warm-start read.
-
-These run against the KB Store's on-disk backend and seed it through the real
-write path, so a read is only ever asserted against something a run could
-actually have recorded.
-"""
+"""Tests for the forge-loop warm-start read."""
 
 from __future__ import annotations
 
@@ -118,8 +113,8 @@ def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
 
 
 def test_read_none_without_required_gpu_type(config, workspace):
-    # Reading without the model would resolve a GPU-less address that no write
-    # ever reached, and the empty result would look like an honest cold start.
+    # Reading without the model would resolve a GPU-less address that no write ever reached, and the empty result
+    # would look like an honest cold start.
     config.gpu_type = ""
     status: dict[str, str] = {}
 

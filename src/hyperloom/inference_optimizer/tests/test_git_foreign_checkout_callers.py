@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Callers that reach for git directly must survive a foreign-owned checkout.
-
-These sites do not go through ``executors/_git.py``, and their refusals do not
-surface as errors: one silently rebases a patch snapshot on the dirty worktree,
-the other reports "no version tags" for a repo whose tags are intact.
-
-``GIT_TEST_ASSUME_DIFFERENT_OWNER`` is git's own hook for this path, so the
-tests need no root and no foreign-owned directory.
-"""
+"""Callers that reach for git directly must survive a foreign-owned checkout."""
 
 from __future__ import annotations
 
@@ -63,11 +55,7 @@ def foreign_repo(tmp_path, monkeypatch):
 
 
 def test_patch_snapshot_base_comes_from_head_not_the_dirty_worktree(foreign_repo, tmp_path):
-    """The on-disk fallback exists for non-git frameworks, not for a refusal.
-
-    With the worktree dirty, silently falling back to it puts the patch on a
-    base that was never committed, and nothing reports that it happened.
-    """
+    """The on-disk fallback exists for non-git frameworks, not for a refusal."""
     from hyperloom.orchestrator.kernel import request_handlers
 
     (foreign_repo / "kern.py").write_text(_DIRTY, encoding="utf-8")
@@ -82,14 +70,12 @@ def test_patch_snapshot_base_comes_from_head_not_the_dirty_worktree(foreign_repo
 
     from pathlib import Path
 
-    # Snapshot mode carries final bytes, so success itself is the evidence: the
-    # patch only applies against the committed base, never the dirty one.
+    # Snapshot mode carries final bytes, so success itself is the evidence: the patch only applies against the
+    # committed base, never the dirty one.
     assert (Path(snap) / "kern.py").read_text(encoding="utf-8") == "patched\n"
 
 
 # Verbs git refuses on a foreign-owned checkout, measured rather than assumed.
-# The apply family is absent on purpose: it works the tree as plain files and
-# never validates repository ownership, even under --index.
 _BLOCKED_VERBS = ("rev-parse", "status", "tag", "show", "clean", "ls-files", "checkout", "reset")
 
 _GUARDED_MODULES = (
@@ -101,11 +87,7 @@ _GUARDED_MODULES = (
 
 @pytest.mark.parametrize("relpath", _GUARDED_MODULES)
 def test_no_unguarded_git_call_for_a_blocked_verb(relpath):
-    """These modules build argv themselves instead of using executors/_git.py.
-
-    A refusal at any of them is silent or misattributed, so the exception has to
-    travel with every call rather than being remembered per site.
-    """
+    """These modules build argv themselves instead of using executors/_git.py."""
     from pathlib import Path
 
     import hyperloom

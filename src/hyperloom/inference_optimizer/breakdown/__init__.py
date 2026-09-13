@@ -1,25 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session breakdown exporter.
-
-Produces ``session_breakdown.json`` — a self-contained snapshot of every
-fact a dashboard needs about one hyperloom session.
-
-Public surface:
-
-* :func:`build` — pure builder (read-only, returns a dict)
-* :func:`write_breakdown_json` — build + atomic write to disk
-* :const:`BREAKDOWN_FILENAME` — canonical filename under ``session_dir``
-* :const:`SCHEMA_VERSION` — the wire-shape version string
-* :const:`EXPORTER_VERSION` — this exporter implementation version
-"""
+"""Session breakdown exporter."""
 
 from __future__ import annotations
 
 from .exporter import (
     BREAKDOWN_FILENAME,
     EXPORTER_VERSION,
+    FINAL_PRODUCER_COORDINATOR,
+    FINAL_PRODUCER_SUPERVISOR,
     build,
     patch_breakdown_close,
     patch_breakdown_langfuse,
@@ -34,6 +24,8 @@ __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "SCHEMA_VERSION",
+    "FINAL_PRODUCER_COORDINATOR",
+    "FINAL_PRODUCER_SUPERVISOR",
     "build",
     "package_session_artifacts",
     "patch_breakdown_close",

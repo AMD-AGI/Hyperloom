@@ -108,13 +108,7 @@ class AnalysisEvidenceMixin:
         return result
 
     def _canonical_commit(self) -> str:
-        """The tree state everything planned this round is attributed to.
-
-        Named separately from the context it is built into because a caller can
-        need the commit alone: a round of lane plans records the tree it
-        describes, and the process that picks those plans back up has to compare
-        against it without paying for a whole planning context.
-        """
+        """The tree state everything planned this round is attributed to."""
         head_lines = self._git("rev-parse", "HEAD").strip().splitlines()
         return (
             self.run_state.best.commit_hash
@@ -258,9 +252,8 @@ class AnalysisEvidenceMixin:
             ),
             program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
             source_map_path=str(source_map_path),
-            # The declared source set, verbatim and in campaign order, so the
-            # planner is told what it may edit instead of inferring it from the
-            # one path in program_context.
+            # The declared source set, verbatim and in campaign order, so the planner is told what it may edit instead
+            # of inferring it from the one path in program_context.
             editable_sources=tuple(self._target_source_files()),
             cases=cases,
             knowledge_index=knowledge_index,

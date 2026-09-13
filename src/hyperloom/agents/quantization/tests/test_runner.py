@@ -1,7 +1,4 @@
-"""Tests for `driver.runner` — prompt assembly + SDK injection.
-
-Uses ``FakeSDK`` / ``FakeOptions`` from conftest to bypass the real SDK.
-"""
+"""Tests for `driver.runner` — prompt assembly + SDK injection."""
 
 from __future__ import annotations
 
@@ -20,8 +17,7 @@ from hyperloom.agents.quantization.driver.runner import (
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# resolve_skill_path
+# ───────────────────────────────────────────────────────────────────────────── resolve_skill_path
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -47,8 +43,7 @@ def test_quark_py310_compat_dir_is_process_singleton():
     assert (first.stat().st_mode & 0o222) == 0
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# build_attempt_prompt
+# ───────────────────────────────────────────────────────────────────────────── build_attempt_prompt
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -131,8 +126,7 @@ def test_build_attempt_prompt_default_threshold_message(tmp_path):
     assert "caller did not override" in text
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# run_one_attempt — SDK injection
+# ───────────────────────────────────────────────────────────────────────────── run_one_attempt — SDK injection
 # ─────────────────────────────────────────────────────────────────────────────
 
 

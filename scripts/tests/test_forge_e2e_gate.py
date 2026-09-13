@@ -78,8 +78,8 @@ def test_unrelated_hyperloom_changes_do_not_trigger() -> None:
 
 
 def test_previous_filename_can_trigger_a_rename_out_of_forge() -> None:
-    # The workflow feeds both filename and previous_filename from the Pull Files
-    # API, so deleting or renaming a Forge file cannot evade the gate.
+    # The workflow feeds both filename and previous_filename from the Pull Files API, so deleting or renaming a Forge
+    # file cannot evade the gate.
     assert gate.requires_forge_e2e(
         [
             "src/hyperloom/unrelated/new_home.py",
@@ -129,8 +129,8 @@ def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:
     workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
     workflow_header, jobs = workflow.split("jobs:", 1)
 
-    # Workflow-level concurrency is evaluated before resolve.if and could let
-    # an untrusted or malformed comment cancel an expensive GPU run.
+    # Workflow-level concurrency is evaluated before resolve.if and could let an untrusted or malformed comment cancel
+    # an expensive GPU run.
     assert "concurrency:" not in workflow_header
     assert "github.event.comment.author_association == 'OWNER'" in jobs
     assert "github.event.comment.author_association == 'MEMBER'" in jobs
@@ -140,8 +140,8 @@ def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:
     assert workflow.count(group) == 2
     assert workflow.count("cancel-in-progress: true") == 2
 
-    # Adding the opt-out label must reach skipped-status so it can enter the
-    # same resolved concurrency group and cancel an already running workload.
+    # Adding the opt-out label must reach skipped-status so it can enter the same resolved concurrency group and
+    # cancel an already running workload.
     labeled_clause = workflow.split("(github.event.action != 'labeled'", 1)[1].split(") &&", 1)[0]
     assert "github.event.label.name == 'retest'" in labeled_clause
     assert "github.event.label.name == 'skip-e2e-test'" in labeled_clause

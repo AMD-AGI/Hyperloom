@@ -1,9 +1,4 @@
-"""Unit tests for the per-iteration lesson documents.
-
-GPU-free: the summarizer session is replaced by a plain async callable, so the
-store, the prompt rendering, the character budget, and the two-author write
-path are all exercised without an agent backend.
-"""
+"""Unit tests for the per-iteration lesson documents."""
 
 from __future__ import annotations
 
@@ -425,12 +420,7 @@ def test_held_fixed_is_read_only_from_its_own_marker_lines():
 
 
 def test_scan_constant_values_finds_every_assignment():
-    """A call site passing a LITERAL is a real pin of that literal.
-
-    In Triton that is where tile sizes and warp counts live, so both the
-    module-level binding and the launch keyword are values the name is pinned
-    to right now. A name the source never mentions is a different fact.
-    """
+    """A call site passing a LITERAL is a real pin of that literal."""
     source = "BLOCK_N = 64\nnum_warps=8\nfoo(BLOCK_N=128)\n"
     found = scan_constant_values(source, ["BLOCK_N", "num_warps", "SPLIT_K"])
     assert found["BLOCK_N"] == ("64", "128")
@@ -606,14 +596,7 @@ _SOFTMAX_KERNEL = _EXAMPLES / "triton-softmax-forge-loop" / "softmax_kernel.py"
 
 
 def test_a_constexpr_parameter_is_not_an_assignment_of_the_constant():
-    """`BLOCK_N: tl.constexpr` and `BLOCK_N=block_n` say nothing about a pin.
-
-    Reading either as the kernel's current value renders "BLOCK_N is now
-    tl.constexpr/block_n" into every implementer prompt — a false statement
-    about the source, which closes or re-opens an axis on a fiction. Reporting
-    the name as absent is the opposite false statement: the kernel plainly runs
-    at some BLOCK_N. Neither: the name is there, no literal was read for it.
-    """
+    """`BLOCK_N: tl.constexpr` and `BLOCK_N=block_n` say nothing about a pin."""
     source = _MXFP8_KERNEL.read_text()
     assert "BLOCK_N: tl.constexpr" in source  # the annotation is there
     assert "BLOCK_N=block_n" in source  # so is the call-site keyword
@@ -644,12 +627,7 @@ def test_an_annotated_assignment_records_the_value_not_the_annotation():
 
 
 def test_a_parameter_default_is_not_an_assignment_of_the_constant():
-    """A parameter is a name the caller supplies, so no value was checked.
-
-    Reporting {} would say the source dropped BLOCK_N, and it plainly has not:
-    the name is right there. "Not checked" is the fact, and it is rendered as
-    such rather than as a constant that is gone.
-    """
+    """A parameter is a name the caller supplies, so no value was checked."""
     source = "def launch(BLOCK_N=32):\n    return BLOCK_N\n"
     assert scan_constant_values(source, ["BLOCK_N"]) == {"BLOCK_N": ()}
 
@@ -805,11 +783,7 @@ def test_a_full_scope_line_round_trips_in_all_three_negative_states():
 
 
 def test_a_pin_living_in_the_unparsable_file_is_not_reported_as_gone():
-    """One broken file among several must not indict the constant it holds.
-
-    Skipping it and reading the survivors as the whole declared set turns "the
-    file I could not read" into "the task deleted this constant".
-    """
+    """One broken file among several must not indict the constant it holds."""
     mapping, complete = scan_sources_with_coverage(["def broken(:\n", "num_warps = 8\n"], ["BLOCK_N", "num_warps"])
     assert mapping == {"num_warps": ("8",)}
     assert complete is False
@@ -1069,17 +1043,7 @@ def test_a_document_from_before_the_disproof_field_reads_as_unknown():
 
 
 def test_an_unrecorded_disproof_does_not_convict_a_document_by_itself(tmp_path):
-    """The transition case: the state this field deliberately does not fire on.
-
-    A document whose summarizer never answered the question can still contain a
-    "cannot" sentence. Firing on that would convict every record written before
-    the marker existed of a claim most of them never made, and a verdict every
-    document receives ranks none of them. So the note stays IN SCOPE, and what
-    separates this document from a tested one is the SCOPE line plus the
-    citation rule — until summarizers emit the marker, that prose is the whole
-    protection, which is why it is asserted here and not only in the rule's own
-    test.
-    """
+    """The transition case: the state this field deliberately does not fire on."""
     store = _store(tmp_path)
     store.write(1, "the only real fix is a transposing LDS read; THIS BUILD CANNOT")
     store.append_scope(
@@ -1136,13 +1100,7 @@ def test_a_cannot_claim_whose_experiment_was_run_stays_in_scope(tmp_path):
 
 
 def test_a_claim_its_own_experiment_refuted_does_not_keep_suppressing(tmp_path):
-    """The inversion: a summarizer reporting its own premise FALSE.
-
-    "falsified — gfx950 accepts the instruction" says the axis is reachable.
-    Scoring that as an obligation discharged would leave the document IN SCOPE
-    and the closure still suppressing the direction the same line proved open,
-    which is the one outcome this marker must never produce.
-    """
+    """The inversion: a summarizer reporting its own premise FALSE."""
     store = _store(tmp_path)
     store.write(
         1,
@@ -1189,13 +1147,7 @@ def test_a_disproved_claim_outranks_the_scope_checks_it_passes(tmp_path):
 
 
 def test_a_measured_closure_without_a_disproof_is_still_reopenable(tmp_path):
-    """The case the naive rule gets wrong, and the reason for this field.
-
-    Everything the older reading asked for is present: real numbers, the pins
-    they were taken under, and the case they were taken on, all still current.
-    What is missing is any test of the premise beside them — and a premise is
-    what closed the axis, not the numbers.
-    """
+    """The case the naive rule gets wrong, and the reason for this field."""
     store = _store(tmp_path)
     store.write(
         1,
@@ -1406,14 +1358,7 @@ def test_the_summary_prompt_asks_which_way_the_experiment_came_out():
 
 
 def test_one_disproof_verdict_per_document_is_stated_where_it_is_met(tmp_path):
-    """The known limit of Finding 2, on the three surfaces a reader meets.
-
-    One ``disproof`` value answers for one claim. Until the field can hold a
-    verdict per claim, the only thing standing between a record making three
-    "cannot" claims and a reader who thinks all three were checked is that the
-    limit is written down: in the prompt that asks for the markers, in the rule
-    printed beside every document, and in the field's own docstring.
-    """
+    """The known limit of Finding 2, on the three surfaces a reader meets."""
     prompt = build_summary_prompt(iteration=5, end_reason="converged")
     assert 'ONE such line per "cannot" claim' in prompt
     assert "A claim you write no line\n   for is recorded as unanswered" in prompt

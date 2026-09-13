@@ -121,7 +121,6 @@ def test_target_analysis_paths():
 
 def test_recipe_kb_paths():
     assert sp.recipe_kb_dir(SD) == SD / "runtime" / "recipe_kb"
-    assert sp.recipe_kb_warm_json(SD).name == ".kb_warm.json"
     assert sp.recipe_kb_pitfalls_json(SD).name == ".kb_pitfalls.json"
     assert sp.recipe_kb_pending_ndjson(SD).name == ".kb_pending.ndjson"
     assert sp.recipe_kb_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
@@ -143,8 +142,8 @@ def test_fs_safe_id_folds_a_fusion_operator_name():
 
 
 def test_fs_safe_id_preserves_ordinary_ids():
-    # uuid hex / k001 / dotted names round-trip untouched, so existing run dirs
-    # keep their names and no in-flight session sees its workspace move.
+    # uuid hex / k001 / dotted names round-trip untouched, so existing run dirs keep their names and no in-flight
+    # session sees its workspace move.
     for value in ("k001", "abc123", "kernel.name-v2", "9f3c1a2b4d5e"):
         assert sp.fs_safe_id(value) == value
 

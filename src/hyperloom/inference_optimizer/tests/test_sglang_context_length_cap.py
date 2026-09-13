@@ -1,11 +1,4 @@
-"""sglang ``--context-length`` cap injection tests.
-
-sglang sizes its context window from the model's ``max_position_embeddings``,
-so a huge native window OOMs the aiter backend. Hyperloom injects a
-workload-sized ``--context-length`` (capped to the native window) into
-``EXTRA_SGLANG_ARGS`` unless the operator already pinned one. Exercised at both
-the pure-helper and the ``materialize_config_with_envs`` layers.
-"""
+"""sglang ``--context-length`` cap injection tests."""
 
 from __future__ import annotations
 
@@ -196,8 +189,7 @@ def test_inject_uses_cap_below_native_window(tmp_path):
 
 # --max-model-len clamp: the injected --context-length must never exceed --max-model-len.
 def test_inject_clamps_to_max_model_len(tmp_path):
-    """A huge native window + ISL/OSL whose cap exceeds an explicit
-    --max-model-len must clamp --context-length down to --max-model-len."""
+    """A huge native window + ISL/OSL whose cap exceeds an explicit --max-model-len must clamp --context-length down to --max-model-len."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     # cap = 80000 + 2000 + 2048 = 84048, but max_model_len pins the ceiling.
     out = inject_sglang_context_length("", "sglang", model, 80000, 2000, max_model_len=82000)
@@ -228,8 +220,7 @@ def test_inject_ignores_absent_or_nonpositive_max_model_len(tmp_path, bad):
 
 
 def test_materialize_sglang_clamps_context_length_to_max_model_len(tmp_path, monkeypatch):
-    """An explicit MAX_MODEL_LEN env caps the injected
-    --context-length at the production choke point."""
+    """An explicit MAX_MODEL_LEN env caps the injected --context-length at the production choke point."""
     model = _write_model(tmp_path, _HUGE_MAX_POS)
     monkeypatch.setenv("ISL", "80000")
     monkeypatch.setenv("OSL", "2000")
@@ -390,14 +381,10 @@ def test_materialize_vllm_no_context_length(tmp_path):
     assert "--context-length" not in envs.get("EXTRA_VLLM_ARGS", "")
 
 
-# ---------------------------------------------------------------------------
 # inject_sglang_attention_backend (dual chunk attention)
-# ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
-    """Default the dual-chunk backend resolver to the non-AMD path so the
-    upstream ``dual_chunk_flash_attn`` assertions hold without real GPU
-    hardware. MI30x-path tests override this with their own monkeypatch."""
+    """Default the dual-chunk backend resolver to the non-AMD path so the upstream ``dual_chunk_flash_attn`` assertions hold without real GPU hardware."""
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
         lambda: None,
@@ -435,8 +422,7 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
 
 
 def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
-    """AMD dual-chunk models are blocked by preflight; if inject still runs
-    it should return the canonical backend (not triton which sglang rejects)."""
+    """AMD dual-chunk models are blocked by preflight; if inject still runs it should return the canonical backend (not triton which sglang rejects)."""
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.cli.model_gate._autodetect_gpu_type",
         lambda: "mi300x",

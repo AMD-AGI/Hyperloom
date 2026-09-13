@@ -1,27 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Atomic filesystem writes (canonical ``atomic_write*``).
-
-Write to a sibling temp file in the same directory, then ``os.replace`` into
-place, so a reader never observes a half-written file. Stdlib-only so any
-package may depend on it without creating an import cycle.
-
-Behaviour-preserving flags let each call site delegate here without any
-observable change:
-
-* ``make_parents`` — create ``path.parent`` first.
-* ``atomic_write_json``: ``indent`` / ``sort_keys`` / ``ensure_ascii`` /
-  ``trailing_newline`` mirror the exact ``json.dump`` shape each site used.
-
-Sites intentionally NOT delegated here (kept local by design):
-
-* ``orchestrator/actions/executors/_magpie_patcher.atomic_write_text`` — returns ``bool``,
-  takes keyword args, ``chmod``-mirrors the target, and relies on
-  module-global ``os``/``tempfile`` being monkeypatched by its tests.
-* ``multi_node/scripts/patch_path_safety.atomic_write_bytes`` — shipped to remote
-  nodes and run standalone, so it must not gain a ``hyperloom`` import dependency.
-"""
+"""Atomic filesystem writes (canonical ``atomic_write*``)."""
 
 from __future__ import annotations
 
@@ -41,17 +21,7 @@ def _best_effort_fsync(fh: Any) -> None:
 
 
 def _best_effort_fsync_dir(directory: Path) -> None:
-    """``os.fsync`` a directory so a rename survives a crash.
-
-    Fsyncing the temp file only guarantees its *contents*; the directory entry
-    the ``os.replace`` created is a separate write, so a caller that needs the
-    replacement itself to survive power loss has to sync the parent too. A
-    best-effort no-op where the platform has no directory fd (Windows) or the
-    filesystem rejects the syscall.
-
-    Args:
-        directory: The directory whose entries must be durable.
-    """
+    """``os.fsync`` a directory so a rename survives a crash."""
     if not hasattr(os, "O_DIRECTORY"):  # Windows has no directory fds
         return
     with suppress(OSError):
@@ -70,22 +40,7 @@ def atomic_write_bytes(
     fsync: bool = False,
     mode: int | None = None,
 ) -> None:
-    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``).
-
-    Args:
-        path: Destination file path.
-        data: Bytes to write.
-        make_parents: When ``True``, create ``path.parent`` (``parents=True,
-            exist_ok=True``) before writing.
-        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
-            rename (OSError swallowed on mounts that reject the syscall).
-        mode: Optional file mode for the temp file before rename. Masked with
-            ``& 0o700``, so group/other bits are always stripped.
-
-    Raises:
-        Exception: Re-raised after a best-effort unlink of the temp file when
-            writing or replacing fails.
-    """
+    """Atomically write ``data`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -97,8 +52,8 @@ def atomic_write_bytes(
             if fsync:
                 _best_effort_fsync(fh)
         if mode is not None:
-            # Strip group/other bits: written files may hold sensitive payloads,
-            # so never expose them beyond the owner regardless of caller intent.
+            # Strip group/other bits: written files may hold sensitive payloads, so never expose them beyond the owner
+            # regardless of caller intent.
             os.chmod(tmp, mode & 0o700)
         os.replace(tmp, path)
     except Exception:
@@ -117,26 +72,7 @@ def atomic_write_text(
     fsync_dir: bool = False,
     mode: int | None = None,
 ) -> None:
-    """Atomically write ``text`` to ``path`` (temp file in same dir + ``os.replace``).
-
-    Args:
-        path: Destination file path.
-        text: Full file contents to write.
-        encoding: Text encoding for the temp file (default ``utf-8``).
-        make_parents: When ``True``, create ``path.parent`` before writing.
-        fsync: When ``True``, best-effort ``os.fsync`` the temp file before the
-            rename (OSError swallowed on mounts that reject the syscall).
-        fsync_dir: When ``True``, also best-effort fsync ``path.parent`` after
-            the rename. ``fsync`` alone makes the *contents* durable; only this
-            makes the replacement itself survive power loss. No-op on platforms
-            without directory fds.
-        mode: Optional file mode for the temp file before rename. Masked with
-            ``& 0o700``, so group/other bits are always stripped.
-
-    Raises:
-        Exception: Re-raised after a best-effort unlink of the temp file when
-            writing or replacing fails.
-    """
+    """Atomically write ``text`` to ``path`` (temp file in same dir + ``os.replace``)."""
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,22 +108,7 @@ def atomic_write_json(
     fsync_dir: bool = False,
     mode: int | None = None,
 ) -> None:
-    """Atomically write ``data`` as JSON to ``path``.
-
-    Args:
-        path: Destination file path.
-        data: JSON-serialisable object.
-        indent: ``json.dumps`` indent (default ``2``).
-        sort_keys: ``json.dumps`` ``sort_keys`` (default ``True``).
-        ensure_ascii: ``json.dumps`` ``ensure_ascii`` (default ``True``).
-        trailing_newline: Append a final ``"\\n"`` after the JSON body.
-        make_parents: When ``True`` (default), create ``path.parent`` first.
-        fsync: When ``True``, best-effort ``os.fsync`` before the rename.
-        fsync_dir: When ``True``, also fsync the parent directory after the
-            rename; see :func:`atomic_write_text`.
-        mode: Optional file mode; see :func:`atomic_write_text` (masked with
-            ``& 0o700``).
-    """
+    """Atomically write ``data`` as JSON to ``path``."""
     text = _json.dumps(data, indent=indent, sort_keys=sort_keys, ensure_ascii=ensure_ascii)
     if trailing_newline:
         text += "\n"
@@ -210,20 +131,7 @@ def append_jsonl(
     ensure_ascii: bool = True,
     sort_keys: bool = False,
 ) -> None:
-    """Append one JSON object as a line to a JSONL file.
-
-    Serialises *row* with ``json.dumps`` and writes it plus a trailing newline
-    in ``"a"`` mode. Not atomic across processes, but a single ``write`` of a
-    compact single-line record is the standard append-log idiom.
-
-    Args:
-        path: Destination JSONL file.
-        row: JSON-serialisable value to append.
-        make_parents: When ``True``, create ``path.parent`` first.
-        fsync: When ``True``, best-effort ``os.fsync`` after the write.
-        ensure_ascii: ``json.dumps`` ``ensure_ascii`` (default ``True``).
-        sort_keys: ``json.dumps`` ``sort_keys`` (default ``False``).
-    """
+    """Append one JSON object as a line to a JSONL file."""
     path = Path(path)
     if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,18 +143,7 @@ def append_jsonl(
 
 
 def safe_mtime(path: Path) -> float:
-    """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails.
-
-    Never raises: a missing entry (concurrent cleanup mid-scan) or an
-    ``OSError`` from ``stat`` (e.g. an NFS stale handle) degrades to ``0.0``,
-    which sorts oldest for the ``key=`` / mtime-cutoff comparisons that use it.
-
-    Args:
-        path: Filesystem path to stat.
-
-    Returns:
-        The ``st_mtime`` of ``path``, or ``0.0`` on any ``stat()`` failure.
-    """
+    """Return ``path``'s modification time, or ``0.0`` when ``stat()`` fails."""
     try:
         return path.stat().st_mtime
     except OSError:

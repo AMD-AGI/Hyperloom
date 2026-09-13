@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the host-side rewrite-evidence probe and its aggregator.
-
-Two halves:
-
-* the probe itself (``assets/host_probe/hl_host_probe.py``), exercised directly
-  against synthetic call sites so the wrappers, the stack attribution and the
-  strict/loose fingerprint split are covered without torch or a benchmark;
-* the orchestrator-side aggregator, exercised against hand-written per-rank
-  reports so each taxonomy classification is pinned independently.
-
-The strict/loose split gets the most attention because it is what tells a
-memoization candidate apart from a loop-hoist enabler, and getting that backwards
-costs a whole optimization bundle: the enabler measures flat on its own, so a
-greedy accept/reject loop discards it and the dependent memoizations then never
-hit.
-"""
+"""Unit tests for the host-side rewrite-evidence probe and its aggregator."""
 
 from __future__ import annotations
 
@@ -33,15 +18,7 @@ from hyperloom.orchestrator.actions.executors import _framework_rewrite_evidence
 
 
 def _load_probe_module():
-    """Import the bundled probe as a standalone module.
-
-    The probe deliberately lives outside the package tree (it is copied onto a
-    benchmark process's ``PYTHONPATH``, not imported as
-    ``hyperloom.…``), so tests load it by path.
-
-    Returns:
-        The imported ``hl_host_probe`` module.
-    """
+    """Import the bundled probe as a standalone module."""
     path = evidence.probe_asset_dir() / "hl_host_probe.py"
     spec = importlib.util.spec_from_file_location("hl_host_probe_under_test", path)
     assert spec is not None and spec.loader is not None
@@ -58,9 +35,7 @@ def probe_module():
     sys.modules.pop("hl_host_probe_under_test", None)
 
 
-# --------------------------------------------------------------------------
 # probe assets
-# --------------------------------------------------------------------------
 
 
 def test_probe_assets_are_bundled():
@@ -92,12 +67,7 @@ def test_repeat_rate_is_zero_without_samples(probe_module):
 
 
 def test_strict_fingerprint_separates_tensor_identity(probe_module, tmp_path):
-    """Strict keys on tensor identity; loose keys only on shape/dtype/device.
-
-    This is the pairing that distinguishes the two candidate classes, so it is
-    asserted on the fingerprint function directly rather than inferred from a
-    classification downstream.
-    """
+    """Strict keys on tensor identity; loose keys only on shape/dtype/device."""
     probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
 
     class _FakeTensor:
@@ -123,15 +93,7 @@ def test_strict_fingerprint_separates_tensor_identity(probe_module, tmp_path):
 
 
 def test_a_live_tensor_keeps_its_generation_across_eviction(probe_module, tmp_path):
-    """Trimming the table must not turn a memoize candidate into a hoist candidate.
-
-    The table is bounded, and a long rollout allocates enough intermediates to
-    reach that bound repeatedly. If the bound is enforced by clearing the table,
-    a tensor that is still alive and still being passed loses its generation and
-    reads as new. Strict repeats then vanish while loose repeats survive, which
-    is exactly the signature the classifier reads as "hoist first, memoizing
-    would never hit" -- on a site where memoizing was the right answer.
-    """
+    """Trimming the table must not turn a memoize candidate into a hoist candidate."""
 
     class _Obj:
         __slots__ = ("__weakref__",)
@@ -149,13 +111,7 @@ def test_a_live_tensor_keeps_its_generation_across_eviction(probe_module, tmp_pa
 
 
 def test_a_repeatedly_passed_tensor_outlives_live_pressure(probe_module, tmp_path):
-    """Reclaiming dead entries is not enough on its own.
-
-    When the table fills with objects that are all still alive, something live
-    has to go. Dropping by insertion order alone would evict the loop-invariant
-    tensor first -- it was inserted before the loop started -- which is the
-    worst possible choice. Being passed again has to count as recency.
-    """
+    """Reclaiming dead entries is not enough on its own."""
 
     class _Obj:
         __slots__ = ("__weakref__",)
@@ -186,15 +142,7 @@ def test_eviction_still_gives_a_new_generation_to_a_new_object(probe_module, tmp
 
 
 def test_strict_fingerprint_survives_allocator_address_reuse(probe_module, tmp_path):
-    """A recycled allocation must not read as "the same tensor as last time".
-
-    Under a caching allocator a tensor allocated and freed inside a loop gets the
-    same address back next iteration. Keying strict identity on ``data_ptr`` would
-    report that freshly built tensor as an argument repeat, which inverts the
-    memoize/hoist distinction: every hoist candidate would be reclassified as a
-    memoization that then never hits at runtime. Verified against real torch on a
-    device before being pinned here.
-    """
+    """A recycled allocation must not read as \"the same tensor as last time\"."""
     probe = probe_module.HostProbe(out_dir=str(tmp_path), roots=())
     recycled_address = 0x7000
 
@@ -310,26 +258,15 @@ def test_deep_probe_counts_calls_and_argument_repeats(probe_module, tmp_path):
     # Loop counter: every call is distinct, so neither rate fires.
     assert by_name["varying"]["strict_repeat_rate"] == 0.0
     assert report["tier2_enabled"] is True
-    # Tier 2 timestamps its rows so the aggregator can tell a constructor that
-    # runs during model construction from a function that runs every step.
+    # Tier 2 timestamps its rows so the aggregator can tell a constructor that runs during model construction from a
+    # function that runs every step.
     for row in report["framework_calls"]:
         assert row["first_s"] >= 0.0
         assert row["last_s"] >= row["first_s"]
 
 
 def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
-    """Tier 2's ``first_s`` must latch a real timestamp, not sit on its sentinel.
-
-    ``_CallStats.first_s`` starts at ``-1.0`` and the hook latches with
-    ``if stats.first_s < 0``, so a sentinel of ``0.0`` would leave every tier-2
-    row reporting ``first_s == 0.0`` for the process lifetime. The aggregator
-    reads that field as "started at probe init", which is its set-up-work
-    signal, so the mutant silently demotes every hot-path function.
-
-    ``first_s >= 0.0`` cannot see that. Instead the probe's monotonic baseline
-    is shifted back by a known offset, so every timestamp the hook derives is
-    provably past the offset while the sentinel is not.
-    """
+    """Tier 2's ``first_s`` must latch a real timestamp, not sit on its sentinel."""
     framework_root = tmp_path / "fake_framework"
     framework_root.mkdir()
     module_path = framework_root / "stepper.py"
@@ -354,10 +291,9 @@ def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
         roots=(str(framework_root) + "/",),
         deep=True,
     )
-    # ``at_s = perf_counter() - _perf_started`` is the hook's only time base and
-    # perf_counter is monotonic, so shifting the origin back puts every observed
-    # timestamp at or beyond the offset by construction -- no clock patching and
-    # no dependence on the workload taking a measurable amount of time.
+    # ``at_s = perf_counter() - _perf_started`` is the hook's only time base and perf_counter is monotonic, so
+    # shifting the origin back puts every observed timestamp at or beyond the offset by construction -- no clock
+    # patching and no dependence on the workload taking a measurable amount of time.
     offset_s = 100.0
     probe._perf_started -= offset_s
 
@@ -380,21 +316,13 @@ def test_deep_probe_timestamps_the_first_outermost_call(probe_module, tmp_path):
         assert row["last_s"] >= row["first_s"], row
 
     # The latch kept the FIRST timestamp instead of overwriting it every call.
-    # Read the accumulator, not the report: report() rounds to 3 decimals, which
-    # can collapse two genuinely distinct sub-millisecond timestamps.
     step_label = next(label for label in probe._calls if label.endswith(":step"))
     step_stats = probe._calls[step_label]
     assert step_stats.last_s > step_stats.first_s
 
 
 def test_probe_wraps_the_implicit_conversion_dunders(probe_module, tmp_path):
-    """``if scalar_tensor == 0`` syncs, and the probe has to count it as one.
-
-    A device-to-host read does not have to be spelled ``.item()``. The implicit
-    forms are the ones a reviewer misses, because nothing at the call site looks
-    like a transfer, so wrapping only the named methods reports a clean host-sync
-    picture on a hot path that is in fact stalling every iteration.
-    """
+    """``if scalar_tensor == 0`` syncs, and the probe has to count it as one."""
 
     class _FakeTensor:
         def __float__(self) -> float:
@@ -431,14 +359,7 @@ def test_probe_wraps_the_implicit_conversion_dunders(probe_module, tmp_path):
 
 
 def test_aten_level_scalar_conversion_is_a_declared_blind_spot():
-    """Pin the limit the evidence notes claim, so a torch change cannot silently void it.
-
-    ``torch.full((n,), t)`` with a 0-dim device tensor reads device memory, but the
-    conversion happens in the C++ argument parser without calling any Python
-    method, so no monkeypatch can see it. The evidence document tells the
-    specialist to read the source for this class of sync; if torch ever routes it
-    through ``__float__`` that advice becomes stale and the probe gains coverage.
-    """
+    """Pin the limit the evidence notes claim, so a torch change cannot silently void it."""
     torch = pytest.importorskip("torch")
     seen: list[str] = []
     originals = {name: getattr(torch.Tensor, name) for name in ("item", "__float__", "__index__")}
@@ -494,20 +415,11 @@ def test_probe_writes_one_report_per_process(probe_module, tmp_path, monkeypatch
     assert probe.write_report() == ""
 
 
-# --------------------------------------------------------------------------
 # aggregator
-# --------------------------------------------------------------------------
 
 
 def _report(**overrides: Any) -> dict[str, Any]:
-    """Build a minimal well-formed per-rank probe report.
-
-    Args:
-        **overrides: Fields to replace in the base report.
-
-    Returns:
-        The report dict.
-    """
+    """Build a minimal well-formed per-rank probe report."""
     base: dict[str, Any] = {
         "schema": "hyperloom.host_probe/1",
         "rank": 0,
@@ -611,13 +523,7 @@ def test_host_to_device_copies_become_a_residency_candidate():
 
 
 def test_adjacent_same_shape_collectives_become_a_fusion_candidate():
-    """Several lines in one function moving one shape is the fusion signal.
-
-    A collective wrapped in a framework helper attributes to a single line inside
-    that helper however often it runs, so the enclosing call lines are the only
-    thing that separates three adjacent q/k/v exchanges (fusable) from one
-    exchange in a loop (not fusable).
-    """
+    """Several lines in one function moving one shape is the fusion signal."""
     document = evidence.build_evidence(
         [
             _report(
@@ -718,23 +624,13 @@ def test_repeated_identical_arguments_become_a_memoize_candidate():
     assert candidate["taxonomy"] == "a"
     assert not candidate.get("enabler")
     assert document["deep_probe_ran"] is True
-    # Purity is a precondition the probe cannot check, and a real run showed
-    # coarse module forwards topping the list at a 96% repeat rate while being
-    # impossible to memoize. The caveat has to travel with the candidate.
+    # Purity is a precondition the probe cannot check, and a real run showed coarse module forwards topping the list
+    # at a 96% repeat rate while being impossible to memoize.
     assert "PURE function" in candidate["signal"]
 
 
 def test_setup_phase_work_is_marked_and_demoted():
-    """One-time weight loading must not outrank per-step work.
-
-    The numbers here are the real ones from an 8-rank scriptable run, because the
-    obvious version of this discriminator failed on exactly this shape. Weight
-    loading took 580s of a 644s process, so the generation phase spanned under 10%
-    of wall clock; a "must span enough of the run" floor therefore marked *every*
-    genuine finding as set-up. What separates them is whether a site was still
-    being called when the process finished: set-up stops at 402s / 438s / 547s,
-    while the per-step collective runs to 642s of 644s.
-    """
+    """One-time weight loading must not outrank per-step work."""
     document = evidence.build_evidence(
         [
             _report(
@@ -790,20 +686,7 @@ def test_setup_phase_work_is_marked_and_demoted():
 
 
 def test_a_constructor_that_stops_being_called_is_demoted_like_setup_host_work():
-    """Tier-2 candidates need the same set-up discriminator the tier-1 sites got.
-
-    Model construction calls each module's ``__init__`` once per sub-module, which
-    looks exactly like a repeated argument identity: on a real deep run two
-    constructors ranked inside the top 40 as memoization candidates. Nothing can
-    be memoized there — the calls stop before the first denoising step — so the
-    timestamps have to travel with the framework rows too, and the anchor has to be
-    shared with the tier-1 table rather than derived per table.
-
-    The low-frequency rows are not padding: a real deep leg carries 49 host sites
-    and 272 framework sites, so the median call count sits near 24. A three-row
-    fixture would put the median up next to the hottest site and trip the
-    flat-distribution guard, testing the guard instead of the discriminator.
-    """
+    """Tier-2 candidates need the same set-up discriminator the tier-1 sites got."""
     document = evidence.build_evidence(
         [
             _report(
@@ -882,27 +765,13 @@ def test_a_constructor_that_stops_being_called_is_demoted_like_setup_host_work()
     assert "model construction" in constructor["signal"]
     assert not per_step.get("setup_phase")
     assert per_step["rank"] < constructor["rank"]
-    # The anchor came from the tier-1 table, which is the point of deriving it
-    # across both: a tier-2 row cannot see the collective that marks the loop.
+    # The anchor came from the tier-1 table, which is the point of deriving it across both: a tier-2 row cannot see
+    # the collective that marks the loop.
     assert constructor["hot_loop_start_s"] == pytest.approx(580.6, abs=0.01)
 
 
 def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
-    """A benchmark leg does not end when its hot loop ends, and the split must survive that.
-
-    These are the real numbers from the first live orchestrator leg, where the
-    previous discriminator marked all 20 candidates as set-up work — including the
-    object collective that ranks first on every other measurement. It anchored on
-    the latest call across all sites, and a ``barrier`` called **5 times** spanned
-    518s to 1393s while the denoising loop finished at 995s. 995/1393 = 0.714, below
-    the threshold, so the hot path was labelled one-time set-up and the specialist
-    would have been told in writing that rewriting the biggest lever on the workload
-    cannot change steady-state throughput.
-
-    Set-up is not "stops early in absolute terms" — with a long weight load the hot
-    loop starts late, and with a long tail it ends early. It is "finished before the
-    hot loop started", and the hottest site by call count is what marks that start.
-    """
+    """A benchmark leg does not end when its hot loop ends, and the split must survive that."""
     document = evidence.build_evidence(
         [
             _report(
@@ -932,8 +801,8 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
                         "last_s": 1393.5,
                     },
                     {
-                        # Weight loading: more wall time than the hot-path finding,
-                        # which is why it has to be demoted rather than out-ranked.
+                        # Weight loading: more wall time than the hot-path finding, which is why it has to be demoted
+                        # rather than out-ranked.
                         "api": "torch.Tensor.to",
                         "site": "mypkg/pipelines/pipeline.py:2106:create_pipeline",
                         "count": 218,
@@ -956,26 +825,16 @@ def test_a_long_tail_after_the_hot_loop_does_not_demote_the_hot_loop():
     assert not hot.get("setup_phase")
     assert hot["rank"] == 1
     assert hot["hot_loop_start_s"] == pytest.approx(160.4, abs=0.01)
-    # Weight loading finished before the hot loop began, so it is demoted despite
-    # spending more wall time (29.7s) than the finding that now outranks it.
+    # Weight loading finished before the hot loop began, so it is demoted despite spending more wall time (29.7s) than
+    # the finding that now outranks it.
     assert setup.get("setup_phase") is True
     assert "before the hot loop" in setup["signal"]
-    # `barrier` is in no category, so it never becomes a candidate — which is what
-    # made this bug so easy to miss. It still lands in the merged table, and under
-    # the old anchor five calls were enough to redefine "the end of activity" and
-    # demote everything else.
+    # `barrier` is in no category, so it never becomes a candidate — which is what made this bug so easy to miss.
     assert "mypkg/pipelines/pipeline.py:1900:__call__" not in by_site
 
 
 def test_a_flat_call_distribution_demotes_nothing():
-    """With no dominant call site there is no hot loop to anchor on, so demote nothing.
-
-    The anchor assumes the hottest site sits in the innermost loop, which holds when
-    the loop product dominates: measured ratios of hottest-to-median call count were
-    2689x, 2808x and 99741x on three real runs. A workload without that structure
-    must fail conservatively — a wrong "this is set-up" note is worse than no note,
-    because it tells the specialist to skip a site rather than to think about it.
-    """
+    """With no dominant call site there is no hot loop to anchor on, so demote nothing."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1002,12 +861,7 @@ def test_a_flat_call_distribution_demotes_nothing():
 
 
 def test_mostly_uncalled_sites_do_not_anchor_a_hot_loop():
-    """A zero median is not a "typical" call count to measure dominance against.
-
-    Substituting 1 for it makes any called site look infinitely dominant, so a
-    distribution that carries no loop at all still anchors one, and every site
-    that finished early is then labelled set-up on an invented reference.
-    """
+    """A zero median is not a \"typical\" call count to measure dominance against."""
     table = {
         f"k{i}": {"first_s": 10.0 + i, "last_s": 11.0 + i, "count_per_rank": count}
         for i, count in enumerate((1000, 900, 0, 0, 0, 0, 0))
@@ -1022,12 +876,7 @@ def test_mostly_uncalled_sites_do_not_anchor_a_hot_loop():
 
 
 def test_a_collective_fused_only_during_setup_is_demoted():
-    """Fusion was the one category that never checked the hot-loop anchor.
-
-    Collectives issued while the model is being built are genuinely fusable and
-    fusing them buys nothing, so left un-demoted they outrank steady-state finds
-    in a list capped at MAX_CANDIDATES.
-    """
+    """Fusion was the one category that never checked the hot-loop anchor."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1095,12 +944,7 @@ def test_a_report_without_timestamps_is_not_assumed_to_be_setup():
 
 
 def test_probe_reports_are_keyed_by_pid_not_only_rank(probe_module, tmp_path, monkeypatch):
-    """Two processes sharing a RANK must not overwrite each other's report.
-
-    Observed on a real 8-rank run: a 0.8-second helper process inherited RANK=0,
-    installed its own probe, and its exit handler overwrote rank 0's complete
-    report with an empty one — silently losing an eighth of the evidence.
-    """
+    """Two processes sharing a RANK must not overwrite each other's report."""
     monkeypatch.setenv("RANK", "0")
     out = tmp_path / "probe"
     first = probe_module.HostProbe(out_dir=str(out), roots=()).write_report()
@@ -1119,13 +963,7 @@ def test_the_aggregator_reads_every_pid_report(tmp_path):
 
 
 def test_reallocated_invariant_arguments_become_a_hoist_enabler():
-    """High loose repeats with low strict repeats is the loop-hoist signature.
-
-    The arguments are logically the same value rebuilt every iteration, so a
-    cache keyed on tensor identity can never hit. The candidate must be marked as
-    an enabler, because measured on its own it shows no gain and would otherwise
-    be discarded along with everything it unlocks.
-    """
+    """High loose repeats with low strict repeats is the loop-hoist signature."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1153,12 +991,7 @@ def test_reallocated_invariant_arguments_become_a_hoist_enabler():
 
 
 def test_a_recomputed_constant_is_a_memoize_candidate_not_a_hoist_one():
-    """A high strict rate wins over a high loose rate: nothing needs hoisting.
-
-    Both rates are high whenever the same object arrives repeatedly, so the
-    classifier has to prefer the strict verdict or every memoization candidate
-    would be misfiled as an enabler.
-    """
+    """A high strict rate wins over a high loose rate: nothing needs hoisting."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1181,12 +1014,7 @@ def test_a_recomputed_constant_is_a_memoize_candidate_not_a_hoist_one():
 
 
 def test_a_mixed_site_is_a_hoist_candidate_but_not_a_pure_enabler():
-    """Partly-stable arguments mean part of the win is already reachable.
-
-    Calling such a site a pure enabler would overstate the dependency, which
-    matters because the enabler flag is what buys a candidate an exemption from
-    being judged on its standalone gain.
-    """
+    """Partly-stable arguments mean part of the win is already reachable."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1211,13 +1039,7 @@ def test_a_mixed_site_is_a_hoist_candidate_but_not_a_pure_enabler():
 
 
 def test_hoist_signal_states_its_own_limitation():
-    """The candidate says the premise needs confirming against the source.
-
-    "Loose repeat" means shape/dtype/device matched, not that the values were
-    equal — the probe never reads tensor contents, because a device-to-host read
-    per sampled call would inject the very stalls it measures. Presenting the
-    inference as proof would send a specialist to rewrite working code.
-    """
+    """The candidate says the premise needs confirming against the source."""
     document = evidence.build_evidence(
         [
             _report(
@@ -1383,9 +1205,7 @@ def test_prompt_summary_flags_enablers_and_is_empty_without_candidates():
     assert "enables" in text
 
 
-# --------------------------------------------------------------------------
 # probe env contract
-# --------------------------------------------------------------------------
 
 
 def test_probe_env_carries_dir_roots_and_deep_flag(tmp_path):
@@ -1404,16 +1224,7 @@ def test_probe_env_carries_dir_roots_and_deep_flag(tmp_path):
 
 
 def test_evidence_reaches_shared_state_from_a_composite_result():
-    """The evidence is useless if the path never lands on SharedState.
-
-    On a live session the probe produced 29 classified candidates and the
-    specialist still reported "No host-side profiling evidence was available this
-    round" — it had been left to guess landing points from source. The path was
-    promoted only by the ``profile`` writeback, while the evidence is produced
-    inside the composite ``roofline`` action, whose own promotion path never
-    looked for it. Every measurement in the pipeline was collected and then
-    dropped one step before the consumer.
-    """
+    """The evidence is useless if the path never lands on SharedState."""
     from types import SimpleNamespace
 
     state = SimpleNamespace(last_framework_rewrite_evidence="")
@@ -1426,12 +1237,7 @@ def test_evidence_reaches_shared_state_from_a_composite_result():
 
 
 def test_promoting_evidence_never_clears_a_path_already_on_record():
-    """A later result without evidence must not erase the evidence we have.
-
-    The deep leg and the cheap leg do not both produce a document, and a run whose
-    probe was disabled produces none at all; treating that as "forget what you
-    measured" would silently return the specialist to guessing.
-    """
+    """A later result without evidence must not erase the evidence we have."""
     from types import SimpleNamespace
 
     state = SimpleNamespace(last_framework_rewrite_evidence="/kept/evidence.json")
@@ -1442,16 +1248,7 @@ def test_promoting_evidence_never_clears_a_path_already_on_record():
 
 
 def test_probe_env_drops_a_bare_site_packages_root(tmp_path):
-    """A site-packages root attributes call sites to torch, which is never a rewrite target.
-
-    PolicyGate's allowlist legitimately contains ``dist-packages`` so a patch against
-    an installed package such as sglang or vllm can land. Reusing it verbatim for
-    call-site attribution is wrong: torch lives there too, so on the first live leg
-    six of the top ten candidates pointed inside
-    ``torch/distributed/distributed_c10d.py`` — code the specialist must not touch,
-    and which displaced the framework call sites that actually reach those
-    collectives. A specific package directory stays; the root it sits in does not.
-    """
+    """A site-packages root attributes call sites to torch, which is never a rewrite target."""
     env = evidence.build_probe_env(
         probe_dir=tmp_path,
         source_roots=[
@@ -1471,13 +1268,7 @@ def test_probe_env_drops_a_bare_site_packages_root(tmp_path):
 
 
 def test_probe_env_keeps_the_probe_off_when_every_root_is_too_wide(tmp_path):
-    """Dropping every root must not silently leave the probe attributing to torch.
-
-    With no usable root the probe falls back to the innermost frame, which is what
-    produced the torch-internal candidates in the first place. Saying so in the
-    report is the difference between "the framework has no host-side findings" and
-    "nothing told the probe where the framework is".
-    """
+    """Dropping every root must not silently leave the probe attributing to torch."""
     env = evidence.build_probe_env(
         probe_dir=tmp_path,
         source_roots=["/usr/local/lib/python3.12/dist-packages/"],
@@ -1514,18 +1305,11 @@ def test_deep_probe_is_off_by_default(monkeypatch):
     assert evidence.deep_probe_enabled() is True
 
 
-# --------------------------------------------------------------------------
 # profile executor wiring
-# --------------------------------------------------------------------------
 
 
 def _write_profile_config(path: Path, envs: dict[str, Any] | None = None) -> None:
-    """Write a minimal materialized profile YAML.
-
-    Args:
-        path: Destination YAML path.
-        envs: Contents of ``benchmark.envs``.
-    """
+    """Write a minimal materialized profile YAML."""
     import yaml
 
     path.write_text(
@@ -1535,12 +1319,7 @@ def _write_profile_config(path: Path, envs: dict[str, Any] | None = None) -> Non
 
 
 def test_probe_injection_prepends_to_an_existing_pythonpath(tmp_path, monkeypatch):
-    """The probe dir is prepended, never substituted for the framework's own path.
-
-    Replacing ``PYTHONPATH`` would break imports in any framework that sets it,
-    which is why the injection edits the materialized YAML instead of going
-    through ``extra_envs`` (which overrides).
-    """
+    """The probe dir is prepended, never substituted for the framework's own path."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
@@ -1641,12 +1420,7 @@ def test_evidence_collection_is_silent_without_candidates(tmp_path):
 
 
 def test_evidence_collection_reports_that_it_was_unarmed():
-    """An unarmed leg publishes no document, and says so rather than staying mute.
-
-    A bare empty result is indistinguishable from a probe that ran and found
-    nothing, which is the difference between "look elsewhere" and "the
-    instrument is broken".
-    """
+    """An unarmed leg publishes no document, and says so rather than staying mute."""
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
 
     result: dict[str, Any] = {}
@@ -1672,17 +1446,11 @@ def test_evidence_collection_reports_an_aggregation_failure(tmp_path, monkeypatc
     assert "framework_rewrite_evidence" not in result
 
 
-# --------------------------------------------------------------------------
 # gap composition
-# --------------------------------------------------------------------------
 
 
 def test_gap_carries_the_host_side_bottleneck(tmp_path):
-    """Host-side evidence contributes its own keyword to the framework arm's gap.
-
-    Without this the gap can only ever name a device-side kernel, so an arm
-    dispatched to fix a collective rendezvous would be steered at attention.
-    """
+    """Host-side evidence contributes its own keyword to the framework arm's gap."""
     from hyperloom.orchestrator.actions.executors._framework_gap_composer import compose_gap
 
     document = evidence.build_evidence(
@@ -1742,10 +1510,8 @@ def test_site_stats_record_caps_shape_sigs_and_callers_while_tallies_grow(probe_
     width = probe_module._MAX_CONTAINER_WIDTH
     callers_cap = probe_module._MAX_CALLERS_PER_SITE
     for i in range(width + 3):
-        # Start at 1.0 (not 0.0) so first_s == 1.0 is distinguishable from the
-        # degenerate sentinel value (-1.0 → latched 0.0 when first call passes
-        # at_s=0.0).  Both the sentinel-init mutation and the always-overwrite
-        # mutation now turn this test red.
+        # Start at 1.0 (not 0.0) so first_s == 1.0 is distinguishable from the degenerate sentinel value (-1.0 →
+        # latched 0.0 when first call passes at_s=0.0).
         stats.record(elapsed=0.1, nbytes=10, shape_sig=f"s{i}", caller=f"c{i}", at_s=float(i) + 1.0)
 
     assert stats.count == width + 3

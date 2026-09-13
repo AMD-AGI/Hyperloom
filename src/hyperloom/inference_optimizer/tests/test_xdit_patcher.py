@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``_xdit_patcher`` — a VERIFIER, not a mutator.
-
-The two diffusion-profiling adaptations (``repeat=1`` + per-denoise-step
-markers) are baked into the sandbox image. This module verifies the baked
-sentinels are present in the running xfuser and fails soft (returns ``False``,
-logs remediation) when they are missing.
-
-Fixtures synthesize a fake xfuser tree in ``tmp_path`` discovered via
-``$XDIT_PATH`` (``base_model.py`` with / without the baked sentinels).
-"""
+"""Tests for ``_xdit_patcher`` — a VERIFIER, not a mutator."""
 
 from __future__ import annotations
 
@@ -69,8 +60,7 @@ class xFuserModel:
 
 @pytest.fixture(autouse=True)
 def _isolate_xdit_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Clear ``$XDIT_PATH`` so a synthetic ``tmp_path`` test never discovers a
-    real on-pod xDiT checkout (tests that exercise discovery re-set it)."""
+    """Clear ``$XDIT_PATH`` so a synthetic ``tmp_path`` test never discovers a real on-pod xDiT checkout (tests that exercise discovery re-set it)."""
     monkeypatch.delenv("XDIT_PATH", raising=False)
 
 
@@ -82,9 +72,7 @@ def _write_fake_xdit(tmp_path: Path, contents: str, monkeypatch: pytest.MonkeyPa
     return target
 
 
-# ---------------------------------------------------------------------------
 # verify_xdit_profiler_baked
-# ---------------------------------------------------------------------------
 def test_verify_true_when_both_sentinels_present(tmp_path: Path, monkeypatch) -> None:
     target = _write_fake_xdit(tmp_path, _BAKED_FIXTURE, monkeypatch)
     assert verify_xdit_profiler_baked() is True
@@ -138,9 +126,7 @@ def test_verify_scans_all_discovered_and_accepts_any_baked(tmp_path: Path, monke
     assert verify_xdit_profiler_baked() is True
 
 
-# ---------------------------------------------------------------------------
 # _discover_xfuser_base_models: discovery-path edge cases (fail-soft)
-# ---------------------------------------------------------------------------
 def test_discovery_skips_when_base_model_missing(tmp_path: Path, monkeypatch) -> None:
     """``$XDIT_PATH`` set but the ``base_model.py`` file is absent → skipped."""
     monkeypatch.setenv("XDIT_PATH", str(tmp_path))
@@ -160,8 +146,7 @@ def test_discovery_survives_find_spec_error(monkeypatch) -> None:
 
 
 def test_discovery_uses_importable_xfuser_spec(tmp_path: Path, monkeypatch) -> None:
-    """When ``$XDIT_PATH`` is unset, discovery falls back to the importable
-    ``xfuser`` package location (``find_spec.submodule_search_locations``)."""
+    """When ``$XDIT_PATH`` is unset, discovery falls back to the importable ``xfuser`` package location (``find_spec.submodule_search_locations``)."""
     pkg_root = tmp_path / "site-packages"
     target = pkg_root.joinpath(*_REL)
     target.parent.mkdir(parents=True)

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A CLI option is only wired once every frame between it and its use can see it.
-
-``--server-extra`` reaches the serving smoke through several frames, and a gap in
-any one of them is a ``NameError`` raised from inside the gate -- which the loop
-records as a failed authoring attempt and spends its whole budget retrying, so
-the miswiring reads as a bad kernel rather than a bad call.
-"""
+"""A CLI option is only wired once every frame between it and its use can see it."""
 
 from __future__ import annotations
 
@@ -111,11 +105,7 @@ def test_recipe_ceiling_never_exceeds_what_was_discovered() -> None:
 
 
 def test_recipe_ceiling_treats_no_budget_as_uncapped() -> None:
-    """An absent ceiling leaves every discovered recipe eligible.
-
-    Zero reaches here when the session is unbounded and no lane share could be
-    derived. Reading it as a real cap would silence the lane for a whole run.
-    """
+    """An absent ceiling leaves every discovered recipe eligible."""
     assert cli_module._recipe_ceiling(4, 0) == 4
     assert cli_module._recipe_ceiling(4, -1) == 4
 

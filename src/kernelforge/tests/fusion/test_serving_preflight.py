@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A card someone else is holding is not a verdict about the kernel.
-
-Four smoke failures across three runs were allocator errors raised before the
-server finished starting -- 283 of 288 GiB were already allocated by a process
-from an earlier stage. Each was recorded as "KERNEL OK but SERVING CRASHED
-(CUDA-graph-ON decode)" and spent the run's remaining attempts re-authoring a
-kernel that had never run. One of the three was the model with the most
-predicted headroom in the whole set.
-"""
+"""A card someone else is holding is not a verdict about the kernel."""
 
 from __future__ import annotations
 
@@ -70,13 +62,7 @@ def test_a_probe_that_raises_reads_as_unknown() -> None:
 
 
 def test_the_cleanup_kills_only_this_users_engines(monkeypatch) -> None:
-    """``VLLM::EngineCore`` names an engine, not a run.
-
-    The card is checked because someone else's process can be holding it. The
-    same reasoning applies to the cleanup that runs moments later: on a shared
-    validation host an unrestricted pkill against that pattern reaps the very
-    colleague whose run the preflight was there to notice.
-    """
+    """``VLLM::EngineCore`` names an engine, not a run."""
     if not hasattr(validate.os, "getuid"):
         pytest.skip("no POSIX uid on this platform")
     seen: list[str] = []

@@ -24,10 +24,8 @@ def test_is_aligned_rejects_different_trees():
 
 
 def test_is_aligned_accepts_wheel_sibling_aiter_meta_layout():
-    # The wheel ships `aiter` (importable) and `aiter_meta` (csrc/tuners) as
-    # siblings, and resolve_aiter_root() picks aiter_meta on purpose. Same wheel,
-    # so they cannot drift -- flagging this pair made the check fire on every
-    # wheel install.
+    # The wheel ships `aiter` (importable) and `aiter_meta` (csrc/tuners) as siblings, and resolve_aiter_root() picks
+    # aiter_meta on purpose.
     sp = "/usr/local/lib/python3.12/dist-packages"
     assert is_aligned(f"{sp}/aiter", f"{sp}/aiter_meta") is True
     assert is_aligned(f"{sp}/aiter", f"{sp}/aiter_meta/") is True
@@ -115,8 +113,8 @@ def test_collect_misaligned_reports_hard(monkeypatch, tmp_path):
 
 
 def test_collect_falls_back_to_package_version_when_commit_unset(monkeypatch, tmp_path):
-    # AITER_COMMIT unset must still yield a real provenance pin (not None), and
-    # the value must be unmistakably a distribution version, never a fake sha.
+    # AITER_COMMIT unset must still yield a real provenance pin (not None), and the value must be unmistakably a
+    # distribution version, never a fake sha.
     from kernelforge.gemm_tune import aiter_preflight as ap
 
     root = tmp_path / "aiter_src"
@@ -155,8 +153,7 @@ def test_collect_commit_is_none_when_nothing_resolvable(monkeypatch, tmp_path):
 
 
 def test_collect_wheel_layout_is_not_reported_as_misaligned(monkeypatch, tmp_path):
-    # End-to-end guard for the false HARD alarm: a wheel-shaped install must come
-    # back aligned with no hard problems.
+    # End-to-end guard for the false HARD alarm: a wheel-shaped install must come back aligned with no hard problems.
     from kernelforge.gemm_tune import aiter_preflight as ap
 
     sp = tmp_path / "dist-packages"
@@ -203,8 +200,8 @@ def test_serve_aiter_path_returns_package_dir(monkeypatch, tmp_path):
 
 
 def test_splitk_trial_key_matches_blockscale_tuner():
-    # #2 guard: the per-shape-trial gate constant must stay in sync with the tuner
-    # that actually passes --splitK, or the trial silently falls back to static cap.
+    # #2 guard: the per-shape-trial gate constant must stay in sync with the tuner that actually passes --splitK, or
+    # the trial silently falls back to static cap.
     from kernelforge.gemm_tune.tuners._aiter_dense_common import SPLITK_TRIAL_SCRIPT_KEY
     from kernelforge.gemm_tune.tuners.a8w8_blockscale import A8W8BlockscaleTuner
 

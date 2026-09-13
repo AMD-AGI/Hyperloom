@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for how a CRASHed iteration is archived and surfaced to the next
-agent prompt (loop/archive.py).
-
-A crashed iteration is recorded like any other failed attempt, with a distinct
-CRASH decision, so the next iteration's lineage digest shows a `crash` row (and,
-when recent, the crashing diff) — letting the agent avoid repeating it. These
-tests use only a temp dir; no LLM / GPU."""
+"""Unit tests for how a CRASHed iteration is archived and surfaced to the next agent prompt (loop/archive.py)."""
 
 from __future__ import annotations
 
@@ -65,8 +59,8 @@ def test_crash_appears_in_digest_with_diff(tmp_path):
 
     # Legend documents the crash outcome.
     assert "crash=raised an exception" in digest
-    # The crashing attempt's plan shows in the trajectory, and — being recent —
-    # its actual diff is inlined so the agent sees what blew up.
+    # The crashing attempt's plan shows in the trajectory, and — being recent — its actual diff is inlined so the
+    # agent sees what blew up.
     assert "risky shared-mem rewrite" in digest
     assert "CRASH_DIFF_MARKER" in digest
 
@@ -245,9 +239,8 @@ def test_transient_candidate_io_failure_preserves_directory_and_index(
 
         monkeypatch.setattr(Path, "stat", transient_stat)
 
-    # The index is memoized, so a scan only touches disk on a cold/invalidated
-    # read (resume, or after an on-disk change). Drop the warm cache so this
-    # exercises the reconcile path the transient failure is about.
+    # The index is memoized, so a scan only touches disk on a cold/invalidated read (resume, or after an on-disk
+    # change).
     archive._invalidate_cache()
     entries = archive.load_index()
 

@@ -213,8 +213,8 @@ def test_enumerate_pr_kb_index_union_query(monkeypatch):
     client = _DiscoveryClient(index_page=_index_page([101]), hits=hits)
     monkeypatch.setattr(pr_kb_source, "build_gbrain_page_client_from_env", lambda: client)
     out = pr_kb_source.enumerate_pr_kb(_req())
-    # All hits for this repo's meta prefix are included regardless of score;
-    # the cross-repo hit (other-repo/pr/999) is still excluded by the prefix check.
+    # All hits for this repo's meta prefix are included regardless of score; the cross-repo hit (other-repo/pr/999) is
+    # still excluded by the prefix check.
     assert sorted(c.ref for c in out) == ["PR:101", "PR:200", "PR:201"]
 
 

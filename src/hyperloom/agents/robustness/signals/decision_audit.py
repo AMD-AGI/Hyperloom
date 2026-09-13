@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reverse-audit decision-quality signals (G1-G6).
-
-Complements Critic (which only sees proposals) by inspecting the persisted result of
-decisions that bypassed Critic via programmatic paths (``integrate`` executor,
-``grid_runner``, ``report_back/ci_metrics.py``). All stateless; reads
-:attr:`SourceData.local_decision_audit` and short-circuits to ``[]`` when empty.
-
-Severity: HIGH + escalate/prune — G1 empty patch KEEP, G3 dispatch bypassed,
-G4 negative-delta kernel kept, G5 ci_metrics baseline=0 without
-``status=baseline_failed``. MEDIUM + alert — G2 sub-threshold
-KEEP, G6 ci_metrics schema drift.
-"""
+"""Reverse-audit decision-quality signals (G1-G6)."""
 
 from __future__ import annotations
 
@@ -50,12 +39,7 @@ _CI_METRICS_LEGACY_FIELDS: frozenset[str] = frozenset(
 
 @dataclass
 class DecisionAuditConfig:
-    """Tunables for :func:`evaluate_decision_audit_signals`.
-
-    ``min_keep_gain_pct`` (noise floor, G2) mirrors the upstream KEEP threshold (1.0%).
-    ``dispatch_bypass_pre_post_epsilon_pct`` (G3) is the ``|gain_pct|`` (absolute
-    gain) below which a KEEP is suspected of never executing the patched kernel.
-    """
+    """Tunables for :func:`evaluate_decision_audit_signals`."""
 
     min_keep_gain_pct: float = 1.0
     dispatch_bypass_pre_post_epsilon_pct: float = 0.5
@@ -67,22 +51,7 @@ def evaluate_decision_audit_signals(
     *,
     config: DecisionAuditConfig | None = None,
 ) -> list[Symptom]:
-    """Run the G1-G6 reverse-audit rules over persisted decision artefacts.
-
-    Inspects integrate result entries, ci_metrics, and kernel attempts collected
-    into :attr:`SourceData.local_decision_audit` and aggregates any symptoms.
-
-    Args:
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data including the decision-audit
-            sample.
-        config (DecisionAuditConfig | None): Tunables; defaults to
-            :class:`DecisionAuditConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: All decision-quality symptoms found this tick, possibly
-            empty.
-    """
+    """Run the G1-G6 reverse-audit rules over persisted decision artefacts."""
     cfg = config or DecisionAuditConfig()
     audit = data.local_decision_audit
     if not isinstance(audit, dict) or not audit:
@@ -101,24 +70,14 @@ def evaluate_decision_audit_signals(
     return out
 
 
-# ---------------------------------------------------------------------------
 # integrate result.json audit
-# ---------------------------------------------------------------------------
 
 
 def _integrate_symptoms(
     entries: list[dict[str, Any]],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """Apply integrate-result rules to recent KEEP/PARTIAL entries.
-
-    Args:
-        entries (list[dict[str, Any]]): Recent integrate result records.
-        cfg (DecisionAuditConfig): Audit tunables.
-
-    Returns:
-        list[Symptom]: Symptoms from the checks across all entries.
-    """
+    """Apply integrate-result rules to recent KEEP/PARTIAL entries."""
     out: list[Symptom] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -133,17 +92,7 @@ def _integrate_symptoms(
 
 
 def _g1_empty_patch_kept(entry: dict[str, Any]) -> list[Symptom]:
-    """Flag a KEEP/PARTIAL integrate with an empty patch.
-
-    A ``patch_size_bytes == 0`` means no code changed, so any measured gain
-    is noise.
-
-    Args:
-        entry: A decision-audit ledger entry.
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag a KEEP/PARTIAL integrate with an empty patch."""
     patch_size = entry.get("patch_size_bytes")
     if not isinstance(patch_size, int) or patch_size > 0:
         return []
@@ -183,17 +132,7 @@ def _g2_decision_threshold_violated(
     entry: dict[str, Any],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """Flag a KEEP whose gain is below the noise-floor threshold.
-
-    MEDIUM severity since the real fix is upstream's keep threshold.
-
-    Args:
-        entry: A decision-audit ledger entry.
-        cfg: Decision-audit configuration (supplies ``min_keep_gain_pct``).
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag a KEEP whose gain is below the noise-floor threshold."""
     if entry.get("decision") != "KEEP":
         return []
     gain_pct = entry.get("gain_pct")
@@ -230,20 +169,7 @@ def _g3_kernel_dispatch_bypassed(
     entry: dict[str, Any],
     cfg: DecisionAuditConfig,
 ) -> list[Symptom]:
-    """Flag a KEEP'd patch that likely never executed.
-
-    Trips when ``dispatched_count == 0``, or it is absent while
-    ``|gain_pct| < dispatch_bypass_pre_post_epsilon_pct``. HIGH severity: a
-    KEEP without proof of execution is a false-positive in the
-    optimization_stack.
-
-    Args:
-        entry: A decision-audit ledger entry.
-        cfg: Decision-audit configuration (dispatch-bypass epsilon).
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag a KEEP'd patch that likely never executed."""
     if entry.get("decision") != "KEEP":
         return []
     dispatched = entry.get("dispatched_count")
@@ -290,25 +216,14 @@ def _g3_kernel_dispatch_bypassed(
     ]
 
 
-# ---------------------------------------------------------------------------
 # ci_metrics audit (if-present only)
-# ---------------------------------------------------------------------------
 
 
 def _ci_metrics_symptoms(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """Apply ci_metrics audit rules when the file is present.
-
-    Args:
-        ci_metrics (dict[str, Any]): Parsed ci_metrics document.
-        ci_metrics_path (str): Filesystem path of the ci_metrics file, used in
-            evidence.
-
-    Returns:
-        list[Symptom]: Symptoms from the checks, possibly empty.
-    """
+    """Apply ci_metrics audit rules when the file is present."""
     if not ci_metrics:
         return []
     out: list[Symptom] = []
@@ -322,19 +237,7 @@ def _g4_negative_delta_kernel_kept(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """Flag net-negative kernel changes counted as wins.
-
-    Trips when ``kernels_optimized > 0`` AND
-    ``optimized_kernel_delta_pct <= 0``. HIGH because downstream
-    aggregators treat ``kernels_optimized`` as a win count.
-
-    Args:
-        ci_metrics: Parsed ci_metrics document.
-        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag net-negative kernel changes counted as wins."""
     kernels_opt = ci_metrics.get("kernels_optimized")
     delta_pct = ci_metrics.get("optimized_kernel_delta_pct")
     if not isinstance(kernels_opt, (int, float)) or kernels_opt <= 0:
@@ -370,19 +273,7 @@ def _g5_baseline_zero_without_status(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """Flag a zero baseline throughput lacking a failure marker.
-
-    Trips when any baseline-throughput field == 0 AND there is no
-    ``status="baseline_failed"`` marker — a half-written ci_metrics file
-    that downstream mistakes for "no optimization space".
-
-    Args:
-        ci_metrics: Parsed ci_metrics document.
-        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag a zero baseline throughput lacking a failure marker."""
     if str(ci_metrics.get("status") or "") == "baseline_failed":
         return []
     baseline_candidates = [
@@ -429,18 +320,7 @@ def _g6_schema_drift(
     ci_metrics: dict[str, Any],
     ci_metrics_path: str,
 ) -> list[Symptom]:
-    """Flag ci_metrics schema drift.
-
-    Trips when required schema fields are missing OR legacy field names are
-    used. MEDIUM severity (the fix is in ``report_back``).
-
-    Args:
-        ci_metrics: Parsed ci_metrics document.
-        ci_metrics_path: Path of the ci_metrics file (recorded in evidence).
-
-    Returns:
-        A list with one :class:`Symptom` when the guard trips, else empty.
-    """
+    """Flag ci_metrics schema drift."""
     keys = set(ci_metrics.keys())
     missing = _CI_METRICS_REQUIRED_FIELDS - keys
     legacy = keys & _CI_METRICS_LEGACY_FIELDS

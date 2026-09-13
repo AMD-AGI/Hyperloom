@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Configuration for the Robustness Agent.
-
-Env-first with auto-detection fallbacks: session_dir (``SESSION_DIR``) and the
-LLM endpoint / credentials (``OPENAI_BASE_URL`` / ``OPENAI_API_KEY``, plus
-Anthropic and DeepSeek variants) fall back to probing well-known paths and
-endpoints when unset. ``ROBUSTNESS_DISABLE_LOCAL_PROBE`` and
-``ROBUSTNESS_NODES`` are env-only with fixed defaults.
-"""
+"""Configuration for the Robustness Agent."""
 
 from __future__ import annotations
 
@@ -38,52 +31,20 @@ SESSION_DIR_CANDIDATES: list[Path] = [
 
 @dataclass
 class Config:
-    """Runtime configuration for the Robustness Agent.
-
-    Holds every tunable knob the agent uses: auto-detected service
-    endpoints, monitoring intervals, alert thresholds, LLM RCA settings,
-    and the reactor signal parameters. Most fields have sensible defaults;
-    the discovered service URLs and LLM credentials are populated by
-    :meth:`discover`.
-
-    Attributes:
-        session_dir (Path): Directory containing the session's storage
-            (including ``coordinator.db``).
-        llm_model (str): Model name used for LLM-driven root-cause
-            analysis.
-        llm_base_url (str): LLM API base URL discovered from the sandbox. Empty
-            for a Claude subscription host, which has no endpoint to resolve.
-        llm_api_key (str): LLM API key discovered from the sandbox. Empty when
-            the credential is a subscription token, which the Claude CLI spends
-            without ever handing it to this process.
-        llm_rca_enabled (Optional[bool]): Tri-state RCA activation flag;
-            ``None`` auto-enables when credentials are present.
-
-    Note:
-        Many additional threshold, interval, and per-signal fields exist
-        on this dataclass; see the inline comments grouped by signal
-        family for their meaning.
-    """
+    """Runtime configuration for the Robustness Agent."""
 
     session_dir: Path = field(default_factory=lambda: Path(tempfile.gettempdir()) / "robustness-session")
 
     @property
     def coordinator_db_path(self) -> Path:
-        """Filesystem path to the session's Coordinator SQLite database.
-
-        Returns:
-            Path: ``session_dir/storage/coordinator.db``.
-        """
+        """Filesystem path to the session's Coordinator SQLite database."""
         return self.session_dir / "storage" / "coordinator.db"
 
-    # -- thresholds --
-    # Set in code, by whoever constructs the Config: :meth:`discover` reads only
-    # the deployment-shape variables listed in SKILL.md, so none of the
-    # thresholds below is settable from the environment.
+    # -- thresholds -- Set in code, by whoever constructs the Config: :meth:`discover` reads only the deployment-shape
+    # variables listed in SKILL.md, so none of the thresholds below is settable from the environment.
     gpu_temp_warn_c: float = 85.0
     agent_stall_timeout_s: float = 300.0
-    # Silence past which an agent_stall is HIGH rather than MEDIUM. Deployments
-    # whose work units differ move it; it does not grade a withheld accusation.
+    # Silence past which an agent_stall is HIGH rather than MEDIUM.
     agent_stall_high_after_s: float = 900.0
 
     # -- LLM for RCA (auto-detected from Claw sandbox env) --
@@ -92,10 +53,9 @@ class Config:
     llm_api_key: str = ""
     llm_provider: str = "openai"
 
-    # -- LLM RCA throttle / activation --
-    # ``None`` = auto-enable when the discovered provider can authenticate a
-    # call, which for the Anthropic side is a usable transport rather than a
-    # base_url + api_key pair; ``False`` = force-disable.
+    # -- LLM RCA throttle / activation -- ``None`` = auto-enable when the discovered provider can authenticate a call,
+    # which for the Anthropic side is a usable transport rather than a base_url + api_key pair; ``False`` =
+    # force-disable.
     llm_rca_enabled: Optional[bool] = None
     llm_rca_severity_min: str = "high"  # one of low/medium/high
     llm_rca_cooldown_s: float = 60.0
@@ -104,7 +64,7 @@ class Config:
     llm_rca_max_chars: int = 1500
 
     # -- reactor knobs --
-    cooldown_ticks: int = 5
+    cooldown_sec: float = 300.0
     source_fail_threshold: int = 3
     source_recheck_interval_s: float = 30.0
     standalone_tick_interval_s: float = 10.0
@@ -113,37 +73,31 @@ class Config:
     health_probe_targets: list[str] = field(default_factory=list)
     health_probe_timeout_s: float = 1.5
 
-    # -- multi-node knobs --
-    # Required in multi-node runs: per-pod ps/HTTP/rocm-smi probes false-fire
+    # -- multi-node knobs -- Required in multi-node runs: per-pod ps/HTTP/rocm-smi probes false-fire
     # local_server_unreachable / ray_head_dead on Ray workers.
     disable_local_probe: bool = False
     # Informational only (mirrors --nodes); policy driven by the flags above.
     nodes: int = 1
 
-    # -- gpu_memory_leaked signal --
-    # GPU "full" when util_mem_pct > threshold OR free MiB < threshold; fires
-    # only after holding for min_consecutive_ticks (anti-flap vs cold-start).
+    # -- gpu_memory_leaked signal -- GPU "full" when util_mem_pct > threshold OR free MiB < threshold; fires only
+    # after holding for min_consecutive_ticks (anti-flap vs cold-start).
     gpu_leak_util_mem_pct_threshold: float = 99.0
     gpu_leak_free_mb_threshold: float = 500.0
     gpu_leak_min_consecutive_ticks: int = 2
 
-    # -- deadline_imminent / budget_burn_no_gain signals --
-    # warn/imminent_pct = budget consumed before medium/high rungs fire;
-    # min_minutes avoids short smoke tests; productive_gain_pct is the
-    # validated-gain cliff above which the run finishes naturally.
+    # -- deadline_imminent / budget_burn_no_gain signals -- warn/imminent_pct = budget consumed before medium/high
+    # rungs fire; min_minutes avoids short smoke tests; productive_gain_pct is the validated-gain cliff above which
+    # the run finishes naturally.
     budget_warn_pct: float = 0.70
     budget_imminent_pct: float = 0.85
     budget_min_minutes: float = 30.0
     budget_productive_gain_pct: float = 0.5
-    # -- budget signal extensions --
-    # strategy_drift_pct = earliest gate: MEDIUM when half-burnt with no gain.
-    # Absolute-time thresholds back-stop very long budgets.
+    # -- budget signal extensions -- strategy_drift_pct = earliest gate: MEDIUM when half-burnt with no gain.
     budget_strategy_drift_pct: float = 0.5
     budget_deadline_warning_minutes: float = 30.0
     budget_deadline_hard_cutoff_minutes: float = 5.0
 
-    # -- same_payload_loop signal --
-    # Consecutive identical-payload failures before firing.
+    # -- same_payload_loop signal -- Consecutive identical-payload failures before firing.
     repeated_payload_streak_threshold: int = 3
     repeated_payload_lookback_events: int = 80
 
@@ -154,10 +108,9 @@ class Config:
     aiter_jit_stale_build_persist_ticks: int = 5
 
     # -- gain_plateau / no_levers_found signals --
-    progress_gain_window_ticks: int = 6
+    progress_gain_window_actions: int = 6
     progress_gain_epsilon_pct: float = 0.5
     progress_no_levers_min_minutes: float = 45.0
-    progress_no_levers_min_ticks: int = 8
 
     # -- disk / shm signals --
     disk_used_warn_pct: float = 85.0
@@ -178,8 +131,7 @@ class Config:
     # -- idempotency_replay signal --
     idempotency_replay_threshold: int = 2
 
-    # -- decision-audit signals --
-    # Off skips the LocalProbe sub-probe (e.g. ``runs/`` on read-only storage).
+    # -- decision-audit signals -- Off skips the LocalProbe sub-probe (e.g. ``runs/`` on read-only storage).
     decision_audit_enabled: bool = True
     decision_audit_max_integrate: int = 20
     decision_audit_max_oob_attempts: int = 50
@@ -187,23 +139,20 @@ class Config:
     decision_audit_min_keep_gain_pct: float = 1.0
     decision_audit_dispatch_bypass_epsilon_pct: float = 0.5
 
-    # -- preflight signals --
-    # Off disables manifest + kernel_breakdown probes (C1/C2); C3 gated by JIT.
+    # -- preflight signals -- Off disables manifest + kernel_breakdown probes (C1/C2); C3 gated by JIT.
     preflight_enabled: bool = True
-    # Fire when projected HBM headroom < min_headroom_pct. 5% floor: the
-    # projection over-estimates HBM by ~5%, so below it headroom is ~0.
+    # Fire when projected HBM headroom < min_headroom_pct. 5% floor: the projection over-estimates HBM by ~5%, so
+    # below it headroom is ~0.
     preflight_min_headroom_pct: float = 5.0
     preflight_activation_buf_gib: float = 8.0
     # Amdahl kernel ceiling; 1.5x single-kernel speedup, 5% noise-floor.
     preflight_amdahl_single_kernel_speedup: float = 1.5
     preflight_amdahl_min_e2e_ceiling_pct: float = 5.0
-    # Cold-start vs budget. ``cold_start_minutes=None`` reads
-    # ``$INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC`` (default 3600s).
+    # Cold-start vs budget.
     preflight_cold_start_so_count: int = 20
     preflight_cold_start_minutes: float | None = None
 
-    # -- multi-source server logs --
-    # Colon-separated extra log globs (env-supplied) added to the
+    # -- multi-source server logs -- Colon-separated extra log globs (env-supplied) added to the
     # ``runs/*/*/server.log`` defaults; "" disables extras.
     server_log_extra_globs: str = ""
     # Max number of extra log files scanned per tick.
@@ -221,8 +170,8 @@ class Config:
     kernel_pipeline_min_pending_ticks: int = 3
     kernel_pipeline_min_geak_sigterm_attempts: int = 2
     kernel_pipeline_min_kernels_with_no_progress: int = 3
-    # Auto-append inference server health URL to ``health_probe_targets`` so
-    # sglang SIGSTOP fires a symptom. 127.0.0.1:8888 = Magpie wrapper default.
+    # Auto-append inference server health URL to ``health_probe_targets`` so sglang SIGSTOP fires a symptom.
+    # 127.0.0.1:8888 = Magpie wrapper default.
     auto_probe_inference_server: bool = True
     inference_server_health_url: str = "http://127.0.0.1:8888/health"
 
@@ -233,31 +182,22 @@ class Config:
     state_inbox_bloat_warn_bytes: int = 100 * 1024 * 1024  # 100 MiB
     state_inbox_bloat_critical_bytes: int = 500 * 1024 * 1024  # 500 MiB
 
-    # -- external-deps signals --
-    # Disable for hosts that audit gateway / mounts externally.
+    # -- external-deps signals -- Disable for hosts that audit gateway / mounts externally.
     external_deps_enabled: bool = True
     external_gateway_probe_url: str = ""  # empty → derive from OPENAI_BASE_URL
     external_mount_latency_warn_ms: float = 5000.0
     external_mount_latency_critical_ms: float = 15000.0
 
-    # -- phase budget / conversation progress signals --
+    # -- phase budget signal --
     phase_budget_warn_used_pct: float = 90.0
-    conversation_progress_enabled: bool = True
 
-    # -- cross-tick state persistence --
-    # Subprocess-per-tick transport needs disk-backed state for any
-    # consecutive-tick rule (gpu leak, gain_plateau, cooldowns). ``False`` =
-    # in-memory only (unit tests / single-process drivers).
+    # -- cross-tick state persistence -- Subprocess-per-tick transport needs disk-backed state for any
+    # consecutive-tick rule (gpu leak, gain_plateau, cooldowns).
     state_store_enabled: bool = True
 
-    # -- server process patterns --
-    # Defaulted from the probe's own lists rather than restated here: a
-    # framework added to one copy but not the other used to appear as a matched
-    # process that is not a server, which silently disabled
-    # ``local_server_unreachable``. ``server_process_patterns`` is what a health
-    # probe may hold accountable for answering a port; the benchmark list adds
-    # the other legitimate VRAM holders the gpu_memory_leaked "no live owner"
-    # check has to see.
+    # -- server process patterns -- Defaulted from the probe's own lists rather than restated here: a framework added
+    # to one copy but not the other used to appear as a matched process that is not a server, which silently disabled
+    # ``local_server_unreachable``.
     server_process_patterns: list[str] = field(
         default_factory=lambda: list(_SERVER_PROCESS_PATTERNS),
     )
@@ -267,14 +207,7 @@ class Config:
 
     @classmethod
     def discover(cls) -> "Config":
-        """Auto-detect all configuration from the runtime environment.
-
-        Scans for the session directory and reads the LLM credentials and
-        the env-only knobs from the sandbox environment.
-
-        Returns:
-            Config: A new instance populated with the discovered values.
-        """
+        """Auto-detect all configuration from the runtime environment."""
         session_dir = _discover_session_dir()
         llm_base_url, llm_api_key, llm_provider = _discover_llm_credentials()
         disable_local_probe = env_bool("ROBUSTNESS_DISABLE_LOCAL_PROBE", False)
@@ -293,9 +226,8 @@ class Config:
         log.info(
             "Config discovered: session_dir=%s llm=%s nodes=%d disable_local_probe=%s",
             config.session_dir,
-            # A subscription-token host resolves no base_url at all, so the URL
-            # alone would report "(not available)" for an RCA engine that is
-            # about to start issuing calls.
+            # A subscription-token host resolves no base_url at all, so the URL alone would report "(not available)"
+            # for an RCA engine that is about to start issuing calls.
             "(configured)" if (config.llm_base_url or config.llm_provider == "anthropic") else "(not available)",
             config.nodes,
             config.disable_local_probe,
@@ -304,16 +236,7 @@ class Config:
 
 
 def _discover_session_dir() -> Path:
-    """Find session directory by scanning well-known paths.
-
-    Checks the ``SESSION_DIR`` environment variable, then the known
-    candidate paths and the current working directory for a
-    ``storage/coordinator.db`` marker.
-
-    Returns:
-        Path: The discovered session directory, or the last candidate
-        as a fallback when none is found.
-    """
+    """Find session directory by scanning well-known paths."""
     if "SESSION_DIR" in os.environ:
         p = Path(os.environ["SESSION_DIR"])
         if p.exists():
@@ -338,24 +261,14 @@ def _discover_session_dir() -> Path:
 
 
 def _provider_env() -> dict[str, str]:
-    """Return the process environment with retired provider variables normalized.
-
-    The robustness agent also runs standalone, outside the CLI preflight that
-    normally performs this rewrite, so a sandbox still carrying ``DEEPSEEK_*``
-    would otherwise resolve no credentials and silently degrade RCA to a no-op.
-    """
+    """Return the process environment with retired provider variables normalized."""
     env = dict(os.environ)
     env.update(deepseek_compat_env(env))
     return env
 
 
 def _discover_llm_credentials() -> tuple[str, str, str]:
-    """Pick up LLM credentials already in the Claw sandbox environment.
-
-    Returns:
-        tuple[str, str, str]: A ``(base_url, api_key, provider)`` tuple read
-        from sandbox environment variables; URL/key may be empty if unset.
-    """
+    """Pick up LLM credentials already in the Claw sandbox environment."""
     env = _provider_env()
     openai_base = env.get("OPENAI_BASE_URL", "").strip()
     openai_key = env.get("OPENAI_API_KEY", "").strip()
@@ -365,9 +278,8 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
     if gateway_key and openai_base:
         return openai_base, gateway_key, "openai"
 
-    # The synthesizable subset, which is exactly the set that may be handed on
-    # as an api_key: a subscription token is spent by the CLI and never travels
-    # as a key, so it is excluded here by construction rather than by omission.
+    # The synthesizable subset, which is exactly the set that may be handed on as an api_key: a subscription token is
+    # spent by the CLI and never travels as a key, so it is excluded here by construction rather than by omission.
     anthropic_key = anthropic_synthesizable_key(env)
     if anthropic_key:
         return (
@@ -375,8 +287,8 @@ def _discover_llm_credentials() -> tuple[str, str, str]:
             anthropic_key,
             "anthropic",
         )
-    # A Claude Max/Pro subscription token is resolved by the CLI itself, so it is
-    # deliberately not returned as an api_key; the provider alone selects it.
+    # A Claude Max/Pro subscription token is resolved by the CLI itself, so it is deliberately not returned as an
+    # api_key; the provider alone selects it.
     if env.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip():
         return env.get("ANTHROPIC_BASE_URL", "").strip(), "", "anthropic"
 

@@ -1,31 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared provenance builder.
-
-Single source of truth for the provenance block that pins *exactly which run*
-produced an artifact -- model revision, framework/stack commits, GPU arch,
-parallelism, graph mode, dtype/quant, workload, and full server args. A tuned
-CSV or a TraceShapeManifest is only valid under the conditions it was made
-under, so both the session manifest and the TraceShapeManifest producer
-consume this one builder to avoid drift.
-
-Design:
-
-* **env-first, args-override-aware, degrade-to-null**: values come from parsed
-  CLI args when present, else the environment, else ``None`` -- building
-  provenance never raises on missing inputs.
-* **injectable ``env``**: callers/tests pass a mapping; defaults to
-  ``os.environ``. Subprocess probes (gfx arch, git SHA, image) are gated by
-  ``probe`` so unit tests stay hermetic.
-* **stdlib-only**: any package may import it without an import cycle.
-
-``session/manifest.py`` and the TraceShapeManifest producer both call
-``build_provenance`` for gfx/EP/graph-mode/server-args and the stack
-fingerprint. ``manifest.py`` still keeps its own ``_detect_image`` /
-``_git_revision`` for the fields it writes directly, so those two detectors are
-currently duplicated here.
-"""
+"""Shared provenance builder."""
 
 from __future__ import annotations
 
@@ -45,7 +21,6 @@ PROVENANCE_VERSION = 1
 PROVENANCE_SOURCE = "shared_v1"
 
 # Env var priority per stack component (operator pins beat auto-detect).
-# Duplicated in session/manifest.py; keep the two in sync.
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "rocm": ("ROCM_VERSION", "HIP_VERSION"),
     "aiter": ("AITER_COMMIT", "AITER_VERSION"),
@@ -126,38 +101,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def detect_gfx_arch(env: Mapping[str, str], *, gpu_type: str | None = None, probe: bool = True) -> str | None:
-    """Detect the ROCm gfx arch (e.g. ``gfx950``).
-
-    Resolution order, most authoritative first:
-
-    1. ``_GFX_ENVS`` -- an explicit operator override.
-    2. ``gpu_type`` -- the session's ``--gpu-type``, mapped through
-       :mod:`hyperloom.common.gpu_identity`. It is fixed for the session and is
-       already the recipe KB's hardware dimension, so it is a stronger source
-       than a probe of whatever binary happens to be on ``PATH``. This does not
-       contradict ``--gpu-type``'s own rule that the probe wins: callers pass
-       ``args.gpu_type`` after the CLI has already overwritten a mistyped hint
-       with the ``rocm-smi`` answer, so what arrives here is the probed board.
-       The probe that loses in step 3 is a different one -- ``rocminfo``, which
-       reports an arch string and needs ``/opt/rocm/bin`` on ``PATH``.
-    3. ``GPU_TYPE`` in ``env`` -- the same board identity as step 2, exported
-       for child processes, which is where it usually does the work.
-    4. ``rocminfo`` -- a guarded subprocess, only when ``probe`` is set.
-
-    Returns ``None`` when none resolve (never raises).
-
-    ``PYTORCH_ROCM_ARCH`` is deliberately absent. It is a build-target list
-    ("gfx90a;gfx942;gfx950;...") and says nothing about the installed device:
-    reading it labelled MI355X nodes ``gfx90a`` (MI200, two generations off)
-    and, because an env hit short-circuits the probe, suppressed the
-    ``rocminfo`` call that would have answered correctly. A single-valued
-    ``PYTORCH_ROCM_ARCH=gfx942`` -- common in vendor images -- was wrong in the
-    same way while looking plausible, so it is excluded outright rather than
-    screened by value shape. Step 2 exists because dropping it otherwise left
-    detection resting entirely on ``rocminfo``, which lives in ``/opt/rocm/bin``
-    and is not placed on ``PATH`` by either install script -- turning a wrong
-    value into no value on exactly the bare-metal nodes that set the variable.
-    """
+    """Detect the ROCm gfx arch (e.g. ``gfx950``)."""
     raw = _env_first(env, *_GFX_ENVS)
     if raw:
         m = _GFX_RE.search(raw)
@@ -198,11 +142,7 @@ def _read_first_line(path: Path) -> str:
 
 
 def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> dict[str, str]:
-    """Best-effort stack fingerprint: env -> rocm marker -> installed pkg.
-
-    Each component resolves to a version/commit string, or ``"unknown"``. Package
-    imports and marker reads are attempted only when ``probe`` is set.
-    """
+    """Best-effort stack fingerprint: env -> rocm marker -> installed pkg."""
     out: dict[str, str] = {}
     for component, env_vars in _STACK_FINGERPRINT_ENVS.items():
         val = _env_first(env, *env_vars) or ""
@@ -219,38 +159,16 @@ def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> d
 
 
 def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str] | None:
-    """``site-packages`` dirs of the interpreter preflight resolved, if any.
-
-    ``None`` means "no answer from a separate interpreter" and lets the caller
-    fall back to this process. That covers four cases: nothing was published,
-    the interpreter was resolved for a different framework, it *is* this
-    process, or its prefix is not a venv layout so the derivation below cannot
-    be trusted.
-
-    A non-empty list is authoritative: the prefix really is venv-shaped, so an
-    absent distribution there means the served environment lacks it, and
-    answering from this process would report a version the run never served
-    with. The caller must not fall back on that.
-
-    The path is used literally. ``resolve()`` would follow ``bin/python`` down
-    its symlink chain to the base interpreter (``/usr/bin/python3.12``), whose
-    ``parent.parent`` is ``/usr`` -- and a system prefix keeps its packages in
-    ``dist-packages``, so every lookup would degrade to "unknown" including the
-    shared case this process answers on its own. ``sys.executable`` inside a
-    venv is likewise the unresolved venv path.
-    """
+    """``site-packages`` dirs of the interpreter preflight resolved, if any."""
     resolved_for = _env_first(env, RESOLVED_FRAMEWORK_ENV)
     if not resolved_for or resolved_for.strip().lower() != component:
         return None
     python_exe = _env_first(env, RESOLVED_FRAMEWORK_PYTHON_ENV)
     if not python_exe or python_exe == sys.executable:
-        # This process already answers for its own interpreter, without a
-        # derivation that only holds for venv-shaped prefixes.
+        # This process already answers for its own interpreter, without a derivation that only holds for venv-shaped
+        # prefixes.
         return None
-    # ``<venv>/bin/python`` -> ``<venv>/lib/python*/site-packages``. Only a venv
-    # keeps packages there; a system prefix uses ``dist-packages`` and a bare
-    # ``python3`` would glob the working directory, so both are refused rather
-    # than silently yielding an empty authoritative answer.
+    # ``<venv>/bin/python`` -> ``<venv>/lib/python*/site-packages``.
     exe_path = Path(python_exe)
     if not exe_path.is_absolute():
         return None
@@ -259,29 +177,13 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
         hits = [str(p) for p in sorted(venv_root.glob("lib/python*/site-packages"))]
     except OSError:
         return None
-    # No match means the prefix is not venv-shaped (a system prefix keeps its
-    # packages in ``dist-packages``), so the derivation failed and this process
-    # is the better answer. Only a real hit is authoritative -- then an absent
-    # distribution genuinely means the served environment lacks it.
+    # No match means the prefix is not venv-shaped (a system prefix keeps its packages in ``dist-packages``), so the
+    # derivation failed and this process is the better answer.
     return hits or None
 
 
 def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> str:
-    """Best-effort installed-package version for a stack component.
-
-    Uses ``importlib.metadata`` (reads the installed distribution's metadata)
-    instead of importing the package: ``import vllm``/``import aiter`` are heavy
-    (seconds; may touch the GPU/driver or trigger JIT module loads), and this
-    runs on the session-manifest build path. Env vars (e.g. ``VLLM_VERSION``,
-    ``AITER_COMMIT``) still take priority in ``detect_stack_fingerprint``.
-
-    ``venv_path`` (not ``None``) means preflight resolved a separate interpreter
-    for this framework, and it is authoritative: the framework serving the run
-    lives there, not in this process. Any same-named distribution installed here
-    belongs to a different environment, so answering from it would report a
-    version the run never served with -- worse than "unknown", because it looks
-    right. This process is consulted only when no interpreter was resolved.
-    """
+    """Best-effort installed-package version for a stack component."""
     dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "aiter"}.get(component)
     if not dist:
         return ""
@@ -301,11 +203,7 @@ def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> st
 
 
 def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
-    """Short git SHA of the repo containing this file, else a baked env rev.
-
-    Live ``git rev-parse`` (dev checkouts) is attempted only when ``probe`` is
-    set; falls back to ``HYPERLOOM_CODE_REVISION`` / ``HYPERLOOM_GIT_SHA``.
-    """
+    """Short git SHA of the repo containing this file, else a baked env rev."""
     if probe:
         try:
             here = Path(__file__).resolve().parent
@@ -323,12 +221,7 @@ def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
 
 
 def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
-    """Container image from env vars or (when ``probe``) known marker files.
-
-    ``probe=False`` skips the host marker-file reads so the result is derived
-    purely from ``args``+``env`` -- matching the hermetic/reproducible contract
-    build_provenance documents for every other detector (gfx/code_rev/stack).
-    """
+    """Container image from env vars or (when ``probe``) known marker files."""
     val = _env_first(env, *_IMAGE_ENVS)
     if val:
         return val
@@ -368,21 +261,7 @@ def build_provenance(
     probe: bool = True,
     source: str = PROVENANCE_SOURCE,
 ) -> dict[str, Any]:
-    """Assemble the shared provenance block.
-
-    Args:
-        args: Parsed CLI args (argparse.Namespace) overriding env, or ``None``.
-        env: Environment mapping; defaults to ``os.environ`` (injectable for
-            tests).
-        probe: When False, skip all subprocess/package/marker probes so the
-            result is derived purely from ``args`` + ``env`` (hermetic).
-        source: Tag stored under ``_provenance_source`` (defaults to the shared
-            marker; pass a custom value to flag a partial/stub block).
-
-    Returns:
-        A JSON-serializable provenance dict. Missing fields degrade to ``None``
-        (or ``""`` / ``"unknown"`` where a string is contractually expected).
-    """
+    """Assemble the shared provenance block."""
     env = os.environ if env is None else env
 
     model_path = _arg_first(args, "model_path", "model")

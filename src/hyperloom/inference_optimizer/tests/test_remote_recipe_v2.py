@@ -238,8 +238,8 @@ def test_build_remote_knowledge_publishes_config_and_kernel_from_state(tmp_path:
             "VLLM_FRAMEWORK_TEST": "1",
         },
     }
-    # Overlays reach the record only through the patch column's own staging, so
-    # a stack entry naming a local patch file does not publish one by itself.
+    # Overlays reach the record only through the patch column's own staging, so a stack entry naming a local patch
+    # file does not publish one by itself.
     assert value["patch"] == {}
     assert not any(item.path.startswith("files/") for item in bundle.artifacts)
     assert isinstance(value["kernel"]["gemm"], dict)
@@ -456,11 +456,7 @@ def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
 
 
 def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path) -> None:
-    """Replay places a kernel patch only into its recorded root, so it must be published.
-
-    The root is an absolute host path, which survives publication solely
-    because it sits under the sanitizer's host-origin exemption.
-    """
+    """Replay places a kernel patch only into its recorded root, so it must be published."""
     bundle = _build(_state(tmp_path), tmp_path / "files-kernel-roots")
 
     kernel = bundle.knowledge["value"]["kernel"]
@@ -471,14 +467,7 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
 
 
 def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
-    """An item that cannot name its checkout degrades to a drop, not an abort.
-
-    Publishing it rootless would poison the combined replay, and raising would
-    take config, patch, and the still-rooted kernels down with it. So the fusion
-    item is dropped while the rest of the Recipe still publishes -- and because a
-    successful build passes the section mismatch guard, the staged fusion patch
-    is proven to leave no orphan behind.
-    """
+    """An item that cannot name its checkout degrades to a drop, not an abort."""
     state = _state(tmp_path)
     state.last_fusion.pop("kernel_repo", None)
     state.last_fusion["source_file"] = "source.cu"
@@ -1196,6 +1185,7 @@ def test_degraded_kb_skips_remote_close_writer(
         "status": "skipped",
         "reason": "degraded_kb",
         "backend": "disabled",
+        "result_type": "kb_disabled",
     }
 
 
@@ -1231,6 +1221,7 @@ def test_local_close_ignores_ambient_kb_store(
         "status": "skipped",
         "reason": "no_recipe_backend",
         "backend": "local",
+        "result_type": "kb_disabled",
     }
     assert calls == []
 
@@ -1289,6 +1280,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
+        "result_type": "written",
     }
     assert calls == [
         (
@@ -1342,6 +1334,11 @@ def test_remote_close_transport_failure_is_nonfatal(
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
+        # The publisher reports the failure as a bare exception class name, so
+        # the class is carried in a field of its own rather than left for a
+        # reader to recover from ``reason``.
+        "result_type": "transport_failed",
+        "error_class": "OSError",
     }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,
@@ -2022,9 +2019,6 @@ def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> N
     prior_patch = "patch/overlays/000000/00-replayed.patch"
     prior_artifact = "patch/artifacts/prior.bin"
     # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
-    # Union must keep prior, dedup the overlap, and append staged_ref_b.
-    # `if not before and after:` at values.py (discard after when before is
-    # non-empty) silently drops staged_ref_b — this shape turns that red.
     after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
     assert after_patches == [staged_ref_a, staged_ref_b]
     value = {

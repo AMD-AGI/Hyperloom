@@ -80,9 +80,7 @@ async def _enqueue_and_run(build_lifecycle, executor, *, action, session_dir) ->
     return await build_lifecycle.tasks.get(tid), result
 
 
-# ---------------------------------------------------------------------------
 # Enqueue
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -141,9 +139,7 @@ async def test_build_lane_does_not_conflict_with_serving(build_coord, build_life
     await build_coord.locks.release(build_lease)
 
 
-# ---------------------------------------------------------------------------
 # Executor
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -199,11 +195,7 @@ async def test_timeout_kills_and_records_timeout(build_coord, build_lifecycle, t
 
 @pytest.mark.asyncio
 async def test_cancel_kills_the_compile_before_releasing_the_lane(build_coord, build_lifecycle, executor, tmp_path):
-    """A cancelled build must not leave the compile running.
-
-    The lane is released as this coroutine unwinds, so a surviving process group
-    would compile on while the next build holds build_lane.
-    """
+    """A cancelled build must not leave the compile running."""
     import asyncio
 
     from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe_mod
@@ -284,9 +276,7 @@ async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, buil
         os.killpg(spawned[0].pgid, 0)
 
 
-# ---------------------------------------------------------------------------
 # Driver wiring
-# ---------------------------------------------------------------------------
 
 
 def test_driver_command_real_component_uses_driver_module(tmp_path):
@@ -385,9 +375,7 @@ async def test_explicit_build_command_passed_verbatim(build_coord, build_lifecyc
     assert spawned_commands[0] == list(action.build_command)
 
 
-# ---------------------------------------------------------------------------
 # Policy gate
-# ---------------------------------------------------------------------------
 
 
 def test_targeted_build_in_coordinator_internal_actions():
@@ -429,9 +417,7 @@ def test_targeted_build_params_pass_policy_gate(tmp_path):
     gate.validate_dispatched_task("targeted_build", action.to_state())
 
 
-# ---------------------------------------------------------------------------
 # P1-12 regression: spawn failure lands row in failed state
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -465,9 +451,7 @@ async def test_spawn_failure_marks_row_failed(build_coord, build_lifecycle, tmp_
     assert holders.get("build_lane", 0) == 0 or "build_lane" not in holders
 
 
-# ---------------------------------------------------------------------------
 # Resume recovery
-# ---------------------------------------------------------------------------
 
 
 def _silent_plan():

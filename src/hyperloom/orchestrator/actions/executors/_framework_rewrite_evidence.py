@@ -1,44 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Merge host-probe output into ranked framework-rewrite candidates.
-
-The GPU kernel breakdown answers "which kernel is hot". A whole class of
-framework-level inefficiency never reaches a kernel and is therefore invisible
-to it: a collective that round-trips through the host to agree on a shape, a
-pure function recomputed once per block per denoising step, a CPU-resident table
-re-uploaded on every use. The host probe
-(``inference_optimizer/assets/host_probe/hl_host_probe.py``) measures those
-directly, once per rank; this module merges the per-rank reports and classifies
-what it finds into the rewrite-pattern taxonomy the authoring specialist works
-from.
-
-Pure functions over already-read JSON plus one thin reader, so the classifier is
-testable without a benchmark.
-
-Taxonomy coverage
------------------
-The host probe can see five of the seven rewrite categories:
-
-===========================  ========================================
-``memoize_invariant``        a pure computation repeated with identical
-                             arguments
-``hoist_loop_invariant``     the same *logical* argument rebuilt every
-                             iteration, so a cache would never hit until the
-                             allocation moves out of the loop
-``eliminate_host_round_trip`` an object collective agreeing on a value the
-                             ranks could derive locally
-``eliminate_host_sync``      a device-to-host read on the hot path
-``fuse_collectives``         several adjacent same-shape collectives from one
-                             enclosing call site
-``keep_device_resident``     a host-to-device copy repeated for a value that
-                             does not change
-===========================  ========================================
-
-Swapping in a vendor kernel and dropping no-op glue are not host-observable;
-they come from the GPU breakdown and from reading the source, and the emitted
-report says so rather than implying the list is exhaustive.
-"""
+"""Merge host-probe output into ranked framework-rewrite candidates."""
 
 from __future__ import annotations
 
@@ -55,16 +18,12 @@ log = logging.getLogger(__name__)
 
 SCHEMA = "hyperloom.framework_rewrite_evidence/1"
 
-# Directory names that hold every installed package rather than one framework. As a
-# probe root each of these matches torch, so a collective attributes to a frame
-# inside torch instead of to the framework helper that issued it.
+# Directory names that hold every installed package rather than one framework.
 _INTERPRETER_PACKAGE_DIRS: frozenset[str] = frozenset({"dist-packages", "site-packages"})
 
 PROBE_FILE_GLOB = "hl_host_probe_rank*.json"
 
-# Category ids. Stable strings: they cross into the specialist prompt, the
-# switch manifest a specialist returns, and the KB, so renaming one is a
-# contract change.
+# Category ids.
 CATEGORY_MEMOIZE = "memoize_invariant"
 CATEGORY_HOIST = "hoist_loop_invariant"
 CATEGORY_HOST_ROUND_TRIP = "eliminate_host_round_trip"
@@ -72,8 +31,8 @@ CATEGORY_HOST_SYNC = "eliminate_host_sync"
 CATEGORY_FUSE_COLLECTIVES = "fuse_collectives"
 CATEGORY_DEVICE_RESIDENT = "keep_device_resident"
 
-# Taxonomy letters, matching the specialist-facing reference so a candidate can
-# be traced back to the pattern description it instantiates.
+# Taxonomy letters, matching the specialist-facing reference so a candidate can be traced back to the pattern
+# description it instantiates.
 _CATEGORY_TAXONOMY: dict[str, str] = {
     CATEGORY_MEMOIZE: "a",
     CATEGORY_HOIST: "b",
@@ -83,9 +42,7 @@ _CATEGORY_TAXONOMY: dict[str, str] = {
     CATEGORY_DEVICE_RESIDENT: "f",
 }
 
-# Per-category rewrite recipe surfaced with the evidence. The specialist still
-# chooses the landing point and writes the code; this only states the shape of
-# the fix so the evidence is actionable on its own.
+# Per-category rewrite recipe surfaced with the evidence.
 _CATEGORY_RECIPE: dict[str, str] = {
     CATEGORY_MEMOIZE: (
         "Memoize the computation behind a module-level or instance-level cache "
@@ -124,9 +81,8 @@ _CATEGORY_RECIPE: dict[str, str] = {
     ),
 }
 
-# APIs that pickle through the host to agree on a value: each call is a host
-# round-trip, and their payload is usually a shape or a length the ranks could
-# compute locally.
+# APIs that pickle through the host to agree on a value: each call is a host round-trip, and their payload is usually
+# a shape or a length the ranks could compute locally.
 _OBJECT_COLLECTIVE_APIS: frozenset[str] = frozenset(
     {
         "torch.distributed.all_gather_object",
@@ -136,10 +92,7 @@ _OBJECT_COLLECTIVE_APIS: frozenset[str] = frozenset(
     }
 )
 
-# APIs that read device memory back to the host, stalling the pipeline. The
-# dunders are the implicit half: ``if scalar_tensor == 0``, ``float(t)``,
-# ``int(t)`` and indexing a list with a tensor all sync, and none of them look
-# like a transfer at the call site.
+# APIs that read device memory back to the host, stalling the pipeline.
 _HOST_SYNC_APIS: frozenset[str] = frozenset(
     {
         "torch.Tensor.item",
@@ -157,8 +110,7 @@ _HOST_SYNC_APIS: frozenset[str] = frozenset(
 # APIs that move host memory onto the device.
 _H2D_APIS: frozenset[str] = frozenset({"torch.Tensor.to", "torch.Tensor.cuda"})
 
-# Tensor collectives, candidates for fusion when several adjacent call sites
-# move identically shaped payloads.
+# Tensor collectives, candidates for fusion when several adjacent call sites move identically shaped payloads.
 _TENSOR_COLLECTIVE_APIS: frozenset[str] = frozenset(
     {
         "torch.distributed.all_gather",
@@ -171,89 +123,36 @@ _TENSOR_COLLECTIVE_APIS: frozenset[str] = frozenset(
     }
 )
 
-# Minimum per-rank call count before a host-API site is worth reporting. Below
-# this the site is start-up or teardown work, not the hot path.
+# Minimum per-rank call count before a host-API site is worth reporting.
 MIN_HOST_CALLS = 64
 
 # Minimum per-rank call count before a framework function is worth reporting.
 MIN_FRAMEWORK_CALLS = 32
 
-# Minimum repeat rate for a memoization candidate. Half the sampled calls
-# repeating an earlier argument identity already means half the work is dead.
+# Minimum repeat rate for a memoization candidate.
 MIN_STRICT_REPEAT_RATE = 0.5
 
-# Minimum loose-repeat rate for a hoist candidate. Paired with a strict rate
-# below :data:`MIN_STRICT_REPEAT_RATE`, the gap between the two rates is the
-# whole signal: same-geometry arguments, freshly allocated each time.
+# Minimum loose-repeat rate for a hoist candidate.
 MIN_LOOSE_REPEAT_RATE = 0.5
 
-# Strict rate at or below which a hoist candidate is a *pure* enabler: the same
-# object essentially never arrives twice, so memoizing the callee cannot pay
-# until the allocation moves out of the loop. Above this the site has a mix of
-# stable and rebuilt arguments, so part of the win is already reachable and
-# calling it an enabler would overstate the dependency.
+# Strict rate at or below which a hoist candidate is a *pure* enabler: the same object essentially never arrives
+# twice, so memoizing the callee cannot pay until the allocation moves out of the loop.
 MAX_STRICT_REPEAT_FOR_PURE_ENABLER = 0.25
 
-# Minimum distinct enclosing call sites sharing a shape signature before a
-# collective is called fusable.
+# Minimum distinct enclosing call sites sharing a shape signature before a collective is called fusable.
 MIN_FUSION_SITES = 2
 
-# Candidates emitted, worst-first truncated. A specialist gets a bounded prompt;
-# an unbounded list would push the ranking work back onto the reader.
+# Candidates emitted, worst-first truncated.
 MAX_CANDIDATES = 40
 
 # A site is set-up work when it stopped being called before the hot loop started.
-#
-# Why the split is needed at all: loading a multi-gigabyte checkpoint issues
-# hundreds of host-to-device copies in a burst, and on absolute cost that outranks
-# every genuine per-step inefficiency — one real ``create_pipeline`` site spent
-# 29.7s moving 4.8 GiB, more wall time than the object collective that is the
-# workload's single biggest lever. Rewriting it cannot move steady-state throughput,
-# and a specialist's attention budget is the scarce resource.
-#
-# Two earlier anchors were tried and both were killed by real data, for the same
-# underlying reason — they measured absolute position along the timeline, and both
-# ends of that timeline are unpredictable:
-#
-#   1. "Does the site's calls span enough of the run?" Weight loading took 580s of a
-#      644s process, collapsing the generation phase to 9.6% of wall clock, so a span
-#      floor marked *every* real finding as set-up. The head of the run is long.
-#   2. "Is the site's last call near the latest call in the process?" On the first
-#      live orchestrator leg a ``barrier`` called *five* times spanned 518s to 1393s
-#      while the denoising loop finished at 995s. Every candidate came back at
-#      995/1393 = 0.714 and was demoted, the object collective included. The tail of
-#      the run is long too.
-#
-# The property that actually distinguishes them is not when a site stopped relative
-# to the clock, but whether it stopped *before the hot loop began*. The hottest site
-# by call count is necessarily inside the innermost loop — the loop product is
-# blocks x steps x chunks, while set-up is O(sub-modules) — so its first call marks
-# that boundary. Measured hottest-to-median call-count ratios on three real runs:
-# 2689x, 2808x and 99741x.
-#
-# Sites that stop before it are still reported, marked ``setup_phase``, because a
-# slow load is worth knowing about — just not worth a rewrite. The label covers
-# everything that is not steady-state work: weight loading, model construction
-# (every ``__init__`` runs once per sub-module, which reads as a repeated argument
-# identity and ranked as a memoization candidate on a real deep run), and work
-# confined to an earlier phase.
-#
-# When the distribution is flat the anchor's assumption does not hold, so nothing is
-# demoted: a wrong "this is set-up" note is worse than no note, because it tells the
-# specialist to skip a site rather than to think about it. This ratio is the
-# significance floor, two orders of magnitude below every ratio measured so far.
 HOT_LOOP_DOMINANCE_RATIO = 20.0
 
 
-# Env switch turning the whole probe off for a run. The probe is on by default
-# for the profile action because tier 1 costs a wrapper call on a handful of
-# APIs, but an operator chasing a profiler anomaly needs a way to take it out of
-# the picture entirely.
+# Env switch turning the whole probe off for a run.
 ENABLE_ENV = "HYPERLOOM_FRAMEWORK_REWRITE_EVIDENCE"
 
-# Env switch adding the tier-2 hook, which counts every framework call and
-# fingerprints its arguments. Off by default: it inflates host time enough to
-# skew a co-collected torch trace, so it belongs to a dedicated evidence leg.
+# Env switch adding the tier-2 hook, which counts every framework call and fingerprints its arguments.
 DEEP_ENV = "HYPERLOOM_FRAMEWORK_REWRITE_EVIDENCE_DEEP"
 
 # Subdirectory of the run workspace the per-rank probe reports are written into.
@@ -264,56 +163,26 @@ EVIDENCE_FILENAME = "framework_rewrite_evidence.json"
 
 
 def probe_asset_dir() -> Path:
-    """Return the bundled directory holding the probe and its import shim.
-
-    Returns:
-        The directory to prepend to the benchmark process's ``PYTHONPATH``. It
-        contains ``sitecustomize.py``, which CPython auto-imports at start-up,
-        so no change to the framework's own entrypoint is needed.
-    """
+    """Return the bundled directory holding the probe and its import shim."""
     from hyperloom.inference_optimizer.session.paths import asset_root
 
     return asset_root() / "assets" / "host_probe"
 
 
 def probe_enabled() -> bool:
-    """Return True when the host probe should be installed for this run.
-
-    Returns:
-        True unless :data:`ENABLE_ENV` is explicitly set to a falsey token.
-    """
+    """Return True when the host probe should be installed for this run."""
     raw = str(os.environ.get(ENABLE_ENV, "")).strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
 def deep_probe_enabled() -> bool:
-    """Return True when the tier-2 (argument-fingerprinting) hook is requested.
-
-    Returns:
-        True when :data:`DEEP_ENV` is set to a truthy token.
-    """
+    """Return True when the tier-2 (argument-fingerprinting) hook is requested."""
     raw = str(os.environ.get(DEEP_ENV, "")).strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
 def _is_package_root(path: str) -> bool:
-    """Return whether ``path`` is an interpreter package root rather than a package.
-
-    PolicyGate's source-root allowlist legitimately contains ``dist-packages`` so a
-    patch against an installed framework such as sglang or vllm can land. Reusing it
-    for the probe's call-site attribution is a different question and the answer is
-    no: torch is installed there too, so every collective attributes to a frame
-    inside ``torch/distributed`` instead of to the framework helper that issued it.
-    Torch is never a framework-rewrite target, and a root that matches it displaces
-    the sites that are.
-
-    Args:
-        path: A candidate source root.
-
-    Returns:
-        True when the path is the package root itself; a specific package directory
-        *inside* one (``dist-packages/sglang/``) returns False and is kept.
-    """
+    """Return whether ``path`` is an interpreter package root rather than a package."""
     return PurePosixPath(path.rstrip("/")).name in _INTERPRETER_PACKAGE_DIRS
 
 
@@ -323,21 +192,7 @@ def build_probe_env(
     source_roots: "list[str] | tuple[str, ...]",
     deep: bool = False,
 ) -> dict[str, str]:
-    """Build the environment the benchmark process needs to run the probe.
-
-    Args:
-        probe_dir: Directory the per-rank reports are written into. Interpreter
-            package roots are dropped; see :func:`_is_package_root`.
-        source_roots: Framework source roots used to attribute call sites. With
-            none supplied the probe still runs but attributes sites to whatever
-            frame was innermost, which is rarely actionable.
-        deep: Request the tier-2 hook.
-
-    Returns:
-        Environment variables to layer onto the benchmark process.         ``PYTHONPATH``
-        is deliberately absent: it has to be *prepended* to whatever the
-        materialized config already carries, which is the caller's job.
-    """
+    """Build the environment the benchmark process needs to run the probe."""
     env: dict[str, str] = {
         "HYPERLOOM_HOST_PROBE": "1",
         "HYPERLOOM_HOST_PROBE_DIR": str(probe_dir),
@@ -351,30 +206,7 @@ def build_probe_env(
 
 
 def promote_evidence_path(shared_state: Any, result: dict[str, Any] | None) -> str:
-    """Lift an executor result's evidence path and status onto SharedState.
-
-    Both the standalone ``profile`` action and the composite ``roofline`` action
-    (which runs profile internally) can produce the document, so both have to
-    promote it. Leaving that to one of them is how a live session ended up with 29
-    measured candidates on disk and a specialist reporting that no host-side
-    evidence was available: the roofline path never looked for it, and the prompt
-    renderer reads SharedState, not the filesystem.
-
-    ``framework_rewrite_evidence_status`` rides along and is promoted whenever
-    present, including on the legs that produce no document at all — that is the
-    only record of *why* there is none, and it is what keeps a broken probe from
-    reading like a workload with nothing left to rewrite.
-
-    Args:
-        shared_state: The SharedState to update.
-        result: An executor result that may carry ``framework_rewrite_evidence``
-            and/or ``framework_rewrite_evidence_status``.
-
-    Returns:
-        The promoted path, or ``""`` when the result carries none — in which case
-        any path already on record is left alone, because a leg that produced no
-        document is not evidence that the previous one was wrong.
-    """
+    """Lift an executor result's evidence path and status onto SharedState."""
     status = str((result or {}).get("framework_rewrite_evidence_status") or "").strip()
     if status:
         shared_state.last_framework_rewrite_evidence_status = status
@@ -386,15 +218,7 @@ def promote_evidence_path(shared_state: Any, result: dict[str, Any] | None) -> s
 
 
 def _round(value: float, digits: int = 4) -> float:
-    """Round ``value`` defensively.
-
-    Args:
-        value: Number to round.
-        digits: Decimal places.
-
-    Returns:
-        The rounded value, or ``0.0`` when ``value`` is not a real number.
-    """
+    """Round ``value`` defensively."""
     try:
         return round(float(value), digits)
     except (TypeError, ValueError):
@@ -402,16 +226,7 @@ def _round(value: float, digits: int = 4) -> float:
 
 
 def read_probe_reports(probe_dir: Path | str) -> list[dict[str, Any]]:
-    """Read every per-rank host-probe report in ``probe_dir``.
-
-    Args:
-        probe_dir: Directory the probe wrote its per-rank JSON into.
-
-    Returns:
-        The parsed reports, ordered by rank. Unreadable or non-conforming files
-        are skipped with a warning: partial rank coverage still yields usable
-        evidence, and a truncated file from a killed rank must not lose the rest.
-    """
+    """Read every per-rank host-probe report in ``probe_dir``."""
     root = Path(probe_dir)
     if not root.is_dir():
         return []
@@ -431,18 +246,7 @@ def read_probe_reports(probe_dir: Path | str) -> list[dict[str, Any]]:
 
 
 def _merge_host_calls(reports: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
-    """Merge per-rank host-API rows into one table keyed by ``(api, site)``.
-
-    Counts and wall time are averaged across the ranks that reported the site
-    rather than summed, so a number stays comparable to one run's cost no matter
-    how many ranks the workload used.
-
-    Args:
-        reports: Parsed per-rank host-probe reports.
-
-    Returns:
-        Mapping of ``(api, site)`` to merged statistics.
-    """
+    """Merge per-rank host-API rows into one table keyed by ``(api, site)``."""
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     for report in reports:
         for row in report.get("host_calls") or []:
@@ -486,28 +290,7 @@ def _merge_host_calls(reports: list[dict[str, Any]]) -> dict[tuple[str, str], di
 
 
 def _hot_loop_start(*tables: dict[Any, dict[str, Any]]) -> float | None:
-    """Return the timestamp at which the hot loop began, or None when undecidable.
-
-    The hottest site by per-rank call count is taken as the anchor: with a loop
-    product of blocks x steps x chunks it cannot be anywhere but the innermost loop.
-    Its first call is therefore the moment steady-state work started, and anything
-    that had already finished by then was preparation. See
-    :data:`HOT_LOOP_DOMINANCE_RATIO` for why this replaced two timeline-position
-    anchors that real data disproved.
-
-    Both probe tiers timestamp against the same base, and the hot loop is a property
-    of the process rather than of one table, so the anchor is derived across all of
-    them — a tier-2 function can easily run more often than any wrapped host API.
-
-    Args:
-        *tables: Merged tables from :func:`_merge_host_calls` and
-            :func:`_merge_framework_calls`.
-
-    Returns:
-        The hottest site's ``first_s``, or ``None`` when no report carried timestamps
-        or no site dominates by call count (a flat distribution has no hot loop to
-        anchor on, and guessing one would mislabel real findings).
-    """
+    """Return the timestamp at which the hot loop began, or None when undecidable."""
     timed = [
         entry
         for table in tables
@@ -521,9 +304,7 @@ def _hot_loop_start(*tables: dict[Any, dict[str, Any]]) -> float | None:
         return None
     median = counts[len(counts) // 2]
     if median <= 0:
-        # Over half the sites were never called. There is no "typical" call count
-        # to measure dominance against, and substituting 1 would make any hot
-        # site look infinitely dominant and anchor the loop on it.
+        # Over half the sites were never called.
         return None
     if counts[0] / median < HOT_LOOP_DOMINANCE_RATIO:
         return None
@@ -532,16 +313,7 @@ def _hot_loop_start(*tables: dict[Any, dict[str, Any]]) -> float | None:
 
 
 def _stops_before_hot_loop(entry: dict[str, Any], hot_loop_start: float | None) -> bool:
-    """Return whether a site had already stopped being called when the hot loop began.
-
-    Args:
-        entry: A merged host-call or framework-call entry.
-        hot_loop_start: Output of :func:`_hot_loop_start`.
-
-    Returns:
-        True only on positive evidence. A missing anchor or a report without
-        timestamps yields False, so a site is never called set-up on absent data.
-    """
+    """Return whether a site had already stopped being called when the hot loop began."""
     last = entry.get("last_s")
     if hot_loop_start is None or not isinstance(last, (int, float)) or float(last) < 0:
         return False
@@ -549,18 +321,7 @@ def _stops_before_hot_loop(entry: dict[str, Any], hot_loop_start: float | None) 
 
 
 def _merge_framework_calls(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Merge per-rank framework-function rows into one table keyed by function.
-
-    Repeat rates are averaged over the reporting ranks; each rank samples the
-    same code under the same workload, so an average is the right summary and a
-    sum would be meaningless.
-
-    Args:
-        reports: Parsed per-rank host-probe reports.
-
-    Returns:
-        Mapping of ``file:line:name`` to merged statistics.
-    """
+    """Merge per-rank framework-function rows into one table keyed by function."""
     merged: dict[str, dict[str, Any]] = {}
     for report in reports:
         for row in report.get("framework_calls") or []:
@@ -617,24 +378,7 @@ def _candidate(
     last_call_s: float | None = None,
     hot_loop_start_s: float | None = None,
 ) -> dict[str, Any]:
-    """Assemble one rewrite candidate row.
-
-    Args:
-        category: One of the ``CATEGORY_*`` ids.
-        site: The framework source location the candidate applies to.
-        signal: Human-readable statement of the measured evidence.
-        count: Per-rank call count backing the candidate.
-        wall_s: Per-rank wall seconds backing the candidate.
-        wall_pct: ``wall_s`` as a percentage of the measured run.
-        extra: Additional category-specific fields.
-        setup_phase: Whether the site had stopped being called before the hot loop
-            began.
-        last_call_s: The site's last observed call timestamp, probe-relative.
-        hot_loop_start_s: When the hot loop began; see :func:`_hot_loop_start`.
-
-    Returns:
-        The candidate row.
-    """
+    """Assemble one rewrite candidate row."""
     row: dict[str, Any] = {
         "category": category,
         "taxonomy": _CATEGORY_TAXONOMY.get(category, "?"),
@@ -669,17 +413,7 @@ def _host_call_candidates(
     wall_seconds: float,
     hot_loop_start: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Classify merged host-API rows into rewrite candidates.
-
-    Args:
-        merged: Output of :func:`_merge_host_calls`.
-        wall_seconds: Measured run wall seconds, used for the percentage column.
-        hot_loop_start: When the hot loop began, derived across every merged table.
-            Defaults to deriving it from ``merged`` alone.
-
-    Returns:
-        Unsorted candidate rows.
-    """
+    """Classify merged host-API rows into rewrite candidates."""
     out: list[dict[str, Any]] = []
     denom = wall_seconds if wall_seconds > 0 else 0.0
     if hot_loop_start is None:
@@ -759,25 +493,7 @@ def _fusion_candidates(
     wall_seconds: float,
     hot_loop_start: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Find tensor collectives issued from several adjacent same-shape sites.
-
-    A collective wrapped in a framework helper attributes to one line inside
-    that helper however many times it is called, so the enclosing frames are
-    what distinguish three adjacent same-shape collectives (fusable into one
-    padded call) from a single collective in a loop (not fusable).
-
-    Args:
-        merged: Output of :func:`_merge_host_calls`.
-        wall_seconds: Measured run wall seconds, used for the percentage column.
-        hot_loop_start: Output of :func:`_hot_loop_start`, used to demote sites
-            that had stopped being called before the loop began. Collectives
-            issued while the model is being built are real and fusable, and
-            fusing them buys nothing, so they must not outrank a steady-state
-            find in a list capped at ``MAX_CANDIDATES``.
-
-    Returns:
-        Unsorted fusion candidate rows.
-    """
+    """Find tensor collectives issued from several adjacent same-shape sites."""
     out: list[dict[str, Any]] = []
     denom = wall_seconds if wall_seconds > 0 else 0.0
     for entry in merged.values():
@@ -831,17 +547,7 @@ def _framework_call_candidates(
     wall_seconds: float,
     hot_loop_start: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Classify merged framework-function rows into rewrite candidates.
-
-    Args:
-        merged: Output of :func:`_merge_framework_calls`.
-        wall_seconds: Measured run wall seconds, used for the percentage column.
-        hot_loop_start: When the hot loop began, derived across every merged table.
-            Defaults to deriving it from ``merged`` alone.
-
-    Returns:
-        Unsorted candidate rows.
-    """
+    """Classify merged framework-function rows into rewrite candidates."""
     out: list[dict[str, Any]] = []
     denom = wall_seconds if wall_seconds > 0 else 0.0
     if hot_loop_start is None:
@@ -918,16 +624,7 @@ def _framework_call_candidates(
 
 
 def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build the merged rewrite-evidence document from per-rank reports.
-
-    Args:
-        reports: Parsed per-rank host-probe reports.
-
-    Returns:
-        The evidence document. When ``reports`` is empty the document still
-        carries its schema and an explanatory note, so a consumer can tell "the
-        probe found nothing" apart from "the probe never ran".
-    """
+    """Build the merged rewrite-evidence document from per-rank reports."""
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if not reports:
         return {
@@ -962,13 +659,7 @@ def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
         for table in (host_merged, framework_merged)
         for entry in table.values()
     )
-    # Hot-path work first, then wall time, then call count. Set-up work is sorted
-    # to the bottom rather than dropped: on a real run, loading a 34 GB checkpoint
-    # took the top four slots on transferred bytes alone and pushed the genuine
-    # per-step findings below them, which is exactly the attention a specialist
-    # cannot afford to spend. The count tie-break keeps a site the probe could not
-    # time (a collective whose cost lands in the next kernel launch) ranked by how
-    # often it runs instead of dropping to the bottom.
+    # Hot-path work first, then wall time, then call count.
     candidates.sort(
         key=lambda row: (
             0 if row.get("setup_phase") else 1,
@@ -1039,16 +730,7 @@ def build_evidence(reports: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def aggregate_probe_dir(probe_dir: Path | str, out_path: Path | str) -> dict[str, Any]:
-    """Read a probe directory, build the evidence document and write it.
-
-    Args:
-        probe_dir: Directory holding the per-rank host-probe reports.
-        out_path: Destination for the merged evidence JSON.
-
-    Returns:
-        The evidence document, whether or not the write succeeded (the caller
-        decides how loudly to complain about a failed write).
-    """
+    """Read a probe directory, build the evidence document and write it."""
     evidence = build_evidence(read_probe_reports(probe_dir))
     try:
         target = Path(out_path)
@@ -1060,15 +742,7 @@ def aggregate_probe_dir(probe_dir: Path | str, out_path: Path | str) -> dict[str
 
 
 def summarize_for_prompt(evidence: dict[str, Any], *, limit: int = 12) -> str:
-    """Render the top candidates as a compact block for a specialist prompt.
-
-    Args:
-        evidence: An evidence document from :func:`build_evidence`.
-        limit: Maximum candidates rendered.
-
-    Returns:
-        A plain-text block, or ``""`` when there is nothing worth rendering.
-    """
+    """Render the top candidates as a compact block for a specialist prompt."""
     candidates = evidence.get("candidates") if isinstance(evidence, dict) else None
     if not isinstance(candidates, list) or not candidates:
         return ""

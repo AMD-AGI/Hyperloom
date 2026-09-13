@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Continue an agent session that the LLM API cut short.
-
-A session stops for one of two very different reasons. Either the model
-answered — it finished, it hit its turn cap, or its deadline expired — or the
-API never answered at all, because the gateway returned an error or the stream
-dropped mid-turn. Only the second kind deserves another attempt, and that
-attempt has to be a RESUME: by the time the gateway fails, the session has
-usually already read the kernel, built it, and benchmarked it, and a fresh
-session throws every one of those turns away.
-
-Retrying the first kind is always wrong. A turn cap and a deadline are limits
-the caller chose, and a finished session is an answer; re-running either one
-buys nothing and spends the campaign's budget twice.
-
-The distinction also has to survive into the result. A session the API killed
-produced no candidate, which looks exactly like a session that produced no
-candidate on purpose — so an exhausted retry chain reports ``api_error``
-rather than leaving the caller to record "the agent changed nothing".
-"""
+"""Continue an agent session that the LLM API cut short."""
 
 from __future__ import annotations
 
@@ -51,23 +33,17 @@ TERMINAL_END_REASONS = frozenset(
         "turn_cap",
     }
 )
-# End reason for a session the API killed and that could not be recovered. It
-# is deliberately NOT one of the reasons above: nothing was measured, so no
-# downstream reader may treat it as a verdict about the kernel.
+# End reason for a session the API killed and that could not be recovered.
 EXHAUSTED_END_REASON = "api_error"
 
 DEFAULT_MAX_RESUMES = 3
 DEFAULT_BASE_DELAY_SEC = 5.0
 DEFAULT_MAX_DELAY_SEC = 120.0
 _DELAY_FACTOR = 3.0
-# Ceiling on the wall clock the retry/resume chain may add. A session that keeps
-# failing must give the campaign its remaining budget back rather than spending
-# hours discovering the same outage; 0 lifts the bound.
+# Ceiling on the wall clock the retry/resume chain may add.
 DEFAULT_DEADLINE_SEC = 3600.0
 
-# Exception types that mean "this request never got an answer, and the next one
-# might". Matched by name because the SDKs wrap httpx/aiohttp/openai errors and
-# importing those to isinstance-check them would make optional deps mandatory.
+# Exception types that mean "this request never got an answer, and the next one might".
 _TRANSIENT_TYPE_NAMES = frozenset(
     {
         "APIConnectionError",
@@ -91,11 +67,8 @@ _TRANSIENT_TYPE_NAMES = frozenset(
         "WriteTimeout",
     }
 )
-# Substrings that identify the same failures once a backend has flattened them
-# into a message (CodexExecutionError does this), keyed to what gateways and
-# proxies actually emit. A local turn timeout is deliberately absent: it means
-# the model was answering and ran out of clock, so re-running it just burns the
-# same clock again.
+# Substrings that identify the same failures once a backend has flattened them into a message (CodexExecutionError
+# does this), keyed to what gateways and proxies actually emit.
 _TRANSIENT_MARKERS = (
     "429",
     "500 internal",
@@ -153,13 +126,7 @@ def is_api_failure(result: Any) -> bool:
 
 
 def _error_chain(error: BaseException) -> list[BaseException]:
-    """The exception and everything it was raised from.
-
-    Backends flatten the transport error into a message of their own
-    (``CodexExecutionError(f"Codex SDK execution failed: {exc}")``), so the type
-    that says whether a retry can help is usually the ``__cause__``, not the
-    exception the caller sees.
-    """
+    """The exception and everything it was raised from."""
     chain: list[BaseException] = []
     seen: set[int] = set()
     current: BaseException | None = error
@@ -171,31 +138,19 @@ def _error_chain(error: BaseException) -> list[BaseException]:
 
 
 def is_retryable_api_error(error: BaseException) -> bool:
-    """Whether a failed session is worth another attempt.
-
-    Retrying is the exception, not the default. Only a transport or gateway
-    failure — a reset connection, a 5xx, a rate limit — stops happening on its
-    own; a rejected request, a workspace-safety stop, and an expired clock all
-    fail again identically, and each retry spends the campaign's budget and
-    (for a timeout) its wall clock to learn nothing.
-
-    That is why the check is an allowlist. It used to be a denylist of
-    credentials plus ``TimeoutError``, which made ``WorkspaceSafetyError`` and
-    ``CodexExecutionError("Codex timed out after 1800s")`` retryable: a 1800s
-    turn ran four times, so a single wedged session could eat two hours.
-    """
+    """Whether a failed session is worth another attempt."""
     chain = _error_chain(error)
     for exc in chain:
-        # A provider that is not installed or configured, and a session stopped
-        # for touching what it must not, are both decisions -- never weather.
+        # A provider that is not installed or configured, and a session stopped for touching what it must not, are
+        # both decisions -- never weather.
         if isinstance(exc, AgentProviderUnavailableError):
             return False
         if "safety" in type(exc).__name__.lower():
             return False
     for exc in chain:
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-            # A real timeout type from the transport is transient; the local turn
-            # deadline is raised as a plain backend error and stays terminal.
+            # A real timeout type from the transport is transient; the local turn deadline is raised as a plain
+            # backend error and stays terminal.
             return type(exc).__name__ in _TRANSIENT_TYPE_NAMES
         if type(exc).__name__ in _TRANSIENT_TYPE_NAMES:
             return True
@@ -214,12 +169,7 @@ def _delay_for(
     max_sec: float,
     rng: Callable[[], float],
 ) -> float:
-    """Exponential backoff with full jitter, for a 1-based attempt number.
-
-    The gateway degradations this recovers from last minutes, not seconds, so
-    the ceiling grows fast; the jitter keeps a whole batch of pods from
-    retrying in lockstep and re-degrading the gateway they are waiting on.
-    """
+    """Exponential backoff with full jitter, for a 1-based attempt number."""
     ceiling = min(max_sec, base_sec * (_DELAY_FACTOR ** max(0, attempt - 1)))
     return ceiling * (0.5 + 0.5 * rng())
 
@@ -234,17 +184,7 @@ def _merged(
     resumed: AgentRunResult,
     session_id: str,
 ) -> AgentRunResult:
-    """Fold a resumed turn into the session it continued.
-
-    The resumed turn's text is the session's answer — the previous text is the
-    truncated fragment plus the SDK's error line — but the tool calls and
-    findings from before the failure are real work and stay attributed.
-
-    Workspace contention carries forward the same way, and for a stronger
-    reason: the turn that hit the deadline is exactly the turn that leaves a
-    benchmark running, and a clean resume afterwards does not free the device
-    that leftover is still holding.
-    """
+    """Fold a resumed turn into the session it continued."""
     resumed.tool_calls = [*previous.tool_calls, *resumed.tool_calls]
     resumed.findings = [*previous.findings, *resumed.findings]
     if not resumed.workspace_contention:
@@ -257,13 +197,7 @@ def _merged(
 
 
 def resumable_session_id(error: BaseException) -> str:
-    """The session handle a raising backend managed to establish, if any.
-
-    A transport error after ``thread_start`` succeeded is the expensive case: the
-    session already holds every turn it spent reading, building and benchmarking.
-    Backends attach the handle to the exception so this layer can continue that
-    session instead of opening a new one and paying for all of it again.
-    """
+    """The session handle a raising backend managed to establish, if any."""
     for exc in _error_chain(error):
         session_id = str(getattr(exc, "session_id", "") or "").strip()
         if session_id:
@@ -272,12 +206,7 @@ def resumable_session_id(error: BaseException) -> str:
 
 
 def _interrupted_result(error: BaseException, session_id: str) -> AgentRunResult:
-    """Present a session that died holding a live handle as a resumable result.
-
-    Returning it (rather than raising) hands it to the resume loop, which already
-    knows how to continue a session, count the attempt against the budget, and
-    merge the recovered turn back in.
-    """
+    """Present a session that died holding a live handle as a resumable result."""
     return AgentRunResult(
         text=f"[session ended with SDK error: {error}]",
         subtype="error",
@@ -297,13 +226,7 @@ async def _start(
     sleep: Callable,
     delay: Callable[[int], float],
 ) -> AgentRunResult:
-    """Open the session, retrying a start that never reached the model.
-
-    A failure with no session handle raises instead of returning a result:
-    nothing was established, so there is no context to preserve and a plain
-    re-run loses nothing. A failure that DOES carry a handle is returned as a
-    resumable result so the caller continues that session.
-    """
+    """Open the session, retrying a start that never reached the model."""
     attempt = 0
     while True:
         attempt += 1
@@ -346,19 +269,7 @@ async def run_session_with_api_resume(
     sleep: Callable = asyncio.sleep,
     rng: Callable[[], float] = random.random,
 ) -> AgentRunResult:
-    """Run one agent session, resuming it whenever the API — not the agent — fails.
-
-    Returns the session's result. When the API keeps failing, the last result is
-    returned with ``end_reason`` set to :data:`EXHAUSTED_END_REASON` so the
-    caller can tell an outage apart from an agent that decided to change
-    nothing. Only a failure that precedes the session (nothing to resume, and
-    therefore nothing lost) can still raise.
-
-    ``deadline_sec`` bounds the wall clock this whole chain may consume, because
-    the resume budget alone does not: every attempt can spend a full turn
-    timeout, so an outage that outlives the budget would hold the campaign for
-    hours. Passing 0 lifts the bound.
-    """
+    """Run one agent session, resuming it whenever the API — not the agent — fails."""
     resume_budget = int(
         max_resumes
         if max_resumes is not None
@@ -436,8 +347,8 @@ async def run_session_with_api_resume(
                 type(exc).__name__,
                 exc,
             )
-            # Keep the newest handle: a resume that got as far as re-opening the
-            # thread may report a different id, and that is the one to continue.
+            # Keep the newest handle: a resume that got as far as re-opening the thread may report a different id, and
+            # that is the one to continue.
             result.session_id = resumable_session_id(exc) or session_id
             continue
         result = _merged(result, resumed, session_id)

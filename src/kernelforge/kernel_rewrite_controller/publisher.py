@@ -133,13 +133,7 @@ def publish_operator_result(
     finally:
         pointer.unlink(missing_ok=True)
 
-    # A superseded version stays. Everything else treats `.versions/<digest>/
-    # <commit>` as content-addressed and immutable -- _validate_version refuses
-    # any divergence rather than rewriting -- so reclaiming one contradicts that,
-    # and the rename is atomic while the removal is not: a reader that has
-    # already resolved the old pointer would lose the tree underneath it. Each
-    # version is a patch and two small files, so keeping them costs nothing worth
-    # the race.
+    # A superseded version stays.
     return destination
 
 
@@ -161,12 +155,20 @@ def render_operator_report(
         f"- **Kernel path:** `{task.kernel_path}`",
         f"- **Correctness:** `{'passed' if details.get('correctness_passed', True) else 'failed'}`",
     ]
+    # Rendered as written. It is the agent's account of why this operator was
+    # worth a campaign, and a reader comparing patches wants it beside the
+    # speedup; nothing downstream computes with it.
+    if task.gpu_pct is not None:
+        # ``!r`` because the field is deliberately unchecked: a value carrying a
+        # backtick or a newline would otherwise break the document around it,
+        # and refusing the task instead would trade an operator for a cast.
+        lines.append(f"- **Operator share of E2E GPU time:** `{task.gpu_pct!r}`")
     if details.get("mean_case_speedup") is not None:
         lines.append(f"- **Mean case speedup:** `{float(details['mean_case_speedup']):.6f}x`")
     if details.get("iteration") is not None:
         lines.append(f"- **Best iteration:** `{int(details['iteration'])}`")
-    # What the patch changes, preferred over the manifest's account of what the
-    # optimizer edited, because this is the list integration will act on.
+    # What the patch changes, preferred over the manifest's account of what the optimizer edited, because this is the
+    # list integration will act on.
     reported = list(changed_files) if changed_files else details.get("changed_files")
     if isinstance(reported, list):
         lines.extend(["", "## Changed Files", ""])

@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Integration + unit tests for :class:`TargetAnalysisExecutor`.
-
-Integration tests cover the no-flag / no-target / mapping-miss / happy paths;
-unit tests cover the env/ctx helpers and the executor's never-fail branches.
-"""
+"""Integration + unit tests for :class:`TargetAnalysisExecutor`."""
 
 from __future__ import annotations
 

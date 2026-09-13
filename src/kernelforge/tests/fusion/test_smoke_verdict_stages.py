@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The smoke knows which stage failed; nobody should re-derive it from a message.
-
-``classify_serving_smoke_failure`` read the reason string back and matched
-substrings, which cannot tell a boot-time HIP OOM from a fused-kernel fault
-(both carry "HIP error") nor an HTTP probe error from a crashed scheduler (both
-were spelled "decode probe failed"). The verdict carries the stage the smoke was
-in and whether the kernel is implicated, decided where the evidence is.
-"""
+"""The smoke knows which stage failed; nobody should re-derive it from a message."""
 
 from __future__ import annotations
 

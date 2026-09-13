@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for recording a forge-loop run under its kernel identity.
-
-These run against the KB Store's on-disk backend rather than a stand-in, so the
-gates, the address and the artifact round trip are exercised the way a real run
-would exercise them.
-"""
+"""Tests for recording a forge-loop run under its kernel identity."""
 
 from __future__ import annotations
 
@@ -99,8 +94,7 @@ def _records(config, workspace) -> KernelRecipeKB:
 
 # --- gates ----------------------------------------------------------------- #
 def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
-    # Remote mode selected against GBrain, which holds no rewrite records, so
-    # there is no backend to write to.
+    # Remote mode selected against GBrain, which holds no rewrite records, so there is no backend to write to.
     knowledge = KnowledgeConfig.from_env(
         {},
         mode="remote",
@@ -124,9 +118,7 @@ def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
 
 
 def test_write_fails_closed_without_gpu_type(config, workspace):
-    # The hardware model addresses the record. Writing without it would file the
-    # run under an address no read resolves to, which is worse than not writing:
-    # the loop would report success while the experience is unreachable.
+    # The hardware model addresses the record.
     config.gpu_type = ""
     assert _write(config, workspace) == {
         "written": False,
@@ -134,11 +126,24 @@ def test_write_fails_closed_without_gpu_type(config, workspace):
     }
 
 
-def test_write_skips_no_improvement_and_empty_diff(config, workspace):
-    assert _write(config, workspace, mean_case_speedup=1.0)["reason"] == "no_improvement"
-    assert _write(config, workspace, mean_case_speedup=0.9)["reason"] == "no_improvement"
+def test_write_skips_empty_diff(config, workspace):
     assert _write(config, workspace, cumulative_diff="")["reason"] == "empty_diff"
     assert _records(config, workspace).list_candidates() == []
+
+
+def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
+    """Losing to the source baseline must not cost the run its evidence.
+
+    An operator whose best attempt is still slower than what ships is the one that most needs its progress carried to
+    the next run. Withholding it made every later run read the same losing seed and repeat the same climb.
+    """
+    losing = _write(config, workspace, mean_case_speedup=0.9)
+
+    assert losing["written"] is True
+    assert losing["speedup"] == 0.9
+    # Recorded, but not held up as the identity's best.
+    assert losing["champion"] is False
+    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
 
 
 def test_write_requires_explicit_mean_case_speedup(config, workspace):
@@ -185,22 +190,15 @@ def test_write_preserves_the_patch_and_the_measurements(config, workspace):
 
 
 def test_a_crlf_patch_round_trips_byte_for_byte(config, workspace):
-    """A patch is applied by matching context byte for byte.
-
-    Folding its newlines leaves a diff that still parses, still names the right
-    file, and still cannot be applied to a CRLF source -- so the solution reads
-    as reusable right up to the moment git refuses it.
-    """
+    """A patch is applied by matching context byte for byte."""
     crlf = DIFF.replace("\n", "\r\n")
     status = _write(config, workspace, cumulative_diff=crlf)
 
     assert status["written"] is True
     kb = _records(config, workspace)
 
-    # Both ways a stored patch is reached must return the same bytes: the warm
-    # start reads the materialized file, and a direct fetch goes through the
-    # store. A reader that folded the newlines would still return a diff that
-    # parses and names the right file, so only the bytes reveal the loss.
+    # Both ways a stored patch is reached must return the same bytes: the warm start reads the materialized file, and
+    # a direct fetch goes through the store.
     bundle = kb.read_top_n(workspace / "kb-candidates", limit=1)[0]
     materialized = (bundle.files_dir / PATCH_ARTIFACT).read_bytes()
     fetched = kb.prior_file(bundle.session_id, PATCH_ARTIFACT)
@@ -211,11 +209,7 @@ def test_a_crlf_patch_round_trips_byte_for_byte(config, workspace):
 
 
 def test_the_record_carries_a_readable_account_beside_the_patch(config, workspace):
-    """A ranker reads the record's fields; a person reads this.
-
-    It travels with the patch so a reader does not have to reconstruct the run
-    from the record, and it names the patch rather than copying it.
-    """
+    """A ranker reads the record's fields; a person reads this."""
     _write(config, workspace)
 
     bundle = _records(config, workspace).read_top_n(workspace / "kb-candidates", limit=1)[0]
@@ -229,8 +223,7 @@ def test_the_record_carries_a_readable_account_beside_the_patch(config, workspac
     assert f"- Patch: `{PATCH_ARTIFACT}`\n" in experience
     assert "## Strategy\n\nvectorize loads\n" in experience
     assert "## Lessons\n\nAlignment matters.\n" in experience
-    # The diff sits beside it under its own name; copying it here would hold the
-    # same bytes twice in one record.
+    # The diff sits beside it under its own name; copying it here would hold the same bytes twice in one record.
     assert "-old" not in experience
 
 
@@ -285,8 +278,8 @@ def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(config,
     )
 
     assert same == {"written": False, "reason": "no_improvement_over_reuse"}
-    # The one recorded solution still stands, and still serves its patch: the
-    # warm-started run keeps it as its own result.
+    # The one recorded solution still stands, and still serves its patch: the warm-started run keeps it as its own
+    # result.
     kb = _records(config, workspace)
     candidates = kb.list_candidates(limit=5)
     assert len(candidates) == 1
@@ -311,14 +304,7 @@ def test_a_warm_started_run_that_improved_records_the_better_result(config, work
 
 
 def test_a_new_summary_for_one_solution_is_recorded_as_a_second_candidate(config, workspace):
-    """Known gap, pinned so a change in it cannot pass unnoticed.
-
-    The store names a record after its own content, so the final write's richer
-    prose for a solution already recorded is filed as its own record: one patch
-    at one speedup, held twice, crowding out a genuinely different approach.
-    Closing it needs a way to name the record being revised, which the store
-    does not expose.
-    """
+    """Known gap, pinned so a change in it cannot pass unnoticed."""
     _write(config, workspace, summary_override={**SUMMARY, "lessons": ""})
     _write(config, workspace, summary_override={**SUMMARY, "lessons": "later"})
 
@@ -339,8 +325,8 @@ def test_recording_the_same_result_twice_updates_one_record(config, workspace):
 
 
 def test_a_different_gpu_is_a_different_address(config, workspace):
-    # Two cards can share one compilation target, so the target alone would pool
-    # runs whose timings are not comparable. The model separates them.
+    # Two cards can share one compilation target, so the target alone would pool runs whose timings are not
+    # comparable.
     _write(config, workspace)
     config.gpu_type = "mi355x"
     _write(config, workspace)
@@ -356,17 +342,15 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
 
     assert other.canonical_id.endswith(":mi355x")
     assert other.canonical_id != IDENTITY
-    # Each model holds exactly its own run, so neither can be read on the
-    # other's behalf.
+    # Each model holds exactly its own run, so neither can be read on the other's behalf.
     assert len(other.list_candidates(limit=5)) == 1
     config.gpu_type = "mi300x"
     assert len(_records(config, workspace).list_candidates(limit=5)) == 1
 
 
 def test_a_different_producer_is_a_different_address(config, workspace):
-    # A pipeline built ON the loop rewires a framework rather than optimizing a
-    # kernel, so its records must neither rank against the loop's own nor be
-    # offered to one as a warm start.
+    # A pipeline built ON the loop rewires a framework rather than optimizing a kernel, so its records must neither
+    # rank against the loop's own nor be offered to one as a warm start.
     _write(config, workspace)
     config.producer = "fusion"
     _write(config, workspace)

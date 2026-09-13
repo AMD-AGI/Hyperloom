@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unified-diff parsing, kept free of framework-agent imports.
-
-The orchestrator reads the file list out of a candidate diff through this
-module, so it must stay importable without pulling the agent runtime in.
-"""
+"""Unified-diff parsing, kept free of framework-agent imports."""
 
 from __future__ import annotations
 
@@ -25,14 +21,7 @@ class FileChange:
 
 
 def parse_unified_diff(patch_text: str) -> list[FileChange]:
-    """Parse a unified diff into per-file added/removed/context line groups.
-
-    Args:
-        patch_text: The unified diff (``diff --git`` / ``--- a/`` / ``+++ b/``).
-
-    Returns:
-        One :class:`FileChange` per file section, in first-seen order.
-    """
+    """Parse a unified diff into per-file added/removed/context line groups."""
     changes: list[FileChange] = []
     current: FileChange | None = None
     for raw in (patch_text or "").splitlines():

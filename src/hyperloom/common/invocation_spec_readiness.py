@@ -1,17 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether an invocation spec is complete enough to drive driver preparation.
-
-The spec builder does not fail when evidence is missing: it marks the document
-``status: "partial"`` and lists what is absent in ``missing_fields``. Nothing
-read either field, so the rewrite route admitted a partial spec, the producer
-kept its placeholder driver, and the run burned its whole budget before exiting
-non-zero. This module is the missing reader.
-
-Kept out of the backends package on purpose -- that tree is excluded from
-coverage, and this is the decision worth covering.
-"""
+"""Whether an invocation spec is complete enough to drive driver preparation."""
 
 from __future__ import annotations
 
@@ -38,16 +28,7 @@ class SpecReadiness:
 
 
 def evaluate_spec_readiness(spec_path: str | Path | None) -> SpecReadiness:
-    """Decide whether a spec file can drive driver preparation.
-
-    Args:
-        spec_path: Path to the invocation spec JSON, or an empty value.
-
-    Returns:
-        A ready verdict, or a rejection carrying one of the module's reason
-        codes. Unreadable and partial are reported separately: the first is an
-        environment problem, the second is missing upstream evidence.
-    """
+    """Decide whether a spec file can drive driver preparation."""
     raw = str(spec_path or "").strip()
     if not raw:
         return SpecReadiness(False, REASON_MISSING, "no invocation spec path was supplied")
@@ -62,8 +43,8 @@ def evaluate_spec_readiness(spec_path: str | Path | None) -> SpecReadiness:
         return SpecReadiness(False, REASON_UNREADABLE, f"invocation spec is not a JSON object: {raw}")
     status = str(document.get("status") or "").strip().lower()
     missing = _missing_fields(document)
-    # An absent status predates the field; treat it as complete so an older spec
-    # keeps working, and let the explicit `partial` marker be the only rejection.
+    # An absent status predates the field; treat it as complete so an older spec keeps working, and let the explicit
+    # `partial` marker be the only rejection.
     if status == STATUS_PARTIAL:
         listed = ", ".join(missing) if missing else "unspecified"
         return SpecReadiness(

@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AgentX budget profile, search-scope collapse, and the session-level guards.
-
-An AgentX round costs orders of magnitude more wall-clock than a synthetic one,
-so budgets sized for the latter reap healthy variants -- and an overtime kill is
-terminal (the variant skips the KEEP ladder entirely). These tests pin the
-widened budgets, the scope reductions that make the cost affordable, and the two
-guards that stop a session from silently measuring something other than what it
-reports: the bypass-backend combination, and a resume that changes benchmark
-mode or crosses an AgentX measurement epoch.
-
-Every case asserts the synthetic path is untouched.
-"""
+"""AgentX budget profile, search-scope collapse, and the session-level guards."""
 
 from __future__ import annotations
 
@@ -68,14 +57,7 @@ def test_budget_profile_widens_conc_sweep_defaults_under_agentx(monkeypatch):
 
 
 def test_budget_profile_leaves_the_kill_ratio_alone(monkeypatch):
-    """A duration-based replay compresses runtime spread, it does not widen it.
-
-    The measurement window is fixed, so only warmup scales with how slow a
-    config is: a variant with 3x slower warmup still lands at ~1.8x the baseline
-    total (measured: 46 min warmup + 60 min window + 5 min setup). The stock
-    2.0x guard is not the thing that needed loosening -- the per-variant hard
-    cap was, and raising this instead would invert the two.
-    """
+    """A duration-based replay compresses runtime spread, it does not widen it."""
     _on(monkeypatch)
     args = _budget_args()
     _apply_agentx_budget_profile(args)
@@ -83,13 +65,7 @@ def test_budget_profile_leaves_the_kill_ratio_alone(monkeypatch):
 
 
 def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
-    """The layering `_compute_explore_variant_timeout` documents must hold.
-
-    At the measured ~111 min baseline the stock 4h ceiling clamps the hard cap
-    to 240 min while the soft kill sits at 222 min -- barely intact -- and a
-    longer baseline inverts it, so the generic timeout fires and the round loses
-    its KILLED_OVERTIME diagnosis. The AgentX ceiling keeps the ordering.
-    """
+    """The layering `_compute_explore_variant_timeout` documents must hold."""
     from hyperloom.orchestrator.actions.executors.explore import (
         AGENTX_EXPLORE_TIMEOUT_CEILING_SEC,
         DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
@@ -106,11 +82,7 @@ def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
 
 
 def test_budget_profile_never_touches_max_hours(monkeypatch):
-    """``--max-hours`` is the operator's contract with the scheduler.
-
-    Silently extending it gets the job killed from outside the process, which
-    is far harder to diagnose than simply running out of budget.
-    """
+    """``--max-hours`` is the operator's contract with the scheduler."""
     _on(monkeypatch)
     args = _budget_args()
     _apply_agentx_budget_profile(args)
@@ -154,14 +126,7 @@ def test_bypass_guard_rejects_the_silent_combination(monkeypatch):
 
 
 def test_guard_rejects_agentx_with_a_scriptable_framework(monkeypatch):
-    """The other way for the switch to no-op while every gate still fires.
-
-    ``apply_agentx_switch`` returns early for a scriptable framework, but
-    ``agentx_enabled()`` is a bare env read -- so eval is disabled, the conc
-    sweep is turned off, the grid is collapsed, budgets are widened and the
-    state is stamped ``benchmark_mode="agentx"`` over a workload that never
-    touched a trace.
-    """
+    """The other way for the switch to no-op while every gate still fires."""
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)
     with pytest.raises(SystemExit) as ei:
@@ -247,12 +212,7 @@ def test_verdict_gate_rejects_a_failed_submission(monkeypatch):
 
 
 def test_verdict_gate_rejects_an_unknown_verdict(monkeypatch):
-    """None means no scenario, or an aiperf too old to stamp one.
-
-    ``map_aiperf`` writes the key unconditionally, so an unknown verdict still
-    arrives as a present key. Treating unknown as valid is exactly how an
-    incomparable run reaches the leaderboard-comparable set.
-    """
+    """None means no scenario, or an aiperf too old to stamp one."""
     _on(monkeypatch)
     assert _valid(_measurement(submission_valid=None)) is False
 
@@ -263,26 +223,14 @@ def test_verdict_gate_accepts_a_valid_submission(monkeypatch):
 
 
 def test_verdict_gate_is_inert_on_the_synthetic_path(monkeypatch):
-    """``is_valid_measurement`` is hot for every synthetic measurement too.
-
-    The synthetic harness runs an InferenceX revision this repo re-pins from
-    time to time. Were a future upstream to stamp the key into a synthetic
-    ``inferencex_result.json``, a presence-only check would silently invalidate
-    every synthetic measurement session-wide while throughput still looked
-    healthy. Gating on the mode removes that coupling.
-    """
+    """``is_valid_measurement`` is hot for every synthetic measurement too."""
     _off(monkeypatch)
     assert _valid(_measurement(submission_valid=False)) is True
     assert _valid(_measurement(submission_valid=None)) is True
 
 
 def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
-    """A scriptable framework skips the aiperf switch entirely.
-
-    ``apply_agentx_switch`` returns early for scriptable frameworks, so their
-    results legitimately carry no verdict even with AgentX on. Keying on
-    absence rather than presence would reap them.
-    """
+    """A scriptable framework skips the aiperf switch entirely."""
     _on(monkeypatch)
     assert _valid(_measurement()) is True
 
@@ -291,15 +239,7 @@ def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
 
 
 def test_agentx_switch_raises_the_inner_magpie_timeout(monkeypatch):
-    """The flat Magpie ``timeout_seconds`` must follow the raised AgentX cap.
-
-    The flat cap covers server boot + warmup + the measurement window + export
-    as one deadline. At the model's native context AgentX's boot+warmup alone
-    overruns the synthetic 7200s default, so the benchmark is SIGKILLed before
-    aiperf writes its result -- a 0-tput baseline that fails the session. The
-    switch lifts the inner cap to the same budget the outer subprocess timeout
-    uses, so the two layers stay consistent.
-    """
+    """The flat Magpie ``timeout_seconds`` must follow the raised AgentX cap."""
     _on(monkeypatch)
     monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -359,17 +299,7 @@ def _switched(monkeypatch, **env):
 
 
 def test_the_client_is_handed_the_conc_scaled_grace(monkeypatch):
-    """One number, two layers.
-
-    ``aiperf_client.sh`` reads AGENTX_WARMUP_GRACE_PERIOD and passes it to
-    aiperf as ``--warmup-grace-period`` -- that is what actually stops the
-    warmup. This process scales the same knob by CONC to size the subprocess
-    cap. Forwarding the operator's RAW value bounds the client below what the
-    cap pays for: measured on a Kimi-K3 conc=32 round, a 14400s cap against a
-    3600s client bound would have cut warmup at 106 of 354 requests, and the
-    round would then report a prefix-reuse figure taken before the cache held
-    anything.
-    """
+    """One number, two layers."""
     _on(monkeypatch)
     monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
     envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", AGENTX_WARMUP_GRACE_CONC="8", CONC="32")
@@ -397,11 +327,7 @@ def test_the_exported_grace_matches_what_the_cap_budgeted(monkeypatch):
 
 
 def test_nothing_is_exported_on_the_default_synthetic_path(monkeypatch):
-    """AgentX off: no envs block, no grace, no benchmark_script -- untouched.
-
-    The switch returns early before any of this runs, so the synthetic path
-    cannot pick up an AgentX-shaped warmup bound.
-    """
+    """AgentX off: no envs block, no grace, no benchmark_script -- untouched."""
     from hyperloom.orchestrator.actions.executors._workload_envs import (
         apply_agentx_switch,
     )
@@ -469,13 +395,7 @@ def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="
 
 
 def test_a_sweep_variant_is_bounded_by_its_own_concurrency(monkeypatch, tmp_path):
-    """A rung's grace follows the rung, not the concurrency the session started at.
-
-    Warmup is ten requests per lane across CONC lanes, so a ladder rung at 128
-    has to drain sixteen times the work of a session sitting at 8. Bounding it at
-    the session's number cuts the warmup short and the round reports a
-    prefix-reuse figure taken before the cache filled.
-    """
+    """A rung's grace follows the rung, not the concurrency the session started at."""
     envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128, grace_conc=8)
     assert envs["CONC"] == "128"
     assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
@@ -488,11 +408,7 @@ def test_a_lower_rung_is_not_given_the_sessions_larger_grace(monkeypatch, tmp_pa
 
 
 def test_the_inner_cap_moves_with_the_grace(monkeypatch, tmp_path):
-    """The two bounds are derived from the same number and must not disagree.
-
-    Raising only the client's grace makes a round wait inside a bound its own
-    cap does not cover, and it is SIGKILLed mid-warmup instead.
-    """
+    """The two bounds are derived from the same number and must not disagree."""
     import yaml
 
     from hyperloom.orchestrator.actions.executors._grid_runner import (
@@ -541,11 +457,7 @@ def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
 
 
 def test_the_derivation_does_not_narrate_once_per_call_site(monkeypatch, caplog):
-    """A ladder resolves this for every rung at several sites; one line each.
-
-    The same arithmetic repeated tens of times per sweep buries the one line
-    per rung that carries information.
-    """
+    """A ladder resolves this for every rung at several sites; one line each."""
     from hyperloom.orchestrator.actions.executors import baseline as bl
 
     _on(monkeypatch)

@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Translate the fusion harness into the driver contract the forge-loop reads.
-
-The loop scores from the driver's stdout -- ``SNR: <x> dB`` and
-``case_ms: <id> <ms>`` -- while the harness prints one JSON object. The shim
-is generated rather than authored because it is pure translation, and a
-mistake in it would read as a failed fusion.
-
-The loop benches the unfused framework first to anchor its speedup, and at
-that point the tracked fused module is still the empty placeholder the
-campaign committed. The driver reads that file to tell an unfused baseline
-from a compile failure, because the two are indistinguishable in the report:
-an author describing "there is nothing to compile yet" writes the same
-``compiled: false`` as one whose kernel failed to build, and reading it as a
-failure leaves the loop with no pristine timings to score against.
-"""
+"""Translate the fusion harness into the driver contract the forge-loop reads."""
 
 from __future__ import annotations
 
@@ -136,11 +122,7 @@ def render_driver(
     timeout_sec: int = 1800,
     fused_module: str = "",
 ) -> str:
-    """Render the driver source for one recipe's harness.
-
-    ``fused_module`` is the tracked module the author writes into. Left empty,
-    every ``compiled: false`` is read as a compile failure.
-    """
+    """Render the driver source for one recipe's harness."""
     return _SHIM_TEMPLATE.format(
         harness=str(harness_path),
         env_flags=tuple(env_flags),

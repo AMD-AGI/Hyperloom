@@ -1,9 +1,4 @@
-"""Hermetic tests for the framework apply-back producer contract.
-
-No GPU, no LLM, no git: this pins the version handshake, the logical-name to
-builder-symbol rule, and the apply-back manifest schema a consumer integrates
-against.
-"""
+"""Hermetic tests for the framework apply-back producer contract."""
 
 from __future__ import annotations
 
@@ -33,11 +28,7 @@ def test_capabilities_report_the_supported_protocol():
 
 
 def test_no_source_without_readable_code_is_advertised_as_portable():
-    """A prebuilt binary or hand-written ASM has nothing to port.
-
-    A consumer reads these lists to decide whether to hand work over, so naming
-    a source-less kind here would invite a campaign that cannot even start.
-    """
+    """A prebuilt binary or hand-written ASM has nothing to port."""
     advertised = set(protocol.SUPPORTED_SOURCE_LANGUAGES) | set(protocol.SUPPORTED_SOURCE_KINDS)
 
     assert not advertised & {"asm", "aiter_asm", "prebuilt", "binary", "hsaco"}

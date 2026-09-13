@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The MoE dispatch key, read off the log instead of guessed from the config.
-
-``fmoe_ck`` refuses to tune a key it inferred from ``config.json``, for good
-reasons it documents: the quantisation pair, the per-partition ``inter_dim`` and
-the EP path's extra masked expert slot are all chosen by the serving framework.
-The refusal was correct and the tuner still never ran -- across 33 models on a
-real box it skipped 33 times, because the only accepted source was a
-hand-prepared ``moe_untuned_csv`` that nothing produced. The key was in the
-serving log the whole time; these tests pin down reading it.
-
-Every tuple literal below is copied verbatim from a production sglang log
-(MiniMax-M3-MXFP4, TP8, gfx950). The layout matters more than it looks: the
-previous parser documented it as starting at ``cu_num``, read the token out of
-the CU-count slot, and reported every model's token set as the constant [256].
-"""
+"""The MoE dispatch key, read off the log instead of guessed from the config."""
 
 from __future__ import annotations
 
@@ -55,8 +41,8 @@ class TestTupleLayout:
         rep = _log(_DISPATCH.format(tok=1))
         (key,) = ev.moe_dispatch_keys(rep)
         assert key["model_dim"] == "6144"
-        # 384, not the config's moe_intermediate_size of 3072: this log is TP8,
-        # and the per-partition width is precisely what cannot be derived.
+        # 384, not the config's moe_intermediate_size of 3072: this log is TP8, and the per-partition width is
+        # precisely what cannot be derived.
         assert key["inter_dim"] == "384"
         assert key["expert"] == "128"
         assert key["topk"] == "4"
@@ -71,8 +57,7 @@ class TestTupleLayout:
         assert key["dtype"] == "torch.bfloat16"  # quotes stripped
 
     def test_a_tuple_without_the_arch_prefix_still_yields_its_token(self):
-        # Builds that print no arch start the tuple at cu_num. The token is
-        # still the field after the box properties.
+        # Builds that print no arch start the tuple at cu_num.
         rep = _log("[aiter] [fused_moe] using 2stage default for (304, 32, 4096, 1536, 8, 2)")
         stages = rep["dispatch"]["moe"]["by_stage"]
         assert stages["2stage/default"]["tokens"] == [32]
@@ -96,8 +81,8 @@ class TestTupleLayout:
 
 class TestMissSignal:
     def test_the_miss_line_is_what_marks_a_token_as_needing_tuning(self):
-        # The dispatch line prints identically whether or not a tuned row was
-        # found, so it cannot be the miss signal on its own.
+        # The dispatch line prints identically whether or not a tuned row was found, so it cannot be the miss signal
+        # on its own.
         rep = _log(_DISPATCH.format(tok=1), _DISPATCH.format(tok=512), _MISS.format(tok=512))
         (key,) = ev.moe_dispatch_keys(rep)
         assert key["tokens"] == [1, 512]
@@ -156,8 +141,8 @@ class TestUntunedCsv:
 
 class TestReportSurvivesDisk:
     def test_keys_round_trip_through_demand_json(self, tmp_path):
-        # The tuner reads the report back off disk, so the key has to be JSON
-        # -- the sets it is accumulated in are not.
+        # The tuner reads the report back off disk, so the key has to be JSON -- the sets it is accumulated in are
+        # not.
         rep = _log(_DISPATCH.format(tok=1), _MISS.format(tok=512))
         out = ev.write_demand(rep, tmp_path / "demand.json")
         loaded = json.loads(out.read_text(encoding="utf-8"))
@@ -263,8 +248,8 @@ class TestFmoeCkAcceptsIt:
         assert rows[1].startswith("512,6144,384,128,4,ActivationType.Swiglu,")
 
     def test_the_token_budget_keeps_both_ends_of_the_range(self, tmp_path):
-        # Keeping the largest N would tune prefill only and leave decode on the
-        # untuned fallback, which is the opposite of where serving time goes.
+        # Keeping the largest N would tune prefill only and leave decode on the untuned fallback, which is the
+        # opposite of where serving time goes.
         rep = _log(*[_MISS.format(tok=t) for t in (1, 8, 64, 512)])
         out = ev.write_demand(rep, tmp_path / "demand.json")
         tuner = self._tuner(tmp_path, out)
@@ -301,10 +286,7 @@ class TestFmoeCkAcceptsIt:
         assert [r.split(",")[0] for r in rows] == ["1", "8", "64"]
 
     def test_the_token_hint_restricts_the_set_it_does_not_just_size_it(self, tmp_path):
-        # A run where CK 2-stage serves token 16 and the 1-stage path serves
-        # 4096. The router hands this tuner token_hint=[16] for exactly that
-        # reason. Reading the hint as a budget of one spent the single slot on
-        # 4096 -- a token CK never dispatches -- and dropped the one it does.
+        # A run where CK 2-stage serves token 16 and the 1-stage path serves 4096.
         rep = _log(*[_MISS.format(tok=t) for t in (16, 4096)])
         out = ev.write_demand(rep, tmp_path / "demand.json")
         tuner = self._tuner(tmp_path, out)
@@ -315,8 +297,7 @@ class TestFmoeCkAcceptsIt:
         assert [r.split(",")[0] for r in rows] == ["16"]
 
     def test_a_hint_disjoint_from_the_misses_is_rejected(self, tmp_path):
-        # Hint and misses come from the same log, so a disjoint pair says these
-        # tokens belong to another stage. A CK row for them is unreachable.
+        # Hint and misses come from the same log, so a disjoint pair says these tokens belong to another stage.
         rep = _log(*[_MISS.format(tok=t) for t in (8, 64)])
         out = ev.write_demand(rep, tmp_path / "demand.json")
         tuner = self._tuner(tmp_path, out)
@@ -326,9 +307,8 @@ class TestFmoeCkAcceptsIt:
             tuner._untuned_csv_from_demand(tuner._demand_key())
 
     def test_no_hint_leaves_the_budget_behaviour_untouched(self, tmp_path):
-        # ctx.tokens without a hint is the run's coverage sweep, not a
-        # restriction: intersecting against it would drop every observed token
-        # that the sweep happens not to list.
+        # ctx.tokens without a hint is the run's coverage sweep, not a restriction: intersecting against it would drop
+        # every observed token that the sweep happens not to list.
         rep = _log(*[_MISS.format(tok=t) for t in (1, 8, 64)])
         out = ev.write_demand(rep, tmp_path / "demand.json")
         tuner = self._tuner(tmp_path, out)

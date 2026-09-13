@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared model-path resolution: a ``--model`` value -> a local model directory.
-
-The CLI ``--model`` accepts a local path OR a HuggingFace repo id and is
-persisted verbatim into ``state.model_path``. In-process metadata readers
-(roofline ceiling, model-config summary, KB tags, model-class inference, fp8
-detection) need a real directory; a bare repo id makes them silently degrade.
-This is the single source of truth for turning either form into a local dir,
-reusing the serving engine's own HF hub cache for repo ids -- never a hardcoded
-models root.
-
-Zero first-party dependency (stdlib + optional ``huggingface_hub``), so any
-package may import it without a cycle. Standalone kernel-agent tools that cannot
-import ``hyperloom.common`` (the Ray/subprocess ``sys.path`` contract documented
-in ``hyperloom.common.__init__``) mirror this same strategy independently.
-"""
+"""Shared model-path resolution: a ``--model`` value -> a local model directory."""
 
 from __future__ import annotations
 
@@ -25,11 +11,7 @@ from typing import Any
 
 
 def _identity_leaf(seg: str) -> str:
-    """Reduce one identity segment to its ``org/repo`` (or bare ``repo``) form.
-
-    Strips a ``models--`` cache prefix and canonicalizes the ``org--repo`` cache
-    separator to ``org/repo``; a segment without org info stays bare.
-    """
+    """Reduce one identity segment to its ``org/repo`` (or bare ``repo``) form."""
     s = seg.strip().strip("/").split("/")[-1]
     if s.startswith("models--"):
         s = s[len("models--") :]
@@ -50,13 +32,7 @@ def _is_hf_repo_id(raw: str) -> bool:
 
 
 def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[str]]:
-    """Return ``(full, bare)`` casefolded identity candidate sets.
-
-    ``full`` keeps the ``org/repo`` qualification (e.g. ``qwen/qwen2.5-7b``);
-    ``bare`` is the repo tail only (``qwen2.5-7b``). Covers flat dirs, bare
-    names, HF repo ids, and HF hub cache paths whose ``snapshots/<hash>``
-    basename hides the repo name in an upstream ``models--org--repo`` segment.
-    """
+    """Return ``(full, bare)`` casefolded identity candidate sets."""
     raw = ("" if model is None else str(model)).strip()
     if not raw:
         return set(), set()
@@ -77,14 +53,7 @@ def model_identity_candidates(model: str | Path | None) -> tuple[set[str], set[s
 
 
 def model_identities_match(declared: str, *launched: str) -> bool:
-    """Whether ``declared`` names the same model as any ``launched`` value.
-
-    Prefers a fully-qualified ``org/repo`` match. Falls back to the repo-only
-    (bare) name ONLY when at least one side lacks org info — so two different
-    orgs sharing a repo name (``a/Llama-8B`` vs ``b/Llama-8B``) do NOT match,
-    while a declared clean name (``Llama-8B``, no org) still matches its
-    launched ``org/repo`` form.
-    """
+    """Whether ``declared`` names the same model as any ``launched`` value."""
     d_full, d_bare = model_identity_candidates(declared)
     l_full: set[str] = set()
     l_bare: set[str] = set()
@@ -101,23 +70,7 @@ def model_identities_match(declared: str, *launched: str) -> bool:
 
 
 def resolve_local_model_dir(model: str | Path | None) -> Path | None:
-    """Resolve a ``--model`` value (local path OR HF repo id) to a local dir.
-
-    * **Local path** -- an existing directory is returned unchanged.
-    * **HF repo id** (e.g. ``Qwen/Qwen3-0.6B``) -- resolved to the serving
-      engine's HF hub cache via ``huggingface_hub.try_to_load_from_cache``
-      (honoring ``HF_HOME`` / ``HF_HUB_CACHE``). The snapshot dir carries a
-      non-derivable commit-hash segment, so ``huggingface_hub`` locates it
-      rather than string-building a path -- and no models root is hardcoded.
-
-    Args:
-        model: A model directory path or a HuggingFace repo id.
-
-    Returns:
-        The resolved local model directory, or ``None`` when unresolved (repo id
-        neither a dir nor cached, or ``huggingface_hub`` unavailable), so callers
-        keep their existing degrade path.
-    """
+    """Resolve a ``--model`` value (local path OR HF repo id) to a local dir."""
     raw = ("" if model is None else str(model)).strip()
     if not raw:
         return None
@@ -125,13 +78,11 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
     try:
         is_dir = p.is_dir()
     except OSError:
-        # Permission denied or other OS error — treat as not a local dir and
-        # fall through to the HF hub cache probe.
+        # Permission denied or other OS error — treat as not a local dir and fall through to the HF hub cache probe.
         is_dir = False
     if is_dir:
         return p
-    # Repo id: reuse the engine's HF hub cache. Lazy import keeps this module
-    # dependency-light -- a missing huggingface_hub just degrades to None.
+    # Repo id: reuse the engine's HF hub cache.
     try:
         from huggingface_hub import try_to_load_from_cache
     except Exception:  # noqa: BLE001 -- optional dep; degrade to no-resolution.
@@ -146,13 +97,7 @@ def resolve_local_model_dir(model: str | Path | None) -> Path | None:
 
 
 def resolve_serving_model_path(raw: str) -> str:
-    """Resolve a session model identity to a path suitable for launching servers.
-
-    Precedence mirrors ``run_hyperloom.sbatch``: an existing directory wins,
-    then ``HL_MODEL_BASE/<repo-tail>``, then the HuggingFace hub cache via
-    :func:`resolve_local_model_dir`. When nothing resolves, the original
-    string is returned unchanged.
-    """
+    """Resolve a session model identity to a path suitable for launching servers."""
     text = str(raw or "").strip()
     if not text:
         return ""
@@ -184,12 +129,7 @@ def resolve_session_model_path(
     state_model_path: str = "",
     for_serving: bool = False,
 ) -> str:
-    """Unified session model-path precedence for executors and handlers.
-
-    Order: ``params['model_path']`` → ``$MODEL_PATH`` → ``state.model_path``.
-    When ``for_serving`` is true, :func:`resolve_serving_model_path` is applied
-    to the chosen raw value.
-    """
+    """Unified session model-path precedence for executors and handlers."""
     raw = (
         str((params or {}).get("model_path") or "").strip()
         or os.environ.get("MODEL_PATH", "").strip()

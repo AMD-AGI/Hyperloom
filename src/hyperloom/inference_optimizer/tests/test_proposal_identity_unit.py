@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared proposal/variant identity.
-
-The fingerprints below were captured from the explore executor's own identity
-block before it was refactored onto this helper. They are pinned rather than
-recomputed: a change here re-keys ``explore_search["tested"]``, so every
-resumed session would re-bench its whole history.
-"""
+"""Shared proposal/variant identity."""
 
 from __future__ import annotations
 

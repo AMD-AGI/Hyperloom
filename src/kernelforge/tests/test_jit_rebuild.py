@@ -1,8 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the JIT-rebuild safety net (loop/jit_rebuild.py).
-
-monkeypatch.setenv/delenv keeps os.environ mutations from leaking between tests."""
+"""Unit tests for the JIT-rebuild safety net (loop/jit_rebuild.py)."""
 
 from __future__ import annotations
 
@@ -21,14 +19,7 @@ from kernelforge.loop.jit_rebuild import (
 
 @pytest.fixture(autouse=True)
 def _isolate_aiter_root_dir():
-    """Snapshot and restore ``AITER_ROOT_DIR`` around every test in this module.
-
-    ``force_jit_rebuild`` writes ``AITER_ROOT_DIR`` DIRECTLY into ``os.environ``
-    (via the aiter-cache isolation helper), not through ``monkeypatch``, so
-    monkeypatch's teardown does not undo it. Without this, the value set here
-    leaks into later tests (e.g. ``resolve_aiter_root`` in the kernelforge.gemm_tune
-    suite reads it and resolves a bogus root).
-    """
+    """Snapshot and restore ``AITER_ROOT_DIR`` around every test in this module."""
     original = os.environ.get("AITER_ROOT_DIR")
     try:
         yield
@@ -93,9 +84,8 @@ def test_exception_is_swallowed(monkeypatch):
 
     class Boom:
         def __bool__(self):
-            # __bool__ must raise TypeError (its standard exception) rather than
-            # a non-standard one; the test only needs truthiness to raise so the
-            # caller's exception handling can be exercised.
+            # __bool__ must raise TypeError (its standard exception) rather than a non-standard one; the test only
+            # needs truthiness to raise so the caller's exception handling can be exercised.
             raise TypeError("boom")
 
     # A non-string, non-empty path whose truthiness raises must be swallowed.

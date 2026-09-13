@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Single-shot, tool-free Claude completions through the Claude Agent SDK.
-
-The Anthropic Messages HTTP path in :mod:`hyperloom.common.llm_config`
-authenticates with ``x-api-key``, a channel that rejects a Claude Max/Pro
-subscription token outright. Driving single-shot Anthropic inference through the
-SDK hands credential resolution back to the Claude CLI, which reads every
-supported form -- API key, gateway bearer token, and ``CLAUDE_CODE_OAUTH_TOKEN``
--- so one transport serves all of them.
-
-Callers keep the :class:`~hyperloom.common.llm_config.AnthropicMessageResult`
-shape they already consume, so token accounting and stop-reason handling are
-unchanged from the HTTP path.
-"""
+"""Single-shot, tool-free Claude completions through the Claude Agent SDK."""
 
 from __future__ import annotations
 
@@ -35,8 +23,7 @@ __all__ = [
     "message_text",
 ]
 
-# Claude Code must behave as a plain completion client here. Denying every
-# built-in tool keeps a single-shot request from reading beyond its prompt.
+# Claude Code must behave as a plain completion client here.
 DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash",
     "BashOutput",
@@ -61,8 +48,8 @@ DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
-# ClaudeAgentOptions has no max_tokens field; the CLI reads the cap from its own
-# environment instead, which is the only way to keep an output budget here.
+# ClaudeAgentOptions has no max_tokens field; the CLI reads the cap from its own environment instead, which is the
+# only way to keep an output budget here.
 OUTPUT_TOKEN_CAP_ENV = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 
 log = logging.getLogger(__name__)
@@ -71,15 +58,7 @@ _DEFAULT_TIMEOUT_SEC = 60.0
 
 
 def _load_sdk() -> Any:
-    """Import ``claude_agent_sdk`` and check the attributes this module uses.
-
-    Returns:
-        The imported ``claude_agent_sdk`` module.
-
-    Raises:
-        RuntimeError: If the package is missing or lacks ``query`` /
-            ``ClaudeAgentOptions``.
-    """
+    """Import ``claude_agent_sdk`` and check the attributes this module uses."""
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]  # noqa: PLC0415
     except ImportError as exc:
@@ -90,14 +69,7 @@ def _load_sdk() -> Any:
 
 
 def _locate_cli(sdk: Any) -> str:
-    """Path to the ``claude`` binary the SDK would drive, or "" when absent.
-
-    Follows the SDK's own order, which prefers its bundled copy over PATH. The
-    bundled file is matched by prefix rather than by an exact name: it ships as
-    ``claude`` or ``claude.exe`` depending on the platform, and this probe is
-    the gate that fails a critic at startup, so a wrong "absent" verdict is far
-    more expensive here than a wrong "present" one.
-    """
+    """Path to the ``claude`` binary the SDK would drive, or \"\" when absent."""
     package_dir = getattr(sdk, "__file__", None)
     if package_dir:
         bundled = Path(package_dir).resolve().parent / "_bundled"
@@ -108,16 +80,7 @@ def _locate_cli(sdk: Any) -> str:
 
 
 def ensure_available() -> None:
-    """Fail now if the transport is unusable, so callers can degrade early.
-
-    Checks the binary as well as the package: the SDK is only a wrapper that
-    spawns ``claude``, so an importable SDK with no reachable CLI still fails —
-    and it fails at the first real call, far from the cause.
-
-    Raises:
-        RuntimeError: If ``claude_agent_sdk`` or the ``claude`` binary it drives
-            cannot be used.
-    """
+    """Fail now if the transport is unusable, so callers can degrade early."""
     sdk = _load_sdk()
     if not _locate_cli(sdk):
         raise RuntimeError(
@@ -128,19 +91,7 @@ def ensure_available() -> None:
 
 
 def message_text(message: Any) -> list[str]:
-    """Extract text fragments from one Claude SDK message.
-
-    Covers every shape the SDK emits across versions: a bare string, a ``.text``
-    attribute, ``.content`` blocks exposing ``.text`` (object or dict), and a
-    ``ResultMessage.result`` summary string.
-
-    Args:
-        message: A message yielded by ``claude_agent_sdk.query``.
-
-    Returns:
-        Every text fragment the message carries, in order; empty when it
-        carries none.
-    """
+    """Extract text fragments from one Claude SDK message."""
     if isinstance(message, str):
         return [message]
     text = getattr(message, "text", None)
@@ -160,18 +111,7 @@ def message_text(message: Any) -> list[str]:
 
 
 def _prompt_from_messages(messages: Sequence[Mapping[str, Any]] | None) -> str:
-    """Flatten Anthropic-style turns into the single prompt the SDK accepts.
-
-    Args:
-        messages: The Messages-API ``messages`` array.
-
-    Returns:
-        The concatenated turn content.
-
-    Raises:
-        ValueError: If no turn carries content, which would send an empty
-            prompt and bill a call for nothing.
-    """
+    """Flatten Anthropic-style turns into the single prompt the SDK accepts."""
     parts: list[str] = []
     for turn in messages or ():
         content = turn.get("content") if isinstance(turn, Mapping) else None
@@ -199,19 +139,13 @@ def _build_options(
     component: str = "",
     operation: str = "",
 ) -> Any:
-    """Assemble the tool-free, single-turn options for one completion.
-
-    ``env`` is the caller's view of the environment, not a set of overrides on
-    top of the process one: a caller that resolved credentials from
-    provider-specific variables has to be able to hand the CLI what it
-    resolved, or the child would re-read the ambient values instead.
-    """
+    """Assemble the tool-free, single-turn options for one completion."""
     kwargs: dict[str, Any] = dict(
         claude_sdk_env_options(model=model, env=env, component=component, operation=operation)
     )
     if max_tokens:
-        # claude_sdk_env_options returns {} when no provider signal is set; fall
-        # back to the caller's environment so the cap is the only addition.
+        # claude_sdk_env_options returns {} when no provider signal is set; fall back to the caller's environment so
+        # the cap is the only addition.
         base = kwargs.get("env") or (env if env is not None else os.environ)
         child_env = dict(base)
         child_env[OUTPUT_TOKEN_CAP_ENV] = str(int(max_tokens))
@@ -235,13 +169,7 @@ def _build_options(
 
 
 async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
-    """Consume one ``query`` stream and flatten it onto the shared result type.
-
-    The stream is closed explicitly: a timeout cancels this coroutine mid-
-    iteration, and without an ``aclose()`` the SDK's generator — and the
-    ``claude`` process behind it — is left to whatever the garbage collector
-    does next.
-    """
+    """Consume one ``query`` stream and flatten it onto the shared result type."""
     final = ""
     chunks: list[str] = []
     usage: Any = None
@@ -252,9 +180,8 @@ async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
             if isinstance(message_usage, Mapping):
                 usage = dict(message_usage)
             elif message_usage is not None:
-                # Reported rather than dropped: every consumer folds a missing
-                # usage into zero tokens, so an SDK shape change would quietly
-                # under-count spend instead of failing.
+                # Reported rather than dropped: every consumer folds a missing usage into zero tokens, so an SDK shape
+                # change would quietly under-count spend instead of failing.
                 log.warning("claude_oneshot: ignoring usage of unexpected type %s", type(message_usage).__name__)
             reason = getattr(message, "stop_reason", None)
             if isinstance(reason, str) and reason:
@@ -273,19 +200,7 @@ async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
 
 @dataclass
 class ClaudeOneShotClient:
-    """Tool-free Claude completion client shaped like the Anthropic HTTP one.
-
-    Attributes:
-        timeout_s: Wall-clock budget for one completion, CLI startup included.
-            The CLI spawns a process before it reaches the model, so a budget
-            sized for an HTTP round trip will expire during startup.
-        env: Environment the CLI child sees. ``None`` reads the process
-            environment; a caller that resolved credentials from
-            provider-specific variables passes its own view instead.
-        component: Producer label used to tag the child's calls for the gateway.
-            Empty leaves the child untagged.
-        operation: What the child is being spawned to do.
-    """
+    """Tool-free Claude completion client shaped like the Anthropic HTTP one."""
 
     timeout_s: float = _DEFAULT_TIMEOUT_SEC
     env: Mapping[str, str] | None = None
@@ -300,21 +215,7 @@ class ClaudeOneShotClient:
         system: str | None = None,
         max_tokens: int | None = None,
     ) -> AnthropicMessageResult:
-        """Run one completion and return its text, stop reason and usage.
-
-        Args:
-            model: The Claude model id.
-            messages: Anthropic-style turns; flattened into one prompt.
-            system: The system instruction, or ``None``.
-            max_tokens: Output-token cap, applied through the CLI environment.
-
-        Returns:
-            The flattened :class:`AnthropicMessageResult`.
-
-        Raises:
-            RuntimeError: If the SDK or the ``claude`` binary is unavailable.
-            asyncio.TimeoutError: If the completion outruns :attr:`timeout_s`.
-        """
+        """Run one completion and return its text, stop reason and usage."""
         sdk = _load_sdk()
         options = _build_options(
             sdk,
@@ -338,12 +239,7 @@ class ClaudeOneShotClient:
         system: str | None = None,
         max_tokens: int | None = None,
     ) -> AnthropicMessageResult:
-        """Synchronous twin of :meth:`amessages`; see it for the full contract.
-
-        Raises:
-            RuntimeError: If called from inside a running event loop, where the
-                caller must await :meth:`amessages` instead.
-        """
+        """Synchronous twin of :meth:`amessages`; see it for the full contract."""
         try:
             asyncio.get_running_loop()
         except RuntimeError:

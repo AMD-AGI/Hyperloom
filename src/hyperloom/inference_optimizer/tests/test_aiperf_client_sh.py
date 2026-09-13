@@ -1,21 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavioral tests for the aiperf_client.sh asset, driven via bash with fakes.
-
-Covers the shell invariants unit tests can't reach: missing-builtin exit, no-pid
-fail-loud, aiperf rc gating, happy-path mapping, AIPERF_* scrub keeping
-AIPERF_BIN, GPU_TYPE lowercasing, warmup-flag gating, and builtin resolution
-from FRAMEWORK / AGENTX_SERVER_SCRIPT. POSIX-only (skipped elsewhere).
-"""
+"""Behavioral tests for the aiperf_client.sh asset, driven via bash with fakes."""
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,16 +28,17 @@ def _write_exec(path: Path, content: str):
 
 
 def _fake_builtin(write_pid: bool) -> str:
-    # Emulates the builtin MAGPIE_RUN_PHASE=server phase: (optionally) record a
-    # tearable bg pid, then return. Only the server phase is exercised.
-    # Also dumps the keep-alive env it inherited, so a test can assert what the
-    # client exported BEFORE the server booted. Defaults to /dev/null so every
-    # pre-existing test is unaffected.
+    # Emulates the builtin MAGPIE_RUN_PHASE=server phase: (optionally) record a tearable bg pid, then return.
     pid_line = 'sleep 300 & echo $! > "$MAGPIE_SERVER_PID_FILE"\n' if write_pid else ": no pid written\n"
     dump = (
         "{\n"
         '  echo "VLLM_HTTP_TIMEOUT_KEEP_ALIVE=${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
         '  echo "SGLANG_TIMEOUT_KEEP_ALIVE=${SGLANG_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '  echo "PATH=$PATH"\n'
+        '  echo "PYTHON=${PYTHON:-UNSET}"\n'
+        '  echo "PYTHONPATH=${PYTHONPATH:-UNSET}"\n'
+        '  echo "PYTHONHOME=${PYTHONHOME:-UNSET}"\n'
+        '  echo "PYTHONUSERBASE=${PYTHONUSERBASE:-UNSET}"\n'
         '} > "${AGENTX_TEST_SERVER_MARKER:-/dev/null}"\n'
     )
     return "#!/usr/bin/env bash\nset -e\n" + dump + pid_line + "exit 0\n"
@@ -61,6 +59,14 @@ mkdir -p "$art"
 echo '{"output_token_throughput":{"avg":1.0},"request_count":{"avg":1}}' > "$art/profile_export_aiperf.json"
 printf '%s\n' "$@" > "$art/aiperf_args.txt"
 {
+  echo "CLI=$0"
+  echo "PATH=$PATH"
+  echo "PYTHON=${PYTHON:-UNSET}"
+  echo "PYTHONPATH=${PYTHONPATH:-UNSET}"
+  echo "PYTHONHOME=${PYTHONHOME:-UNSET}"
+  echo "PYTHONUSERBASE=${PYTHONUSERBASE:-UNSET}"
+  echo "PYTHONPLATLIBDIR=${PYTHONPLATLIBDIR:-UNSET}"
+  echo "__PYVENV_LAUNCHER__=${__PYVENV_LAUNCHER__:-UNSET}"
   echo "AIPERF_BIN=${AIPERF_BIN:-UNSET}"
   echo "AIPERF_FOO=${AIPERF_FOO:-UNSET}"
   echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
@@ -78,8 +84,18 @@ _FAKE_CURL = r"""#!/usr/bin/env bash
 for a in "$@"; do case "$a" in *v1/models*) echo '{"data":[{"id":"m"}]}'; exit 0;; esac; done
 for a in "$@"; do
   case "$a" in
-    *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";;
-    *stop_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}";;
+    *start_profile*)
+      printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}"
+      printf '%s\n' start_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      if [ -n "${FAKE_TRACE_SOURCE:-}" ]; then
+        mkdir -p "$FAKE_TRACE_DEST"
+        cp "$FAKE_TRACE_SOURCE"/* "$FAKE_TRACE_DEST/"
+      fi
+      exit "${FAKE_START_PROFILE_RC:-0}";;
+    *stop_profile*)
+      printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}"
+      printf '%s\n' stop_profile >> "${AGENTX_PROFILE_EVENTS:-/dev/null}"
+      exit "${FAKE_STOP_PROFILE_RC:-0}";;
   esac
 done
 exit 0
@@ -89,7 +105,28 @@ _FAKE_PHASE_GATE = r"""#!/usr/bin/env python3
 import os
 import sys
 import json
+import runpy
+from pathlib import Path
 
+if sys.argv[1] == "traces-complete" and os.environ.get("AGENTX_TRACE_CHECKS_MARKER"):
+    cache = sys.argv[sys.argv.index("--cache-file") + 1] if "--cache-file" in sys.argv else None
+    with open(os.environ["AGENTX_TRACE_CHECKS_MARKER"], "a", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "argv": sys.argv[1:],
+                "elapsed": float(Path(os.environ["AGENTX_TEST_TRACE_CLOCK"]).read_text()),
+                "cache_exists": bool(cache and Path(cache).is_file()),
+            },
+            handle,
+        )
+        handle.write("\n")
+if sys.argv[1] == "traces-complete" and "FAKE_TRACE_CHECK_RC" in os.environ:
+    clock = Path(os.environ["AGENTX_TEST_TRACE_CLOCK"])
+    elapsed = float(clock.read_text()) + float(os.environ.get("FAKE_TRACE_CHECK_ADVANCE_SECONDS", "0"))
+    clock.write_text(str(elapsed), encoding="utf-8")
+    raise SystemExit(int(os.environ["FAKE_TRACE_CHECK_RC"]))
+if sys.argv[1] in {"is-auto-bounded", "snapshot-traces", "trace-stat", "traces-complete"}:
+    runpy.run_path(str(Path(__file__).with_name("real_phase_gate.py")), run_name="__main__")
 if sys.argv[1] == "pick-port":
     print("19090")
     raise SystemExit(0)
@@ -131,6 +168,53 @@ if sys.argv[1] == "write-capture-status":
 raise SystemExit(2)
 """
 
+_FAKE_PROGRESS_AIPERF = r"""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+argv = sys.argv[1:]
+events = Path(os.environ["AGENTX_PROFILE_EVENTS"])
+
+class ProgressHandler(BaseHTTPRequestHandler):
+    requests_seen = 0
+
+    def do_GET(self):
+        assert self.path == "/api/progress"
+        type(self).requests_seen += 1
+        phase = "warmup" if self.requests_seen == 1 else "profiling"
+        with events.open("a", encoding="utf-8") as handle:
+            handle.write(phase + "\n")
+        stats = {"start_ns": 123456789}
+        if self.requests_seen >= 3:
+            stats["requests_end_ns"] = 123456999
+        body = json.dumps({"phases": {phase: stats}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+with HTTPServer(("127.0.0.1", int(argv[argv.index("--api-port") + 1])), ProgressHandler) as server:
+    server.timeout = 0.05
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        server.handle_request()
+        seen = events.read_text().splitlines() if events.exists() else []
+        if "stop_profile" in seen or (os.environ.get("FAKE_START_PROFILE_RC") == "22" and "start_profile" in seen):
+            break
+    else:
+        raise SystemExit("client did not bracket profiling")
+raise SystemExit(subprocess.call(["bash", str(Path(__file__).with_name("aiperf-export")), *argv]))
+"""
+
 _FAKE_FUSER = "#!/usr/bin/env bash\nexit 0\n"
 
 
@@ -143,6 +227,7 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     res.mkdir()
     shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
     shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
+    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "real_phase_gate.py")
     (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))
@@ -154,13 +239,13 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
 
 def _run(bench, bind, res, tmp_path, **extra_env):
     env = dict(os.environ)
-    # Drop the knobs under test before overlaying: a developer or CI box with
-    # WEKA_LOADER_OVERRIDE / AGENTX_DATASET exported (both documented operator
-    # knobs) would otherwise fail the canonical-run assertions, and an inherited
+    # Drop the knobs under test before overlaying: a developer or CI box with WEKA_LOADER_OVERRIDE / AGENTX_DATASET
+    # exported (both documented operator knobs) would otherwise fail the canonical-run assertions, and an inherited
     # AGENTX_NONCANONICAL_REASONS would make the deviation tests pass vacuously.
     for _k in [k for k in env if k.startswith("AGENTX_")]:
         env.pop(_k, None)
     env.pop("WEKA_LOADER_OVERRIDE", None)
+    env.pop("MAGPIE_RUN_PHASE", None)
     env["PATH"] = f"{bind}:{env.get('PATH', '')}"
     env.update(
         MODEL="/m",
@@ -176,6 +261,7 @@ def _run(bench, bind, res, tmp_path, **extra_env):
         AGENTX_TEST_MARKER=str(tmp_path / "marker.txt"),
     )
     env.update(extra_env)
+    env = {key: value for key, value in env.items() if value is not None}
     return subprocess.run(
         ["bash", str(bench / "aiperf_client.sh")],
         env=env,
@@ -189,6 +275,147 @@ def test_happy_path_writes_result(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
+
+
+def _managed_aiperf(state: Path) -> Path:
+    cli = state / "aiperf-venv" / "bin" / "aiperf"
+    cli.parent.mkdir(parents=True)
+    _write_exec(cli, _FAKE_AIPERF)
+    return cli
+
+
+@pytest.mark.parametrize("custom_state", [False, True])
+def test_managed_client_outranks_broken_path_without_changing_parent_env(tmp_path, custom_state):
+    bench, bind, res = _sandbox(tmp_path)
+    home = tmp_path / "home"
+    state = tmp_path / "custom state" if custom_state else home / ".hyperloom"
+    cli = _managed_aiperf(state)
+    _write_exec(bind / "aiperf", "#!/bin/sh\nexit 91\n")
+    before = dict(os.environ)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN=" \t\n",
+        HOME=str(home),
+        HYPERLOOM_STATE_DIR=str(state) if custom_state else "",
+        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    client = _server_env(tmp_path, tmp_path / "marker.txt")
+    server = _server_env(tmp_path, tmp_path / "server.txt")
+    assert client["CLI"] == str(cli)
+    assert client["PATH"] == server["PATH"] == f"{bind}:{before.get('PATH', '')}"
+    assert client["PYTHON"] == server["PYTHON"] == before.get("PYTHON", "UNSET")
+    assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("home", [None, ""])
+def test_managed_client_missing_home_uses_isolated_system_user_lookup(tmp_path, home):
+    bench, bind, res = _sandbox(tmp_path)
+    cli = _managed_aiperf(tmp_path / "system-home" / ".hyperloom")
+    user_python = bind / "user-python"
+    _write_exec(
+        user_python,
+        f'#!/bin/sh\n[ "$1" = "-I" ] || exit 88\nprintf \'%s\\n\' {shlex.quote(str(tmp_path / "system-home"))}\n',
+    )
+    _write_exec(bind / "aiperf", "#!/bin/sh\nexit 91\n")
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN=None, HOME=home, HYPERLOOM_STATE_DIR="", PYTHON=str(user_python))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _server_env(tmp_path, tmp_path / "marker.txt")["CLI"] == str(cli)
+
+
+@pytest.mark.parametrize(
+    "state_env", [{"HYPERLOOM_STATE_DIR": "relative"}, {"HOME": "relative-home", "HYPERLOOM_STATE_DIR": ""}]
+)
+def test_client_rejects_relative_state(tmp_path, state_env):
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN="", **state_env)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "HYPERLOOM_STATE_DIR must be an absolute path" in r.stdout + r.stderr
+    assert not (tmp_path / "marker.txt").exists()
+
+
+@pytest.mark.parametrize("candidate_kind", ["missing", "directory", "not-executable"])
+def test_managed_client_unusable_falls_back_to_path(tmp_path, candidate_kind):
+    bench, bind, res = _sandbox(tmp_path)
+    state = tmp_path / "state"
+    if candidate_kind != "missing":
+        cli = _managed_aiperf(state)
+        if candidate_kind == "directory":
+            cli.unlink()
+            cli.mkdir()
+        else:
+            cli.chmod(0o644)
+    r = _run(bench, bind, res, tmp_path, AIPERF_BIN=None, HYPERLOOM_STATE_DIR=str(state))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _server_env(tmp_path, tmp_path / "marker.txt")["CLI"] == str(bind / "aiperf")
+
+
+@pytest.mark.parametrize("broken_override", [False, True])
+def test_managed_client_explicit_override_wins_and_keeps_pythonpath(tmp_path, broken_override):
+    bench, bind, res = _sandbox(tmp_path)
+    _managed_aiperf(tmp_path / "state")
+    override = bind / "operator-aiperf"
+    _write_exec(override, "#!/bin/sh\nexit 79\n" if broken_override else _FAKE_AIPERF)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN=f" \t{override}\n",
+        HYPERLOOM_STATE_DIR=str(tmp_path / "state"),
+        PYTHONPATH="/operator/python-packages",
+    )
+    assert r.returncode == (79 if broken_override else 0), r.stdout + r.stderr
+    if not broken_override:
+        client = _server_env(tmp_path, tmp_path / "marker.txt")
+        assert client["CLI"] == str(override)
+        assert client["PYTHONPATH"] == "/operator/python-packages"
+    else:
+        assert not (res / "inferencex_result.json").exists()
+
+
+@pytest.mark.parametrize("profile", [False, True])
+def test_managed_client_sanitizes_only_aiperf_python_environment(tmp_path, profile):
+    bench, bind, res = _sandbox(tmp_path)
+    cli = _managed_aiperf(tmp_path / "state")
+    _write_exec(
+        bind / "python3",
+        '#!/bin/sh\nprintf "%s\\n" "${PYTHONPATH:-UNSET}" >> "$AGENTX_TEST_PYTHON_MARKER"\n'
+        "exec env -u PYTHONHOME -u PYTHONPATH -u PYTHONUSERBASE -u PYTHONPLATLIBDIR -u __PYVENV_LAUNCHER__ "
+        f'{shlex.quote(sys.executable)} "$@"\n',
+    )
+    pollution = {
+        "PYTHONHOME": "/host/python310",
+        "PYTHONPATH": "/host/python310/site-packages",
+        "PYTHONUSERBASE": "/host/user-packages",
+        "PYTHONPLATLIBDIR": "host-lib",
+        "__PYVENV_LAUNCHER__": "/host/python310/bin/python",
+    }
+    run = _run_profile if profile else _run
+    r = run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AIPERF_BIN="",
+        HYPERLOOM_STATE_DIR=str(tmp_path / "state"),
+        AGENTX_TEST_SERVER_MARKER=str(tmp_path / "server.txt"),
+        AGENTX_TEST_PYTHON_MARKER=str(tmp_path / "python.txt"),
+        **pollution,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    client = _server_env(tmp_path, tmp_path / "marker.txt")
+    server = _server_env(tmp_path, tmp_path / "server.txt")
+    assert client["CLI"] == str(cli)
+    for key in pollution:
+        assert client[key] == "UNSET"
+    for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE"):
+        assert server[key] == pollution[key]
+    assert set((tmp_path / "python.txt").read_text().splitlines()) == {pollution["PYTHONPATH"]}
     assert (res / "inferencex_result.json").exists()
 
 
@@ -212,6 +439,84 @@ def test_aiperf_failure_not_mapped(tmp_path):
     assert not (res / "inferencex_result.json").exists()
 
 
+def _client_only_env(bind, tmp_path):
+    lifecycle_marker = shlex.quote(str(tmp_path / "server-lifecycle.txt"))
+    bash_env = tmp_path / "bash-env.sh"
+    bash_env.write_text(
+        f"""kill() {{
+  printf 'kill %s\\n' "$*" >> {lifecycle_marker}
+  [ "${{1:-}}" != "-0" ]
+}}
+""",
+        encoding="utf-8",
+    )
+    _write_exec(bind / "fuser", f"#!/usr/bin/env bash\nprintf 'fuser %s\\n' \"$*\" >> {lifecycle_marker}\n")
+    return {
+        "MAGPIE_RUN_PHASE": "client",
+        "BASH_ENV": str(bash_env),
+        "AGENTX_TEST_SERVER_MARKER": str(tmp_path / "builtin-called.txt"),
+    }
+
+
+def _assert_external_server_untouched(tmp_path):
+    assert not (tmp_path / "builtin-called.txt").exists(), "client-only mode launched a builtin server"
+    assert not (tmp_path / "server-lifecycle.txt").exists(), "client-only mode called kill or fuser"
+
+
+@pytest.mark.parametrize("existing_pid", [False, True])
+@pytest.mark.parametrize("client_rc", [0, 7])
+def test_client_only_preserves_external_server_on_success_and_failure(tmp_path, existing_pid, client_rc):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    pidfile = res / "agentx_server.pid"
+    if existing_pid:
+        pidfile.write_text("987654321\n", encoding="utf-8")
+    r = _run(bench, bind, res, tmp_path, FAKE_RC=str(client_rc), **_client_only_env(bind, tmp_path))
+    _assert_external_server_untouched(tmp_path)
+    assert r.returncode == client_rc, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists() is (client_rc == 0)
+    if existing_pid:
+        assert pidfile.read_text() == "987654321\n"
+    else:
+        assert not pidfile.exists()
+    argv = _aiperf_args(res).splitlines()
+    for flag, value in _UPSTREAM_FLAGS:
+        assert argv[argv.index(flag) + 1] == value, flag
+    for flag in _UPSTREAM_BARE_FLAGS:
+        assert flag in argv
+    assert "--max-context-length" not in argv
+    if client_rc == 0:
+        assert not _result(res)["submission_invalid_reasons"]
+
+
+@pytest.mark.parametrize("framework", ["vllm", ""])
+def test_client_only_needs_no_builtin_or_framework(tmp_path, framework):
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK=framework, **_client_only_env(bind, tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists()
+    assert not (res / "agentx_server.pid").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_client_only_still_requires_explicit_concurrency(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    r = _run(bench, bind, res, tmp_path, CONC="", **_client_only_env(bind, tmp_path))
+    assert r.returncode != 0
+    assert "CONC required" in r.stderr + r.stdout
+    assert not (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_client_only_noncanonical_workload_stays_invalid(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    r = _run(bench, bind, res, tmp_path, AGENTX_NUM_ENTRIES="50", **_client_only_env(bind, tmp_path))
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("entries=50" in reason for reason in out["submission_invalid_reasons"])
+    _assert_external_server_untouched(tmp_path)
+
+
 def test_scrub_keeps_aiperf_bin_drops_others(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AIPERF_FOO="leak")
@@ -222,15 +527,7 @@ def test_scrub_keeps_aiperf_bin_drops_others(tmp_path):
 
 
 def test_tcp_user_timeout_survives_the_scrub(tmp_path):
-    """The scrub must not leave aiperf on its 30s stock TCP_USER_TIMEOUT.
-
-    That bound is how long Linux tolerates an established connection making no
-    progress, and an agentic turn against a long-context model makes none for
-    as long as the server is prefill-bound. Upstream's Kimi-K3 and DSv4 recipes
-    export 900000; because the scrub above drops any inherited copy, this file
-    has to re-state it or the connection dies mid-prefill and the round fails
-    as a warmup error with no matching server-side fault.
-    """
+    """The scrub must not leave aiperf on its 30s stock TCP_USER_TIMEOUT."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
@@ -265,16 +562,7 @@ def _aiperf_args(res):
 
 
 def test_no_max_context_length_flag(tmp_path):
-    """AgentX must never cap the replay context from ``$MAX_MODEL_LEN``.
-
-    ``--max-context-length`` makes aiperf DROP every trace whose peak exceeds
-    it (not truncate), and ``$MAX_MODEL_LEN`` is itself derived from the
-    synthetic ISL+OSL shape the agentic corpus never uses. Emitting the flag
-    therefore shrinks the 393-trace corpus to its short-trace tail while every
-    status marker still reports a clean run. Upstream's agentic path unsets
-    ``MAX_MODEL_LEN`` and never emits the flag; the server's own context window
-    is the only limit that may apply.
-    """
+    """AgentX must never cap the replay context from ``$MAX_MODEL_LEN``."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
@@ -282,22 +570,14 @@ def test_no_max_context_length_flag(tmp_path):
 
 
 def test_failed_request_threshold_is_passed(tmp_path):
-    """A partial error storm must fail the run, not be scored as a clean result.
-
-    aiperf defaults ``--failed-request-threshold`` to None, which DISABLES the
-    check, so without the flag a run whose requests mostly 4xx still exits 0
-    and is mapped as a normal measurement. ``map_aiperf.py`` carries no error
-    counters, so nothing downstream can notice.
-    """
+    """A partial error storm must fail the run, not be scored as a clean result."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
     assert "--failed-request-threshold" in _aiperf_args(res)
 
 
-# The upstream contract, flag by flag. A golden list rather than scattered
-# substring checks: the failure mode this guards against is a flag quietly
-# going missing, which no individual assertion would notice.
+# The upstream contract, flag by flag.
 _UPSTREAM_FLAGS = (
     ("--scenario", "inferencex-agentx-mvp"),
     ("--url", "http://localhost:8199"),
@@ -314,9 +594,8 @@ _UPSTREAM_FLAGS = (
     ("--trajectory-start-max-ratio", "0.75"),
     ("--warmup-requests-per-lane", "10"),
     ("--warmup-grace-period", "1800"),
-    # Not scenario-locked, so nothing downstream would notice its removal: a
-    # trace carrying a 20-minute recorded idle gap would replay it in full and,
-    # against a fixed duration window, silently cost measured requests.
+    # Not scenario-locked, so nothing downstream would notice its removal: a trace carrying a 20-minute recorded idle
+    # gap would replay it in full and, against a fixed duration window, silently cost measured requests.
     ("--trace-idle-gap-cap-seconds", "300"),
     ("--failed-request-threshold", "0.10"),
     ("--stats-interval", "30"),
@@ -345,11 +624,7 @@ def test_upstream_flag_contract(tmp_path):
 
 
 def test_removed_warmup_flags_are_gone(tmp_path):
-    """The old warmup pair measured a different thing; the scenario rejects it.
-
-    Kept as an explicit assertion rather than deleting the coverage outright,
-    so a re-introduction has to argue with a red test.
-    """
+    """The old warmup pair measured a different thing; the scenario rejects it."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path)
     assert r.returncode == 0, r.stderr
@@ -404,8 +679,7 @@ def test_framework_sglang_delegates_to_sglang_builtin(tmp_path):
 
 
 def test_missing_framework_fail_loud(tmp_path):
-    """FRAMEWORK unset must fail loud (exit 2), never silently boot the vllm
-    builtin — the switch always injects FRAMEWORK from benchmark.framework."""
+    """FRAMEWORK unset must fail loud (exit 2), never silently boot the vllm builtin — the switch always injects FRAMEWORK from benchmark.framework."""
     bench, bind, res = _sandbox(tmp_path)  # vllm_mi300x.sh present
     r = _run(bench, bind, res, tmp_path, FRAMEWORK="")
     assert r.returncode == 2
@@ -431,13 +705,7 @@ def test_default_run_is_not_flagged_unsafe(tmp_path):
 
 
 def test_missing_conc_fails_loud(tmp_path):
-    """A missing CONC must abort, not silently pick a concurrency.
-
-    Concurrency is measurement-defining and upstream makes it a hard requirement.
-    A default would produce a full scenario-locked run at a concurrency nobody
-    chose, and the mapped result records no concurrency at all, so the mismatch
-    would be invisible afterwards.
-    """
+    """A missing CONC must abort, not silently pick a concurrency."""
     bench, bind, res = _sandbox(tmp_path)
     env_without_conc = {"CONC": ""}
     r = _run(bench, bind, res, tmp_path, **env_without_conc)
@@ -447,19 +715,10 @@ def test_missing_conc_fails_loud(tmp_path):
 
 
 # --- non-canonical workloads may run, but may never be submittable -------------
-#
-# aiperf cannot judge these: the scenario has no concept of corpus size, and it
-# stamps a False verdict only when --unsafe-override actually suppressed a
-# violation. So the client reports the deviation and map_aiperf forces it.
 
 
 def test_shrunken_corpus_cannot_keep(tmp_path):
-    """A reduced trace count is a smoke, not a leaderboard measurement.
-
-    Without this the corpus could be cut to a handful of traces while
-    ``submission_valid`` stayed true -- exactly the failure this whole path
-    exists to prevent, arriving through the one knob the scenario cannot see.
-    """
+    """A reduced trace count is a smoke, not a leaderboard measurement."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_NUM_ENTRIES="50")
     assert r.returncode == 0, r.stderr
@@ -469,13 +728,7 @@ def test_shrunken_corpus_cannot_keep(tmp_path):
 
 
 def test_forced_unsafe_override_at_canonical_duration_cannot_keep(tmp_path):
-    """``--unsafe-override`` alone does NOT invalidate a run.
-
-    aiperf stamps the verdict false only when the override suppressed a real
-    violation, so forcing it at 3600s -- where there is nothing to suppress --
-    would otherwise leave a fully KEEP-able result while the log claimed the
-    opposite.
-    """
+    """``--unsafe-override`` alone does NOT invalidate a run."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_UNSAFE_OVERRIDE="true")
     assert r.returncode == 0, r.stderr
@@ -495,14 +748,7 @@ def test_client_side_context_cap_cannot_keep(tmp_path):
 
 
 def test_short_duration_opts_into_unsafe_override(tmp_path):
-    """A sub-900s duration must be runnable as a smoke, not a startup abort.
-
-    The scenario enforces a 900s floor, so without the flag ``AGENTX_DURATION``
-    below it aborts before the first request and this path cannot be smoke
-    tested at all. Upstream opts in below the floor; the scenario then stamps
-    ``submission_valid`` false, which ``benchmark_result.py`` rejects -- so the
-    escape hatch cannot be mistaken for a leaderboard measurement.
-    """
+    """A sub-900s duration must be runnable as a smoke, not a startup abort."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_DURATION="120")
     assert r.returncode == 0, r.stderr
@@ -520,9 +766,7 @@ def test_unsafe_override_can_be_forced_at_full_duration(tmp_path):
 
 
 def test_realtime_metrics_survive_the_scrub(tmp_path):
-    """Without this env the rolling stats block is skipped and
-    ``--stats-interval`` is inert -- a 60-minute window emits nothing until it
-    ends, so a merely slow run looks identical to a wedged one."""
+    """Without this env the rolling stats block is skipped and ``--stats-interval`` is inert -- a 60-minute window emits nothing until it ends, so a merely slow run looks identical to a wedged one."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AIPERF_UI_REALTIME_METRICS_ENABLED="false")
     assert r.returncode == 0, r.stderr
@@ -556,13 +800,155 @@ def _capture_status_path(res: Path) -> Path:
     return res / "agentx-profile" / "test-capture" / "capture-status.json"
 
 
-def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
-    """SGLang takes its capture bounds in the POST body, not on the serve line.
+def _fast_trace_poll_env(bind, tmp_path):
+    """Advance shell polling time without changing the real phase gate's clock."""
+    env = _client_only_env(bind, tmp_path)
+    clock = tmp_path / "trace-clock.txt"
+    clock.write_text("0\n", encoding="utf-8")
+    env["AGENTX_TEST_TRACE_CLOCK"] = str(clock)
+    with Path(env["BASH_ENV"]).open("a", encoding="utf-8") as handle:
+        handle.write(
+            r"""
+sleep() {
+  if [ "${0##*/}" = aiperf_client.sh ]; then
+    local elapsed
+    read -r elapsed < "$AGENTX_TEST_TRACE_CLOCK"
+    awk -v elapsed="$elapsed" -v duration="$1" 'BEGIN { printf "%.9f\n", elapsed + duration }' > "$AGENTX_TEST_TRACE_CLOCK"
+  else
+    command sleep "$@"
+  fi
+}
+date() {
+  local elapsed
+  read -r elapsed < "$AGENTX_TEST_TRACE_CLOCK"
+  case "${1:-}" in
+    +%s) awk -v elapsed="$elapsed" 'BEGIN { printf "%.0f\n", int(elapsed) }' ;;
+    +%s%N) awk -v elapsed="$elapsed" 'BEGIN { printf "%.0f\n", elapsed * 1000000000 }' ;;
+    *) command date "$@" ;;
+  esac
+}
+"""
+        )
+    return env
 
-    A bare POST leaves the capture unbounded and the worker accumulates profiler
-    events in host RAM until the cgroup OOM-killer takes it out mid-run, which
-    surfaces as an unexplained server death rather than a profiling bug.
-    """
+
+@pytest.mark.parametrize(
+    "start_rc,stop_rc,reason",
+    [
+        (0, 0, "profiler_output_unconfigured"),
+        (22, 0, "start_profile_failed"),
+        (0, 22, "stop_profile_failed"),
+    ],
+)
+def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, start_rc, stop_rc, reason):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "aiperf_phase_gate.py")
+    _write_exec(bind / "aiperf-export", _FAKE_AIPERF)
+    _write_exec(bind / "aiperf", _FAKE_PROGRESS_AIPERF)
+    events = tmp_path / "profile-events.txt"
+    start_marker = tmp_path / "start-profile.txt"
+    stop_marker = tmp_path / "stop-profile.txt"
+    body = '{"start_step":0,"num_steps":128,"with_stack":true}'
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        PROFILE_EXTRA_BODY=body,
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_PROFILE_WINDOW_S="20",
+        AGENTX_PHASE_WAIT_TIMEOUT_S="10",
+        AGENTX_CAPTURE_ID="test-capture",
+        AGENTX_CAPTURE_STATUS_PATH=str(_capture_status_path(res)),
+        AGENTX_PROFILE_EVENTS=str(events),
+        AGENTX_CURL_MARKER=str(start_marker),
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_START_PROFILE_RC=str(start_rc),
+        FAKE_STOP_PROFILE_RC=str(stop_rc),
+        **_client_only_env(bind, tmp_path),
+    )
+    _assert_external_server_untouched(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (res / "inferencex_result.json").exists()
+    assert not _result(res)["submission_invalid_reasons"]
+    seen = events.read_text().splitlines()
+    assert seen.index("warmup") < seen.index("profiling") < seen.index("start_profile")
+    argv = start_marker.read_text().splitlines()
+    assert argv[argv.index("-d") + 1] == body
+    assert "-sf" in argv
+    assert stop_marker.exists() is (start_rc == 0)
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["capture_id"] == "test-capture"
+    assert capture["phase_start_ns"] == 123456789
+    assert capture["requested_window_seconds"] == 20
+    assert capture["status"] == "failed"
+    assert capture["reason"] == reason
+    if start_rc == 0:
+        assert seen.index("start_profile") < seen.index("stop_profile")
+        assert "-sf" in stop_marker.read_text().splitlines()
+        assert capture["decision"]["stop_reason"] == "phase_complete"
+
+
+@pytest.mark.parametrize(
+    "framework,body,case,stop_rc,reason,stop_called",
+    [
+        ("sglang", '{"num_steps":8}', "complete", "22", "capture_complete", False),
+        ("sglang", '{"num_steps":8}', "stale", "0", "trace_files_missing", True),
+        ("sglang", '{"num_steps":8}', "partial_ranks", "0", "trace_flush_timeout", True),
+        ("sglang", '{"num_steps":8}', "bad_gzip", "0", "trace_flush_timeout", True),
+        ("sglang", '{"num_steps":8}', "empty", "22", "stop_profile_failed", True),
+        ("vllm", '{"num_steps":8}', "complete", "22", "stop_profile_failed", True),
+        ("sglang", '{"num_steps":true}', "complete", "22", "stop_profile_failed", True),
+    ],
+)
+def test_stop_is_skipped_only_for_proven_current_native_completion(
+    tmp_path, framework, body, case, stop_rc, reason, stop_called
+):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    if case != "empty":
+        for rank in range(1 if case == "partial_ranks" else 2):
+            path = source / f"177-TP-{rank}-DECODE.trace.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+            if case == "bad_gzip":
+                path.write_bytes(path.read_bytes()[:-8])
+            if case == "stale":
+                shutil.copy2(path, trace / path.name)
+    stop_marker = tmp_path / "stop.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        FRAMEWORK=framework,
+        PROFILE_EXTRA_BODY=body,
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_STOP_PROFILE_RC=stop_rc,
+        FAKE_TRACE_SOURCE=str(source) if case not in {"empty", "stale"} else "",
+        FAKE_TRACE_DEST=str(trace),
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="75",
+        **_fast_trace_poll_env(bind, tmp_path),
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert stop_marker.exists() is stop_called
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["reason"] == reason
+    assert capture["status"] == ("succeeded" if reason == "capture_complete" else "failed")
+    argv = (tmp_path / "curl.txt").read_text().splitlines()
+    assert argv[argv.index("-d") + 1] == body
+    assert capture["requested_window_seconds"] == 0
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
+    """SGLang takes its capture bounds in the POST body, not on the serve line."""
     bench, bind, res = _sandbox(tmp_path)
     body = '{"start_step":0,"num_steps":128,"with_stack":true}'
     r = _run_profile(bench, bind, res, tmp_path, PROFILE_EXTRA_BODY=body)
@@ -575,8 +961,7 @@ def test_profile_forwards_capture_bounds_to_start_profile(tmp_path):
 
 @pytest.mark.parametrize("env", [{"PROFILE_EXTRA_BODY": "{}"}, {}])
 def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
-    """vLLM carries its bounds on --profiler-config; an empty body must not be
-    posted as one, or the endpoint gets a meaningless payload."""
+    """vLLM carries its bounds on --profiler-config; an empty body must not be posted as one, or the endpoint gets a meaningless payload."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run_profile(bench, bind, res, tmp_path, **env)
     assert r.returncode == 0, r.stderr
@@ -674,12 +1059,7 @@ def test_agentx_server_script_override_without_framework(tmp_path):
 
 
 def test_pinned_corpus_cannot_keep(tmp_path):
-    """A different corpus is a different workload, and the scenario cannot object.
-
-    Its allowlist admits every dated weka variant, so replaying an older set --
-    which upstream's own H100/H200 recipes pin via WEKA_LOADER_OVERRIDE -- comes
-    back submission_valid=true against a row measured on 062126.
-    """
+    """A different corpus is a different workload, and the scenario cannot object."""
     bench, bind, res = _sandbox(tmp_path)
     older = "semianalysis_cc_traces_weka_with_subagents_256k"
     r = _run(bench, bind, res, tmp_path, WEKA_LOADER_OVERRIDE=older)
@@ -711,14 +1091,7 @@ def test_default_corpus_is_canonical_and_submittable(tmp_path):
 
 
 def test_canonical_pin_can_be_declared(tmp_path):
-    """The family whitelist is a derivation, not a registry.
-
-    A model upstream runs on the full corpus but whose slug does not match the
-    whitelist falls back to the 256k set, and the corpus log line tells the
-    operator to pin the right one. Treating that pin as a deviation would make
-    the *correct* run permanently non-submittable, so the operator can declare
-    which corpus is canonical here.
-    """
+    """The family whitelist is a derivation, not a registry."""
     bench, bind, res = _sandbox(tmp_path)
     full = "semianalysis_cc_traces_weka_062126"
     r = _run(
@@ -754,11 +1127,7 @@ def test_declaring_canonical_does_not_excuse_a_different_pin(tmp_path):
 
 
 def test_inherited_noncanonical_marker_does_not_leak_in(tmp_path):
-    """The switch forwards every AGENTX_* key, so a stale marker must be cleared.
-
-    Left alone it would stamp submission_valid=false, with reasons from a
-    previous run, onto a round that deviated in nothing.
-    """
+    """The switch forwards every AGENTX_* key, so a stale marker must be cleared."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_NONCANONICAL_REASONS="entries=7(stale)")
     assert r.returncode == 0, r.stderr
@@ -768,14 +1137,7 @@ def test_inherited_noncanonical_marker_does_not_leak_in(tmp_path):
 
 
 def test_reduced_warmup_is_flagged_non_canonical(tmp_path):
-    """Warmup is measurement-defining, so trimming it must void submittability.
-
-    Measured on a 743B model: the canonical 10 requests/lane is a ~2h warmup, so
-    an operator reaches for this knob under real time pressure. aiperf has no
-    concept of "enough warmup", so the scenario stamps submission_valid=true and
-    the round looks publishable while having measured a materially emptier cache.
-    Only the client knows the canonical value, so only the client can object.
-    """
+    """Warmup is measurement-defining, so trimming it must void submittability."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_REQUESTS_PER_LANE="1")
     assert r.returncode == 0, r.stderr
@@ -812,13 +1174,7 @@ def test_canonical_warmup_is_not_flagged(tmp_path):
 
 
 def test_raised_warmup_grace_is_not_flagged_non_canonical(tmp_path):
-    """A *longer* grace period is more warmup, not less, and must not be flagged.
-
-    An operator raising this so a large model's warmup has room to fully drain
-    (e.g. 4h for Kimi-K3-scale warmup) does not change what gets replayed --
-    only how long the client is willing to wait for it. Flagging it the same
-    as a truncated drain would make the correct run non-submittable.
-    """
+    """A *longer* grace period is more warmup, not less, and must not be flagged."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_GRACE_PERIOD="14400")
     assert r.returncode == 0, r.stderr
@@ -838,14 +1194,7 @@ def test_raised_warmup_per_lane_is_not_flagged_non_canonical(tmp_path):
 
 
 def test_raised_failed_request_threshold_is_flagged_non_canonical(tmp_path):
-    """Loosening the abort threshold is measurement-defining and carries no marker.
-
-    Raising it keeps alive a run that upstream's 0.10 would have aborted, and
-    the requests that did survive are then mapped as an ordinary measurement.
-    aiperf stamps nothing for this -- the threshold is the client's own safety
-    net, not part of the scenario -- so without the client objecting the round
-    comes back submission_valid=true.
-    """
+    """Loosening the abort threshold is measurement-defining and carries no marker."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD="0.5")
     assert r.returncode == 0, r.stderr
@@ -880,15 +1229,7 @@ def test_canonical_failed_request_threshold_is_not_flagged(tmp_path):
 
 
 def test_failed_request_threshold_cannot_inject_awk_code(tmp_path):
-    """FRT reaches an awk program; it must be DATA, never program text.
-
-    ``awk "BEGIN{exit !(($FRT) > ($CANON_FRT))}"`` interpolates the value into
-    the program body, so ``AGENTX_FAILED_REQUEST_THRESHOLD='system("...")'``
-    executes inside the container. The switch forwards every AGENTX_* key from
-    the orchestrator's environment verbatim, so anything that can write a config
-    or recipe gets command execution. Worse, the injected program supplies its
-    own exit status, so the non-canonical guard silently stops firing too.
-    """
+    """FRT reaches an awk program; it must be DATA, never program text."""
     canary = tmp_path / "pwned.txt"
     bench, bind, res = _sandbox(tmp_path)
     r = _run(
@@ -915,14 +1256,7 @@ def test_failed_request_threshold_cannot_inject_awk_code(tmp_path):
     ],
 )
 def test_non_integer_measurement_knobs_fail_loud(tmp_path, knob, value):
-    """A malformed measurement-defining knob must stop the round, not be stamped.
-
-    ``[ "$WARMLANE" -lt N ]`` exits 2 on a non-integer, and on the left of ``&&``
-    that status is exempt from ``set -e``: the guard silently does not fire and
-    NONCANON stays empty, so an illegal configuration comes back
-    submission_valid=true. A non-integer grace additionally reaches the ``$(( ))``
-    in the PROFILE branch and aborts an otherwise-complete round there instead.
-    """
+    """A malformed measurement-defining knob must stop the round, not be stamped."""
     base = tmp_path / f"{knob}_{value}".replace(".", "_").replace("/", "_")
     base.mkdir()
     bench, bind, res = _sandbox(base)
@@ -937,18 +1271,7 @@ def _server_env(tmp_path, marker: Path) -> dict[str, str]:
 
 
 def test_server_keep_alive_defaults_to_the_client_tolerance(tmp_path):
-    """The server idle timeout must be raised before the server boots.
-
-    Regression: AIPerf pins one pooled keep-alive connection per agentic session
-    and reuses it across turns. vLLM's default idle timeout is 5s
-    (``envs.py: VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``) while the client is
-    already given 900s via AIPERF_HTTP_TCP_USER_TIMEOUT -- a 180x disagreement.
-    An inter-turn think-time past 5s lets the server close the socket exactly as
-    the client reuses it; aiohttp raises ServerDisconnectedError and AIPerf
-    escalates it to a terminal warmup failure against a healthy server. Measured
-    on a conc=16 K3 round: orderly "Application shutdown complete" at warmup
-    64/177, no error in the server log at all.
-    """
+    """The server idle timeout must be raised before the server boots."""
     marker = tmp_path / "srv.txt"
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, AGENTX_TEST_SERVER_MARKER=str(marker))
@@ -997,22 +1320,7 @@ def test_server_keep_alive_uses_the_frameworks_own_knob(tmp_path):
 
 
 def test_keep_alive_follows_the_server_script_not_a_concatenation(tmp_path):
-    """The exact mismatch that reached production.
-
-    ``BUILTIN`` defaults to ``${FRAMEWORK}_${GPU}.sh``, so the two can only
-    disagree through AGENTX_SERVER_SCRIPT -- which is precisely how it happens
-    in the field: a stale FRAMEWORK reaches the client through persisted state
-    while the operator pins the script explicitly.
-
-    The arm used to be chosen by matching ``"${FRAMEWORK}${BUILTIN}"``, so a
-    stale FRAMEWORK=vllm alongside BUILTIN=sglang_mi300x.sh formed
-    ``"vllmsglang_mi300x.sh"``, matched ``*vllm*`` first, and exported the vllm
-    knob -- leaving SGLang on its 5s default while the log reported 900s. The
-    server then closed the socket mid-warmup and the round died as a terminal
-    warmup failure, with the one diagnostic line actively denying the cause.
-
-    BUILTIN is the script that actually boots, so it decides.
-    """
+    """The exact mismatch that reached production."""
     marker = tmp_path / "mix.txt"
     bench, bind, res = _sandbox(tmp_path, make_builtin=False)
     _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
@@ -1057,14 +1365,7 @@ def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
     ],
 )
 def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, knob, value):
-    """Both downstream constructs mishandle a non-integer, in opposite directions.
-
-    ``$(( ))`` aborts the whole round under ``set -e`` -- minutes from the
-    measurement window -- while ``[ -gt ]`` exits 2, which ``set -e`` exempts as
-    an ``if`` condition, so the clamp silently does not fire and the capture
-    lands after the round ended: no trace, and the "exceeds the safe bound"
-    warning never printed. Reject at the door instead, with the knob named.
-    """
+    """Both downstream constructs mishandle a non-integer, in opposite directions."""
     bench, bind, res = _sandbox(tmp_path)
     r = _run(bench, bind, res, tmp_path, PROFILE="1", **{knob: value})
     assert r.returncode == 2, r.stdout + r.stderr
@@ -1074,25 +1375,258 @@ def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, kn
 # --- the trace has to finish writing before the server is torn down -----------
 
 
+@pytest.mark.parametrize("stop_rc", ["0", "22"])
+@pytest.mark.parametrize("cpu_frontend", [False, True], ids=["unranked-gpu", "ranked-gpu-with-cpu-frontend"])
+def test_tp1_vllm_gzip_flushes_after_manual_stop(tmp_path, stop_rc, cpu_frontend):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    gpu_name = (
+        "rank0.1770000000000000000.pt.trace.json.gz"
+        if cpu_frontend
+        else "worker-host_12345.1770000000000000000.trace.json.gz"
+    )
+    with gzip.open(source / gpu_name, "wt", encoding="utf-8") as handle:
+        json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+    if cpu_frontend:
+        with gzip.open(
+            source / "host_84217.async_llm.1787731415290283310.pt.trace.json.gz", "wt", encoding="utf-8"
+        ) as handle:
+            json.dump({"traceEvents": [{"cat": "python_function", "ph": "X", "name": "step"}]}, handle)
+    events = tmp_path / "profile-events.txt"
+    env = _fast_trace_poll_env(bind, tmp_path)
+
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="1",
+        FRAMEWORK="vllm",
+        PROFILE_EXTRA_BODY="{}",
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_PROFILE_EVENTS=str(events),
+        FAKE_STOP_PROFILE_RC=stop_rc,
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+        **env,
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert events.read_text().splitlines() == ["start_profile", "stop_profile"]
+    assert "trace flush complete" in r.stdout + r.stderr
+    assert 0 < float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) < 1800
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == ("succeeded" if stop_rc == "0" else "failed")
+    assert capture["reason"] == ("capture_complete" if stop_rc == "0" else "stop_profile_failed")
+    assert (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+@pytest.mark.parametrize("auto_bounded", [False, True])
+def test_trace_checks_reuse_capture_cache_and_remaining_flush_budget(tmp_path, auto_bounded):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    for rank in range(2):
+        path = source / f"177-TP-{rank}-DECODE.trace.json.gz"
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+        if rank == 1:
+            path.write_bytes(path.read_bytes()[:-8])
+    checks_marker = tmp_path / "trace-checks.jsonl"
+    stop_marker = tmp_path / "stop.txt"
+    budget = 75
+
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        FRAMEWORK="sglang" if auto_bounded else "vllm",
+        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
+        AGENTX_TRACE_CHECKS_MARKER=str(checks_marker),
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+        **_fast_trace_poll_env(bind, tmp_path),
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    checks = [json.loads(line) for line in checks_marker.read_text().splitlines()]
+    assert len(checks) >= 2, r.stdout + r.stderr
+    caches = set()
+    timeouts = []
+    for check in checks:
+        argv = check["argv"]
+        assert "--cache-file" in argv
+        assert "--timeout-seconds" in argv
+        cache = Path(argv[argv.index("--cache-file") + 1])
+        assert cache.parent == _capture_status_path(res).parent
+        caches.add(cache)
+        timeout = float(argv[argv.index("--timeout-seconds") + 1])
+        assert 0 < timeout <= budget - check["elapsed"]
+        timeouts.append(timeout)
+    assert len(caches) == 1
+    assert not checks[0]["cache_exists"]
+    assert all(check["cache_exists"] for check in checks[1:])
+    assert all(later < earlier for earlier, later in zip(timeouts, timeouts[1:]))
+    assert stop_marker.exists()
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "trace_flush_timeout"
+    assert (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+@pytest.mark.parametrize("auto_bounded", [False, True])
+@pytest.mark.parametrize("budget", [0, 5, 40])
+def test_trace_flush_never_scans_without_remaining_budget(tmp_path, auto_bounded, budget):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    (source / "r0.trace.json").write_text(
+        '{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]}', encoding="utf-8"
+    )
+    checks_marker = tmp_path / "trace-checks.jsonl"
+    stop_marker = tmp_path / "stop.txt"
+    env = _fast_trace_poll_env(bind, tmp_path)
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="sglang" if auto_bounded else "vllm",
+        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
+        AGENTX_TRACE_CHECKS_MARKER=str(checks_marker),
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_TRACE_CHECK_RC="1",
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+        **env,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    checks = [json.loads(line) for line in checks_marker.read_text().splitlines()] if checks_marker.exists() else []
+    assert len(checks) == (1 if auto_bounded and budget else 0)
+    for check in checks:
+        argv = check["argv"]
+        assert 0 < float(argv[argv.index("--timeout-seconds") + 1]) <= budget - check["elapsed"]
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == budget
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "trace_flush_timeout"
+    assert stop_marker.exists()
+    assert (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+@pytest.mark.parametrize("auto_bounded", [False, True])
+@pytest.mark.parametrize("overrun", [0, 1])
+def test_trace_check_success_at_or_after_deadline_is_rejected(tmp_path, auto_bounded, overrun):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    trace = res / "torch_trace"
+    source = tmp_path / "trace-source"
+    trace.mkdir()
+    source.mkdir()
+    (source / "r0.trace.json").write_text(
+        '{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]}', encoding="utf-8"
+    )
+    checks_marker = tmp_path / "trace-checks.jsonl"
+    stop_marker = tmp_path / "stop.txt"
+    env = _fast_trace_poll_env(bind, tmp_path)
+    budget = 1 if auto_bounded else 41
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="sglang" if auto_bounded else "vllm",
+        PROFILE_EXTRA_BODY='{"num_steps":8}' if auto_bounded else "{}",
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S=str(budget),
+        AGENTX_TRACE_CHECKS_MARKER=str(checks_marker),
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+        FAKE_TRACE_CHECK_RC="0",
+        FAKE_TRACE_CHECK_ADVANCE_SECONDS=str(1 + overrun),
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+        **env,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    checks = [json.loads(line) for line in checks_marker.read_text().splitlines()]
+    assert len(checks) == 1
+    argv = checks[0]["argv"]
+    assert 0 < float(argv[argv.index("--timeout-seconds") + 1]) <= 1
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == budget + overrun
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "trace_flush_timeout"
+    assert "trace flush complete" not in r.stdout
+    assert stop_marker.exists()
+    assert (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
+def test_pre_stop_check_consumes_the_same_flush_budget(tmp_path):
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    (res / "torch_trace").mkdir()
+    checks_marker = tmp_path / "trace-checks.jsonl"
+    env = _fast_trace_poll_env(bind, tmp_path)
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="sglang",
+        PROFILE_EXTRA_BODY='{"num_steps":8}',
+        SGLANG_TORCH_PROFILER_DIR="",
+        VLLM_TORCH_PROFILER_DIR="",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="1",
+        AGENTX_TRACE_CHECKS_MARKER=str(checks_marker),
+        FAKE_TRACE_CHECK_RC="1",
+        FAKE_TRACE_CHECK_ADVANCE_SECONDS="0.25",
+        **env,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    checks = [json.loads(line) for line in checks_marker.read_text().splitlines()]
+    assert len(checks) == 1
+    argv = checks[0]["argv"]
+    assert 0 < float(argv[argv.index("--timeout-seconds") + 1]) <= 1
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 1
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "trace_files_missing"
+    assert (res / "inferencex_result.json").exists()
+    _assert_external_server_untouched(tmp_path)
+
+
 def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
-    """A 200 from /stop_profile means "told to stop", not "written to disk".
-
-    MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the first per-rank file
-    appeared 350s after the call returned, all eight were present at 391s, and
-    the set was still growing at 546s on its way to 5.1 GB. ``cleanup`` allows
-    20s before SIGKILL, so every capture before this fix was killed mid-write --
-    eight files of plausible size that all fail ``gzip -t``.
-
-    Here a rank file keeps growing for a few seconds after stop; the client must
-    still be waiting when it settles.
-    """
+    """A 200 from /stop_profile means \"told to stop\", not \"written to disk\"."""
     bench, bind, res = _sandbox(tmp_path)
     trace = res / "torch_trace"
     trace.mkdir()
     grower = tmp_path / "grow.sh"
+    trace_file = shlex.quote(str(trace / "r0.trace.json"))
     grower.write_text(
         "#!/usr/bin/env bash\n"
-        f"for i in 1 2 3 4 5 6; do printf 'x%.0s' $(seq 1 2000) >> '{trace}/r0.trace.json'; sleep 2; done\n",
+        f"printf '%s' '{{\"traceEvents\":[' > {trace_file}\n"
+        f'for i in 1 2 3 4 5 6; do printf \'%s\' \'{{"cat":"kernel","ph":"X","ts":1,"dur":2}},\' >> {trace_file}; sleep 2; done\n'
+        f'printf \'%s\' \'{{"cat":"kernel","ph":"X","ts":1,"dur":2}}]}}\' >> {trace_file}\n',
         encoding="utf-8",
     )
     grower.chmod(0o755)
@@ -1102,24 +1636,30 @@ def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush complete" in out, out[-1500:]
-    # It must not have declared completion on the first sample, while the file
-    # was still being appended to.
+    # It must not have declared completion on the first sample, while the file was still being appended to.
     assert "waiting for the profiler trace" in out
 
 
 def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
-    """Timing out must be loud, and must name the knob.
-
-    A truncated trace reported as a trace is worse than no trace: TraceLens will
-    read it and produce a kernel table from a half-written capture.
-    """
+    """Timing out must be loud, and must name the knob."""
     bench, bind, res = _sandbox(tmp_path)
     trace = res / "torch_trace"
     trace.mkdir()
-    # Two ranks expected, only one ever appears -> the count gate never passes.
-    (trace / "r0.trace.json").write_text("partial", encoding="utf-8")
+    # A fresh but incomplete JSON trace cannot pass the integrity gate.
+    source = tmp_path / "trace-source"
+    source.mkdir()
+    (source / "r0.trace.json").write_text("partial", encoding="utf-8")
 
-    r = _run_profile(bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="2",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+    )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush did not settle" in out, out[-1500:]
@@ -1130,17 +1670,26 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
 
 
 def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
-    """Ranks serialise one at a time, so "not growing" is not "complete".
-
-    A set that is merely idle between two ranks would otherwise be declared
-    finished with half its files missing.
-    """
+    """Ranks serialise one at a time, so \"not growing\" is not \"complete\"."""
     bench, bind, res = _sandbox(tmp_path)
     trace = res / "torch_trace"
     trace.mkdir()
-    (trace / "r0.trace.json").write_text("done", encoding="utf-8")
+    source = tmp_path / "trace-source"
+    source.mkdir()
+    (source / "r0.trace.json").write_text(
+        '{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]}', encoding="utf-8"
+    )
 
-    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="8",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
+        FAKE_TRACE_SOURCE=str(source),
+        FAKE_TRACE_DEST=str(trace),
+    )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush did not settle" in out, out[-1500:]
@@ -1156,14 +1705,7 @@ def test_the_wait_is_skipped_when_not_profiling(tmp_path):
 
 
 def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
-    """With no profiler output directory there is nothing that can ever settle.
-
-    The stability gate gates on a nonzero file count, so a run where neither
-    SGLANG_TORCH_PROFILER_DIR nor VLLM_TORCH_PROFILER_DIR is set and no
-    ``$RESULT_DIR/torch_trace`` exists can never satisfy it -- the loop would
-    spin out the entire flush budget waiting for files that no profiler was
-    configured to write. Return at once instead.
-    """
+    """With no profiler output directory there is nothing that can ever settle."""
     bench, bind, res = _sandbox(tmp_path)
     assert not (res / "torch_trace").exists()
 
@@ -1171,8 +1713,8 @@ def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "no profiler output directory is configured" in out, out[-1500:]
-    # Crucially, it must not have entered the polling loop at all: the default
-    # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
+    # Crucially, it must not have entered the polling loop at all: the default AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s
+    # and this test does not lower it.
     assert "waiting for the profiler trace" not in out
     capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == "profiler_output_unconfigured"
@@ -1200,12 +1742,7 @@ def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
 
 
 def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
-    """Zero files is a failed capture, not a slow one; bound it separately.
-
-    A rejected /start_profile or an unwritable output dir yields a directory
-    that stays empty forever. Waiting out the full flush budget (1800s by
-    default) buys nothing, and on a sweep it is paid once per profiled round.
-    """
+    """Zero files is a failed capture, not a slow one; bound it separately."""
     bench, bind, res = _sandbox(tmp_path)
     (res / "torch_trace").mkdir()  # exists, but nothing ever lands in it
 
@@ -1221,17 +1758,12 @@ def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "no trace file appeared within 15s" in out, out[-1500:]
-    # The shorter first-file bound must win over the flush budget, not the
-    # other way round.
+    # The shorter first-file bound must win over the flush budget, not the other way round.
     assert "trace flush did not settle" not in out
 
 
 def test_the_first_file_bound_never_exceeds_the_flush_budget(tmp_path):
-    """An operator who lowers only the flush budget must still get that bound.
-
-    Otherwise the 900s first-file default would silently override a deliberately
-    short AGENTX_TRACE_FLUSH_TIMEOUT_S and the wait would outlast it.
-    """
+    """An operator who lowers only the flush budget must still get that bound."""
     bench, bind, res = _sandbox(tmp_path)
     (res / "torch_trace").mkdir()
 

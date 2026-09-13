@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run several Implementer lanes side by side, one isolated workspace each.
-
-A round that spends one session on one plan learns one thing. Running the round's
-plans concurrently gives each its own measured score, which is what makes them
-comparable -- and what later lets two of them be stacked, since that selection
-reads the per-case timings each candidate earned on its own.
-
-Three properties make this safe. Each lane edits a full copy of the workspace --
-its own git index included, which a worktree-backed workspace does not get from
-copying alone -- so lanes cannot see or clobber each other's edits, and the copy
-carries the build outputs and caches an in-session benchmark needs. Each lane is
-handed a driver invocation that takes one cross-process lock first, because the
-GPU is a single resource and concurrent timing corrupts every number taken
-during the overlap. And a lane's leftover processes are killed with the lane, so
-they cannot hold the device through the canonical measurement that follows --
-with whatever survives that reported back to the round rather than to the lane
-alone, because the device is not per-lane and neither is the damage.
-"""
+"""Run several Implementer lanes side by side, one isolated workspace each."""
 
 from __future__ import annotations
 
@@ -45,28 +28,7 @@ DEVICE_LOCK_SENTINEL = ".forge-device-bench.lock"
 
 
 def campaign_device_lock_path(workspace: str | Path) -> Path:
-    """The sentinel the fan-out lanes and the analysis-phase probes lock.
-
-    The device is the campaign's, not one round's: a lane in round 3 and a
-    specialist probe in round 4 drive the same GPU, and a sentinel scoped to
-    either would serialize only its own siblings. So the path is derived from
-    the campaign workspace and is the same file in every phase and every round.
-
-    NOT every device-touching run: the canonical measurement and the baseline
-    take no lock at all, so a probe or a lane running beside them is not
-    serialized against them. What they are serialized against is each other.
-
-    What protects the canonical measurement instead is the hazard mechanism, and
-    a probe reaches it the way a lane does. A round's probe scratch tree is
-    reaped before it is removed, so a specialist killed by its session timeout
-    cannot leave a probe subprocess holding this file unseen: what the reaper
-    could not clear becomes a recorded device hazard, and the round it belongs
-    to measures nothing.
-
-    Beside the workspace rather than inside it, for the reason the lane copies
-    are: a file inside the canonical tree appears in its git status and is
-    copied into every lane.
-    """
+    """The sentinel the fan-out lanes and the analysis-phase probes lock."""
     workspace = Path(workspace).expanduser().resolve()
     return workspace.parent / f"{workspace.name}{DEVICE_LOCK_SENTINEL}"
 
@@ -160,40 +122,14 @@ if __name__ == "__main__":
 
 
 class DeviceBenchmarkLock:
-    """The lock a lane's driver run has to take before it touches the device.
-
-    A lane session is a CLI subprocess that invokes the driver from its own
-    shell, so the timing happens in a process this one never sees. The lock is
-    therefore an ``fcntl.flock`` on a sentinel file -- the mechanism the
-    experiment tracker already uses to serialize across processes -- and it is
-    taken by a wrapper script installed into each
-    lane, which is the only process in the chain that can hold it.
-
-    Pointing a lane at its wrapper is what makes the lock effective, and the
-    lane session is given it as the command its own instructions name to run.
-    Instructions alone would leave the lock advisory -- the real driver sits
-    beside the wrapper and every habit says to run it -- so the session's own
-    command hooks refuse a driver run that goes around it.
-
-    What that still cannot reach is a session that times the kernel without the
-    driver at all. Such a run scores nothing the loop reads, but it holds the
-    device while a sibling is being measured.
-    """
+    """The lock a lane's driver run has to take before it touches the device."""
 
     def __init__(self, sentinel: str | Path) -> None:
         self.sentinel = Path(sentinel)
         self.sentinel.touch(exist_ok=True)
 
     async def install(self, *, lane_dir: Path, driver: Path) -> Path:
-        """Write one lane's serialized driver, invisible to the lane's git.
-
-        The candidate a lane produces is read back as ``git diff HEAD -- .`` and
-        refused outright when it touches the measurement surface, so a wrapper
-        that reached that diff would cost the lane its whole session. It is
-        written as a new file and excluded in the lane's own repository, which
-        keeps it out of the diff even after the ``git add -A`` that a session
-        routinely runs.
-        """
+        """Write one lane's serialized driver, invisible to the lane's git."""
         wrapper = lane_dir / SERIALIZED_DRIVER_NAME
         wrapper.write_text(
             _SERIALIZED_DRIVER.format(
@@ -238,13 +174,7 @@ def _available_bytes(directory: Path) -> int:
 
 
 async def _require_room(*, source: Path, parent: Path, lane_count: int) -> None:
-    """Refuse the round unless every lane copy fits where it is going.
-
-    ``cp -a`` copies build outputs and the whole experiment archive, so one lane
-    is as large as the campaign workspace and a round asks for that ``lanes``
-    times over. Discovering that halfway through leaves partial copies and a
-    lane whose in-session build fails for a reason no lesson can explain.
-    """
+    """Refuse the round unless every lane copy fits where it is going."""
     needed = await _tree_bytes(source) * lane_count
     available = _available_bytes(parent)
     if available < needed:
@@ -280,26 +210,12 @@ async def _git(*args: str, cwd: Path) -> str:
 async def _head_branch(lane_dir: Path) -> str:
     """The branch HEAD names, or empty when HEAD is detached."""
     # A detached HEAD is a normal answer here and reported as a non-zero exit.
-    # The caller has already resolved HEAD, so the repository is readable.
     completed = await git_async("symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False)
     return completed.stdout.strip()
 
 
 async def _isolate_lane_repository(lane_dir: Path) -> None:
-    """Give a lane copy its own git index when the workspace is not a plain repo.
-
-    In a git worktree -- and under ``--separate-git-dir`` -- ``.git`` is a FILE
-    holding the path of the repository, and ``cp -a`` copies that pointer
-    verbatim. Every lane copy would then share the canonical repository: one
-    ``git add`` in a lane stages the lane's edit into the canonical workspace,
-    where the loop reads it as this round's candidate, and N lanes plus the
-    canonical side contend on one index.lock.
-
-    The lane is turned into its own repository at the same commit, reading the
-    canonical object store through an alternate so HEAD costs no copy. Its
-    index, HEAD and refs are its own, and anything it writes -- including a
-    commit -- lands in its own object store.
-    """
+    """Give a lane copy its own git index when the workspace is not a plain repo."""
     marker = lane_dir / ".git"
     if not marker.is_file():
         return
@@ -319,10 +235,8 @@ async def _isolate_lane_repository(lane_dir: Path) -> None:
         await _git("symbolic-ref", "HEAD", branch, cwd=lane_dir)
     else:
         await _git("update-ref", "--no-deref", "HEAD", head, cwd=lane_dir)
-    # Rebuild the lane's index from the commit the canonical workspace is on,
-    # leaving the copied working tree exactly as cp left it. The lane therefore
-    # starts from the state it was given and diffs against the same commit the
-    # canonical side does.
+    # Rebuild the lane's index from the commit the canonical workspace is on, leaving the copied working tree exactly
+    # as cp left it.
     await _git("reset", "--quiet", "--mixed", head, cwd=lane_dir)
 
 
@@ -333,13 +247,7 @@ async def _clone_lane(source: Path, lane_dir: Path) -> None:
 
 
 def _lane_driver(*, source: Path, driver: str) -> Path:
-    """The driver's path within a workspace, checked for a lane to be given it.
-
-    A driver outside the campaign workspace is not copied into a lane, and
-    handing a lane the canonical path would point every lane's measurement at the
-    shared tree. Refused rather than passed through, as the whole round depends
-    on each lane measuring its own copy.
-    """
+    """The driver's path within a workspace, checked for a lane to be given it."""
     relative = Path(driver)
     resolved = (source / relative).resolve()
     if relative.is_absolute() or source not in resolved.parents or not resolved.is_file():
@@ -351,29 +259,12 @@ def _lane_driver(*, source: Path, driver: str) -> Path:
 
 
 async def _reap_lane_processes(lane_dir: Path) -> ReapReport:
-    """Kill whatever is still running inside a lane whose session has ended.
-
-    Two things go wrong if a lane command outlives its session: it holds the
-    device that the canonical validation and benchmark are about to use, which
-    corrupts the KEEP decision rather than only the lane's own belief, and it can
-    still be writing the tree the lane's candidate diff is read from. Scoped to
-    this one lane copy so the sibling lanes benching from their own copies -- and
-    every one of them is this campaign's child too -- are not reaped with it.
-    """
+    """Kill whatever is still running inside a lane whose session has ended."""
     return await reap_processes_under(lane_dir, description=f"left running in lane {lane_dir}")
 
 
 def _tracked_diff(lane_dir: Path) -> str:
-    """The lane's staged and unstaged edits, in the form the archive stores.
-
-    ``git diff HEAD -- .`` is the exact form the canonical side captures, so a
-    lane candidate and an archived one describe a tree the same way. It also
-    includes staged edits: running ``git add`` mid-session is routine, and a bare
-    ``git diff`` would report that whole lane as having changed nothing.
-
-    A failed git invocation raises. An empty diff is a real answer -- the agent
-    chose to change nothing -- so it must not be what a broken read returns.
-    """
+    """The lane's staged and unstaged edits, in the form the archive stores."""
     return git("diff", "HEAD", "--", ".", cwd=lane_dir).stdout
 
 
@@ -385,24 +276,11 @@ async def run_lanes(
     parent_dir: str,
     driver: str,
 ) -> list[LaneResult]:
-    """Run every lane's session concurrently and return each lane's own diff.
-
-    A lane that raises is reported rather than cancelling its siblings: one
-    failed session is a lost candidate, not a lost round.
-
-    ``parent_dir`` is where the lane copies are created and is required: a lane
-    copy is as large as the whole workspace, so which filesystem holds it is a
-    decision the caller must make rather than inherit from ``TMPDIR``.
-
-    ``driver`` names the measurement driver relative to the workspace. Each lane
-    is given a serialized invocation of its own copy of it, and ``session`` is
-    called with the lane's plan, its workspace copy and that invocation, which is
-    what the lane has to be told to run instead of the driver beside it.
-    """
+    """Run every lane's session concurrently and return each lane's own diff."""
     if not lanes:
         return []
-    # Before the first lane process exists: it is what makes a lane's orphaned
-    # benchmark still identifiable as this campaign's when its shell is gone.
+    # Before the first lane process exists: it is what makes a lane's orphaned benchmark still identifiable as this
+    # campaign's when its shell is gone.
     install_child_subreaper()
     source = Path(workspace_dir).resolve()
     parent = Path(parent_dir).resolve()
@@ -414,10 +292,8 @@ async def run_lanes(
         for lane_dir in lane_dirs:
             lane_dir.mkdir(parents=True)
         await asyncio.gather(*(_clone_lane(source, lane_dir) for lane_dir in lane_dirs))
-        # One sentinel for the whole campaign rather than for this round, so a
-        # lane queues behind an analysis-phase probe as well as behind its
-        # siblings. It therefore outlives the lane copies and is NOT removed
-        # with them; it is an empty file that is only ever flocked.
+        # One sentinel for the whole campaign rather than for this round, so a lane queues behind an analysis-phase
+        # probe as well as behind its siblings.
         lock = DeviceBenchmarkLock(campaign_device_lock_path(source))
         serialized_drivers = [
             await lock.install(lane_dir=lane_dir, driver=lane_dir / driver_relative) for lane_dir in lane_dirs
@@ -428,29 +304,24 @@ async def run_lanes(
             lane_dir: Path,
             serialized_driver: Path,
         ) -> LaneResult:
-            # Assigned before the guard and returned on both paths: the report
-            # is the round's, not this lane's, so it has to survive a lane that
-            # failed for a reason of its own -- and a session that raised is
-            # exactly the lane most likely to have left something running.
+            # Assigned before the guard and returned on both paths: the report is the round's, not this lane's, so it
+            # has to survive a lane that failed for a reason of its own -- and a session that raised is exactly the
+            # lane most likely to have left something running.
             reaped: ReapReport | None = None
             try:
                 try:
                     await session(lane, lane_dir, serialized_driver)
                 finally:
                     reaped = await _reap_lane_processes(lane_dir)
-                # Outside the guard above on purpose: a lane whose session
-                # already failed has to report why it failed, not what its
-                # teardown found afterwards. This is about the lane's own
-                # candidate -- its tree may still be being written -- while what
-                # the contention costs the ROUND is decided from ``reaped``.
+                # Outside the guard above on purpose: a lane whose session already failed has to report why it failed,
+                # not what its teardown found afterwards.
                 if reaped.contended:
                     raise RuntimeError(
                         f"lane workspace could not be cleared, so its candidate cannot be trusted: {reaped.describe()}"
                     )
-                # Reading the diff belongs inside the same guard: a lane whose
-                # result cannot be read is lost for a different reason, but it is
-                # just as lost, and reporting it as an empty diff would file a
-                # session that cost hours as a deliberate no-op.
+                # Reading the diff belongs inside the same guard: a lane whose result cannot be read is lost for a
+                # different reason, but it is just as lost, and reporting it as an empty diff would file a session
+                # that cost hours as a deliberate no-op.
                 diff = _tracked_diff(lane_dir)
             except Exception as error:  # noqa: BLE001 - reported as a lost lane
                 return LaneResult(

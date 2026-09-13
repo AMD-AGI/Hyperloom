@@ -243,8 +243,8 @@ def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
 
 
-# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any
-# propose/delegate/request that names either action.
+# ``roofline`` and ``profile`` are Coordinator-enqueued; PolicyGate denies any propose/delegate/request that names
+# either action.
 _INTERNAL_ANALYSIS_ACTIONS = ("roofline", "profile")
 
 
@@ -264,11 +264,7 @@ def test_phase_explore_allowlist_drops_legacy_actions():
 
 
 def test_full_enabled_actions_still_contains_explore():
-    """Sanity: ``explore`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled.
-
-    ``sweep`` is absent by design: the concurrency ladder is Coordinator-internal
-    and the workload grid it used to fan out over is gone.
-    """
+    """Sanity: ``explore`` / ``baseline`` stay enabled; ``recover`` is intentionally NOT enabled."""
     assert "explore" in FULL_ENABLED_ACTIONS
     assert "sweep" not in FULL_ENABLED_ACTIONS
     assert "recover" not in FULL_ENABLED_ACTIONS
@@ -314,6 +310,5 @@ def test_mission_summary_surfaces_resume_pending_revalidation():
     assert "recheck current stack" in text
 
 
-# The Robustness prune_branch family list used to live in robustness.md, which was
-# loaded every tick and discarded by the backend. The role is prompt-driven no
-# longer, so the file is gone and test_agent_roles_and_policy asserts it stays gone.
+# The Robustness prune_branch family list used to live in robustness.md, which was loaded every tick and discarded by
+# the backend.

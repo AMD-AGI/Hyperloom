@@ -1,26 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``kernelforge gemm-tune`` command group.
-
-Deterministic GEMM tuning, registered as a subcommand of the single forge CLI
-in :mod:`kernelforge.cli`. It had its own ``forge-gemm-tune`` console script
-and its own distribution while it shipped as a standalone wheel; both are gone,
-so this module no longer defines a program entry point of its own.
-"""
+"""The ``kernelforge gemm-tune`` command group."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from . import __version__
+
+if TYPE_CHECKING:
+    from .tuners.base import TuneResult
 
 log = logging.getLogger("kernelforge.gemm_tune")
 
@@ -52,12 +50,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 
 
 def _safe_is_file(value: str) -> bool:
-    """``Path.is_file()`` that never raises on an over-long pathname.
-
-    A caller can hand inline JSON content instead of a path. ``is_file()``
-    raises ``OSError(ENAMETOOLONG)`` once a path component exceeds the
-    filesystem limit; treat that (and any OSError) as "not a file".
-    """
+    """``Path.is_file()`` that never raises on an over-long pathname."""
     try:
         return Path(value).is_file()
     except OSError:
@@ -65,29 +58,20 @@ def _safe_is_file(value: str) -> bool:
 
 
 def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
-    """Parse a serving log into a demand file, or "" when it carries no demand.
-
-    Returns a path so the caller can treat it exactly like an operator-supplied
-    ``--demand``. Best-effort throughout: a log that cannot be read, or that the
-    runtime never made a tuned-config lookup in, simply leaves the shape source
-    as it was rather than failing the run.
-    """
+    """Parse a serving log into a demand file, or \"\" when it carries no demand."""
     try:
         from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
-        report = parse_log_file(server_log)
+        # Hyperloom sets this for serving runs, making zero hits conclusive.
+        # Operator logs without it remain inconclusive.
+        hit_logging = os.environ.get("AITER_LOG_TUNED_CONFIG", "").strip() not in ("", "0")
+        report = parse_log_file(server_log, hit_logging=hit_logging or None)
     except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
         log.debug("could not parse %s for demand", server_log, exc_info=True)
         return ""
 
     demands = report.get("demands") or []
-    # The dense misses are not the only demand the log carries. A MoE dispatch
-    # line records the key the runtime actually asked fused_moe for, and that
-    # key lives outside report["demands"]. Gating on dense misses alone threw
-    # it away on exactly the runs that need it most: a MoE-only model, or one
-    # whose dense tables all hit while fused_moe still missed. fmoe_ck then saw
-    # no runtime key and skipped itself for want of evidence that was in the
-    # log all along.
+    # The dense misses are not the only demand the log carries.
     moe_keys = moe_dispatch_keys(report) or []
     if not demands and not moe_keys:
         av = (report.get("apply_verdict") or {}).get("verdict")
@@ -115,12 +99,7 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
 
 
 def _load_demand_report(demand_json: str) -> dict | None:
-    """Parse the demand file once, for both selection and the coverage report.
-
-    Best-effort like everything else that reads it: a run without a demand file
-    is the normal case on a first pass, and an unreadable one must not stop the
-    tuning it was meant to inform.
-    """
+    """Parse the demand file once, for both selection and the coverage report."""
     if not demand_json:
         return None
     try:
@@ -132,27 +111,30 @@ def _load_demand_report(demand_json: str) -> dict | None:
         return None
 
 
-def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Path) -> list:
-    """Write the demanded tables no selected tuner will produce, and return them.
+def _coverage_gaps(
+    demand_report: dict | None,
+    tuner_specs: list,
+    output_dir: Path,
+    results: list | None = None,
+) -> list:
+    """Write and return demanded tables not covered by selected tuners.
 
-    The trigger for writing a tuner is "no official script and no forge
-    implementation", and nothing measured whether that combination ever occurs.
-    Recording it per run turns that into an answer instead of an assumption.
-    Best-effort: this is a report, and failing to write it must not affect the
-    tuning it describes.
+    With results, owners that produced nothing landable also count as gaps.
+    Reporting is best-effort and never affects tuning.
     """
     if not demand_report:
         return []
     try:
         from .tier3 import coverage_gaps
 
-        gaps = coverage_gaps(demand_report, tuner_specs)
-        if not gaps:
-            return []
-        (output_dir / "coverage_gaps.json").write_text(
-            json.dumps([g.to_dict() for g in gaps], indent=2),
-            encoding="utf-8",
-        )
+        gaps = coverage_gaps(demand_report, tuner_specs, results)
+        # The second pass writes even when it finds nothing, or the pre-run
+        # file it supersedes would be read as this run's final answer.
+        if gaps or results is not None:
+            (output_dir / "coverage_gaps.json").write_text(
+                json.dumps([g.to_dict() for g in gaps], indent=2),
+                encoding="utf-8",
+            )
         return gaps
     except Exception:  # noqa: BLE001 - a report must never fail the run
         log.debug("could not record coverage gaps", exc_info=True)
@@ -167,27 +149,17 @@ def _attempt_tier3(
     profile: Any,
     gpu_type: str,
     framework: str,
-) -> dict | None:
-    """Try a generated tuner for the strongest gap nothing else can cover.
+) -> "TuneResult | None":
+    """Try Tier3 for the strongest otherwise-uncovered gap.
 
-    Reached only when a demanded table has no owner at all, so the time it
-    spends is not taken from a tuner that would have covered that table --
-    there is none. Everything it can conclude still has to survive our own
-    re-timing, and a table we cannot dispatch stops the attempt rather than
-    producing an unverified result.
-
-    Never raises: this is an extra chance at a table that was otherwise going
-    to be left untuned, and it must not be able to damage the run carrying it.
-    Note that the caller must not compute arguments for this call either --
-    reading one wrong attribute off the profile at the call site took down a
-    completed tuning run, because argument evaluation happens outside the
-    guard. Hence ``profile`` rather than fields pulled from it.
+    Never raises and returns only referee-verified improvements. Accepting the
+    profile object keeps attribute access inside this failure boundary.
     """
     if not gaps:
         return None
     try:
         model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
-        from .evidence import load_demand
+        from .evidence import demand_shapes, load_demand
         from .tier3 import attempt_generated_tuner
         from .tier3.dispatch import adapters_for
         from .tier3.gate import should_generate
@@ -195,48 +167,81 @@ def _attempt_tier3(
         decision = should_generate(gaps)
         if not decision.allowed or decision.gap is None:
             log.info("tier3: not attempted -- %s", "; ".join(decision.reasons))
-            return {"attempted": False, "reasons": decision.reasons}
+            return None
 
         adapter = adapters_for(decision.gap.table)
         demand = load_demand(demand_json)
 
         def shapes_for(gap):
-            entry = demand.tables.get(gap.table) if demand else None
-            return list(getattr(entry, "shapes", None) or [])
+            # ``load_demand`` returns a parsed dict, not an object with ``tables``.
+            for entry in (demand or {}).get("demands") or []:
+                if str(entry.get("table") or "") == gap.table:
+                    return demand_shapes(entry)
+            return []
 
-        outcome = attempt_generated_tuner(
-            gaps,
-            shapes_for,
-            output_dir,
-            model_name=model_name,
-            gpu=gpu_type,
-            framework=framework,
-            decision=decision,
-            make_baseline=adapter.make_baseline if adapter else None,
-            make_dispatch=adapter.make_dispatch if adapter else None,
-            make_correctness=adapter.make_correctness if adapter else None,
-            sync=adapter.sync() if adapter else None,
-        )
+        try:
+            outcome = attempt_generated_tuner(
+                gaps,
+                shapes_for,
+                output_dir,
+                model_name=model_name,
+                gpu=gpu_type,
+                framework=framework,
+                decision=decision,
+                make_baseline=adapter.make_baseline if adapter else None,
+                make_dispatch=adapter.make_dispatch if adapter else None,
+                make_correctness=adapter.make_correctness if adapter else None,
+                sync=adapter.sync() if adapter else None,
+            )
+        finally:
+            # An adapter steers the library under test through process-wide state, so the
+            # attempt has to be closed before anything else in this process runs -- the
+            # report and the e2e validation that follow must not be served by whatever
+            # candidate happened to be dispatched last.
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()
         log.info("tier3: %s -- %s", outcome.stage, outcome.reason)
         (output_dir / "tier3_outcome.json").write_text(
             json.dumps(outcome.to_dict(), indent=2),
             encoding="utf-8",
         )
-        return outcome.to_dict()
+        return _tier3_result(outcome, decision.gap)
     except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
         log.warning("tier3 attempt failed; tuning continues", exc_info=True)
         return None
 
 
-def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
-    """Return a usable shapes-JSON *file path*, materializing inline content.
+def _tier3_result(outcome: Any, gap: Any) -> "TuneResult | None":
+    """Convert a referee-approved Tier3 outcome into a tuner result.
 
-    Defensive against callers that pass GEMM shapes as inline JSON (a list, or
-    its Python-repr with single quotes) in ``--shapes-json`` instead of a path.
-    ``Path(inline).is_file()`` would raise ``OSError(ENAMETOOLONG)`` and crash
-    the dense tuner. Existing paths are returned unchanged; inline content is
-    written to ``<output_dir>/_inline_shapes.json``; unusable input -> "".
+    Unverified artifacts return nothing. Marking the result as a candidate
+    forces normal e2e validation; microbenchmark speedup is not an e2e claim.
     """
+    from .tuners.base import TuneResult
+
+    if not outcome.ok or not outcome.output_csv:
+        return None
+    best = max(
+        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
+        default=1.0,
+    )
+    return TuneResult(
+        tuner_name=f"tier3_generated_{Path(outcome.table).stem}",
+        status="ok",
+        artifact_path=outcome.output_csv,
+        env_var=gap.env_var,
+        env_value=outcome.output_csv,
+        candidate=True,
+        total_shapes=len(outcome.judgements),
+        improved_shapes=outcome.improved_shapes,
+        best_micro_speedup=float(best or 1.0),
+        key_source="runtime_observed",
+    )
+
+
+def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
+    """Return a usable shapes-JSON *file path*, materializing inline content."""
     text = (value or "").strip()
     if not text:
         return ""
@@ -265,11 +270,7 @@ def _normalize_inline_shapes_json(value: str, output_dir: Path) -> str:
 
 @click.group("gemm-tune")
 def gemm_tune():
-    """Deterministic GEMM tuning for AMD GPUs.
-
-    No ``--version`` of its own: it is versioned by the distribution that
-    carries it, which the parent group already reports.
-    """
+    """Deterministic GEMM tuning for AMD GPUs."""
 
 
 @gemm_tune.command()
@@ -388,10 +389,7 @@ def run(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Defensive input normalization: callers sometimes pass inline JSON content
-    # instead of a file path. Materialize inline --shapes-json to a real file
-    # and drop a non-existent --untuned-csv so the dense tuners never crash with
-    # OSError(ENAMETOOLONG) on an over-long pseudo-path.
+    # Defensive input normalization: callers sometimes pass inline JSON content instead of a file path.
     shapes_json = _normalize_inline_shapes_json(shapes_json, output_path)
     if untuned_csv and not _safe_is_file(untuned_csv):
         log.warning("--untuned-csv is not an existing file; ignoring it")
@@ -406,12 +404,7 @@ def run(
         log.warning("--demand is not an existing file; ignoring it")
         demand_json = ""
 
-    # The serving log is already handed to us for MoE stage detection, and it is
-    # the same log the demand parser reads. Deriving demand from it here is what
-    # connects evidence to tuning at all: nothing upstream produces a demand file,
-    # so without this the shape list keeps coming from config.json, which measured
-    # 0.4% coverage of the keys the runtime actually looks up. An explicit
-    # --demand still wins.
+    # The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
     if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
         demand_json = _demand_from_serving_log(kernel_signature_log, output_path)
 
@@ -436,10 +429,7 @@ def run(
                     [g.gpu_id for g in busy],
                 )
 
-    # aiter tune/serve alignment preflight (warn-only, best-effort). The serve-safe
-    # split-K cap keeps a misaligned CSV from crashing engine init, but a drifted
-    # aiter can silently stale the tuned CSV; surface it here and record an artifact
-    # for audit. Never aborts tuning -- misalignment can still produce a usable CSV.
+    # aiter tune/serve alignment preflight (warn-only, best-effort).
     try:
         from .aiter_preflight import collect as _aiter_collect
 
@@ -470,8 +460,7 @@ def run(
         emit_result_json(report_dict)
         raise SystemExit(2)
 
-    # Compute token coverage. Tolerate a bracketed/quoted list form
-    # (e.g. "[4, 8, 64]") that a caller may pass instead of a bare CSV.
+    # Compute token coverage.
     try:
         tokens_clean = tokens.strip().strip("[](){}") if tokens else ""
         explicit_tokens = (
@@ -493,8 +482,8 @@ def run(
     token_list = compute_token_coverage(conc=conc, explicit_tokens=explicit_tokens)
     log.info("Token coverage: %s", token_list)
 
-    # Parsed once: selection needs the tables the runtime consulted, and the
-    # coverage report needs the same document to say what stayed uncovered.
+    # Parsed once: selection needs the tables the runtime consulted, and the coverage report needs the same document
+    # to say what stayed uncovered.
     demand_report = _load_demand_report(demand_json)
 
     # Select tuners
@@ -506,24 +495,18 @@ def run(
         gpu_type=gpu_type,
         kernel_signature_log=kernel_signature_log or None,
         has_untuned_csv=bool(untuned_csv),
-        # A demand file is a shape source like the others, and a stronger one:
-        # it lists the keys the runtime actually asked for.
+        # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
+        # asked for.
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
-        # ...and a stronger *selection* input for the same reason. Passing only
-        # the boolean left the router guessing the operator set from the
-        # precision label while this file named it.
+        # ...and a stronger *selection* input for the same reason.
         demand_report=demand_report,
     )
 
-    # What the runtime asked for that nothing selected can write. Always
-    # recorded, so whether a generated tuner has any real target is a question
-    # the fleet answers rather than one that gets argued about.
+    # What the runtime asked for that nothing selected can write.
     coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path)
 
-    # If --tuner specified, filter to only that one. An explicit --tuner is a
-    # directive: if the router didn't auto-select it (e.g. a non-canonical
-    # quant_type), still honor it for any known tuner rather than failing.
+    # If --tuner specified, filter to only that one.
     if tuner:
         from .router import TunerSpec
 
@@ -549,8 +532,8 @@ def run(
             emit_result_json(report_dict)
             raise SystemExit(2)
 
-    # Cut the routed set to what the caller's share pays for, in priority order
-    # so the dropped ones rank last. 0 means no ceiling was supplied.
+    # Cut the routed set to what the caller's share pays for, in priority order so the dropped ones rank last. 0 means
+    # no ceiling was supplied.
     if max_tuners > 0 and len(tuner_specs) > max_tuners:
         log.info(
             "gemm-tune: lane ceiling of %d tuner(s); dropping %s",
@@ -639,12 +622,7 @@ def run(
             log.info("SKIP %s: %s", spec.name, spec.skip_reason)
             continue
 
-        # A fallback tuner runs only when no earlier non-fallback tuner produced
-        # a deployable candidate. This is the fp8-barren -> bf16-dense retry that
-        # used to be a second subprocess: selected up front, executed here only
-        # when the fp8 tuning came back empty, so a winning fp8 run never spends
-        # budget on it. Ordered last by priority, so ``results`` is complete for
-        # the non-fallback tuners by the time this is checked.
+        # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
         if spec.fallback and any(is_candidate(r) for r in results):
             skipped.append((spec.name, "fallback not needed: an earlier tuner produced a candidate"))
             log.info("SKIP %s: an earlier tuner already produced a candidate", spec.name)
@@ -660,10 +638,7 @@ def run(
         # Cap per-tuner timeout to remaining global budget
         effective_timeout = min(timeout, int(remaining)) if global_timeout > 0 else timeout
 
-        # Create per-tuner context copy to avoid shared state mutation. A tuner
-        # the log says serves only part of the token range gets that part: two
-        # MoE backends can split one run, and a table keyed on the other's
-        # tokens is one nothing will read.
+        # Create per-tuner context copy to avoid shared state mutation.
         import dataclasses
 
         tuner_ctx = dataclasses.replace(ctx, timeout_s=effective_timeout)
@@ -674,11 +649,7 @@ def run(
                 len(spec.token_hint),
                 spec.token_hint[:8],
             )
-            # Both fields: ``tokens`` so the config-derived paths sweep only
-            # what this kernel serves, and ``token_hint`` so the paths that
-            # start from runtime-observed tokens can tell "this is the allowed
-            # set" from "this is the coverage sweep" -- ``tokens`` alone cannot
-            # carry that distinction, since every run has one.
+            # ``tokens`` bounds the sweep; ``token_hint`` marks the observed allowed set.
             tuner_ctx = dataclasses.replace(
                 tuner_ctx,
                 tokens=list(spec.token_hint),
@@ -703,12 +674,12 @@ def run(
             result.elapsed_s,
         )
 
-    # Last, and only on what the selected tuners left behind. Running it here
-    # rather than alongside them is what keeps the guarantee that a generated
-    # tuner cannot take time from a tuner that was going to produce something:
-    # by now they all have.
+    # Last, and only on what the selected tuners left behind: by now they have
+    # all run, so a generated tuner cannot take time from one that would have
+    # produced something, and the recomputed list says which of them did.
+    coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path, results)
     if coverage_gap_list and time.time() < global_deadline:
-        _attempt_tier3(
+        generated = _attempt_tier3(
             coverage_gap_list,
             demand_json,
             output_path,
@@ -716,6 +687,8 @@ def run(
             gpu_type=gpu_type,
             framework=framework,
         )
+        if generated is not None:
+            results.append(generated)
 
     # Build report
     total_elapsed = time.time() - start_time
@@ -738,9 +711,8 @@ def run(
     report_path = write_report(report, output_path)
     log.info("Report written to %s", report_path)
 
-    # Ship a TuningArtifactManifest alongside the tuned CSV when a candidate was
-    # produced (provenance + trace linkage + weighted coverage + CSV hash so a
-    # consumer can decide reuse-vs-stale). Non-fatal; never breaks the run.
+    # Ship a TuningArtifactManifest alongside the tuned CSV when a candidate was produced (provenance + trace linkage
+    # + weighted coverage + CSV hash so a consumer can decide reuse-vs-stale).
     if report.recommended_env:
         try:
             from .artifact_manifest import write_artifact_manifest
@@ -777,11 +749,7 @@ def run(
 @click.option("--out", default="", help="Write demand.json here (default: stdout summary only)")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
 def evidence(logs: tuple[str, ...], out: str, verbose: bool):
-    """Parse serving log(s) into a tuning demand list and an apply verdict.
-
-    The demand list is the shape source `run --demand` consumes. Shapes derived
-    from config.json instead served 0.4% of real lookups.
-    """
+    """Parse serving log(s) into a tuning demand list and an apply verdict."""
     import logging as _logging
 
     from .evidence import parse_log_file, write_demand
@@ -846,10 +814,8 @@ def plan(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Same derivation as `run`, or the preview answers a different question
-    # than the thing it previews: a serving log that unblocks TunableOp there
-    # would show it skipped here. The demand file is a throwaway -- plan has no
-    # output directory and nothing downstream reads it.
+    # Same derivation as `run`, or the preview answers a different question than the thing it previews: a serving log
+    # that unblocks TunableOp there would show it skipped here.
     with tempfile.TemporaryDirectory(prefix="forge-plan-") as scratch:
         if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
             demand_json = _demand_from_serving_log(kernel_signature_log, Path(scratch))

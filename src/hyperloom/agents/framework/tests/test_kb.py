@@ -25,9 +25,7 @@ def kb_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-# ---------------------------------------------------------------------------
 # hyperloom.agents.framework.kb module
-# ---------------------------------------------------------------------------
 
 
 class TestResolveKbRoot:
@@ -40,23 +38,14 @@ class TestResolveKbRoot:
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
 
     def test_defaults_to_its_own_workspace_subdirectory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """With no override the KB lives in its own directory under the workspace.
-
-        Not ``<workspace>/kb``: the recipe KB owns that, and ``list_domains``
-        treats every directory under this root as a framework domain.
-        """
+        """With no override the KB lives in its own directory under the workspace."""
         monkeypatch.delenv("FRAMEWORK_AGENT_KB_DIR", raising=False)
         monkeypatch.delenv("INFERENCE_OPTIMIZER_FA_KB_PATH", raising=False)
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
         assert kb._resolve_kb_root() == tmp_path / "workspace" / "framework-kb"
 
     def test_withdrawn_override_is_ignored_not_raised(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Resolution stays total; rejecting the withdrawn override is start-up's job.
-
-        Read paths treat KB lookups as advisory and swallow their own failures,
-        so raising here would be absorbed by the caller rather than surfaced —
-        turning a misconfiguration into a silently disabled gate.
-        """
+        """Resolution stays total; rejecting the withdrawn override is start-up's job."""
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
         monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "io-kb"))
         assert kb._resolve_kb_root() == tmp_path / "io-kb"
@@ -76,21 +65,15 @@ class TestCheckKbConfiguration:
     def test_withdrawn_override_is_reported_not_enforced(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """A deployment still exporting it is told, and still runs.
-
-        Honouring it moved reads without moving writes, which is how the ledger
-        came to be written in one place and read from another. Now that both
-        halves resolve through one function the variable is inert, so the split
-        it used to cause cannot happen and there is nothing left to refuse over.
-        """
+        """A deployment still exporting it is told, and still runs."""
         monkeypatch.setenv("FRAMEWORK_AGENT_KB_DIR", str(tmp_path / "legacy"))
         monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
         with caplog.at_level("WARNING"):
             kb.check_kb_configuration()
 
-        # Names the replacement and where the KB actually resolved, so the
-        # operator can tell whether their intent was met.
+        # Names the replacement and where the KB actually resolved, so the operator can tell whether their intent was
+        # met.
         assert "INFERENCE_OPTIMIZER_FA_KB_PATH" in caplog.text
         assert str(tmp_path / "workspace" / "framework-kb") in caplog.text
 
@@ -119,11 +102,7 @@ class TestCheckKbConfiguration:
         assert cli.main(["kb", "list"]) == 0
 
     def test_start_up_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The whole hook is total, not merely each step as written today.
-
-        Enforced at the hook rather than per step so a step added later cannot
-        quietly reintroduce a start-up failure for an advisory KB.
-        """
+        """The whole hook is total, not merely each step as written today."""
 
         def _explode() -> None:
             raise RuntimeError("a step nobody expected to fail")
@@ -162,13 +141,7 @@ class TestMigrateLegacyPartition:
         assert kb.read_pr_ledger() == [{"pr_url": "PR-1"}]
 
     def test_adds_nothing_of_its_own_to_the_partition(self, tmp_path: Path) -> None:
-        """The partition is a served KB domain, so the migration may not litter it.
-
-        ``get_domain_files`` returns every entry under the domain unfiltered and
-        hands them to the KB readers as content, so bookkeeping dropped in here
-        would come back out as a KB file. Being once-only comes from refusing a
-        populated destination, not from a marker, so there is nothing to drop.
-        """
+        """The partition is a served KB domain, so the migration may not litter it."""
         self._seed_legacy(tmp_path)
 
         destination = kb.migrate_legacy_partition_once()
@@ -228,14 +201,7 @@ class TestMigrateLegacyPartition:
 
 
 class TestMigrationCannotStopTheRun:
-    """A convenience copy must never be able to take a session down with it.
-
-    A missing ledger is a cold start, which the FRAMEWORK phase handles, so the
-    worst outcome of a failed migration is re-proposing a PR. A session that
-    disabled the phase entirely never reads this KB at all. Neither justifies
-    refusing to start, which is what a full disk or one unreadable file would
-    otherwise have caused.
-    """
+    """A convenience copy must never be able to take a session down with it."""
 
     @pytest.fixture(autouse=True)
     def _legacy_data(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -291,11 +257,7 @@ class TestMigrationCannotStopTheRun:
         assert kb.list_domains() == []
 
     def test_staging_is_unique_and_outside_the_kb_root(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Concurrent start-ups must not stage onto one another's directory.
-
-        A fixed staging name let one process's cleanup delete the copy another
-        was still writing, turning two healthy start-ups into a failed one.
-        """
+        """Concurrent start-ups must not stage onto one another's directory."""
         seen: list[Path] = []
         real_copytree = kb.shutil.copytree
 
@@ -469,9 +431,7 @@ class TestSearchKb:
         assert hits[0].domain == "framework"
 
 
-# ---------------------------------------------------------------------------
 # `fa kb <op>` CLI surface
-# ---------------------------------------------------------------------------
 
 
 class TestKbCli:
@@ -582,9 +542,7 @@ class TestKbCli:
         assert "claude_agent_sdk not installed" in err
 
 
-# ---------------------------------------------------------------------------
 # Per-framework KB partition (`framework_optimization/<fw>/`)
-# ---------------------------------------------------------------------------
 
 
 class TestPathForFramework:

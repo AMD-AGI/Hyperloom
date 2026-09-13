@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Orchestration permission widenings for scheduling-police intents.
-
-Orchestration may emit PRUNE_BRANCH and ESCALATE_STRATEGY_CHANGE in addition to
-the robustness path; Kernel/Critic cannot emit any.
-"""
+"""Orchestration permission widenings for scheduling-police intents."""
 
 from __future__ import annotations
 

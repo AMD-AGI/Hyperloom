@@ -5,13 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Contract tests for the kernel source-resolution artifact and its review tier.
-
-The artifact exists so that "where does this kernel live, and how do we know"
-has one versioned answer on disk instead of a scatter of candidate fields. That
-only holds if the schema is enforced, so these pin the envelope, the per-entry
-keys, and the guard rails on the tier allowed to rewrite entries.
-"""
+"""Contract tests for the kernel source-resolution artifact and its review tier."""
 
 from __future__ import annotations
 
@@ -174,12 +168,6 @@ def test_written_artifact_satisfies_its_own_contract(tmp_path):
 
 
 # --- degrade, don't abort, against an older installed contract module -------
-#
-# tracelens_analysis.py runs as a standalone subprocess and imports the
-# *installed* hyperloom, which need not match this checkout (cf.
-# runtime/source-mirrors/). A contract module that predates the method-name
-# constants this script reads must degrade to a fallback method name rather
-# than raise AttributeError and kill the run.
 
 
 def test_candidate_method_falls_back_without_the_constants(monkeypatch):
@@ -198,6 +186,6 @@ def test_stamped_method_survives_a_missing_known_methods(monkeypatch):
 
     monkeypatch.setattr(tl, "_KSC", _OldContract())
     item = {"source_resolution_method": "active_finder", "source_file": "/repo/k.cu"}
-    # KNOWN_METHODS is missing -> the stamp is not recognized and falls to the
-    # path-present grep verdict rather than raising.
+    # KNOWN_METHODS is missing -> the stamp is not recognized and falls to the path-present grep verdict rather than
+    # raising.
     assert tl._candidate_resolution_method(item) == "name_grep"

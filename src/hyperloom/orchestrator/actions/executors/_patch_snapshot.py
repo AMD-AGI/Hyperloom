@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Path-scoped patch snapshot / restore / commit primitives for git worktrees.
-
-Public surface
---------------
-* :func:`_create_patch_snapshot`  — snapshot patch-touched paths before apply.
-* :func:`_restore_patch_snapshot` — restore exactly those paths, verified.
-* :func:`_git_commit_kept`        — stage and commit only patch-touched paths.
-* :func:`_commit_strip_level`     — the ``-p`` level a forward apply resolved at.
-* :func:`_patch_touched_paths`    — touched paths of an already-applied patch set.
-* :func:`_patch_touched_paths_from_text` — pre-apply candidates, from header text.
-
-A KEEP commits the paths the apply resolved at; a snapshot, taken before the
-level is knowable, covers the candidates for every level it could resolve at, so
-the restore is a superset of what the commit would stage. Neither ever widens to
-the whole tree, so unrelated working-tree state survives both.
-"""
+"""Path-scoped patch snapshot / restore / commit primitives for git worktrees."""
 
 from __future__ import annotations
 
@@ -34,18 +19,7 @@ from ._nogit_patch import _P_LEVELS, _PATCH_DEV_NULL, _strip_path_prefix
 
 
 def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> int:
-    """Pick the ``-p`` strip level resolving the most targets to existing files.
-
-    The patch has already been applied, so modify/create targets exist in the
-    tree; the level that maximises those hits is the one the forward apply used.
-
-    Args:
-        framework_root: The git checkout the patch was applied into.
-        pairs: ``(old_path, new_path)`` header pairs from the patch.
-
-    Returns:
-        The ``-p`` strip level resolving the most targets to existing files.
-    """
+    """Pick the ``-p`` strip level resolving the most targets to existing files."""
     best_lvl, best_hits = 1, -1
     for lvl in _P_LEVELS:
         hits = 0
@@ -64,21 +38,7 @@ def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> i
 
 
 def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tuple[list[str], list[str]]:
-    """Classify applied patch targets as upserted or deleted.
-
-    Per header pair (``old`` ``---``, ``new`` ``+++``):
-      * The ``new`` target exists post-apply → upserted (created/modified).
-      * The ``new`` target is ``/dev/null`` or absent post-apply → deleted;
-        emit the ``old`` path.
-      * A header that resolves to neither is dropped.
-
-    Args:
-        framework_root: The git checkout the patches were applied into.
-        patches: The applied patch files to inspect.
-
-    Returns:
-        ``(upserted, deleted)`` each in first-seen order.
-    """
+    """Classify applied patch targets as upserted or deleted."""
     upserted: list[str] = []
     deleted: list[str] = []
     for patch in patches:
@@ -107,35 +67,13 @@ def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tup
 
 
 def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
-    """Repo-relative paths to stage, for callers that need no upsert/delete split.
-
-    Args:
-        framework_root: The git checkout the patches were applied into.
-        patches: The applied patch files to inspect.
-
-    Returns:
-        The repo-relative paths, upserted first.
-    """
+    """Repo-relative paths to stage, for callers that need no upsert/delete split."""
     upserted, deleted = _patch_touched_paths_split(framework_root, patches)
     return list(dict.fromkeys(upserted + deleted))
 
 
 def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
-    """Repo-relative paths a diff's headers may resolve to, before it is applied.
-
-    The strip level is not knowable here — what the patch creates does not exist
-    yet, and in a multi-patch set a later patch only resolves once an earlier one
-    has applied — so every level in :data:`_P_LEVELS` is emitted, the same ladder
-    the apply is driven through. Over-broad is safe: an unused candidate is
-    snapshotted absent and restored absent, or restored to the content it
-    already has.
-
-    Args:
-        patch_content: Raw text of a unified diff.
-
-    Returns:
-        Deduplicated repo-relative candidate paths, in first-seen order.
-    """
+    """Repo-relative paths a diff's headers may resolve to, before it is applied."""
     paths: list[str] = []
     for line in patch_content.splitlines():
         if not line.startswith(("--- ", "+++ ")):
@@ -151,20 +89,7 @@ def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
 
 
 def _index_entries(repo_path: str, paths: list[str]) -> dict[str, str]:
-    """Map each tracked path to its ``git ls-files -s`` record.
-
-    One call for the whole candidate set, which carries a path per strip level
-    and so grows with the depth of the diff headers. ``-z`` leaves paths with
-    unusual bytes unquoted, as the restore compares them verbatim.
-
-    Args:
-        repo_path: The git worktree root to query.
-        paths: Repo-relative candidate paths.
-
-    Returns:
-        Tracked path to its ``"<mode> <sha> <stage>\\t<path>"`` record; untracked
-        paths are absent.
-    """
+    """Map each tracked path to its ``git ls-files -s`` record."""
     result = subprocess.run(
         ["git", *safe_directory_args(["ls-files", "-s", "-z", "--", *paths], cwd=repo_path)],
         cwd=repo_path,
@@ -184,24 +109,7 @@ def _create_patch_snapshot(
     patch_contents: list[str],
     output_dir: Path,
 ) -> dict[str, Any]:
-    """Snapshot the worktree content, mode and index entry of patch-touched paths.
-
-    Covers a candidate per strip level, so the apply cannot resolve to a path the
-    restore does not hold. A symlink among them fails the snapshot rather than
-    the restore, before anything has been mutated.
-
-    Args:
-        repo_path: The git worktree root the patches will be applied into.
-        patch_contents: Raw text of each patch, to derive the paths to snapshot.
-        output_dir: Directory the snapshot sub-directory is created under.
-
-    Returns:
-        The manifest, also written to ``<output_dir>/warm_patch_snapshot/manifest.json``.
-
-    Raises:
-        ValueError: When no candidate paths are derivable, or one is a symlink.
-        subprocess.CalledProcessError: When ``git ls-files`` fails (not a git tree).
-    """
+    """Snapshot the worktree content, mode and index entry of patch-touched paths."""
     touched = list(
         dict.fromkeys(path for content in patch_contents for path in _patch_touched_paths_from_text(content))
     )
@@ -244,19 +152,7 @@ def _create_patch_snapshot(
 
 
 def _restore_patch_snapshot(manifest: Any) -> dict[str, Any]:
-    """Restore exact touched paths/index entries; never reset unrelated work.
-
-    Every path is re-read after restore and compared against its backup, so a
-    partial restore is reported rather than mistaken for success.
-
-    Args:
-        manifest: The dict from :func:`_create_patch_snapshot`, or a path to the
-            ``manifest.json`` it wrote.
-
-    Returns:
-        ``{"ok": bool, "errors": list[str]}``; ``ok`` only when every path
-        restored and verified.
-    """
+    """Restore exact touched paths/index entries; never reset unrelated work."""
     if isinstance(manifest, (str, Path)):
         try:
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
@@ -319,21 +215,7 @@ def _git_commit_kept(
     message: str,
     paths: list[str],
 ) -> tuple[bool, str]:
-    """Commit only the patch-touched ``paths`` to git for cross-cycle durability.
-
-    Committing each KEEP makes wins survive a later cycle's revert. The commit is
-    scoped to the exact paths the patch touched (never ``git add -A``), so bench
-    by-products and concurrent edits stay out of the accepted stack.
-
-    Args:
-        framework_root: The git checkout to commit in.
-        message: The commit message for the KEEP.
-        paths: The repo-relative patch-touched paths to stage and commit.
-
-    Returns:
-        A ``(ok, note)`` tuple; ``ok`` is ``True`` on a successful commit or a
-        benign no-op (nothing to commit), and ``note`` carries any detail.
-    """
+    """Commit only the patch-touched ``paths`` to git for cross-cycle durability."""
     if not paths:
         return True, "no patch-touched paths to commit"
     cp_add = _run_git_cp(["-C", str(framework_root), "add", "-A", "--", *paths], timeout=60.0)
@@ -370,28 +252,7 @@ def harvest_realized_diff(
     rel_paths: list[str],
     dest_path: Path,
 ) -> str:
-    """Render what a KEEP actually landed as one canonical ``-p1`` diff.
-
-    The patch a specialist delivered is what it *asked* for; this is what the
-    tree ended up holding, which differs whenever the apply resolved at another
-    strip level or the KEEP created a file the diff never named. Publishing the
-    realized form is what lets a later session replay the change without having
-    to re-derive the strip level.
-
-    Read from the KEEP's own commit rather than the working tree: by this point
-    :func:`_git_commit_kept` has already committed exactly these paths, so the
-    commit *is* the realized change and nothing has to touch the index of a
-    checkout other work is still using.
-
-    Args:
-        framework_root: The git checkout the KEEP was committed in.
-        rel_paths: Repo-relative paths the KEEP touched.
-        dest_path: Where to write the diff; written only when non-empty.
-
-    Returns:
-        The path written, or ``""`` when there is nothing to harvest, the commit
-        has no parent to diff against, or git could not be run.
-    """
+    """Render what a KEEP actually landed as one canonical ``-p1`` diff."""
     paths = [path for path in (str(raw or "").strip() for raw in rel_paths) if path]
     if not paths:
         return ""

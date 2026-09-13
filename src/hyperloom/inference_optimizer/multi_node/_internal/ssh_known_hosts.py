@@ -16,26 +16,12 @@ _HOST_KEY_ERROR_MARKERS: tuple[str, ...] = (
 
 
 def default_known_hosts_path(ssh_dir: Path) -> Path:
-    """Return the default known_hosts file adjacent to the SSH keypair.
-
-    Args:
-        ssh_dir: Session directory holding ``mn_id_ed25519``.
-
-    Returns:
-        Path: ``<ssh_dir>/known_hosts``.
-    """
+    """Return the default known_hosts file adjacent to the SSH keypair."""
     return ssh_dir / "known_hosts"
 
 
 def is_host_key_error(stderr: str | None) -> bool:
-    """Return True when SSH stderr indicates a host-key mismatch.
-
-    Args:
-        stderr: SSH subprocess stderr text.
-
-    Returns:
-        bool: True for known host-key verification failures.
-    """
+    """Return True when SSH stderr indicates a host-key mismatch."""
     text = (stderr or "").lower()
     return any(marker.lower() in text for marker in _HOST_KEY_ERROR_MARKERS)
 
@@ -44,21 +30,7 @@ def refresh_known_hosts(
     hosts: list[tuple[str, int]],
     dest: Path,
 ) -> Path:
-    """Append ssh-keyscan results for ``hosts`` into ``dest``.
-
-    Idempotent per host line: re-scanning the same IP updates the file via
-    ssh-keyscan append semantics (duplicates are harmless for OpenSSH).
-
-    Args:
-        hosts: ``(ip_or_hostname, port)`` pairs to scan.
-        dest: Target known_hosts file.
-
-    Returns:
-        Path: The ``dest`` path (created or updated).
-
-    Raises:
-        RuntimeError: When every host scan fails.
-    """
+    """Append ssh-keyscan results for ``hosts`` into ``dest``."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
         dest.parent.chmod(0o700)

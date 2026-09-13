@@ -190,11 +190,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
     def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
-        # The probe must be the same invocation the tool makes, in the same
-        # interpreter. Vendoring forge in-tree retires the cross-venv failure
-        # this was written for, but not the other one: an importable
-        # kernelforge.gemm_tune says nothing about whether `gemm-tune` is
-        # registered on the CLI, and that is what the run needs.
+        # The probe must be the same invocation the tool makes, in the same interpreter.
         seen: list[list[str]] = []
 
         def _fake_run(cmd, **_kwargs):
@@ -207,8 +203,8 @@ class TestForgeGemmHelperCoverage:
         assert seen[0][0] == sys.executable
 
     def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
-        # A tree whose kernelforge imports fine but never registered the
-        # gemm-tune group; click exits 2 on an unknown command.
+        # A tree whose kernelforge imports fine but never registered the gemm-tune group; click exits 2 on an unknown
+        # command.
         monkeypatch.setattr(
             krh.subprocess,
             "run",
@@ -353,8 +349,8 @@ class TestForgeGemmHelperCoverage:
         return str(model_dir)
 
     def test_resolve_forge_untuned_csv_rejects_model_mismatch(self, tmp_path):
-        # CSV carries K=7168 shapes but the model has hidden_size=2048: reject it
-        # so forge derives per-model shapes from config.json.
+        # CSV carries K=7168 shapes but the model has hidden_size=2048: reject it so forge derives per-model shapes
+        # from config.json.
         self._write_aiter_csv(tmp_path, "abc", "a8w8_blockscale_untuned_gemm.csv", "M,N,K\n16,1536,7168\n")
         model_path = self._write_model_config(tmp_path / "model", hidden_size=2048)
         assert krh._resolve_forge_untuned_csv(tmp_path, "fp8", "blockscale", model_path) == ""
@@ -532,8 +528,8 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", spec)
         assert krh._forge_fusion_available() is True
-        # Probing kernelforge alone would pass on a KernelForge predating the
-        # fusion absorption and only fail once the subprocess rejected forge-fuse.
+        # Probing kernelforge alone would pass on a KernelForge predating the fusion absorption and only fail once the
+        # subprocess rejected forge-fuse.
         assert probed == ["kernelforge.fusion"]
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
@@ -589,16 +585,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_repo(self, tmp_path):
-        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed
-        under site-packages/dist-packages).
-
-        forge-fusion (PR #75) emits a patch for non-git frameworks so KEPT
-        fusions reach e2e integrate, but the consumer resolved base content via
-        ``git show HEAD:<path>`` which fails outside a git repo -> the snapshot
-        never gets the base file -> ``git apply`` fails with
-        ``<path>: No such file or directory`` (observed on Qwen3-0.6B / Llama
-        vLLM sessions). The base must fall back to the on-disk source.
-        """
+        """Repro: fusion patch against a NON-git repo_root (e.g. vLLM installed under site-packages/dist-packages)."""
         repo = tmp_path / "site-packages"
         (repo / "vllm" / "model_executor" / "models").mkdir(parents=True)
         target = repo / "vllm" / "model_executor" / "models" / "qwen3.py"
@@ -655,15 +642,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "model.py").read_text(encoding="utf-8") == "new = 2\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_timestamped(self, tmp_path):
-        """A created file whose ``+++`` line carries a tab-suffixed timestamp
-        must still be recognized as a create on a NON-git root.
-
-        The new-file path is normalized exactly like ``parse_patch_manifest``
-        (strip the ``\\t<timestamp>`` suffix and the ``b/`` prefix); otherwise it
-        is misclassified as a modify, pre-seeded from disk, and ``git apply``
-        fails "already exists". Pairs a modify (base from disk) with a create in
-        the same patch.
-        """
+        """A created file whose ``+++`` line carries a tab-suffixed timestamp must still be recognized as a create on a NON-git root."""
         repo = tmp_path / "site-packages"
         (repo / "vllm").mkdir(parents=True)
         (repo / "vllm" / "existing.py").write_text("old = 1\n", encoding="utf-8")
@@ -697,11 +676,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "fused_new.py").read_text(encoding="utf-8") == "created = 3\n"
 
     def test_materialize_unified_patch_snapshot_nongit_new_file_quoted(self, tmp_path):
-        """A created file whose header path is C-quoted (git quotes paths with
-        spaces) must be recognized as a create via the shared
-        ``parse_patch_manifest`` normalization, not pre-seeded, and produced by
-        ``git apply``. Regression guard for the quoted-path branch.
-        """
+        """A created file whose header path is C-quoted (git quotes paths with spaces) must be recognized as a create via the shared ``parse_patch_manifest`` normalization, not pre-seeded, and produced by ``git apply``."""
         repo = tmp_path / "site-packages"
         (repo / "vllm").mkdir(parents=True)
         # NOTE: deliberately NOT a git repo -- mirrors dist-packages.
@@ -727,10 +702,7 @@ class TestForgeGemmHelperCoverage:
         assert (snapshot / "vllm" / "fused new.py").read_text(encoding="utf-8") == "created = 1\n"
 
     def test_materialize_unified_patch_snapshot_modify_base_missing_raises(self, tmp_path):
-        """A modify whose base is neither in git HEAD nor on disk must fail with
-        a precise error instead of the opaque ``git apply`` "No such file or
-        directory".
-        """
+        """A modify whose base is neither in git HEAD nor on disk must fail with a precise error instead of the opaque ``git apply`` "No such file or directory"."""
         repo = tmp_path / "site-packages"
         repo.mkdir(parents=True)
         # NOTE: NOT a git repo, and the target file does not exist on disk.
@@ -867,8 +839,8 @@ class TestForgeGemmHelperCoverage:
             }
         ) == ("codex", "gpt-explicit")
 
-    def test_resolve_forge_agent_prefers_forge_claude_model_over_claude_model(self, monkeypatch):
-        """FORGE_CLAUDE_MODEL mirrors GEAK_CLAUDE_MODEL for the Claude forge path."""
+    def test_resolve_forge_agent_ignores_the_removed_forge_claude_model(self, monkeypatch):
+        """The Forge-private spelling is gone; CLAUDE_MODEL is what runs."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
@@ -880,11 +852,11 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_agent({}) == (
             "claude",
-            "claude-forge-only",
+            "claude-orchestration",
         )
 
-    def test_resolve_forge_agent_prefers_forge_codex_model_over_codex_model(self, monkeypatch):
-        """FORGE_CODEX_MODEL overrides CODEX_MODEL when the forge backend is Codex."""
+    def test_resolve_forge_agent_ignores_the_removed_forge_codex_model(self, monkeypatch):
+        """Same on the Codex side: CODEX_MODEL is the only model variable."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
@@ -896,30 +868,29 @@ class TestForgeGemmHelperCoverage:
 
         assert krh._resolve_forge_agent({}) == (
             "codex",
-            "gpt-forge-only",
+            "gpt-orchestration",
         )
 
-    def test_resolve_forge_agent_forge_model_loses_to_payload_llm_model(self, monkeypatch):
-        """Request ``llm_model`` still outranks the forge-specific env knobs."""
+    def test_resolve_forge_agent_env_model_loses_to_payload_llm_model(self, monkeypatch):
+        """Request ``llm_model`` still outranks the environment."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_ANTHROPIC_ONLY_ENV,
                 "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CLAUDE_MODEL": "claude-forge-only",
             },
         )
 
         assert krh._resolve_forge_agent({"llm_model": "claude-payload"}) == ("claude", "claude-payload")
 
-    def test_resolve_forge_agent_ignores_other_backend_forge_model(self, monkeypatch):
-        """A Codex forge override must not leak onto the Claude forge path."""
+    def test_resolve_forge_agent_ignores_the_other_provider_model(self, monkeypatch):
+        """A Codex-side id must not leak onto the Claude forge path."""
         _pin_fusion_provider_env(
             monkeypatch,
             {
                 **_ANTHROPIC_ONLY_ENV,
                 "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CODEX_MODEL": "gpt-forge-only",
+                "CODEX_MODEL": "gpt-orchestration",
             },
         )
 
@@ -1106,11 +1077,7 @@ class TestForgeGemmHelperCoverage:
         assert payload["max_recipes"] == lane_budget.FUSION_MAX_TARGETS
 
     async def test_an_unbounded_session_sends_no_recipe_ceiling(self, tmp_path, monkeypatch):
-        """No share can be derived, and a zero ceiling would silence the lane.
-
-        The key is omitted rather than sent as 0, so forge-fuse keeps every
-        discovered recipe eligible; the rest of the brief is unaffected.
-        """
+        """No share can be derived, and a zero ceiling would silence the lane."""
         payload = await self._fusion_input_payload(tmp_path, monkeypatch, max_minutes=0)
 
         assert "max_recipes" not in payload
@@ -1503,11 +1470,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_an_explicit_gemm_ceiling_outranks_the_lane_share(self, tmp_path, monkeypatch):
-        """An operator/test value stays an escape hatch over the derived share.
-
-        The lane's own figure is pinned to a different number, so the assertion
-        fails if the derived share is used instead of the explicit one.
-        """
+        """An operator/test value stays an escape hatch over the derived share."""
         monkeypatch.setattr(
             krh,
             "_lane_budget",
@@ -1623,9 +1586,8 @@ class TestForgeGemmHelperCoverage:
         assert result["status"] == "failed"
         assert result["backend"] == "forge"
 
-    # ---- forge wording -> coordinator decision ------------------------------
-    # forge reports seven micro_decision wordings; the bridge handled four, and
-    # the three it missed read in the breakdown like a genuine no_improvement.
+    # ---- forge wording -> coordinator decision ------------------------------ forge reports seven micro_decision
+    # wordings; the bridge handled four, and the three it missed read in the breakdown like a genuine no_improvement.
 
     @pytest.mark.asyncio
     async def test_a_partial_wording_is_reverted_and_named(self, tmp_path, monkeypatch):
@@ -1727,9 +1689,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(self, tmp_path, monkeypatch):
-        """One tuner crashed, another delivered: forge reports ``candidate``, so
-        the env is measured and the crash is still named. Promotability keys on
-        ``status``, so a named crash must not demote the run."""
+        """One tuner crashed, another delivered: forge reports ``candidate``, so the env is measured and the crash is still named."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), ""))
@@ -1764,8 +1724,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_a_malformed_tuners_run_does_not_break_the_run(self, tmp_path, monkeypatch):
-        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason
-        out of it must not turn a run that happened into a reported crash."""
+        """``tuners_run`` is forge's JSON and may be any shape; lifting a reason out of it must not turn a run that happened into a reported crash."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
 
@@ -1812,10 +1771,9 @@ class TestForgeGemmHelperCoverage:
 
         assert "decision" not in result
 
-    # ---- MoE runtime key: log -> CSV -> payload -> forge argv ---------------
-    # Both ends were covered (the CSV writer, and KernelForge's preference for a
-    # caller-supplied CSV); the handoff between them was not, and deleting any
-    # link in it left the suite green.
+    # ---- MoE runtime key: log -> CSV -> payload -> forge argv --------------- Both ends were covered (the CSV
+    # writer, and KernelForge's preference for a caller-supplied CSV); the handoff between them was not, and deleting
+    # any link in it left the suite green.
 
     #: A real dispatch line, gfx field included. Fixtures that dropped the gfx
     #: field once let a regex that could never match production pass its tests.
@@ -1850,8 +1808,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_moe_key_travels_from_the_log_into_the_forge_payload(self, tmp_path, monkeypatch):
-        """The values must come from the log, not from the config: a
-        config-derived key is what aiter would never look up."""
+        """The values must come from the log, not from the config: a config-derived key is what aiter would never look up."""
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         log = tmp_path / "server.log"
@@ -1886,11 +1843,7 @@ class TestForgeGemmHelperCoverage:
         assert values["q_type"] == "QuantType.per_1x32"
 
     def test_the_token_column_comes_from_the_workload(self, tmp_path):
-        """``tokens`` arrives as forge's comma-separated string, not a list.
-
-        Every prior case passed a list, so the tests agreed with the annotation
-        instead of with the only production caller.
-        """
+        """``tokens`` arrives as forge's comma-separated string, not a list."""
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
 
@@ -1928,8 +1881,7 @@ class TestForgeGemmHelperCoverage:
 
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
-        # The handler hands the tool an input JSON; the tool builds forge's argv
-        # from it. Assert the field the tool reads is the CSV that was derived.
+        # The handler hands the tool an input JSON; the tool builds forge's argv from it.
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["moe_untuned_csv"].endswith("untuned_fmoe_from_runtime.csv")
@@ -1987,14 +1939,7 @@ class TestForgeGemmHelperCoverage:
 
     @pytest.mark.asyncio
     async def test_vllm_block_fp8_prefers_traced_shapes_over_profile_capture(self, tmp_path, monkeypatch):
-        """vLLM block-FP8 must tune the device-side traced shapes.
-
-        Decode steps replay inside a CUDA Graph, so they emit no Kineto op
-        events and the block-FP8 profile capture can only ever report prefill M
-        (it reported M=2095 alone on the session that then lost 18.45% E2E).
-        The TraceLens candidates carry the decode M, so they win and the capture
-        pass is not needed at all.
-        """
+        """vLLM block-FP8 must tune the device-side traced shapes."""
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -2040,8 +1985,8 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
 
-        # task_id keeps the workspace deterministic (it otherwise falls back to
-        # a wall-clock suffix, which the assertion below could not re-derive).
+        # task_id keeps the workspace deterministic (it otherwise falls back to a wall-clock suffix, which the
+        # assertion below could not re-derive).
         payload = {"precision": "fp8", "quant_type": "blockscale", "task_id": "gemm-1"}
         await krh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
 
@@ -2195,707 +2140,10 @@ class TestForgeGemmHelperCoverage:
             assert captured["shapes_json"] == ""
         else:
             assert captured["untuned_csv"] == ""
-            # The fresh profile wins over the specialist CSV; the path handed to
-            # forge is that profile re-keyed onto aiter's lookup ladder.
+            # The fresh profile wins over the specialist CSV; the path handed to forge is that profile re-keyed onto
+            # aiter's lookup ladder.
             assert captured["shapes_json"].endswith("forge_shapes.aiter_aligned.json")
             assert json.loads(Path(captured["shapes_json"]).read_text(encoding="utf-8"))
-
-
-def _collective_candidate(**overrides):
-    """Build a valid all-reduce candidate with optional field overrides."""
-    candidate = {
-        "kernel_id": "all-reduce-1",
-        "name": "all_reduce_kernel",
-        "source_file": "/workspace/kernels/all_reduce.py",
-        "source_function": "all_reduce",
-        "input_shapes": [[4, 1024]],
-        "input_dtypes": ["float16"],
-        "gpu_pct": 12.5,
-        "kernel_repo": "/workspace",
-        "reusable_native_kernel": True,
-        "candidate_source": "nccl_summary",
-        "kernel_contract": {
-            "kind": "collective",
-            "collective_op": "all_reduce",
-        },
-    }
-    candidate.update(overrides)
-    return candidate
-
-
-class TestForgeCollectiveCoverage:
-    def test_parse_forge_collective_sentinel(self):
-        """Parse a valid collective wrapper result."""
-        payload = {
-            "engine": "forge_collective",
-            "status": "complete",
-            "decision": "KEEP",
-            "kept": True,
-            "requires_e2e_validation": True,
-        }
-        stdout = (
-            "wrapper noise\nFORGE_COLLECTIVE_RESULT_BEGIN\n"
-            + json.dumps(payload)
-            + "\nFORGE_COLLECTIVE_RESULT_END\ntrailing noise"
-        )
-
-        assert krh._parse_forge_collective_sentinel(stdout) == payload
-
-    @pytest.mark.parametrize(
-        "payload, error",
-        [
-            pytest.param("no-sentinel", "no result sentinel", id="missing-sentinel"),
-            pytest.param("malformed", "malformed result JSON", id="malformed-json"),
-            pytest.param([], "must be a JSON object", id="non-object"),
-            pytest.param(
-                {
-                    "engine": "other",
-                    "status": "complete",
-                    "decision": "REVERT",
-                    "kept": False,
-                    "requires_e2e_validation": False,
-                },
-                "invalid engine",
-                id="engine",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": 1,
-                    "decision": "REVERT",
-                    "kept": False,
-                    "requires_e2e_validation": False,
-                },
-                "invalid status",
-                id="status-type",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "",
-                    "decision": "REVERT",
-                    "kept": False,
-                    "requires_e2e_validation": False,
-                },
-                "invalid status",
-                id="status-empty",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "complete",
-                    "decision": "SKIP",
-                    "kept": False,
-                    "requires_e2e_validation": False,
-                },
-                "invalid decision",
-                id="decision",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "complete",
-                    "decision": "KEEP",
-                    "kept": 1,
-                    "requires_e2e_validation": True,
-                },
-                "invalid kept",
-                id="kept",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "complete",
-                    "decision": "REVERT",
-                    "kept": False,
-                    "requires_e2e_validation": None,
-                },
-                "invalid requires_e2e_validation",
-                id="e2e-type",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "complete",
-                    "decision": "KEEP",
-                    "kept": False,
-                    "requires_e2e_validation": False,
-                },
-                "inconsistent decision",
-                id="decision-consistency",
-            ),
-            pytest.param(
-                {
-                    "engine": "forge_collective",
-                    "status": "complete",
-                    "decision": "KEEP",
-                    "kept": True,
-                    "requires_e2e_validation": False,
-                },
-                "inconsistent E2E gate",
-                id="e2e-consistency",
-            ),
-        ],
-    )
-    def test_parse_forge_collective_sentinel_rejects_contract_errors(
-        self,
-        payload,
-        error,
-    ):
-        """Reject every malformed collective sentinel contract."""
-        if payload == "no-sentinel":
-            stdout = "wrapper emitted no markers"
-        elif payload == "malformed":
-            stdout = "FORGE_COLLECTIVE_RESULT_BEGIN\nnot-json\nFORGE_COLLECTIVE_RESULT_END"
-        else:
-            stdout = "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(payload) + "\nFORGE_COLLECTIVE_RESULT_END"
-
-        with pytest.raises(ValueError, match=error):
-            krh._parse_forge_collective_sentinel(stdout)
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("candidate", [[], {}], ids=["list", "empty"])
-    async def test_run_forge_collective_rejects_invalid_candidate(
-        self,
-        tmp_path,
-        candidate,
-    ):
-        """Reject explicitly supplied empty or non-object candidates."""
-        result = await krh._run_forge_collective(
-            {"candidate": candidate},
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "invalid_collective_candidate"
-        assert result["decision"] == "REVERT"
-        assert result["kept"] is False
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_rejects_invalid_candidate_artifact(
-        self,
-        tmp_path,
-    ):
-        """Shape a malformed candidate artifact as a skipped result."""
-        candidates = tmp_path / "collective_candidates.json"
-        candidates.write_text("not-json", encoding="utf-8")
-        SharedState(last_trace_analyze={"candidates_path": str(candidates)}).save(tmp_path)
-
-        result = await krh._run_forge_collective({}, session_dir=tmp_path)
-
-        assert result["status"] == "skipped"
-        assert result["error_class"] == "invalid_collective_candidate_artifact"
-        assert result["analysis_key"] == str(candidates)
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_skips_without_candidate(self, tmp_path):
-        """Skip safely when the latest analysis has no collective candidate."""
-        SharedState().save(tmp_path)
-
-        result = await krh._run_forge_collective({}, session_dir=tmp_path)
-
-        assert result["status"] == "skipped"
-        assert result["error_class"] == "no_collective_candidate"
-        assert result["analysis_key"] == ""
-        assert result["requires_e2e_validation"] is False
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_rejects_unsupported_contract(self, tmp_path):
-        """Reject collectives with no distributed reference in the driver."""
-        candidate = _collective_candidate(kernel_contract={"kind": "collective", "collective_op": "all_to_all"})
-
-        result = await krh._run_forge_collective(
-            {"candidate": candidate},
-            session_dir=tmp_path,
-        )
-
-        assert result["error_class"] == "unsupported_collective_contract"
-        assert result["decision"] == "REVERT"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "field, value",
-        [
-            ("kernel_id", ""),
-            ("source_file", ""),
-            ("source_function", ""),
-            ("input_shapes", []),
-            ("input_dtypes", []),
-            ("gpu_pct", True),
-            ("gpu_pct", float("inf")),
-            ("gpu_pct", -1),
-        ],
-    )
-    async def test_run_forge_collective_rejects_invalid_required_fields(
-        self,
-        tmp_path,
-        field,
-        value,
-    ):
-        """Reject missing and invalid fields required by the driver."""
-        candidate = _collective_candidate(**{field: value})
-
-        result = await krh._run_forge_collective(
-            {"candidate": candidate},
-            session_dir=tmp_path,
-        )
-
-        assert result["error_class"] == "invalid_collective_candidate"
-        assert field in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_rejects_non_string_kernel_repo(
-        self,
-        tmp_path,
-    ):
-        """Reject a candidate whose repository root is not a string."""
-        candidate = _collective_candidate(kernel_repo=123)
-
-        result = await krh._run_forge_collective(
-            {"candidate": candidate},
-            session_dir=tmp_path,
-        )
-
-        assert result["error_class"] == "invalid_collective_candidate"
-        assert "kernel_repo must be a string" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_requires_resolvable_repo_root(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Reject a source path with no explicit or discoverable repository."""
-        candidate = _collective_candidate(source_file=str(tmp_path / "outside" / "all_reduce.py"))
-        candidate.pop("kernel_repo")
-        monkeypatch.setattr(krh, "_find_repo_root_for_source", lambda _path: "")
-
-        result = await krh._run_forge_collective(
-            {"candidate": candidate},
-            session_dir=tmp_path,
-        )
-
-        assert result["error_class"] == "kernel_repo_missing"
-        assert candidate["source_file"] in result["error"]
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "tp",
-        [True, 1.5, "invalid", 1],
-        ids=["bool", "float", "non-numeric", "single-rank"],
-    )
-    async def test_run_forge_collective_rejects_invalid_world_size(
-        self,
-        tmp_path,
-        monkeypatch,
-        tp,
-    ):
-        """Reject non-integral and single-rank collective world sizes."""
-        monkeypatch.delenv("TP", raising=False)
-
-        result = await krh._run_forge_collective(
-            {"candidate": _collective_candidate(), "tp": tp},
-            session_dir=tmp_path,
-        )
-
-        assert result["error_class"] == "invalid_collective_world_size"
-        assert result["decision"] == "REVERT"
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "budget",
-        [
-            {"timeout": True},
-            {"timeout": 1.5},
-            {"timeout": "invalid"},
-            {"timeout": -1},
-            {"timeout": 10000, "max_hours": True},
-        ],
-        ids=["bool", "float", "non-numeric", "negative", "max-hours"],
-    )
-    async def test_run_forge_collective_rejects_invalid_budget(
-        self,
-        tmp_path,
-        monkeypatch,
-        budget,
-    ):
-        """Reject malformed collective timeout and campaign budgets."""
-        monkeypatch.delenv("FORGE_COLLECTIVE_TIMEOUT", raising=False)
-        payload = {
-            "candidate": _collective_candidate(),
-            "tp": 2,
-            **budget,
-        }
-
-        result = await krh._run_forge_collective(payload, session_dir=tmp_path)
-
-        assert result["error_class"] == "invalid_collective_budget"
-        assert result["decision"] == "REVERT"
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_skips_insufficient_budget(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Skip when the wrapper budget cannot fit a minimum campaign."""
-        monkeypatch.delenv("FORGE_COLLECTIVE_TIMEOUT", raising=False)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(),
-                "tp": 2,
-                "timeout": 100,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "skipped"
-        assert result["error_class"] == "insufficient_collective_budget"
-        assert result["analysis_key"] == ""
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_writes_input_and_applies_defaults(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Run the collective happy path with a fully isolated wrapper."""
-        candidates = tmp_path / "collective_candidates.json"
-        fallback = _collective_candidate(
-            kernel_id="fallback",
-            candidate_source="trace",
-            gpu_pct=90.0,
-        )
-        selected = _collective_candidate(
-            kernel_id="resolved",
-            source_file=str(tmp_path / "kernels" / "all_reduce.py"),
-            kernel_repo=str(tmp_path),
-            gpu_pct=10.0,
-        )
-        candidates.write_text(
-            json.dumps(
-                {
-                    "hot_kernels": [
-                        _collective_candidate(reusable_native_kernel=False),
-                        _collective_candidate(
-                            kernel_contract={
-                                "kind": "collective",
-                                "collective_op": "all_to_all",
-                            }
-                        ),
-                        fallback,
-                        selected,
-                    ]
-                }
-            ),
-            encoding="utf-8",
-        )
-        SharedState(
-            gpu_type="MI300X",
-            tp=8,
-            last_trace_analyze={"candidates_path": str(candidates)},
-        ).save(tmp_path)
-        monkeypatch.setenv("FORGE_COLLECTIVE_AGENT_TIMEOUT", "900")
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {**_ANTHROPIC_ONLY_ENV, "CLAUDE_MODEL": "claude-test"},
-        )
-        monkeypatch.setattr(krh.time, "time_ns", lambda: 123)
-        tool_path = tmp_path / "tools" / "forge_collective.py"
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / "tools" / name,
-        )
-        captured = {}
-
-        async def _fake_subprocess(cmd, *, timeout_sec):
-            """Capture the wrapper invocation and return a valid sentinel."""
-            captured["cmd"] = cmd
-            captured["timeout_sec"] = timeout_sec
-            input_path = Path(cmd[cmd.index("--input-json") + 1])
-            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
-            wrapper_result = {
-                "status": "complete",
-                "engine": "forge_collective",
-                "decision": "REVERT",
-                "kept": False,
-                "requires_e2e_validation": False,
-            }
-            return (
-                0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
-                "",
-            )
-
-        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
-
-        result = await krh._run_forge_collective(
-            {
-                "task_id": "collective-task",
-                "tp": "4",
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        workspace = tmp_path / "runs" / "collective" / "collective-task" / "attempt-123"
-        assert captured["cmd"] == [
-            "python3",
-            str(tool_path),
-            "--input-json",
-            str(workspace / "forge_collective_input.json"),
-        ]
-        assert captured["timeout_sec"] == 7200
-        assert captured["input"] == {
-            "agent_backend": "claude",
-            "agent_timeout_sec": "900",
-            "candidate": selected,
-            "experience_id": "attempt-123",
-            "finalize_grace_sec": 300,
-            "framework": "",
-            "gpu_target": "MI300X",
-            "kernel_repo": str(tmp_path),
-            "llm_model": "claude-test",
-            "max_hours": 1.0,
-            "operator_name": "all_reduce",
-            "output_dir": str(workspace),
-            "source_file": selected["source_file"],
-            "source_files": [selected["source_file"]],
-            "target_functions": ["all_reduce"],
-            "timeout": 6900,
-            "tp": 4,
-        }
-        assert result["backend"] == "forge"
-        assert result["workspace"] == str(workspace)
-        assert result["kernel_id"] == "resolved"
-        assert result["kernel_name"] == "all_reduce_kernel"
-        assert result["source_file"] == selected["source_file"]
-        assert result["kernel_repo"] == str(tmp_path)
-        assert result["gpu_pct"] == 10.0
-        assert result["collective_op"] == "all_reduce"
-        assert result["world_size"] == 4
-        assert result["source"] == "forge_collective"
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_shapes_invalid_sentinel(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Convert an invalid wrapper sentinel into a revert result."""
-        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(krh.time, "time_ns", lambda: 456)
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / name,
-        )
-
-        async def _fake_subprocess(cmd, *, timeout_sec):
-            """Return wrapper output without a result sentinel."""
-            return 9, "wrapper output", "wrapper error"
-
-        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(),
-                "tp": 2,
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "invalid_collective_result"
-        assert result["returncode"] == 9
-        assert result["stdout_tail"] == "wrapper output"
-        assert result["stderr_tail"] == "wrapper error"
-        assert result["world_size"] == 2
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_shapes_subprocess_timeout(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Convert wrapper timeout into a bounded revert result."""
-        _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / name,
-        )
-
-        async def _timeout(cmd, *, timeout_sec):
-            """Raise the timeout produced by the subprocess wrapper."""
-            raise subprocess.TimeoutExpired(["python3", "collective-worker"], timeout_sec)
-
-        monkeypatch.setattr(krh, "_run_subprocess", _timeout)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(),
-                "tp": 2,
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "subprocess_timeout"
-        assert "TimeoutExpired after 7200s" in result["error"]
-        assert "collective-worker" in result["error"]
-        assert result["engine"] == "forge_collective"
-        assert result["requires_e2e_validation"] is False
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_prefers_forge_claude_model(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Collective must honor FORGE_CLAUDE_MODEL like fusion and rewrite."""
-        SharedState(tp=2).save(tmp_path)
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_ANTHROPIC_ONLY_ENV,
-                "CLAUDE_MODEL": "claude-orchestration",
-                "FORGE_CLAUDE_MODEL": "claude-forge-only",
-            },
-        )
-        monkeypatch.setattr(krh.time, "time_ns", lambda: 789)
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / "tools" / name,
-        )
-        captured = {}
-
-        async def _fake_subprocess(cmd, *, timeout_sec):
-            input_path = Path(cmd[cmd.index("--input-json") + 1])
-            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
-            wrapper_result = {
-                "status": "complete",
-                "engine": "forge_collective",
-                "decision": "REVERT",
-                "kept": False,
-                "requires_e2e_validation": False,
-            }
-            return (
-                0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
-                "",
-            )
-
-        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
-                "tp": 2,
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "complete"
-        assert captured["input"]["agent_backend"] == "claude"
-        assert captured["input"]["llm_model"] == "claude-forge-only"
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_openai_only_selects_codex(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """OpenAI-only collective must pin Codex and FORGE_CODEX_MODEL."""
-        SharedState(tp=2).save(tmp_path)
-        _pin_fusion_provider_env(
-            monkeypatch,
-            {
-                **_OPENAI_ONLY_ENV,
-                "CODEX_MODEL": "gpt-orchestration",
-                "FORGE_CODEX_MODEL": "gpt-forge-only",
-            },
-        )
-        monkeypatch.setattr(krh.time, "time_ns", lambda: 790)
-        monkeypatch.setattr(
-            krh,
-            "_kernel_agent_tool_path",
-            lambda name: tmp_path / "tools" / name,
-        )
-        captured = {}
-
-        async def _fake_subprocess(cmd, *, timeout_sec):
-            input_path = Path(cmd[cmd.index("--input-json") + 1])
-            captured["input"] = json.loads(input_path.read_text(encoding="utf-8"))
-            wrapper_result = {
-                "status": "complete",
-                "engine": "forge_collective",
-                "decision": "REVERT",
-                "kept": False,
-                "requires_e2e_validation": False,
-            }
-            return (
-                0,
-                "FORGE_COLLECTIVE_RESULT_BEGIN\n" + json.dumps(wrapper_result) + "\nFORGE_COLLECTIVE_RESULT_END\n",
-                "",
-            )
-
-        monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
-                "tp": 2,
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "complete"
-        assert captured["input"]["agent_backend"] == "codex"
-        assert captured["input"]["llm_model"] == "gpt-forge-only"
-
-    @pytest.mark.asyncio
-    async def test_run_forge_collective_unconfigured_provider_fails_before_subprocess(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        """Collective must fail closed before spawning when no LLM side is set."""
-        SharedState(tp=2).save(tmp_path)
-        _pin_fusion_provider_env(monkeypatch, {})
-
-        async def _should_not_run(*_args, **_kwargs):
-            raise AssertionError("forge-collective must not run without a provider")
-
-        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
-
-        result = await krh._run_forge_collective(
-            {
-                "candidate": _collective_candidate(kernel_repo=str(tmp_path)),
-                "tp": 2,
-                "timeout": 10000,
-                "max_hours": 1,
-            },
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "llm_provider_unconfigured"
-        assert result["decision"] == "REVERT"
-        assert result["kept"] is False
-        assert result["engine"] == "forge_collective"
 
 
 def _ensure_torch_module(monkeypatch):
@@ -3086,12 +2334,10 @@ class TestEnrichCandidate:
 
 
 class TestReusableSourceRootsAtom:
-    """atom layout prefixes participate in cross-task kernel reuse
-    alongside aiter/sglang/vllm."""
+    """atom layout prefixes participate in cross-task kernel reuse alongside aiter/sglang/vllm."""
 
     def test_includes_atom_editable_path(self):
-        # The matcher lowercases its source-file input, so the stored prefix is
-        # lowercase ``/app/atom/atom/``.
+        # The matcher lowercases its source-file input, so the stored prefix is lowercase ``/app/atom/atom/``.
         assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
 
     def test_includes_atom_site_packages_python_3_10(self):
@@ -3974,9 +3220,8 @@ class TestRunGemmTuningHandler:
 
         assert captured_input["framework"] == "vllm-aiter"
         shapes_path = Path(captured_input["shapes_json"])
-        # The traced M=4149 is re-keyed onto the padded M aiter looks up, plus a
-        # power-of-two ladder so the rows stay reachable for the M values the
-        # profile never sampled.
+        # The traced M=4149 is re-keyed onto the padded M aiter looks up, plus a power-of-two ladder so the rows stay
+        # reachable for the M values the profile never sampled.
         aligned = json.loads(shapes_path.read_text())
         assert {row["N"] for row in aligned} == {34816}
         assert {row["M"] for row in aligned} == {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 4224, 8192}
@@ -4426,8 +3671,8 @@ class TestRunGemmTuningHandler:
         result = asyncio.run(krh.run_gemm_tuning_handler({"task_id": "capture"}, session_dir=tmp_path))
 
         assert captured_input["framework"] == "vllm-aiter"
-        # Captured shapes are routed to the aiter family, then re-keyed onto the
-        # padded M values the runtime actually looks up.
+        # Captured shapes are routed to the aiter family, then re-keyed onto the padded M values the runtime actually
+        # looks up.
         assert result["shape_alignment"]["source_shapes_json"] == str(shapes_path)
         aligned = json.loads(Path(captured_input["shapes_json"]).read_text())
         assert {row["M"] for row in aligned} == {16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 4224, 8192}
@@ -4850,9 +4095,8 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(shapes_path).read_text(encoding="utf-8")) == [{"M": 4096, "N": 34816, "K": 5120}]
 
     def test_extract_gemm_shapes_tolerates_whitespace_after_comma(self, tmp_path):
-        # TraceLens may render tuples with a space after the comma
-        # ("(1024, 5120)"); the extractor must still parse M/N/K instead of
-        # silently dropping every shape and falling back to config defaults.
+        # TraceLens may render tuples with a space after the comma ("(1024, 5120)"); the extractor must still parse
+        # M/N/K instead of silently dropping every shape and falling back to config defaults.
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -4873,12 +4117,8 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
     def test_extract_gemm_shapes_parses_per_tensor_input_shapes(self, tmp_path):
-        # Current TraceLens emits one entry per tensor ({"call_num": .., "shape":
-        # "(M,K) fp8"}) instead of a single <br>-joined string. The old parser
-        # skipped every such entry and returned no shapes, so GEMM tuning fell
-        # back to a lossy profile capture that recorded only a large prefill M
-        # and missed the throughput-dominant decode M (observed on
-        # Qwen3.5-122B-A10B-FP8: tuned M=2095 only -> -18.45% E2E).
+        # Current TraceLens emits one entry per tensor ({"call_num": .., "shape": "(M,K) fp8"}) instead of a single
+        # <br>-joined string.
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -4901,8 +4141,8 @@ class TestRunGemmTuningHandler:
                             ],
                         },
                         {
-                            # Matrix-vector head: highest call count, but N==1 is
-                            # not a tunable GEMM tile and must be dropped.
+                            # Matrix-vector head: highest call count, but N==1 is not a tunable GEMM tile and must be
+                            # dropped.
                             "name": "vllm::rocm_unquantized_gemm",
                             "input_shapes": [
                                 {"call_num": 9999, "shape": "(64,3072) bf16"},
@@ -4919,8 +4159,8 @@ class TestRunGemmTuningHandler:
 
         assert out, "per-tensor input_shapes yielded no GEMM shapes"
         shapes = json.loads(Path(out).read_text(encoding="utf-8"))
-        # The decode shape is present (it was dropped entirely before) and, being
-        # the most-called, is tuned first when the tuner runs out of budget.
+        # The decode shape is present (it was dropped entirely before) and, being the most-called, is tuned first when
+        # the tuner runs out of budget.
         assert shapes == [
             {"M": 64, "N": 10240, "K": 3072},
             {"M": 3126, "N": 3072, "K": 512},
@@ -4940,8 +4180,8 @@ class TestRunGemmTuningHandler:
                             ],
                         },
                         {
-                            # BF16 router head: most-called, so without dtype
-                            # scoping it displaces the FP8 shape being tuned.
+                            # BF16 router head: most-called, so without dtype scoping it displaces the FP8 shape being
+                            # tuned.
                             "name": "vllm::rocm_unquantized_gemm",
                             "input_shapes": [
                                 {"call_num": 1440, "shape": "(64,3072) bf16"},
@@ -4994,8 +4234,7 @@ class TestRunGemmTuningHandler:
         ],
     )
     def test_extract_gemm_shapes_matches_dtype_aliases(self, tmp_path, precision, traced):
-        """A precision and a traced token spell the same dtype many ways; exact
-        string matching would drop shapes that do belong to the tuned family."""
+        """A precision and a traced token spell the same dtype many ways; exact string matching would drop shapes that do belong to the tuned family."""
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -5020,8 +4259,7 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 64, "N": 8704, "K": 3072}]
 
     def test_extract_gemm_shapes_keeps_the_highest_call_count(self, tmp_path):
-        """The same (M,N,K) can be reported by several kernels; the hot sighting
-        must win, otherwise a rare first one buries the real decode hotspot."""
+        """The same (M,N,K) can be reported by several kernels; the hot sighting must win, otherwise a rare first one buries the real decode hotspot."""
         candidates = tmp_path / "kernel_candidates.json"
         candidates.write_text(
             json.dumps(
@@ -5084,8 +4322,7 @@ class TestRunGemmTuningHandler:
         assert json.loads(Path(out).read_text(encoding="utf-8")) == [{"M": 1024, "N": 34816, "K": 5120}]
 
     def test_resolve_forge_shapes_prefers_scoped_candidates_over_untyped_artifact(self, tmp_path):
-        """A pre-rendered shapes artifact carries no dtype, so it must not win
-        over candidates that were actually scoped to the tuned precision."""
+        """A pre-rendered shapes artifact carries no dtype, so it must not win over candidates that were actually scoped to the tuned precision."""
         session_dir = tmp_path / "session"
         session_dir.mkdir()
         artifact = tmp_path / "shapes.json"  # recorded from the BF16 head
@@ -5136,9 +4373,8 @@ class TestRunGemmTuningHandler:
         assert krh._resolve_forge_shapes(state, session_dir) == str(artifact)
 
 
-# _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
-# _resolve_candidate_id / _all_kernel_candidates — canonicalizes an aliased id
-# against the full hot ∪ skipped set (no fallback).
+# _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
+# _all_kernel_candidates — canonicalizes an aliased id against the full hot ∪ skipped set (no fallback).
 class TestTracelensRootResolution:
     """TraceLens root is resolved/validated independently of inherited env."""
 
@@ -5172,7 +4408,6 @@ class TestTracelensRootResolution:
 
     def test_trace_analyze_handler_selfheals_default_root_then_fails_if_unrecovered(self, tmp_path, monkeypatch):
         # Default root missing: handler attempts self-heal before failing.
-        # Stub the heal to a no-op so the handler returns the structured error.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "no-tracelens-here"))
@@ -5192,8 +4427,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_selfheals_incomplete_default_root(self, tmp_path, monkeypatch):
-        # an incomplete default checkout (dir present, no .git) must still
-        # trigger self-heal.
+        # an incomplete default checkout (dir present, no .git) must still trigger self-heal.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.delenv("TRACELENS_ROOT", raising=False)
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
@@ -5219,8 +4453,8 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
-        # an incomplete non-default operator override (dir present, no .git)
-        # must fail fast — never adopted, never auto-cloned.
+        # an incomplete non-default operator override (dir present, no .git) must fail fast — never adopted, never
+        # auto-cloned.
         monkeypatch.setenv("HYPERLOOM_KERNEL_AGENT_ROOT", str(tmp_path))
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
@@ -5242,9 +4476,7 @@ class TestTracelensRootResolution:
         assert out["error_class"] == "tracelens_root_missing"
 
     def test_selfheal_skips_non_default_override(self, tmp_path, monkeypatch):
-        # An operator override at a NON-default path is never auto-cloned, even
-        # though TRACELENS_ROOT is set in env. Inject a counting fake module so a
-        # regression that reaches _ensure_tracelens_checkout would trip the assert.
+        # An operator override at a NON-default path is never auto-cloned, even though TRACELENS_ROOT is set in env.
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         override = tmp_path / "operator-tl"
         monkeypatch.setenv("TRACELENS_ROOT", str(override))
@@ -5269,9 +4501,8 @@ class TestTracelensRootResolution:
         assert called["n"] == 0
 
     def test_selfheal_runs_on_default_path_even_when_env_set(self, tmp_path, monkeypatch):
-        # the default path is persisted as TRACELENS_ROOT in
-        # kernel-agent.env.sh, so "env set" must NOT be treated as an override.
-        # A missing default path must still attempt self-heal.
+        # the default path is persisted as TRACELENS_ROOT in kernel-agent.env.sh, so "env set" must NOT be treated as
+        # an override.
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         default_root = tmp_path / "podlocal" / "TraceLens"
         monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
@@ -5281,8 +4512,7 @@ class TestTracelensRootResolution:
             called["n"] += 1
             called["root"] = Path(root)
 
-        # Route _kernel_agent_tool_path to a fake module exposing
-        # _ensure_tracelens_checkout.
+        # Route _kernel_agent_tool_path to a fake module exposing _ensure_tracelens_checkout.
         import sys as _sys
         import types as _types
 
@@ -5300,9 +4530,8 @@ class TestTracelensRootResolution:
         assert called["root"] == default_root
 
     def test_selfheal_runs_on_pinned_at_sha_default(self, tmp_path, monkeypatch):
-        # install.sh clones the default checkout as TraceLens@<sha>; a vanished
-        # per-revision default must still self-heal, not be misread as an
-        # operator override (the bare-only default_root check missed @sha dirs).
+        # install.sh clones the default checkout as TraceLens@<sha>; a vanished per-revision default must still
+        # self-heal, not be misread as an operator override (the bare-only default_root check missed @sha dirs).
         monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
         default_root = tmp_path / "podlocal" / "TraceLens@deadbeef"
         monkeypatch.setenv("TRACELENS_ROOT", str(default_root))
@@ -5330,8 +4559,7 @@ class TestTracelensRootResolution:
 
 
 class TestBuildTraceAnalyzeCmd:
-    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable)
-    and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
+    """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
 
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
@@ -5496,18 +4724,6 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
 
 
-def test_forge_loop_budget_bounds_are_read_not_copied():
-    """A local copy of an upstream bound plans against a budget forge-loop ignores."""
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    # Read from a module that is always importable, so the test does not depend
-    # on KernelForge being installed alongside.
-    assert rh._forge_loop_constant("math", "pi", 0.0) == pytest.approx(3.14159, abs=1e-4)
-    assert rh._forge_loop_constant("no.such.module", "X", 7.0) == 7.0
-    assert rh._forge_loop_constant("math", "no_such_name", 7.0) == 7.0
-    assert rh._forge_loop_constant("math", "isfinite", 7.0) == 7.0
-
-
 def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
     """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
     from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
@@ -5552,12 +4768,7 @@ def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
 
 
 class TestTheGemmLaneBudgetReachesTheInputJson:
-    """The gemm lane's share of the phase, as the wrapper actually receives it.
-
-    The wrapper exposes no "run at most N tuners" input, so a ceiling of one is
-    expressed by pinning ``tuner``; the wall-clock half travels as ``timeout`` and
-    ``global_timeout``.
-    """
+    """The gemm lane's share of the phase, as the wrapper actually receives it."""
 
     @staticmethod
     def _sentinel() -> str:
@@ -5599,8 +4810,8 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
 
     @pytest.mark.asyncio
     async def test_a_share_that_funds_one_tuner_caps_the_routed_set_at_one(self, tmp_path, monkeypatch):
-        # 600 min less the 5 min reserve leaves 35700s; gemm's 20% is 7140s, which
-        # funds the first 60-minute tuner and not the second.
+        # 600 min less the 5 min reserve leaves 35700s; gemm's 20% is 7140s, which funds the first 60-minute tuner and
+        # not the second.
         self._prepare(
             tmp_path,
             monkeypatch,

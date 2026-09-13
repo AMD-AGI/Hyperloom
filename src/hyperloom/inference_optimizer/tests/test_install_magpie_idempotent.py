@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Behavioural + static guards for ``ensure_magpie()``.
-
-Magpie is installed from a pinned pip package spec rather than a local editable
-checkout. The installer should skip pip when ``import Magpie`` already works,
-install the configured package spec when it does not, and resolve ``MAGPIE_PATH``
-to the installed package root unless the operator supplied an explicit override.
-"""
+"""Behavioural + static guards for ``ensure_magpie()``."""
 
 from __future__ import annotations
 
@@ -34,14 +28,7 @@ def _extract_ensure_magpie() -> str:
 
 
 def _fake_python(tmp_path: Path, *, import_ok: bool, installed_root: Path) -> Path:
-    """A stub ``$PYTHON``.
-
-    * ``-c 'import Magpie'``: exits according to ``import_ok`` unless pip has
-      already been called.
-    * ``-m pip install ...``: touches PIP_MARKER and exits 0.
-    * ``-`` (stdin script used to resolve the import root): prints
-      ``installed_root``.
-    """
+    """A stub ``$PYTHON``."""
     marker = tmp_path / PIP_MARKER
     import_check = "exit 0" if import_ok else f'[ -f "{marker}" ] && exit 0 || exit 1'
     body = f"""#!/usr/bin/env bash

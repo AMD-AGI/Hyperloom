@@ -1,11 +1,4 @@
-"""
-GPU Kernel Hotspot Analyzer
-Reads rocprof-compute ATT trace output and identifies top-K stall hotspots.
-
-Usage:
-    python hotspot_analyzer.py <dispatch_dir> [--topk N] [--mode {asm,src,both}]
-    python hotspot_analyzer.py <dispatch_dir> --topk 5 --mode src --detail --context 4
-"""
+"""GPU Kernel Hotspot Analyzer"""
 
 import argparse
 import csv
@@ -239,23 +232,7 @@ def print_source_detail(hotspot, source_cache, context=3):
 
 
 def read_kernel_metadata(dispatch_dir, kernel_filter=""):
-    """Read authoritative resource counts from ``out_kernel_trace.csv`` if present.
-
-    The ATT ``code.json`` only contains the (possibly single-CU, possibly
-    vgpr-form) disassembly, so it cannot reveal accum_vgpr / SGPR / LDS /
-    workgroup size.  The kernel-trace CSV carries the real launch metadata.
-    Searches the dispatch dir and its parent (staging often copies the CSV
-    next to the ui_output_agent_* dir).  Returns {} if not found.
-
-    Row selection priority:
-      1. ``kernel_filter`` substring matched against Kernel_Name, optionally
-         narrowed by Dispatch_Id when the dir name encodes ``dispatch_<id>``
-         (rocprofv3 ``ui_output_agent_*_dispatch_<id>`` layout).  Dispatch_Id
-         matching avoids false matches when a PyTorch reference kernel shares
-         the same name substring.
-      2. Bidirectional name heuristic against the directory basename (legacy
-         path for timestamped dirs like ``20240101_120000_pa_decode_kernel``).
-    """
+    """Read authoritative resource counts from ``out_kernel_trace.csv`` if present."""
     candidates = []
     for base in (dispatch_dir, os.path.dirname(os.path.abspath(dispatch_dir))):
         candidates += glob.glob(os.path.join(base, "*kernel_trace*.csv"))
@@ -294,7 +271,6 @@ def read_kernel_metadata(dispatch_dir, kernel_filter=""):
                     )
         else:
             # Legacy heuristic: bidirectional substring match against the dir basename.
-            # Works for timestamped dirs like ``20240101_120000_pa_decode_kernel``.
             short = re.sub(r"^\d{8}_\d{6}_", "", dir_name)  # strip YYYYMMDD_HHMMSS_
 
             def _matches(kn):
@@ -328,26 +304,7 @@ def read_kernel_metadata(dispatch_dir, kernel_filter=""):
 
 
 def detect_arch_and_reg_pressure(instructions, meta=None):
-    """Detect GPU architecture from ISA and estimate occupancy.
-
-    VGPR model (CDNA2/CDNA3/CDNA4 unified register file): arch_vgpr (256) and
-    accum_vgpr (256) share ONE combined 512-entry budget per SIMD.  Occupancy
-    from VGPR is ``512 // (arch_vgpr_alloc + accum_vgpr_alloc)``.  This is the
-    same form on gfx942 and gfx950 — gfx942 is NOT a separate-pool
-    ``256 / max(...)`` machine (that was gfx908/CDNA1).
-
-    Occupancy (waves/SIMD) is the min across every resource limiter:
-        occ = min(vgpr_limit, lds_limit, sgpr_limit, hw_max=8)
-    where
-        vgpr_limit = 512 // (arch_alloc + accum_alloc)                    [per SIMD]
-        lds_limit  = (LDS_total // lds_per_wg) * waves_per_wg // 4_SIMDs   [per SIMD]
-        sgpr_limit = (sgpr_total // sgpr_per_wave)                        [per SIMD]
-
-    ``meta`` (from read_kernel_metadata) supplies accum_vgpr / LDS / SGPR /
-    workgroup size, which the ISA scan alone cannot.  ISA-scanned arch_vgpr is
-    combined via max() with the CSV value so a bogus/low CSV field can't
-    under-report.
-    """
+    """Detect GPU architecture from ISA and estimate occupancy."""
     meta = meta or {}
     asms = [inst.asm for inst in instructions]
 
@@ -369,36 +326,24 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
             max_agpr = max(max_agpr, int(m.group(1)))
 
     # Total VGPR budget consumed (what occupancy divides into 512).
-    #
-    # IMPORTANT: the CSV's VGPR_Count and Accum_VGPR_Count are sub-counts of
-    # the SAME .amdhsa_next_free_vgpr total — they SUM to the real allocation,
-    # they are not two independent pools to add a third time.  For vgpr-form
-    # MFMA (no a-registers in the disassembly) the "accum" portion lives in
-    # the arch VGPR file and the ISA v-register scan already includes it.
-    #
-    #   combined = CSV.VGPR_Count + CSV.Accum_VGPR_Count   (preferred)
-    #   fallback (no CSV): ISA arch scan, plus a separate AGPR scan ONLY if
-    #                      a-registers were actually referenced (true agpr-form).
     isa_arch = max_vgpr + 1
     isa_accum = max_agpr + 1 if max_agpr > 0 else 0
     csv_vgpr = meta.get("csv_vgpr", 0)
     csv_accum = meta.get("csv_accum_vgpr", 0)
 
-    # vgpr-form MFMA writes the accumulator into the arch VGPR file (the
-    # disassembly references v-registers, no a-registers).  agpr-form uses a
-    # real separate AGPR file (a-registers present).
+    # vgpr-form MFMA writes the accumulator into the arch VGPR file (the disassembly references v-registers, no
+    # a-registers). agpr-form uses a real separate AGPR file (a-registers present).
     is_vgpr_form = max_agpr == 0
 
     if csv_vgpr or csv_accum:
         if is_vgpr_form:
-            # No physical AGPR; the whole total lives in the arch file.  Guard
-            # against a bogus-low CSV total with the ISA v-register scan.
+            # No physical AGPR; the whole total lives in the arch file.
             arch_vgpr_count = max(isa_arch, csv_vgpr + csv_accum)
             accum_vgpr_count = 0
             combined_count = arch_vgpr_count
         else:
-            # agpr-form: arch and accum live in separate files; guard each
-            # sub-count with its ISA scan so a low CSV field can't under-report.
+            # agpr-form: arch and accum live in separate files; guard each sub-count with its ISA scan so a low CSV
+            # field can't under-report.
             arch_vgpr_count = max(isa_arch, csv_vgpr)
             accum_vgpr_count = max(isa_accum, csv_accum)
             combined_count = arch_vgpr_count + accum_vgpr_count
@@ -407,8 +352,8 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
         accum_vgpr_count = isa_accum
         combined_count = isa_arch + isa_accum  # isa_accum=0 unless real a-regs seen
 
-    # Round the TOTAL up to allocation granularity of 8 (granularity applies to
-    # next_free_vgpr, not to each sub-count separately).
+    # Round the TOTAL up to allocation granularity of 8 (granularity applies to next_free_vgpr, not to each sub-count
+    # separately).
     arch_vgpr_alloc = ((arch_vgpr_count + 7) // 8) * 8
     accum_vgpr_alloc = ((accum_vgpr_count + 7) // 8) * 8 if accum_vgpr_count > 0 else 0
     combined_alloc = ((combined_count + 7) // 8) * 8
@@ -417,8 +362,7 @@ def detect_arch_and_reg_pressure(instructions, meta=None):
     vgpr_total = 512  # combined arch+accum budget per SIMD (CDNA2/3/4)
     vgpr_limit = min(vgpr_total // combined_alloc, max_occupancy) if combined_alloc > 0 else max_occupancy
 
-    # LDS limiter (waves/SIMD).  LDS is a per-CU resource shared by all
-    # workgroups; convert workgroups/CU to waves/SIMD via waves_per_wg / 4 SIMDs.
+    # LDS limiter (waves/SIMD).
     lds_total = 163840 if is_gfx950 else 65536  # 160KB CDNA4, 64KB CDNA3
     lds_per_wg = meta.get("csv_lds", 0)
     wg_size = meta.get("csv_wg", 0)

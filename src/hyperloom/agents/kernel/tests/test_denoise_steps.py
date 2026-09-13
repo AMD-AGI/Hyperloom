@@ -21,8 +21,7 @@ import _denoise_steps as ds  # noqa: E402
 
 
 def test_divisor_prefers_requested_over_inferred():
-    # A declared --num-denoise-steps wins; Hyperloom cannot know what an
-    # operator's prof.step() brackets.
+    # A declared --num-denoise-steps wins; Hyperloom cannot know what an operator's prof.step() brackets.
     assert ds.resolve_perstep_divisor(requested_steps=9, inferred_steps=3) == 9
     assert ds.resolve_perstep_divisor(requested_steps=16, inferred_steps=0) == 16
 
@@ -38,12 +37,7 @@ def test_divisor_none_when_nothing_known():
 
 
 class TestCallSiteBinding:
-    """Pin what each route BINDS to each parameter, not just the helper.
-
-    Asserting the helper alone proves only that it is deterministic. These
-    recorders fail if either call site's arguments are swapped, which is the
-    regression that made the divisor route-dependent in the first place.
-    """
+    """Pin what each route BINDS to each parameter, not just the helper."""
 
     _TRACE = {
         "traceEvents": [
@@ -143,13 +137,7 @@ class TestCallSiteBinding:
 
 
 def test_bypass_cli_default_honours_the_shared_env_var(monkeypatch):
-    """Both CLIs must derive the default from the same place.
-
-    The TraceLens CLI has always read ``HYPERLOOM_NUM_DENOISE_STEPS`` for this
-    default while bypass hardcoded 0. That was harmless while the inferred count
-    always won, but once the requested count takes precedence the env var would
-    change the divisor on one route only.
-    """
+    """Both CLIs must derive the default from the same place."""
     import importlib
 
     import bypass_trace_analysis as bta
@@ -187,8 +175,8 @@ def test_count_profiler_steps_gz_and_plain(tmp_path):
 
 
 def test_count_profiler_steps_across_chunk_boundary(tmp_path, monkeypatch):
-    # Tiny chunks force ProfilerStep#N markers to straddle boundaries; the
-    # overlap carry must still match them without double-counting.
+    # Tiny chunks force ProfilerStep#N markers to straddle boundaries; the overlap carry must still match them without
+    # double-counting.
     monkeypatch.setattr(ds, "_CHUNK_BYTES", 8)
     names = ["ProfilerStep#1", "aten::mm", "ProfilerStep#2", "ProfilerStep#3", "ProfilerStep#2"]
     gzp = tmp_path / "t.pt.trace.json.gz"

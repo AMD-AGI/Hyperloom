@@ -26,8 +26,7 @@ def _init_repo(tmp_path: Path) -> Path:
     return repo
 
 
-# --------------------------------------------------------------------------- #
-# git helpers
+# --------------------------------------------------------------------------- # git helpers
 # --------------------------------------------------------------------------- #
 def test_git_head_returns_sha(tmp_path):
     repo = _init_repo(tmp_path)
@@ -116,8 +115,7 @@ def test_git_discard_removes_symlink_without_touching_target(tmp_path):
     assert kernel.read_text() == "old\n"
 
 
-# --------------------------------------------------------------------------- #
-# _bench_once / _correctness_once
+# --------------------------------------------------------------------------- # _bench_once / _correctness_once
 # --------------------------------------------------------------------------- #
 def test_bench_once_returns_complete_suite(monkeypatch):
     import kernelforge.mcp_server.tools.bench as bench
@@ -179,8 +177,7 @@ def test_correctness_once_false_on_exception(monkeypatch):
     assert integ._correctness_once("drv.py", 30.0) is False
 
 
-# --------------------------------------------------------------------------- #
-# _cheap_summary
+# --------------------------------------------------------------------------- # _cheap_summary
 # --------------------------------------------------------------------------- #
 class _Archive:
     def __init__(self, index):
@@ -231,8 +228,7 @@ def test_cheap_summary_survives_broken_archive():
     assert out == {"category": "", "strategy": "", "recipe": "", "lessons": ""}
 
 
-# --------------------------------------------------------------------------- #
-# kb_warmstart error path
+# --------------------------------------------------------------------------- # kb_warmstart error path
 # --------------------------------------------------------------------------- #
 def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)

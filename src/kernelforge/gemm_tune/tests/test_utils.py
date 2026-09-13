@@ -88,15 +88,13 @@ class TestTunerEnvVars:
             assert TUNER_ENV_VARS[name], f"Empty env var for {name}"
 
     def test_a4w4_env_var_matches_aiter_serving_name(self):
-        # Regression guard: aiter reads fp4/mxfp4 (gfx950-only) GEMM configs via
-        # AITER_CONFIG_GEMM_A4W4, NOT the "_BLOCKSCALE" variant. A mismatch here
-        # silently drops all tuned fp4 configs at serving (aiter falls back to its
-        # bundled default CSV). See aiter/jit/core.py.
+        # Regression guard: aiter reads fp4/mxfp4 (gfx950-only) GEMM configs via AITER_CONFIG_GEMM_A4W4, NOT the
+        # "_BLOCKSCALE" variant.
         assert TUNER_ENV_VARS["a4w4_blockscale"] == "AITER_CONFIG_GEMM_A4W4"
 
     def test_a4w4_env_var_is_read_by_installed_aiter(self):
-        # When aiter is importable, verify the name against ground truth rather
-        # than a hard-coded literal, so this tracks aiter if it ever renames.
+        # When aiter is importable, verify the name against ground truth rather than a hard-coded literal, so this
+        # tracks aiter if it ever renames.
         import importlib.util
 
         if importlib.util.find_spec("aiter") is None:

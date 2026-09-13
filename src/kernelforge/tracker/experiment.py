@@ -26,11 +26,7 @@ from kernelforge.durable_io import atomic_write_text
 
 
 class ExperimentTracker:
-    """Manages experiment lifecycle and persistence.
-
-    Each experiment is stored as a single JSON file in the experiments directory.
-    Files are named {experiment_id}.json.
-    """
+    """Manages experiment lifecycle and persistence."""
 
     def __init__(self, experiments_dir: str | Path):
         self.dir = Path(experiments_dir)
@@ -216,6 +212,27 @@ class ExperimentTracker:
                 parent_experiment_id=parent_experiment_id,
             )
 
+    def list_experiments(self) -> list[Experiment]:
+        """List all experiments, newest first."""
+        experiments = []
+        for path in sorted(self.dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            try:
+                with open(path) as f:
+                    payload = json.load(f)
+                if not isinstance(payload, dict) or not payload.get("experiment_id") or not payload.get("created_at"):
+                    continue
+                experiments.append(Experiment.from_dict(payload))
+            except (
+                json.JSONDecodeError,
+                KeyError,
+                TypeError,
+                ValueError,
+                OSError,
+                UnicodeDecodeError,
+            ):
+                continue
+        return experiments
+
     def get(self, experiment_id: str) -> Experiment:
         """Load an experiment by ID."""
         return self._load(experiment_id)
@@ -229,12 +246,7 @@ class ExperimentTracker:
             return iteration
 
     def set_llm_usage(self, experiment_id: str, usage: dict) -> None:
-        """Persist the run's total LLM token spend onto the experiment.
-
-        ``usage`` is the canonical totals dict from
-        :class:`~kernelforge.tracker.usage.UsageAccumulator`. No-op on an
-        empty/falsy usage so a no-agent run leaves the field unset.
-        """
+        """Persist the run's total LLM token spend onto the experiment."""
         if not usage:
             return
         with self._experiment_lock(experiment_id):
@@ -260,42 +272,9 @@ class ExperimentTracker:
         self._save(exp)
 
     def set_baseline(self, experiment_id: str, baseline_wall_ms: float) -> None:
-        """Persist an auto-measured baseline onto an experiment.
-
-        No-op if the experiment already has a baseline — task-supplied
-        baselines take precedence over the measured anchor.
-        """
+        """Persist an auto-measured baseline onto an experiment."""
         with self._experiment_lock(experiment_id):
             exp = self._load(experiment_id)
             if exp.baseline_wall_ms is None:
                 exp.baseline_wall_ms = baseline_wall_ms
                 self._save(exp)
-
-    def list_experiments(self) -> list[Experiment]:
-        """List all experiments, newest first."""
-        experiments = []
-        for path in sorted(self.dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
-            try:
-                with open(path) as f:
-                    payload = json.load(f)
-                if not isinstance(payload, dict) or not payload.get("experiment_id") or not payload.get("created_at"):
-                    continue
-                experiments.append(Experiment.from_dict(payload))
-            except (
-                json.JSONDecodeError,
-                KeyError,
-                TypeError,
-                ValueError,
-                OSError,
-                UnicodeDecodeError,
-            ):
-                continue
-        return experiments
-
-    def get_best(self, experiment_id: str) -> Iteration | None:
-        """Get the best-performing iteration from an experiment."""
-        return self._load(experiment_id).best_iteration()
-
-    def summary(self, experiment_id: str) -> str:
-        """Get a formatted summary table for an experiment."""
-        return self._load(experiment_id).summary_table()

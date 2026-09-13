@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared invocation-block renderer for baseline / final sections.
-
-Centralised so both renderers emit an identical block. The ``_`` prefix
-marks it as a helper: it registers no renderer and is not listed in
-``compose.py``'s renderer imports.
-"""
+"""Shared invocation-block renderer for baseline / final sections."""
 
 from __future__ import annotations
 
@@ -19,33 +14,23 @@ __all__ = ["render_invocation_block"]
 _FRAMEWORK_ARGS_MAX = 200
 _ENVS_MAX_DISPLAY = 12
 
+#: What a source label means for a reader who wants the flags and did not get
+#: them. Only the labels that report an absence need one.
+_SOURCE_HINTS = {
+    "unknown": "  (extraction failed; try server.log or config yaml)",
+    "unrecorded": "  (the measurement recorded no launch flags)",
+}
+
 
 def _truncate(text: str, limit: int) -> str:
-    """Truncate ``text`` to ``limit`` characters with an ellipsis.
-
-    Args:
-        text (str): The text to truncate.
-        limit (int): The maximum length of the returned string.
-
-    Returns:
-        str: ``text`` unchanged when within ``limit``, otherwise a prefix
-            ending in ``...``.
-    """
+    """Truncate ``text`` to ``limit`` characters with an ellipsis."""
     if len(text) <= limit:
         return text
     return text[: max(limit - 3, 0)] + "..."
 
 
 def _format_envs(envs: dict[str, Any] | None) -> str:
-    """Format environment variables as a compact, capped string.
-
-    Args:
-        envs (dict[str, Any] | None): Environment variable name/value pairs.
-
-    Returns:
-        str: A comma-joined ``k=v`` listing (capped at ``_ENVS_MAX_DISPLAY``
-            entries with a ``+N more`` suffix), or an empty string when empty.
-    """
+    """Format environment variables as a compact, capped string."""
     if not isinstance(envs, dict) or not envs:
         return ""
     items = sorted(envs.items())
@@ -60,17 +45,7 @@ def render_invocation_block(
     invocation: Any,
     session_image: Any,
 ) -> str:
-    """Render an ``### Invocation`` markdown block, or "" when absent/empty.
-
-    Args:
-        invocation: Invocation record (dict) describing framework args,
-            environment overrides and config/log paths.
-        session_image: Container image associated with the session, if any.
-
-    Returns:
-        The rendered markdown block, or an empty string when the invocation
-        is missing or has nothing to show.
-    """
+    """Render an ``### Invocation`` markdown block, or \"\" when absent/empty."""
     if not isinstance(invocation, dict):
         return ""
     framework_args = str(invocation.get("framework_args") or "").strip()
@@ -78,8 +53,14 @@ def render_invocation_block(
     extra_envs = invocation.get("extra_envs")
     config_path = invocation.get("config_path")
     server_log_path = invocation.get("server_log_path")
+    # The run directory the measurement was taken in, which is where its
+    # config and server log live. Recorded in place of the two paths by
+    # producers that name the directory rather than walking it for them.
+    workspace = invocation.get("workspace")
 
-    has_anything = framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path
+    has_anything = (
+        framework_args or (isinstance(extra_envs, dict) and extra_envs) or config_path or server_log_path or workspace
+    )
     if not has_anything:
         return ""
 
@@ -93,11 +74,13 @@ def render_invocation_block(
     if framework_args:
         lines.append(f"- **command**: `{_truncate(framework_args, _FRAMEWORK_ARGS_MAX)}`")
     if framework_args_source:
-        suffix = "  (extraction failed; try server.log or config yaml)" if framework_args_source == "unknown" else ""
+        suffix = _SOURCE_HINTS.get(framework_args_source, "")
         lines.append(f"- **source**: {framework_args_source}{suffix}")
     envs_str = _format_envs(extra_envs if isinstance(extra_envs, dict) else None)
     if envs_str:
         lines.append(f"- **envs**: `{envs_str}`")
     if server_log_path:
         lines.append(f"- **server log**: `{server_log_path}`")
+    if workspace:
+        lines.append(f"- **workspace**: `{workspace}`")
     return "\n".join(lines)

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Where aiter is installed, and where it keeps each tuner script.
-
-A leaf module on purpose: ``utils`` wants the preferred path per tuner and
-``script_discovery`` wants both the hints and the search patterns, while
-``script_discovery`` also has to know where csrc lives. Holding any of that in
-either of those two made them import each other. Nothing here imports anything
-from the package, so there is no cycle to break in the first place.
-"""
+"""Where aiter is installed, and where it keeps each tuner script."""
 
 from __future__ import annotations
 
@@ -16,12 +9,7 @@ import contextlib
 import os
 from pathlib import Path
 
-# Preference-ordered relative paths under csrc/. First existing file wins.
-#
-# sglang_dense_bf16 lists the direct tuner ahead of gemm_tuner.py on purpose:
-# the latter is a shim that rewrites the tuner's exit code (1 -> 0), which hides
-# whether anything was produced. We judge by row count either way, but the
-# direct script keeps the signal honest.
+# Preference-ordered relative paths under csrc/.
 TUNER_SCRIPT_HINTS: dict[str, tuple[str, ...]] = {
     "fmoe_ck": ("ck_gemm_moe_2stages_codegen/gemm_moe_tune.py",),
     "a8w8": ("ck_gemm_a8w8/gemm_a8w8_tune.py",),
@@ -35,8 +23,7 @@ TUNER_SCRIPT_HINTS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# Filename globs used when every hint misses. Exact filenames, so
-# ``gemm_a8w8_tune.py`` never matches ``batched_gemm_a8w8_tune.py``.
+# Filename globs used when every hint misses.
 TUNER_SCRIPT_PATTERNS: dict[str, tuple[str, ...]] = {
     "fmoe_ck": ("**/gemm_moe_tune.py",),
     "a8w8": ("**/gemm_a8w8_tune.py",),
@@ -57,9 +44,7 @@ def resolve_aiter_root() -> Path | None:
         import aiter
 
         pkg_dir = Path(aiter.__file__).parent
-        # Source installs keep csrc beside the aiter package. Some wheel
-        # layouts split metadata and tuner scripts into a sibling aiter_meta
-        # package under the same site-packages directory.
+        # Source installs keep csrc beside the aiter package.
         for candidate in (pkg_dir.parent, pkg_dir.parent / "aiter_meta"):
             if (candidate / "csrc").is_dir():
                 return candidate

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover the source arm's enqueue and give-up bookkeeping.
-
-Tests ``_enqueue_framework_agent_task`` and
-``_record_framework_agent_phase_done`` (the give-up summary row, whether the
-reason is the retry limit or a clean empty payload) by binding them to a
-minimal Coordinator stub.
-"""
+"""Cover the source arm's enqueue and give-up bookkeeping."""
 
 from __future__ import annotations
 
@@ -67,20 +61,14 @@ def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list
 
 
 class _CoordinatorStub:
-    """Minimal stub to bind the Coordinator's discover methods to.
-
-    Pins discovery to a single repo so one discover call == one phase_discover
-    call (the per-batch failure-counter semantics under test).
-    """
+    """Minimal stub to bind the Coordinator's discover methods to."""
 
     _unprocessed_framework_agent_candidates = Coordinator._unprocessed_framework_agent_candidates
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
     _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys
     _stamp_framework_progress = Coordinator._stamp_framework_progress
-    # Reverse-lookup called on every repo; here it resolves to the session
-    # framework, so nothing is tagged (same-framework path).
-    # Real lane/TTL resolution, so the enqueue tests exercise the production
-    # registry lookup instead of a stub that silently yields no lanes.
+    # Reverse-lookup called on every repo; here it resolves to the session framework, so nothing is tagged
+    # (same-framework path).
     _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
 
     def __init__(self, tmp_path: Path) -> None:
@@ -169,12 +157,7 @@ def test_enqueue_success_does_not_append_progress_row(tmp_path: Path):
 
 
 def test_enqueue_sources_lanes_and_lease_ttl_from_the_action_registry(tmp_path: Path):
-    """Regression: the pump enqueue must inherit ``framework_agent`` lanes and lease TTL from the registry.
-
-    Hardcoding the lanes and omitting ``lease_ttl_sec`` left the task row at 0,
-    which the dispatcher turned into a 60s lane lease for a 12-minute action and
-    which also made the watchdog skip reclamation of orphaned tasks.
-    """
+    """Regression: the pump enqueue must inherit ``framework_agent`` lanes and lease TTL from the registry."""
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
     meta = _ACTION_REGISTRY.get("integrate_patch")

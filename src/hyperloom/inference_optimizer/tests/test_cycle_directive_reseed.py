@@ -1,18 +1,14 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for per-macro-cycle orchestration-prompt reseeding.
-
-Covers the deterministic fallback render and _reseed_orch_prompt_for_cycle:
-LLM directive wins when present, deterministic fallback otherwise, the
-cycle_directive_history ring appends/caps, and a user --orch-prompt is never
-clobbered. All offline; the prompt rebuild is stubbed.
-"""
+"""Unit tests for per-macro-cycle orchestration-prompt reseeding."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.phases.explore import ExplorePhase
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -26,12 +22,7 @@ def _explore_with_stub_coordinator(
     user_supplied: bool = False,
     plan_focus: dict | None = None,
 ) -> tuple[ExplorePhase, SimpleNamespace, list[dict]]:
-    """Build an ExplorePhase over a minimal coordinator stub.
-
-    Returns (phase, coord, rebuild_calls) where rebuild_calls records the kwargs
-    passed to the stubbed prompt rebuilder. ``session_dir`` is required by the
-    tests that reseed, which snapshot the scope they install.
-    """
+    """Build an ExplorePhase over a minimal coordinator stub."""
     st = SharedState(session_id="t", macro_cycle=macro_cycle)
     st.orchestration_memory = {"next_cycle_directive": next_cycle_directive}
     rebuild_calls: list[dict] = []
@@ -129,3 +120,61 @@ def test_reseed_history_ring_caps_at_10(tmp_path):
     # Newest kept; oldest dropped.
     assert hist[-1]["cycle"] == 14
     assert hist[0]["cycle"] == 5
+
+
+def _explore_with_memory_backend(*, raw_text: str, previous: dict | None = None):
+    """An ExplorePhase whose orchestration backend replies with ``raw_text``."""
+    st = SharedState(session_id="t")
+    st.orchestration_memory = dict(previous or {})
+
+    class _Backend:
+        async def run(self, **_kwargs):
+            return SimpleNamespace(raw_text=raw_text)
+
+    phase = ExplorePhase(
+        SimpleNamespace(
+            shared_state=st,
+            session_dir=None,
+            backends={"orchestration": _Backend()},
+        )
+    )
+
+    async def _stub(_agent: str) -> str:
+        return "STUB"
+
+    phase._compose_prompt = _stub  # type: ignore[method-assign]
+    phase._load_system_prompt = _stub  # type: ignore[method-assign]
+    return phase, st
+
+
+@pytest.mark.asyncio
+async def test_capture_warns_when_the_reply_carries_no_json(caplog):
+    phase, st = _explore_with_memory_backend(
+        raw_text="I could not produce JSON, sorry.",
+        previous={
+            "current_plan": "drive down decode latency",
+            "next_cycle_directive": "attack the KV cache",
+        },
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await phase._capture_cycle_memory() is True
+
+    assert "no JSON object found" in caplog.text
+    # The directive steers the next cycle, so it is the one that must survive.
+    assert st.orchestration_memory["next_cycle_directive"] == "attack the KV cache"
+    # An unparseable reply is salvaged as prose rather than discarded.
+    assert st.orchestration_memory["current_plan"] == "I could not produce JSON, sorry."
+
+
+@pytest.mark.asyncio
+async def test_capture_is_quiet_when_the_reply_parses(caplog):
+    phase, st = _explore_with_memory_backend(
+        raw_text='```json\n{"current_plan": "new plan", "next_cycle_directive": "go deep on attention"}\n```'
+    )
+
+    with caplog.at_level("WARNING"):
+        assert await phase._capture_cycle_memory() is True
+
+    assert "_capture_cycle_memory" not in caplog.text
+    assert st.orchestration_memory["next_cycle_directive"] == "go deep on attention"

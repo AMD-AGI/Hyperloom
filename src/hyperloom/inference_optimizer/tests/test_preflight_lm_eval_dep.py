@@ -15,11 +15,7 @@ from hyperloom.inference_optimizer.cli import preflight
 
 
 class _FakeRun:
-    """Stand-in for ``subprocess.run`` driving one probe subprocess per module.
-
-    ``missing`` names the modules whose ``import`` probe fails; ``dead_interpreter``
-    makes even the ``pass`` liveness probe fail.
-    """
+    """Stand-in for ``subprocess.run`` driving one probe subprocess per module."""
 
     def __init__(
         self,
@@ -104,8 +100,8 @@ def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
     preflight._ensure_lm_eval_dep("py", ["--break-system-packages"])
 
     assert len(runner.installs) == 1
-    # Pinned to the commit InferenceX force-reinstalls on the single-node path,
-    # so both paths measure accuracy with the same harness.
+    # Pinned to the commit InferenceX force-reinstalls on the single-node path, so both paths measure accuracy with
+    # the same harness.
     assert preflight._LM_EVAL_PINNED_SPECS[0][1] in runner.installs[0]
     assert preflight._LM_EVAL_PINNED_REF in runner.installs[0][-1]
 
@@ -117,15 +113,7 @@ def _constraint_lines(install_cmd: list[str]) -> list[str]:
 
 
 def test_lm_eval_install_cannot_move_the_packages_install_sh_settled(monkeypatch):
-    """This install runs after install.sh's deliberately-last pandas pin.
-
-    install.sh orders ``ensure_rocprof_compute`` after every pip step precisely
-    so "no later pip install can re-pull pandas>=3"; pandas>=3 makes
-    rocprof-compute drop every counter and forge degrade to PMC with no
-    roofline. This install happens at optimize time -- after that last word, in
-    the same interpreter -- and its closure reaches pandas through datasets and
-    torch directly, where a PyPI torch would be a CUDA build on a ROCm box.
-    """
+    """This install runs after install.sh's deliberately-last pandas pin."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     runner = _patch(monkeypatch, _FakeRun(["lm_eval"]))
 
@@ -167,12 +155,7 @@ def test_lm_eval_skipped_when_present(monkeypatch):
 
 
 def test_image_provided_lm_eval_is_never_reinstalled_for_a_missing_extra(monkeypatch, capsys):
-    """An image that ships lm_eval keeps its own build; only the extra is added.
-
-    Probing ``lm_eval`` and ``tenacity`` as one import made these two states
-    indistinguishable, so a missing extra triggered ``pip install lm_eval[api]``
-    and let pip resolve a different lm_eval over the version the image pinned.
-    """
+    """An image that ships lm_eval keeps its own build; only the extra is added."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     runner = _patch(monkeypatch, _FakeRun(["tenacity"]))
 
@@ -186,11 +169,7 @@ def test_image_provided_lm_eval_is_never_reinstalled_for_a_missing_extra(monkeyp
 
 
 def test_pinned_install_falls_back_to_archive_without_git(monkeypatch):
-    """No git binary must not fail the gate: the source archive is the fallback.
-
-    ``check=True`` on the git spec would turn a gitless sandbox into an aborted
-    preflight, so only the last spec may raise.
-    """
+    """No git binary must not fail the gate: the source archive is the fallback."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     git_spec, archive_spec = (s for _, s in preflight._LM_EVAL_PINNED_SPECS)
     runner = _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity"], failing_specs=[git_spec]))
@@ -201,11 +180,7 @@ def test_pinned_install_falls_back_to_archive_without_git(monkeypatch):
 
 
 def test_image_pinned_lm_eval_is_not_replaced(monkeypatch):
-    """Only the absent extra is installed when the image already ships lm_eval.
-
-    Force-reinstalling the pin here would swap out a version the image chose on
-    purpose, so the pinned spec must stay out of this install.
-    """
+    """Only the absent extra is installed when the image already ships lm_eval."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     runner = _patch(monkeypatch, _FakeRun(["tenacity"]))  # lm_eval imports fine
 
@@ -217,13 +192,7 @@ def test_image_pinned_lm_eval_is_not_replaced(monkeypatch):
 
 
 def test_single_node_is_left_to_inferencex(monkeypatch):
-    """Single-node must not even probe: preflight never touched lm_eval there.
-
-    ``run_eval`` -> InferenceX ``run_lm_eval`` installs the harness on first use
-    and force-reinstalls its own pinned commit over anything already present, so
-    installing ahead of it cannot change the outcome -- it can only add a way for
-    a previously working run to die on ``check=True``.
-    """
+    """Single-node must not even probe: preflight never touched lm_eval there."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
 
@@ -285,12 +254,7 @@ def test_resolved_eval_disabled_reads_nothing_without_a_named_session(tmp_path, 
 
 
 def test_unprobeable_interpreter_is_left_untouched(monkeypatch, capsys):
-    """A probe that cannot run proves nothing, so nothing is installed over it.
-
-    Guessing here would reinstall on top of an lm_eval the image may already
-    ship. An interpreter that cannot run ``python -c`` breaks the benchmark far
-    more visibly than a missing accuracy gate, so this warns instead of raising.
-    """
+    """A probe that cannot run proves nothing, so nothing is installed over it."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     runner = _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity"], dead_interpreter=True))
 
@@ -302,11 +266,7 @@ def test_unprobeable_interpreter_is_left_untouched(monkeypatch, capsys):
 
 
 def test_unusable_interpreter_path_does_not_crash_preflight(monkeypatch, capsys):
-    """A missing interpreter raises from subprocess rather than returning a code.
-
-    Preflight must not die on it: the accuracy gate is not worth aborting the
-    launch over, and absence is still unproven, so nothing is installed either.
-    """
+    """A missing interpreter raises from subprocess rather than returning a code."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     calls: list[list[str]] = []
 
@@ -323,13 +283,7 @@ def test_unusable_interpreter_path_does_not_crash_preflight(monkeypatch, capsys)
 
 
 def test_each_module_is_probed_in_its_own_subprocess(monkeypatch):
-    """A hard crash importing one module must not void the verdict on the others.
-
-    ``import lm_eval`` pulls in torch, which a broken ROCm install can kill by
-    signal rather than by exception. Probing both modules in one interpreter let
-    that take tenacity's result down with it, and the whole ensure then bailed
-    out as unprobeable.
-    """
+    """A hard crash importing one module must not void the verdict on the others."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     runner = _patch(monkeypatch, _FakeRun(["lm_eval"]))  # lm_eval import dies
 
@@ -342,14 +296,7 @@ def test_each_module_is_probed_in_its_own_subprocess(monkeypatch):
 
 
 def test_lm_eval_install_failure_aborts_preflight(monkeypatch):
-    """A failed pip install must abort preflight instead of being swallowed.
-
-    The whole point of this ensure is that ``lm_eval`` exists before the run
-    starts. Ignoring the install exit code let a broken network, resolver or
-    permission land back on ``No module named lm_eval`` ->
-    ``baseline_accuracy_failed`` hours later, with the pip diagnostics gone --
-    exactly the failure this function was added to remove.
-    """
+    """A failed pip install must abort preflight instead of being swallowed."""
     monkeypatch.delenv("RUN_EVAL", raising=False)
     _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity"], install_rc=1))
 

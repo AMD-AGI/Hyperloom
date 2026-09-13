@@ -109,8 +109,8 @@ class _Service:
                 raise urllib.error.HTTPError(url, 404, "missing", {}, None)
             return _Body(detail)
         if path.endswith("/search/prs"):
-            # A bare JSON array of {matched_field, snippet, summary}, NOT the
-            # {items, page} envelope the /prs endpoints use.
+            # A bare JSON array of {matched_field, snippet, summary}, NOT the {items, page} envelope the /prs
+            # endpoints use.
             return _Body(
                 _search_body(
                     self.by_query.get(params.get("q", [""])[0], []),
@@ -533,8 +533,7 @@ def test_all_fallback_candidates_weak_yields_no_candidate(service, client):
 
 
 def test_the_fallback_floor_is_configurable(monkeypatch, service, client):
-    """A repository whose distills score conservatively needs the floor moved,
-    not the whole feature turned off."""
+    """A repository whose distills score conservatively needs the floor moved, not the whole feature turned off."""
     monkeypatch.setenv("PR_KB_FALLBACK_MIN_WORTH", "0.05")
     service.recent = [1, 2]
     service.details = {

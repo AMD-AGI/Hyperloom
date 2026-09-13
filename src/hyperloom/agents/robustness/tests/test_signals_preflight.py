@@ -226,8 +226,9 @@ def test_model_gpu_fit_custom_min_headroom_pct():
 
 
 def test_amdahl_ceiling_silent_on_dsr1_case_with_default_threshold():
-    """DSR1-FP8 case (30.9% Triton at 1.5x → ceiling ~11.7%) stays silent:
-    the theoretical Amdahl ceiling is above the 5% default."""
+    """DSR1-FP8 case (30.9% Triton at 1.5x → ceiling ~11.7%) stays silent: the theoretical Amdahl ceiling is above the
+    5% default.
+    """
     det = AmdahlCeilingDetector()
     breakdown = {
         "tier_pcts": {

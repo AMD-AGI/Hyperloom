@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for fmoe_ck E2E coverage and apply verification (#101821/#101810).
-
-Dense BF16 GEMM lookups must not be treated as fmoe_ck evidence. Runtime
-attribution requires a non-default descriptor whose kernelName1/kernelName2
-pair matches the bare ``candidate_fmoe.csv`` row for the full fourteen-column
-``get_2stage_cfgs`` lookup key.
-"""
+"""Regression tests for fmoe_ck E2E coverage and apply verification (#101821/#101810)."""
 
 from __future__ import annotations
 

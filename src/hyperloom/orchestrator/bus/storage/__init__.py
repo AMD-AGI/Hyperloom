@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SQLite WAL atomic storage backend (single
-``$SESSION_DIR/storage/coordinator.db``). WAL + ``BEGIN IMMEDIATE`` gives
-cross-table atomicity; see :mod:`.schema` for the table layout.
-"""
+"""SQLite WAL atomic storage backend (single ``$SESSION_DIR/storage/coordinator.db``)."""
 
 from .connection import SqliteConnection, open_connection
 from .schema import (

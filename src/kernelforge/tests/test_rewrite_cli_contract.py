@@ -1,9 +1,4 @@
-"""Tests for the forge-rewrite-by-flydsl public CLI surface.
-
-The capability handshake and the logical-op-name option are what a consumer
-binds to before it can run anything, so they are exercised without a GPU, an
-LLM, or a workspace.
-"""
+"""Tests for the forge-rewrite-by-flydsl public CLI surface."""
 
 from __future__ import annotations
 
@@ -27,8 +22,8 @@ def _rewrite_command():
 
 
 def test_capabilities_query_short_circuits_the_required_options():
-    # A bare capability query carries none of the five required options; it must
-    # answer instead of failing with a usage error.
+    # A bare capability query carries none of the five required options; it must answer instead of failing with a
+    # usage error.
     result = CliRunner().invoke(main, ["forge-rewrite-by-flydsl", "--capabilities-json"])
 
     assert result.exit_code == 0
@@ -154,11 +149,7 @@ def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
 
 
 def test_rewrite_rejects_an_unknown_option(monkeypatch, tmp_path):
-    """An undeclared option is fatal here too, for the same reason as forge-loop.
-
-    These two were the only tolerant entry points, granted the exemption because
-    a consumer in another repository drove them. Vendoring removed that repository.
-    """
+    """An undeclared option is fatal here too, for the same reason as forge-loop."""
     result, _captured = _invoke_rewrite(
         monkeypatch,
         tmp_path,

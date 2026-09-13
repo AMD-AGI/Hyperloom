@@ -16,12 +16,7 @@ from sglang.srt.layers.layernorm import RMSNorm
 
 
 def main() -> int:
-    """Parse args, time RMSNorm, write benchmark.json with throughput field.
-
-    Returns:
-        int: Process exit code: ``0`` on success, ``2`` when no CUDA/ROCm
-            device is available.
-    """
+    """Parse args, time RMSNorm, write benchmark.json with throughput field."""
     parser = argparse.ArgumentParser(description="Tiny RMSNorm GPU micro-bench")
     parser.add_argument("--out", required=True, help="Path to benchmark.json")
     parser.add_argument("--num-tokens", type=int, default=4096)

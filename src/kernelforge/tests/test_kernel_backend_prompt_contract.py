@@ -1,9 +1,4 @@
-"""Structural contracts for the two kernel backend prompt assembly paths.
-
-Locks XML tag boundaries (<knowledge>, <skill>, <workspace>, <coordination>),
-per Coordination Rules fingerprints, and full rendered-prompt sha256
-snapshots so that any refactor that silently changes prompt output is caught.
-"""
+"""Structural contracts for the two kernel backend prompt assembly paths."""
 
 from __future__ import annotations
 
@@ -23,8 +18,8 @@ from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 _GPU = "gfx950"
 _KB_SENTINEL = "KB_SENTINEL_VALUE"
 
-# Directory of the kernel backends package as actually loaded, so a prompt that
-# embeds a tool path does not make hashes depend on the checkout location.
+# Directory of the kernel backends package as actually loaded, so a prompt that embeds a tool path does not make
+# hashes depend on the checkout location.
 _KERNEL_BACKENDS_ABS = os.path.abspath(os.path.dirname(_kernel_backends_pkg.__file__))
 
 
@@ -49,26 +44,7 @@ def forge_loop_prompts(monkeypatch):
 
 # ---------- snapshot hashes -------------------------------------------------
 
-# The fixture mocks ``build_forge_knowledge`` to a constant sentinel, so these
-# hashes cover the prompt TEMPLATE only. A change to which knowledge folders a
-# backend is served (``resolve_language_dirs``) leaves every hash here alone --
-# which makes an unexpected diff in this table a precise signal that prompt text
-# moved, not that knowledge assembly did.
-# Every hash below has been re-snapshotted three times: once in the KernelForge
-# -> Hyperloom merge (which rewrote one runnable command in a shared knowledge
-# card -- the old package name in ``python3 -m <pkg>.mcp_server.tools.bench``),
-# once for the backend-vocabulary rename, which reaches the prompt TEXT because
-# each backend introduces itself by name ("You are the CK kernel backend --"),
-# and once for the local_knowledge card renames (cheap_sweeps.md ->
-# lever_cheap_sweeps.md and friends). That last one moved every hash even
-# though only ck/hip/triton prompts.py changed, because the two cards every
-# backend is pointed at live in the shared prompt_utils.py preamble.
-# The intellikit backend's removal moved only aiter's hash: its prompt listed
-# `languages/asm/` in the language-folder routing, and that folder went with the
-# backend (diffed: one line changed, nothing else).
-# Each time the rendered prompts were diffed line by line against their previous
-# rendering; for the card renames every changed line was a card name and nothing
-# else moved. See test_rename_completeness.py for the tree-wide check.
+# The fixture mocks ``build_forge_knowledge`` to a constant sentinel, so these hashes cover the prompt TEMPLATE only.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "67005fca12b430faff552dbf2ed432fc8d2c84836a746ad819f8b9a2633ca33b",
     "ck": "ec949d82a4226152c4a4e288a8109c3d51eabc23cf0739ed2acd925408a88c01",
@@ -126,14 +102,7 @@ _LOOP_FORM_CARD = "lever_loop_form.md"
 
 
 class TestEditSurfaceAndSweepContract:
-    """The sweep contract is shared, always resident, and no longer self-erasing.
-
-    Two campaigns lost their largest available win on a kernel backend whose prompt never
-    mentioned sweeps at all, because the contract lived only in the Triton
-    prompt. It now lives in a ``common_methodology/`` card that every kernel backend
-    receives, with an always-resident pointer in each prompt (the knowledge tree
-    is Read-on-demand, so a card nobody opens teaches nothing).
-    """
+    """The sweep contract is shared, always resident, and no longer self-erasing."""
 
     def test_every_kernel_backend_points_at_the_sweep_card(self, forge_loop_prompts):
         for backend, prompt in forge_loop_prompts.items():
@@ -146,20 +115,13 @@ class TestEditSurfaceAndSweepContract:
             assert _EDIT_SURFACE_CARD in prompt, f"{backend}: prompt does not name the edit-surface card"
             assert "editable_sources" in prompt, f"{backend}: prompt never names the editable source list"
             assert "os.environ" in prompt, f"{backend}: prompt does not state the os.environ converse"
-            # The declared list is a floor: `agent.py` tells repository tasks
-            # that any tracked non-protected implementation file is editable,
-            # so a prompt presenting the list as the boundary contradicts the
-            # rest of its own assembly -- in the direction that lost the
-            # campaigns.
+            # The declared list is a floor: `agent.py` tells repository tasks that any tracked non-protected
+            # implementation file is editable, so a prompt presenting the list as the boundary contradicts the rest of
+            # its own assembly -- in the direction that lost the campaigns.
             assert "FLOOR, not a ceiling" in prompt, f"{backend}: prompt presents the editable list as a ceiling"
 
     def test_every_kernel_backend_carries_the_boolean_parse_warning(self, forge_loop_prompts):
-        """A knob that cannot be turned off is the sweep bug the echo cannot catch.
-
-        The echo prints the string the host sent, not the value the source made
-        of it, so `bool("0")` returning True makes the OFF point time the ON
-        kernel and still come back confirmed.
-        """
+        """A knob that cannot be turned off is the sweep bug the echo cannot catch."""
         for backend, prompt in forge_loop_prompts.items():
             assert 'bool("0")' in prompt, (
                 f"{backend}: prompt does not warn that a bool-cast swept string is always True"
@@ -194,12 +156,7 @@ class TestEditSurfaceAndSweepContract:
 
 
 class TestSharedCardsAreReachable:
-    """The new cards must be reachable through the real knowledge index.
-
-    ``build_forge_knowledge`` loads ``common_methodology/INDEX.md`` whole, so a
-    card that is not registered there is invisible to every kernel backend no matter what
-    the prompt says.
-    """
+    """The new cards must be reachable through the real knowledge index."""
 
     @pytest.fixture()
     def knowledge_block(self) -> str:
@@ -218,14 +175,7 @@ class TestSharedCardsAreReachable:
             )
 
     def test_loop_form_card_reaches_a_triton_kernel_context(self):
-        """The loop-form rule must land in a Triton kernel's context specifically.
-
-        It is registered twice on purpose: once in ``common_methodology/INDEX.md``
-        (every kernel backend) and once in ``languages/triton/INDEX.md``, because the
-        recognition signature -- a ``while`` bounded by a ``tl.load`` -- is Triton
-        syntax and a Triton author routes through the language map, not the
-        methodology one.
-        """
+        """The loop-form rule must land in a Triton kernel's context specifically."""
         prompt = build_single_kernel_backend_prompt(
             Config(gpu_target=_GPU),
             "triton",
@@ -239,16 +189,7 @@ class TestSharedCardsAreReachable:
 
 
 class TestDocumentedSweepHelper:
-    """The helper the card shows must round-trip a boolean knob.
-
-    Every kernel backend now receives this card, so whatever it shows is what eight
-    backends will paste into a kernel. ``type(default)(value)`` is ``bool(value)``
-    for a boolean default, and ``bool("0")`` and ``bool("false")`` are both True:
-    the OFF point then benchmarks the ON configuration, while the echo -- which
-    reports the string the host sent, never the value the source computed --
-    marks the point confirmed. The sweep closes a live axis it never varied,
-    through the one contract that exists to prevent exactly that.
-    """
+    """The helper the card shows must round-trip a boolean knob."""
 
     @pytest.fixture()
     def sweep_const(self):

@@ -1,19 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for tuned-artifact apply verification.
-
-The load-bearing distinction: aiter logs a miss unconditionally but a hit only
-when AITER_LOG_TUNED_CONFIG=1. "No hit lines" therefore does not mean "zero
-hits", and a check that conflates them would revert every arm that ran without
-the flag -- which, in a scan of 60 production logs, was all of them.
-
-``kernelforge.gemm_tune`` is not a Hyperloom dependency, so importorskip on it left
-this whole module -- and therefore the KEEP gate's entire decision surface --
-without automated coverage in CI. The verdict logic is exercised against a
-stand-in parser instead, and the real parser is used as well wherever forge
-happens to be installed.
-"""
+"""Tests for tuned-artifact apply verification."""
 
 from __future__ import annotations
 
@@ -30,8 +18,8 @@ _MISS = (
     "otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, "
     "not found tuned config in /tmp/aiter_configs/bf16_tuned_gemm.csv"
 )
-# Transcribed from a real MI355X run: the hit line names the table it resolved
-# in, which is the only place the path appears once AITER_CONFIG_* is set.
+# Transcribed from a real MI355X run: the hit line names the table it resolved in, which is the only place the path
+# appears once AITER_CONFIG_* is set.
 _HIT = (
     "[aiter] shape is M:{m}, N:4096, K:4096 dtype='torch.bfloat16' "
     "otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False "
@@ -50,18 +38,9 @@ def _log(tmp_path, lines):
 
 @pytest.fixture(params=["stub_parser", "real_forge"])
 def parser(request, monkeypatch):
-    """Run every case against a stand-in parser, and against forge when present.
-
-    The stand-in is deliberately minimal -- it reproduces only the three facts
-    the verdict depends on (hit/miss counts, merged tables, consulted tables) --
-    so the decision logic stays under test on a machine that has no forge.
-    """
+    """Run every case against a stand-in parser, and against forge when present."""
     if request.param == "real_forge":
-        # Skip on the submodule production actually imports, not the top-level
-        # package. A box can have kernelforge.gemm_tune installed without
-        # ``evidence`` in it, and then the top-level check passes, the parser
-        # comes back None, every verdict is "unknown", and eleven cases fail on
-        # a developer machine for a reason that has nothing to do with them.
+        # Skip on the submodule production actually imports, not the top-level package.
         pytest.importorskip("kernelforge.gemm_tune.evidence", reason="real parser unavailable")
         return None
 
@@ -109,10 +88,8 @@ class TestServed:
 
 class TestArtifactArrival:
     def test_an_override_run_prints_no_merge_line_and_still_counts_as_arrived(self, tmp_path, parser):
-        # Setting AITER_CONFIG_* makes aiter skip the merge step: no merge line
-        # at all, and the lookups name our own file. Reading that as "not
-        # merged" would revert every candidate, which is what the merge-list
-        # comparison used to do.
+        # Setting AITER_CONFIG_* makes aiter skip the merge step: no merge line at all, and the lookups name our own
+        # file.
         ours = "/work/run/merged_tuned_dense_bf16.csv"
         p = _log(
             tmp_path,
@@ -124,8 +101,7 @@ class TestArtifactArrival:
         assert v.verdict != "not_merged"
 
     def test_the_runtime_table_name_is_accepted_too(self, tmp_path, parser):
-        # The deployed file is named after the candidate; the server resolves it
-        # under the canonical table name. Both are the same artifact.
+        # The deployed file is named after the candidate; the server resolves it under the canonical table name.
         p = _log(tmp_path, [_MERGE, _HIT.format(m=16)])
         v = verify_applied(p, ["/work/run/merged_tuned_dense_bf16.csv"], runtime_table_names=_BF16)
         assert v.verdict == "served"
@@ -168,10 +144,8 @@ class TestHitLoggingTrap:
         assert v.verdict == "inconclusive_no_hit_logging" and not v.blocks_keep
 
     def test_zero_hits_with_logging_on_is_a_real_failure(self, tmp_path, parser):
-        # This is the verdict the gate exists for, and it was unreachable: the
-        # parser answers "inconclusive" for hits==0 whatever the flag, so the
-        # branch was dead. Now that every serving run sets the flag, "0 hits and
-        # N misses" is a genuine zero and has to block.
+        # This is the verdict the gate exists for, and it was unreachable: the parser answers "inconclusive" for
+        # hits==0 whatever the flag, so the branch was dead.
         p = _log(tmp_path, [_MERGE, _MISS.format(m=15), _MISS.format(m=17)])
         v = verify_applied(
             p,
@@ -226,13 +200,7 @@ class TestDegraded:
 
 
 class TestTheEnvToTableMapDoesNotDrift:
-    """The same mapping exists here and in KernelForge, and cannot be shared.
-
-    A name that drifts makes the apply check compare our deployed file against
-    the wrong runtime table, conclude the artifact never arrived, and revert a
-    candidate that was fine. The two same-repo copies are now one constant;
-    this covers the copy that lives in the other repository.
-    """
+    """The same mapping exists here and in KernelForge, and cannot be shared."""
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
         forge_utils = pytest.importorskip("kernelforge.gemm_tune.utils", reason="KernelForge not installed here")
@@ -249,8 +217,7 @@ class TestTheEnvToTableMapDoesNotDrift:
         )
 
     def test_the_fp4_key_is_the_one_aiter_actually_reads(self):
-        # AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant. The suffixed
-        # name was a dead key that silently dropped every tuned fp4 GEMM.
+        # AITER_CONFIG_GEMM_A4W4, not the "_BLOCKSCALE" variant.
         from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
 
         assert "AITER_CONFIG_GEMM_A4W4" in _AITER_ENV_TO_TABLE

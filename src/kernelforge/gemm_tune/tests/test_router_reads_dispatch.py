@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A vLLM run whose MoE is partly served by aiter needs the CK tuner too.
-
-Routing by framework assumes vLLM's Triton path owns the MoE. aiter's CK
-fused-MoE can serve some or all of the token range in the same process, and its
-table is written by ``fmoe_ck``, which the vLLM branch never selects. When both
-appear in one log the answer is not to pick a side: each serves the range it
-serves, and dropping either forfeits that range -- the same mistake as letting a
-single 1-stage sighting disable CK tuning for the tokens 2-stage was serving.
-"""
+"""A vLLM run whose MoE is partly served by aiter needs the CK tuner too."""
 
 from __future__ import annotations
 
@@ -75,8 +67,7 @@ class TestVllmMoeRouting:
         assert "vllm_moe_triton" in names
 
     def test_a_mixed_log_keeps_both(self, tmp_path):
-        # Part of the token range is CK-served and part is Triton-served, so
-        # both tables need tuning.
+        # Part of the token range is CK-served and part is Triton-served, so both tables need tuning.
         names = _names(
             _select(
                 tmp_path,
@@ -91,8 +82,8 @@ class TestVllmMoeRouting:
         assert {"fmoe_ck", "vllm_moe_triton"} <= set(names)
 
     def test_the_ck_tuner_is_given_only_the_tokens_ck_served(self, tmp_path):
-        # Selecting both tuners is not enough on its own: a CK table keyed on
-        # the token counts Triton served is one nothing ever reads.
+        # Selecting both tuners is not enough on its own: a CK table keyed on the token counts Triton served is one
+        # nothing ever reads.
         specs = _select(
             tmp_path,
             [
@@ -107,8 +98,8 @@ class TestVllmMoeRouting:
         assert ck.token_hint == [16, 64]
 
     def test_no_token_detail_means_the_runs_full_coverage(self, tmp_path):
-        # A log naming the stage but no token count says nothing about which
-        # part of the range CK served, so narrowing would be a guess.
+        # A log naming the stage but no token count says nothing about which part of the range CK served, so narrowing
+        # would be a guess.
         line = "[aiter] [fused_moe] using 2stage ck for (x, y, z)"
         (ck,) = [s for s in _select(tmp_path, [line, _MISS.format(tok=16)]) if s.name == "fmoe_ck"]
         assert ck.token_hint is None
@@ -141,8 +132,7 @@ class TestVllmMoeRouting:
         assert "vllm_moe_triton" in names
 
     def test_a_1stage_only_log_does_not_add_the_ck_tuner(self, tmp_path):
-        # 1-stage ASM is not what fmoe_ck tunes; adding it would burn a tuner
-        # on a path it cannot write a table for.
+        # 1-stage ASM is not what fmoe_ck tunes; adding it would burn a tuner on a path it cannot write a table for.
         names = _names(_select(tmp_path, [_ASM.format(tok=4096)]))
         assert "fmoe_ck" not in names
 
@@ -170,8 +160,8 @@ class TestVllmMoeRouting:
         assert names.count("fmoe_ck") == 1
 
     def test_sglang_routing_is_unchanged(self, tmp_path):
-        # sglang already selects fmoe_ck through its own branch; the vLLM-side
-        # addition must not double it or reorder anything.
+        # sglang already selects fmoe_ck through its own branch; the vLLM-side addition must not double it or reorder
+        # anything.
         specs = select_tuners(
             _moe_profile(),
             framework="sglang",

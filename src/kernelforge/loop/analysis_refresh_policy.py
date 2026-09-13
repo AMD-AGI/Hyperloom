@@ -36,14 +36,7 @@ def decide_analysis_refresh(
     last_attempt_iteration: int = -1,
     current_iteration: int = 0,
 ) -> AnalysisRefreshDecision:
-    """Decide whether the current canonical commit needs fresh Analysis.
-
-    The performance gate is cumulative from the commit that produced the
-    currently active evidence. A Supervisor intervention bypasses that gate,
-    but only when the evidence is stale. The Analysis service owns its durable
-    two-session attempt budget; this policy only prevents duplicate calls in
-    one planning iteration.
-    """
+    """Decide whether the current canonical commit needs fresh Analysis."""
 
     canonical = str(canonical_commit or "").strip()
     evidence = str(evidence_commit or "").strip()

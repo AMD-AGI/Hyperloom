@@ -16,12 +16,7 @@ from kernelforge.mcp_server.tools._subprocess import communicate_process_group
 
 
 def _cancel_mid_communicate() -> int:
-    """Start a group of two, cancel the communicate, answer the group's pgid.
-
-    The inner process is what makes this a group rather than a process: it
-    outlives the ``communicate`` and is only reached through the ``killpg``
-    that the cancellation path is supposed to send.
-    """
+    """Start a group of two, cancel the communicate, answer the group's pgid."""
 
     async def _run() -> int:
         script = (
@@ -68,18 +63,7 @@ def test_cancelled_communicate_kills_and_reaps_process_group():
 
 
 def test_the_group_is_gone_even_once_this_process_is_a_subreaper():
-    """The same case, in a process that has taken on orphans.
-
-    ``PR_SET_CHILD_SUBREAPER`` is per-process and permanent, so one call
-    anywhere in a pytest worker changes this test for the rest of its session:
-    the inner process reparents here instead of to init when ``killpg`` takes
-    its parent. A zombie still occupies its process group, so a campaign that
-    inherits an orphan and never waits on it leaves ``killpg`` answering "still
-    there" for a group in which nothing is left to kill. That is what turned
-    this module red on CI, and which worker ran which test first is a sharding
-    accident rather than something to rely on -- so the ordering is asserted
-    here instead.
-    """
+    """The same case, in a process that has taken on orphans."""
     if not install_child_subreaper():
         pytest.skip("this kernel does not support PR_SET_CHILD_SUBREAPER")
 

@@ -53,10 +53,9 @@ than at the first benchmark.
 
 `--framework-path` is the **code** checkout, which is not the same thing as the
 weights under `--model`. It does more than tell your script where the code
-lives: it registers the tree as a framework source root, and PolicyGate requires
-that registration before any specialist patch against your code can land. The
-source probe discovers pip-installed packages on its own but never a git
-checkout, which is why this must be explicit.
+lives: it registers the tree as the framework source root a session searches and
+patches. The source probe discovers pip-installed packages on its own but never
+a git checkout, which is why this must be explicit.
 
 The equivalent environment variables resolve in this order:
 `<FRAMEWORK>_REPO_PATH` > `<FRAMEWORK>_DIR` > `FRAMEWORK_REPO_PATH`. Prefer the
@@ -235,6 +234,12 @@ creates a new timestamped subdirectory under it. Use
 `--resume-from <subdir>` to continue an existing session; `--force-resume`
 pushes past the terminal-state guard. Without `--resume-from` you always get a
 fresh session, so an interrupted run is never picked up by accident.
+
+A resumed session keeps the budget it started with. Elapsed time is summed
+forward over every leg, so resuming never hands the run another `--max-hours`,
+however the previous leg ended. To let a run that has spent its budget carry
+on, grant more explicitly with `--extend-hours <n>`; the grant is recorded in
+the session state with its reason.
 
 ## Monitor the run and read the output
 

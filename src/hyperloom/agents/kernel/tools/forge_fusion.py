@@ -2,20 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool.
-
-The orchestrator writes an input JSON with one validated agent backend, model,
-and sandbox policy and calls this script; the autonomous fusion pipeline itself
-lives in KernelForge and is invoked as ``kernelforge forge-fuse``.
-
-It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
-Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
-sentinel + an on-disk ``result.json``) that ``run_fusion_handler`` parses. A KEPT
-result already carries validation on the KernelForge side -- kernel parity plus a
-serving smoke for an authored fusion, a serving A/B for a claimed compile pass --
-so ``requires_e2e_validation`` is set for the orchestrator's integrate/re-baseline
-gate to confirm the end-to-end gain and apply the patch + env flags.
-"""
+"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool."""
 
 from __future__ import annotations
 
@@ -41,18 +28,11 @@ sys.path.pop(0)
 RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
 RESULT_END = "FORGE_FUSION_RESULT_END"
 
-# The manifest verdict for "discovery never reached the model", added in manifest
-# schema v2 alongside the ``error`` block. It is NOT a statement about the kernel,
-# so it must not be normalized into an optimization outcome -- see
-# _normalize_manifest.
+# The manifest verdict for "discovery never reached the model", added in manifest schema v2 alongside the ``error``
+# block.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 
-# ``fusion_loop.termination_reason`` values for a run that died before the loop
-# ran a single attempt. Like an LLM outage, this is infrastructure failing rather
-# than a statement about the kernel -- see _normalize_manifest. Keyed on the
-# termination reason, which is KernelForge's contract for why the loop stopped,
-# so a new abort path inherits the handling instead of silently regressing into
-# the no-KEEP shape.
+# ``fusion_loop.termination_reason`` values for a run that died before the loop ran a single attempt.
 INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
 DEFAULT_TIMEOUT_SEC = 7200
 _AGENT_BACKENDS = frozenset({"claude", "codex"})
@@ -80,16 +60,7 @@ def _validated_agent_sandbox_mode(value: Any) -> str:
 
 
 def _inject_author_gateway_env(agent_backend: str) -> None:
-    """Prepare the selected author runtime without crossing provider shapes.
-
-    Codex needs none of the Claude-only auth aliases, root sandbox escape, or
-    stability variables, so its environment is left untouched. Claude keeps the
-    established behavior: credential alias resolution is delegated to
-    :mod:`hyperloom.common.llm_config`, then Claude-specific process defaults are
-    applied. Selection is driven only by the explicit backend contract, never by
-    a model-name prefix. A ``CLAUDE_CODE_OAUTH_TOKEN`` is inherited as-is and
-    deliberately not mirrored into a key var, since either one would disable it.
-    """
+    """Prepare the selected author runtime without crossing provider shapes."""
     if _validated_agent_backend(agent_backend) == "codex":
         return
 
@@ -102,25 +73,18 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     )
     resolved_env = options.get("env")
     if isinstance(resolved_env, dict):
-        # Exactly the synthesizable subset: mirroring the subscription token
-        # into a key slot is what would disable it, so the registry decides
-        # which forms may be copied here rather than a list kept in step by hand.
+        # Exactly the synthesizable subset: mirroring the subscription token into a key slot is what would disable it,
+        # so the registry decides which forms may be copied here rather than a list kept in step by hand.
         for name in llm_config.ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
             value = str(resolved_env.get(name) or "").strip()
             if value:
                 os.environ.setdefault(name, value)
-    # The authoring child inherits this process's environment, not the resolved
-    # copy above, so the tag has to be merged in here or the run arrives at the
-    # gateway anonymous. It is merged rather than copied from ``resolved_env``
-    # because that copy has been through ``_expand_env_refs``: writing it back
-    # would publish the operator's gateway secret in this process's environment,
-    # whereas merging preserves the ``${VAR}`` the child resolves for itself.
+    # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
+    # merged in here or the run arrives at the gateway anonymous.
     from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
 
     inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
-    # Only set it when actually running as root so we do not defeat the guard
-    # for non-root sessions that never needed the escape hatch.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         os.environ.setdefault("IS_SANDBOX", "1")
     apply_llm_stability_env(os.environ)
@@ -157,8 +121,8 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "llm_model", "--model", required=True)
     cmd.extend(["--agent-sandbox-mode", agent_sandbox_mode])
     _add_opt(cmd, args, "max_turns", "--max-turns")
-    # Omitted by the caller when no lane ceiling was derived; forge-fuse reads
-    # both an absent flag and an explicit 0 as "try every discovered recipe".
+    # Omitted by the caller when no lane ceiling was derived; forge-fuse reads both an absent flag and an explicit 0
+    # as "try every discovered recipe".
     _add_opt(cmd, args, "max_recipes", "--max-recipes")
     _add_opt(cmd, args, "gpu", "--gpu")
     _add_opt(cmd, args, "decode_batch", "--decode-batch")
@@ -168,11 +132,7 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "tp", "--tp")
     _add_opt(cmd, args, "block_size", "--block-size")
     _add_opt(cmd, args, "max_model_len", "--max-model-len")
-    # Nominate one independent sibling patch per confirmed pattern by default
-    # (the multi-patch contract). ``fuse_all_confirmed`` is the explicit combine
-    # escape hatch: pass it true to fold every confirmed fusion into ONE stacked
-    # patch. Default False so the auto path stays byte-identical to a run that
-    # never set the flag, and only an explicit combine request appends it.
+    # Nominate one independent sibling patch per confirmed pattern by default (the multi-patch contract).
     if bool(args.get("fuse_all_confirmed", False)):
         cmd.append("--fuse-all-confirmed")
     if truthy(args.get("verbose", False)):
@@ -252,12 +212,7 @@ def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.Compl
 
 
 def _attempted(loop: dict[str, Any]) -> bool:
-    """Whether ``fusion_loop`` reports at least one completed attempt.
-
-    Read defensively: the count crosses a repository boundary, and a non-numeric
-    value must not read as "attempted" -- that would drop the run back into the
-    ``complete``/``no_improvement`` shape this guards against.
-    """
+    """Whether ``fusion_loop`` reports at least one completed attempt."""
     try:
         return int(loop.get("attempts") or 0) > 0
     except (TypeError, ValueError):
@@ -292,36 +247,15 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
     loop = m.get("fusion_loop") or {}
     compile_pass = m.get("compile_pass") or {}
-    # The nomination envelope: a list (possibly empty) on the multi-patch path,
-    # None on the combine / single-patch path. When present it is the source of
-    # truth for ``kept`` -- a run keeps when it nominated at least one sibling,
-    # independent of whether the strongest happened to ride in ``fusion_loop`` or
-    # ``compile_pass``.
+    # The nomination envelope: a list (possibly empty) on the multi-patch path, None on the combine / single-patch
+    # path.
     patches = m.get("patches")
     multi_patch = isinstance(patches, list)
-    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so
-    # exactly one of these is populated. ``validation`` is not consulted: it is the
-    # same object as ``fusion_loop.best``.
+    # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so exactly one of these is populated.
     kept = bool(patches) if multi_patch else bool(loop.get("kept") or compile_pass.get("kept"))
 
     if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
-        # forge-fusion never reached the model, so this run holds no opinion about the
-        # kernel. The default no-KEEP shape below would report it as
-        # ``complete``/``no_improvement``, which is wrong twice over: it records an
-        # outage as an optimization result, AND ``complete`` satisfies the KERNEL-entry
-        # idempotency gate (``_fusion_required_before_kernel_opt``), so one gateway
-        # blip would skip fusion for the whole remaining session and the model would
-        # never be fusion-optimized at all. The timeout shape below is the established
-        # way to say "infrastructure failed, this is retryable".
-        #
-        # Guarded on ``not kept`` so this can never discard a validated fusion. That
-        # combination should be impossible -- forge-fusion only overrides the verdict
-        # when discovery raised, in which case it proposed no recipes and the loop
-        # never ran -- but that invariant lives in another repo and nothing here can
-        # enforce it, while the cost of being wrong is throwing away a measured patch.
-        #
-        # ``result`` still carries its failed/REVERT/not-kept defaults from above, so
-        # only the outage's identity has to be added.
+        # forge-fusion never reached the model, so this run holds no opinion about the kernel.
         detail = m.get("error") if isinstance(m.get("error"), dict) else {}
         kind = str(detail.get("kind") or "unknown")
         attempts = detail.get("attempts")
@@ -338,39 +272,15 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
     aborted = str(loop.get("termination_reason") or "").strip().lower()
     if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
-        # The loop stopped on infrastructure, not on a judgement about the kernel:
-        # the harness-authoring turn failed, or there was no git workspace to
-        # author in. Discovery had already run, so a recipe is named in the
-        # manifest; nothing ever got to measure it.
-        #
-        # The default no-KEEP shape below would report that as
-        # ``complete``/``no_improvement`` -- an outage recorded as an optimization
-        # result, AND ``complete`` satisfies the KERNEL-entry idempotency gate
-        # (``_fusion_required_before_kernel_opt``), so one abort would skip fusion
-        # for the whole remaining session even though every later entry could have
-        # retried it. Same reasoning, and the same retryable shape, as the LLM
-        # outage above.
-        #
-        # Guarded on ``not kept`` and ``not compile_pass`` so a measured result is
-        # never discarded. The attempt count is a weaker signal than it looks:
-        # KernelForge's abort handler builds a fresh ``LoopResult`` whose history
-        # is empty, so ``attempts`` reads 0 even when earlier recipes ran full
-        # campaigns. It is kept as a cheap filter for the ordinary case, but the
-        # load-bearing guards are the two above -- they are what a real
-        # measurement would set.
-        #
-        # ``result`` still carries its failed/REVERT/not-kept defaults from above,
-        # so only the abort's identity has to be added. The located recipe rides
-        # in the message rather than in ``env_flags``: nothing measured it, and
-        # ``env_flags`` means "flags this run confirmed".
+        # The loop stopped on infrastructure, not on a judgement about the kernel: the harness-authoring turn failed,
+        # or there was no git workspace to author in.
         located = str((m.get("fusion") or {}).get("env_flag") or "")
         result.update(
             {
                 "verdict": m.get("verdict"),
                 "error_class": aborted,
-                # Explicit rather than re-deriving the reason set on the consumer
-                # side: the orchestrator bounds how often it re-runs an abort, and
-                # a copied constant there would drift from the one above.
+                # Explicit rather than re-deriving the reason set on the consumer side: the orchestrator bounds how
+                # often it re-runs an abort, and a copied constant there would drift from the one above.
                 "infrastructure_abort": True,
                 "error": (
                     f"forge-fusion aborted on infrastructure ({aborted}); "
@@ -385,18 +295,14 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
     if multi_patch and patches:
-        # On the multi-patch path the producer mirrors the STRONGEST sibling into the
-        # singular ``artifacts`` slot, but ``fusion.source_file`` still names the
-        # top RECIPE -- which may be a compile-pass claim whose file differs from the
-        # strongest authored patch. Realign the singular target with the mirrored
-        # patch so the singular fallback (salvage / singular-only caller) stays
-        # self-consistent: same patch, same target.
+        # On the multi-patch path the producer mirrors the STRONGEST sibling into the singular ``artifacts`` slot, but
+        # ``fusion.source_file`` still names the top RECIPE -- which may be a compile-pass claim whose file differs
+        # from the strongest authored patch.
         src_file = str(patches[0].get("target_file") or patches[0].get("source_file") or src_file)
 
     if compile_pass:
-        # The win is a flipped default in the framework's own source, so the patch
-        # carries it and there is no runtime flag. The speedup is a serving tok/s
-        # ratio, not a microbenchmark one, hence the fields naming its origin.
+        # The win is a flipped default in the framework's own source, so the patch carries it and there is no runtime
+        # flag.
         speedup = compile_pass.get("speedup")
         result.update(
             {
@@ -416,11 +322,9 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             }
         )
 
-    # Integrate applies a fusion from a patch file, its root and a target, and
-    # returns without any of them, while ``ok`` satisfies the KERNEL-entry
-    # idempotency gate -- so reported as a success such a run is both dropped
-    # and never retried. Verified rather than assumed: the invariant that the
-    # producer sets them together lives in another repository.
+    # Integrate applies a fusion from a patch file, its root and a target, and returns without any of them, while
+    # ``ok`` satisfies the KERNEL-entry idempotency gate -- so reported as a success such a run is both dropped and
+    # never retried.
     patch = artifacts.get("patch")
     if kept:
         for name, present in (
@@ -446,26 +350,17 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "patch": patch,
             # For integrate's patch-apply path.
             "source_file": src_file,
-            # The root the patch was exported against, which may be a
-            # site-packages dir. KernelForge sets it exactly when it sets a
-            # patch, so it is present whenever integrate needs it.
+            # The root the patch was exported against, which may be a site-packages dir.
             "kernel_repo": str(artifacts.get("repo_root") or ""),
             "verdict": m.get("verdict"),
-            # KernelForge validated this on its own -- kernel parity plus a serving
-            # smoke for an authored fusion, a serving A/B for a claimed compile pass
-            # -- but integrate is what confirms the real e2e gain here.
+            # KernelForge validated this on its own -- kernel parity plus a serving smoke for an authored fusion, a
+            # serving A/B for a claimed compile pass -- but integrate is what confirms the real e2e gain here.
             "requires_e2e_validation": kept,
         }
     )
 
     if multi_patch:
-        # Carry the sibling envelopes through untouched so the consumer can enqueue
-        # each independently. The singular ``patch``/``source_file``/``kernel_repo``
-        # slots above still describe the STRONGEST sibling (the producer mirrors it
-        # into ``artifacts`` for exactly this fallback), so a caller that only reads
-        # the singular contract still lands the best patch; a nomination-aware caller
-        # reads ``patches`` and lands them all. ``nomination`` is a run summary
-        # for reporting only.
+        # Carry the sibling envelopes through untouched so the consumer can enqueue each independently.
         result["patches"] = [dict(p) for p in patches]
         nomination = m.get("nomination")
         result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
@@ -474,12 +369,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
 
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
-    """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill.
-
-    ``forge-fuse`` is often SIGKILLed during serving smoke (default 7200s). The
-    micro KEEP and ``fusion.patch`` are written before smoke so Hyperloom can
-    still hand them to formal e2e integrate.
-    """
+    """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
     root = Path(output_dir or "")
     if not root.is_dir():
         return None
@@ -545,8 +435,8 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         "workspace": str(root),
     }
     if isinstance(siblings, list):
-        # The consumer reads the nomination contract, so every sibling the
-        # manifest recorded is carried through beside the singular slots.
+        # The consumer reads the nomination contract, so every sibling the manifest recorded is carried through beside
+        # the singular slots.
         result["patches"] = siblings
     return result
 
@@ -636,8 +526,8 @@ def main(argv: list[str] | None = None) -> int:
 
     _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
     output_dir = str(payload.get("output_dir") or "")
-    # The output dir is keyed on the task, so a run that dies before writing new
-    # artifacts must not salvage the previous run's KEEP as its own.
+    # The output dir is keyed on the task, so a run that dies before writing new artifacts must not salvage the
+    # previous run's KEEP as its own.
     output_root = Path(output_dir or ".")
     for stale_name in (
         "fusion_manifest.json",

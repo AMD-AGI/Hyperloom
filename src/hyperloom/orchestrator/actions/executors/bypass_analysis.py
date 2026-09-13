@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bypass benchmark analysis layer.
-
-Pure, GPU-free functions that turn raw run artifacts (server.log, stderr,
-lm-eval results) into structured, higher-signal analysis. The output is
-additive: it lands under ``report["bypass_analysis"]`` and never overrides the
-InferenceX-reported measurements, so the downstream contract is unchanged.
-
-Three capabilities:
-* steady-state throughput estimate from the engine's periodic throughput logs,
-* structured failure attribution (root-cause tag) from logs/stderr,
-* normalized eval summary from lm-eval ``results*.json``.
-"""
+"""Bypass benchmark analysis layer."""
 
 from __future__ import annotations
 
@@ -21,15 +10,13 @@ import re
 from pathlib import Path
 from typing import Any
 
-# sglang: "Decode batch. ... gen throughput (token/s): 1234.5"
-# vllm:   "Avg generation throughput: 1234.5 tokens/s"
+# sglang: "Decode batch. ... gen throughput (token/s): 1234.5" vllm: "Avg generation throughput: 1234.5 tokens/s"
 _THROUGHPUT_PATTERNS = (
     re.compile(r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
     re.compile(r"Avg generation throughput:\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
 )
 
-# Ordered failure signatures: first match wins. Each maps a root-cause tag to
-# substrings (case-insensitive) that identify it in logs/stderr.
+# Ordered failure signatures: first match wins.
 _FAILURE_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("oom", ("out of memory", "outofmemoryerror", "hip out of memory", "cuda out of memory")),
     ("cuda_graph_capture", ("capture cuda graph", "cuda graph capture", "stream capture")),
@@ -50,14 +37,7 @@ _FAILURE_SIGNATURES: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 
 def parse_server_log_throughput(text: str) -> list[float]:
-    """Extract every positive periodic generation-throughput sample.
-
-    Args:
-        text: The server.log contents.
-
-    Returns:
-        A list of positive tokens/sec samples, in log order.
-    """
+    """Extract every positive periodic generation-throughput sample."""
     samples: list[float] = []
     for line in text.splitlines():
         for pattern in _THROUGHPUT_PATTERNS:
@@ -74,19 +54,7 @@ def parse_server_log_throughput(text: str) -> list[float]:
 
 
 def steady_state_mean(samples: list[float], *, warmup_skip_frac: float = 0.2) -> float | None:
-    """Average the steady-state portion of throughput samples.
-
-    Drops the leading ``warmup_skip_frac`` of samples before averaging; falls
-    back to the full set when the trim would empty it. ``benchmark_result``
-    parses the same log with 0.25 and a different clamp bound.
-
-    Args:
-        samples: Positive throughput samples in log order.
-        warmup_skip_frac: Fraction of leading samples treated as warmup.
-
-    Returns:
-        The steady-state mean, or None when there are no samples.
-    """
+    """Average the steady-state portion of throughput samples."""
     positive = [s for s in samples if s > 0]
     if not positive:
         return None
@@ -96,16 +64,7 @@ def steady_state_mean(samples: list[float], *, warmup_skip_frac: float = 0.2) ->
 
 
 def estimate_steady_state_from_log(server_log: Path, *, warmup_skip_frac: float = 0.2) -> dict[str, Any]:
-    """Compute a steady-state throughput block from a server.log file.
-
-    Args:
-        server_log: Path to the engine server.log.
-        warmup_skip_frac: Warmup fraction passed to :func:`steady_state_mean`.
-
-    Returns:
-        A dict with ``sample_count`` and ``steady_state_output_throughput``
-        (None when unavailable). Never raises.
-    """
+    """Compute a steady-state throughput block from a server.log file."""
     try:
         text = server_log.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -118,17 +77,7 @@ def estimate_steady_state_from_log(server_log: Path, *, warmup_skip_frac: float 
 
 
 def classify_failure(*texts: str) -> str | None:
-    """Return a structured root-cause tag from logs/stderr, or None.
-
-    The first matching signature (in priority order) wins. ``None`` means no
-    known signature matched (caller may treat as ``unknown``).
-
-    Args:
-        *texts: Any number of text blobs (server.log, stderr, stdout).
-
-    Returns:
-        A root-cause tag string, or None when nothing matched.
-    """
+    """Return a structured root-cause tag from logs/stderr, or None."""
     blob = "\n".join(t for t in texts if t).lower()
     if not blob:
         return None
@@ -139,18 +88,7 @@ def classify_failure(*texts: str) -> str | None:
 
 
 def summarize_eval(workspace: Path) -> dict[str, Any] | None:
-    """Normalize an lm-eval ``results*.json`` into a compact eval summary.
-
-    Searches ``workspace`` recursively for lm-eval result files and extracts
-    the first recognized accuracy metric.
-
-    Args:
-        workspace: Benchmark workspace directory.
-
-    Returns:
-        ``{"task", "metric", "accuracy", "source_file"}`` on success, or None
-        when no result/metric is found. Never raises.
-    """
+    """Normalize an lm-eval ``results*.json`` into a compact eval summary."""
     result_files = sorted(workspace.rglob("results*.json"))
     if not result_files:
         return None
@@ -191,18 +129,7 @@ def build_analysis(
     stderr_text: str = "",
     run_eval: bool = False,
 ) -> dict[str, Any]:
-    """Assemble the ``bypass_analysis`` block for a report.
-
-    Args:
-        workspace: Benchmark workspace directory.
-        server_log: Engine server.log path.
-        success: Whether the benchmark succeeded.
-        stderr_text: Optional client/server stderr tail for failure attribution.
-        run_eval: Whether an eval pass was requested.
-
-    Returns:
-        The analysis dict (always safe to embed; values may be None).
-    """
+    """Assemble the ``bypass_analysis`` block for a report."""
     analysis: dict[str, Any] = {
         "throughput": estimate_steady_state_from_log(server_log),
     }

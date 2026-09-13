@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What reaches a caller as one planning agent's answer.
-
-A planning session reads source across many turns, so a long one can exhaust
-its context window. The provider CLI answers that by compacting the session and
-prepending a summary of everything so far to the next reply -- and that summary
-is not the answer. Published as one, it hands the Implementer a hundred lines of
-conversation recap before the plan it is supposed to execute.
-"""
+"""What reaches a caller as one planning agent's answer."""
 
 from __future__ import annotations
 
@@ -58,11 +51,7 @@ def test_a_compacted_session_publishes_its_plan_and_not_its_recap():
 
 
 def test_a_compaction_is_reported_because_the_plan_came_from_a_lossy_view(caplog):
-    """Cutting it silently would hide that the session outgrew its window.
-
-    Everything the planner read before the compaction reaches the plan only
-    through a summary of it, which is worth knowing when the plan disappoints.
-    """
+    """Cutting it silently would hide that the session outgrew its window."""
     with caplog.at_level("WARNING"):
         validated_agent_text(AgentRunResult(text=_COMPACTED), role="orchestration lane 1 synthesis")
 

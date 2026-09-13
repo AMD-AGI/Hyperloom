@@ -7,17 +7,408 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import http.client
 import json
+import math
 import os
+import re
+import signal
 import socket
 import sys
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import zlib
 from pathlib import Path
 from typing import Any
+
+
+# Keep the standalone asset aligned with tools/_trace_rank.py's framework names.
+_TRACE_RANK_PATTERNS = (
+    re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"(?:^|[-_.])tp[-_](\d+)(?=[-_.]|$)", re.IGNORECASE),
+    re.compile(r"^r(\d+)(?=[-.])", re.IGNORECASE),
+)
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def is_auto_bounded(framework: str, body: str) -> bool:
+    """Only SGLang's forwarded positive integer num_steps implies auto-stop."""
+    try:
+        payload = json.loads(body, parse_constant=_reject_json_constant)
+    except ValueError:
+        return False
+    steps = payload.get("num_steps") if isinstance(payload, dict) else None
+    return framework == "sglang" and type(steps) is int and steps > 0
+
+
+def _trace_files(directories: list[str]) -> dict[str, list[int]]:
+    files = {}
+    for directory in directories:
+        for path in Path(directory).resolve().rglob("*.trace.json*"):
+            if path.name.startswith(("graph_capture_", "merged-")) or {"capture_traces", "trace_split"}.intersection(
+                path.parts
+            ):
+                continue
+            if path.is_file() and path.name.endswith((".trace.json", ".trace.json.gz")):
+                stat = path.stat()
+                files[str(path)] = [stat.st_mtime_ns, stat.st_size]
+    return files
+
+
+def snapshot_traces(directories: list[str]) -> dict[str, Any]:
+    """Record the trace baseline immediately before start_profile is sent."""
+    return {"started_ns": time.time_ns(), "files": _trace_files(directories)}
+
+
+def current_traces(directories: list[str], snapshot: dict[str, Any]) -> dict[str, list[int]]:
+    """Exclude unchanged paths and files older than the capture boundary."""
+    return {
+        path: stat
+        for path, stat in _trace_files(directories).items()
+        if stat[0] >= snapshot["started_ns"] and stat != snapshot["files"].get(path)
+    }
+
+
+_TRACE_READ_CHARS = 64 * 1024
+_MAX_JSON_VALUE_CHARS = 1024 * 1024
+_MAX_JSON_DEPTH = 128
+_JSON_DECODER = json.JSONDecoder(parse_constant=_reject_json_constant)
+_JSON_STRING_SPECIAL = re.compile(r'["\\\x00-\x1f]')
+
+
+class _TraceValueTooLarge(ValueError):
+    """Switch from whole-value decoding to field-wise streaming."""
+
+
+def _check_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("trace check exceeded its remaining budget")
+
+
+class _TraceJSONReader:
+    """Read a complete trace document without retaining its event array."""
+
+    def __init__(self, handle: Any, deadline: float | None) -> None:
+        self.handle = handle
+        self.deadline = deadline
+        self.buffer = ""
+        self.position = 0
+        self.eof = False
+
+    def refill(self) -> None:
+        _check_deadline(self.deadline)
+        self.buffer = self.buffer[self.position :]
+        self.position = 0
+        if len(self.buffer) >= _MAX_JSON_VALUE_CHARS:
+            raise _TraceValueTooLarge("trace JSON value requires field-wise streaming")
+        chunk = self.handle.read(min(_TRACE_READ_CHARS, _MAX_JSON_VALUE_CHARS - len(self.buffer)))
+        _check_deadline(self.deadline)
+        self.eof = not chunk
+        self.buffer += chunk
+
+    def peek(self) -> str:
+        _check_deadline(self.deadline)
+        while True:
+            while self.position < len(self.buffer) and self.buffer[self.position] in " \t\r\n":
+                self.position += 1
+            if self.position < len(self.buffer):
+                return self.buffer[self.position]
+            if self.eof:
+                return ""
+            self.refill()
+
+    def expect(self, character: str) -> None:
+        if self.peek() != character:
+            raise ValueError(f"expected {character!r} in trace JSON")
+        self.position += 1
+
+    def value(self) -> Any:
+        if not self.peek():
+            raise ValueError("incomplete trace JSON value")
+        while True:
+            _check_deadline(self.deadline)
+            try:
+                value, end = _JSON_DECODER.raw_decode(self.buffer, self.position)
+            except json.JSONDecodeError:
+                if self.eof:
+                    raise
+                self.refill()
+                continue
+            # A number can end at a chunk boundary before its exponent arrives.
+            if end == len(self.buffer) and not self.eof:
+                self.refill()
+                continue
+            if end < len(self.buffer) and self.buffer[end] not in " \t\r\n,]}":
+                if type(value) in (int, float) and self.buffer[end] in ".eE" and not self.eof:
+                    self.refill()
+                    continue
+                raise ValueError("invalid trace JSON value delimiter")
+            self.position = end
+            return value
+
+    def string(self) -> str | None:
+        """Validate strings of any length, retaining only short metadata values."""
+        self.expect('"')
+        parts = []
+        length = 0
+        while True:
+            _check_deadline(self.deadline)
+            match = _JSON_STRING_SPECIAL.search(self.buffer, self.position)
+            end = match.start() if match else len(self.buffer)
+            if length <= 64:
+                length += end - self.position
+                if length <= 64:
+                    parts.append(self.buffer[self.position : end])
+                else:
+                    parts.clear()
+            self.position = end
+            if match is None:
+                if self.eof:
+                    raise ValueError("incomplete trace JSON string")
+                self.refill()
+                continue
+            character = self.buffer[self.position]
+            self.position += 1
+            if character == '"':
+                return "".join(parts) if length <= 64 else None
+            if character != "\\":
+                raise ValueError("unescaped control character in trace JSON string")
+            while len(self.buffer) - self.position < 1 and not self.eof:
+                self.refill()
+            if self.position == len(self.buffer):
+                raise ValueError("incomplete trace JSON escape")
+            escape_length = 5 if self.buffer[self.position] == "u" else 1
+            while len(self.buffer) - self.position < escape_length and not self.eof:
+                self.refill()
+            escaped = self.buffer[self.position : self.position + escape_length]
+            decoded = _JSON_DECODER.decode('"\\' + escaped + '"')
+            self.position += escape_length
+            length += len(decoded)
+            if length <= 64:
+                parts.append(decoded)
+            else:
+                parts.clear()
+
+    def event(self) -> bool:
+        try:
+            event = self.value()
+        except _TraceValueTooLarge:
+            if self.peek() != "{":
+                self.skip()
+                return False
+            fields = {}
+            for key in self.members():
+                if key in {"cat", "ph"} and self.peek() == '"':
+                    fields[key] = self.string()
+                else:
+                    if key in {"cat", "ph"}:
+                        fields[key] = None
+                    self.skip()
+            return fields.get("cat") == "kernel" and fields.get("ph") == "X"
+        return isinstance(event, dict) and event.get("cat") == "kernel" and event.get("ph") == "X"
+
+    def members(self):
+        self.expect("{")
+        if self.peek() == "}":
+            self.position += 1
+            return
+        while True:
+            if self.peek() != '"':
+                raise ValueError("trace JSON object key must be a string")
+            key = self.string()
+            self.expect(":")
+            yield key
+            if self.peek() == "}":
+                self.position += 1
+                return
+            self.expect(",")
+
+    def skip(self, depth: int = 0) -> None:
+        if depth >= _MAX_JSON_DEPTH:
+            raise ValueError("trace JSON nesting exceeds the parsing limit")
+        character = self.peek()
+        if character == "{":
+            for _key in self.members():
+                self.skip(depth + 1)
+        elif character == "[":
+            self.position += 1
+            if self.peek() == "]":
+                self.position += 1
+                return
+            while True:
+                self.skip(depth + 1)
+                if self.peek() == "]":
+                    self.position += 1
+                    return
+                self.expect(",")
+        elif character == '"':
+            self.string()
+        else:
+            self.value()
+
+
+def _read_trace_metadata(path: Path, *, deadline: float | None) -> dict[str, Any]:
+    """Consume JSON and the gzip trailer, keeping only rank and GPU-event evidence."""
+    rank = None
+    for token, fullmatch in ((path.name, False), (path.parent.name, True)):
+        for pattern in _TRACE_RANK_PATTERNS:
+            match = pattern.fullmatch(token) if fullmatch else pattern.search(token)
+            if match:
+                rank = int(match.group(1))
+                break
+        if rank is not None:
+            break
+    opener = gzip.open if path.suffix == ".gz" else open
+    has_kernel = False
+    seen = set()
+    with opener(path, "rt", encoding="utf-8") as handle:
+        reader = _TraceJSONReader(handle, deadline)
+        for key in reader.members():
+            if key in {"traceEvents", "distributedInfo"}:
+                if key in seen:
+                    raise ValueError("duplicate trace metadata field")
+                seen.add(key)
+            if key == "traceEvents":
+                reader.expect("[")
+                if reader.peek() == "]":
+                    reader.position += 1
+                    continue
+                while True:
+                    if reader.event():
+                        has_kernel = True
+                    if reader.peek() == "]":
+                        reader.position += 1
+                        break
+                    reader.expect(",")
+            elif key == "distributedInfo" and reader.peek() == "{":
+                rank_seen = False
+                for field in reader.members():
+                    if field == "rank":
+                        header_rank = reader.value()
+                        if rank_seen or type(header_rank) is not int or (rank is not None and rank != header_rank):
+                            raise ValueError("conflicting trace rank")
+                        rank = header_rank
+                        rank_seen = True
+                    else:
+                        reader.skip()
+            else:
+                reader.skip()
+        # Do not accept a valid prefix: consume EOF to verify gzip CRC/trailer too.
+        if reader.peek():
+            raise ValueError("trailing content after trace JSON document")
+    return {"rank": rank, "has_kernel": has_kernel and "traceEvents" in seen}
+
+
+def traces_complete(
+    directories: list[str],
+    snapshot: dict[str, Any],
+    tp: int,
+    *,
+    cache: dict[str, Any] | None = None,
+    deadline: float | None = None,
+) -> bool:
+    """Require fresh GPU rank coverage, ignoring complete CPU-only companion traces."""
+    if tp <= 0:
+        return False
+    ranks = set()
+    cache = cache if cache is not None else {}
+    try:
+        _check_deadline(deadline)
+        files = current_traces(directories, snapshot)
+        for obsolete in set(cache) - files.keys():
+            del cache[obsolete]
+        if len(files) < tp:
+            return False
+        for name, before in files.items():
+            _check_deadline(deadline)
+            path = Path(name)
+            stat = path.stat()
+            signature = [stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns, stat.st_ino, stat.st_dev]
+            cached = cache.get(name)
+            if isinstance(cached, dict) and cached.get("signature") == signature:
+                metadata = cached.get("metadata")
+            else:
+                try:
+                    metadata = _read_trace_metadata(path, deadline=deadline)
+                except (gzip.BadGzipFile, EOFError, ValueError, RecursionError, zlib.error):
+                    metadata = None
+                _check_deadline(deadline)
+                after = path.stat()
+                if [after.st_mtime_ns, after.st_size, after.st_ctime_ns, after.st_ino, after.st_dev] != signature:
+                    return False
+                cache[name] = {"signature": signature, "metadata": metadata}
+            _check_deadline(deadline)
+            if [stat.st_mtime_ns, stat.st_size] != before or not isinstance(metadata, dict):
+                return False
+            if metadata.get("has_kernel") is False:
+                continue
+            rank = metadata.get("rank")
+            if rank is None and tp == 1:
+                rank = 0
+            if (
+                type(rank) is not int
+                or rank not in range(tp)
+                or rank in ranks
+                or metadata.get("has_kernel") is not True
+            ):
+                return False
+            ranks.add(rank)
+        complete = ranks == set(range(tp)) and files == current_traces(directories, snapshot)
+        _check_deadline(deadline)
+        return complete
+    except (OSError, EOFError, ValueError, RecursionError, zlib.error):
+        return False
+
+
+def _trace_timeout(_signum: int, _frame: Any) -> None:
+    raise TimeoutError("trace check exceeded its remaining budget")
+
+
+def _check_traces_command(args: argparse.Namespace, snapshot: dict[str, Any]) -> bool:
+    timeout = args.timeout_seconds
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+        raise ValueError("trace timeout must be finite and positive")
+    deadline = time.monotonic() + timeout if timeout is not None else None
+    timed = timeout is not None and hasattr(signal, "setitimer")
+    previous_handler = signal.getsignal(signal.SIGALRM) if timed else None
+    temporary_path = None
+    try:
+        if timed:
+            signal.signal(signal.SIGALRM, _trace_timeout)
+            signal.setitimer(signal.ITIMER_REAL, timeout)
+        cache: dict[str, Any] = {}
+        if args.cache_file:
+            try:
+                saved = json.loads(Path(args.cache_file).read_text(encoding="utf-8"))
+            except (FileNotFoundError, ValueError):
+                saved = None
+            if isinstance(saved, dict) and saved.get("snapshot") == snapshot and isinstance(saved.get("files"), dict):
+                cache = saved["files"]
+        _check_deadline(deadline)
+        complete = traces_complete(args.trace_dir, snapshot, args.tp, cache=cache, deadline=deadline)
+        _check_deadline(deadline)
+        if args.cache_file:
+            output = Path(args.cache_file)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_path = tempfile.mkstemp(prefix=".trace-cache-", dir=output.parent)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"snapshot": snapshot, "files": cache}, handle)
+            _check_deadline(deadline)
+            os.replace(temporary_path, output)
+        _check_deadline(deadline)
+        return complete
+    finally:
+        if timed:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 def pick_loopback_port() -> int:
@@ -196,6 +587,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("pick-port", help="print an unused loopback TCP port")
+    auto_parser = subparsers.add_parser("is-auto-bounded", help="check the forwarded native capture bound")
+    auto_parser.add_argument("--framework", required=True)
+    auto_parser.add_argument("--body", required=True)
+    for command in ("snapshot-traces", "trace-stat", "traces-complete"):
+        trace_parser = subparsers.add_parser(command)
+        trace_parser.add_argument("--trace-dir", action="append", default=[])
+        if command != "snapshot-traces":
+            trace_parser.add_argument("--snapshot", required=True)
+        if command == "traces-complete":
+            trace_parser.add_argument("--tp", required=True, type=int)
+            trace_parser.add_argument("--cache-file")
+            trace_parser.add_argument("--timeout-seconds", type=float)
 
     wait_parser = subparsers.add_parser("wait-phase", help="wait for an AIPerf phase")
     wait_parser.add_argument("--api-url", required=True)
@@ -231,6 +634,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Run the requested phase-gate command."""
     args = build_parser().parse_args(argv)
+    if args.command == "is-auto-bounded":
+        return 0 if is_auto_bounded(args.framework, args.body) else 1
+    if args.command in {"snapshot-traces", "trace-stat", "traces-complete"}:
+        try:
+            if args.command == "snapshot-traces":
+                print(json.dumps(snapshot_traces(args.trace_dir)))
+                return 0
+            snapshot = json.loads(args.snapshot)
+            if args.command == "traces-complete":
+                return 0 if _check_traces_command(args, snapshot) else 1
+            files = current_traces(args.trace_dir, snapshot)
+            print(len(files), sum(stat[1] for stat in files.values()))
+            return 0
+        except (OSError, ValueError) as exc:
+            print(f"aiperf trace check failed: {exc}", file=sys.stderr)
+            return 1
     if args.command == "pick-port":
         print(pick_loopback_port())
         return 0

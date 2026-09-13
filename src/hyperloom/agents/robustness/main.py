@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Entry point for the standalone Robustness Agent reactor.
-
-The console script runs the symptom -> intent reactor standalone, polling
-sources every ``standalone_tick_interval_s`` and writing findings to disk.
-Production hosts drive the same reactor via
-:mod:`hyperloom.agents.robustness.runtime.cli` in a subprocess instead.
-"""
+"""Entry point for the standalone Robustness Agent reactor."""
 
 from __future__ import annotations
 
@@ -24,11 +18,7 @@ from .role.prompt_inputs import ReactorContext, SharedStateSnapshot
 
 
 def _setup_logging() -> None:
-    """Configure root logging for the daemon.
-
-    Sets up a basic stderr handler at INFO level with a timestamped
-    format.
-    """
+    """Configure root logging for the daemon."""
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -38,15 +28,7 @@ def _setup_logging() -> None:
 
 
 async def _run_reactor_mode(config: Config) -> None:
-    """Run the standalone reactor loop for dev / debugging.
-
-    Polls sources at ``standalone_tick_interval_s`` and writes findings to
-    disk. (Production drives the same reactor via ``runtime.cli tick`` in a
-    subprocess.)
-
-    Args:
-        config: The resolved agent configuration.
-    """
+    """Run the standalone reactor loop for dev / debugging."""
     log = logging.getLogger("robustness_agent")
     bundle = build_reactor_components(config)
 
@@ -54,11 +36,7 @@ async def _run_reactor_mode(config: Config) -> None:
     loop = asyncio.get_running_loop()
 
     def _shutdown(sig: signal.Signals) -> None:
-        """Signal handler that requests a graceful loop shutdown.
-
-        Args:
-            sig (signal.Signals): The received signal triggering shutdown.
-        """
+        """Signal handler that requests a graceful loop shutdown."""
         log.info("Received %s, shutting down", sig.name)
         stop.set()
 
@@ -98,39 +76,20 @@ async def _run_reactor_mode(config: Config) -> None:
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse daemon command-line arguments.
-
-    Args:
-        argv (list[str] | None): Argument vector to parse. Defaults to
-            ``None``, which uses ``sys.argv``.
-
-    Returns:
-        argparse.Namespace: Parsed arguments. The parser defines no options, so
-        the namespace is empty; the call exists to reject unknown argv and
-        provide ``--help``.
-    """
+    """Parse daemon command-line arguments."""
     parser = argparse.ArgumentParser(prog="robustness-agent")
     return parser.parse_args(argv)
 
 
 async def _async_main(argv: list[str] | None = None) -> None:
-    """Discover configuration and run the reactor loop.
-
-    Args:
-        argv (list[str] | None): Argument vector forwarded to
-            :func:`_parse_args`. Defaults to ``None``.
-    """
+    """Discover configuration and run the reactor loop."""
     _parse_args(argv)
     config = Config.discover()
     await _run_reactor_mode(config)
 
 
 def main() -> None:
-    """Synchronous process entry point for the daemon.
-
-    Configures logging and runs the async main loop, treating a
-    keyboard interrupt as a clean exit.
-    """
+    """Synchronous process entry point for the daemon."""
     _setup_logging()
     try:
         asyncio.run(_async_main())

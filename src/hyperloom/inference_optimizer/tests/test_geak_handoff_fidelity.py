@@ -1,13 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
-"""Serving-launch fidelity forwarding for the GEAK handoff.
-
-Guards that Hyperloom forwards the same max-model-len / gpu-mem-util its Magpie
-baseline served with, so GEAK/e2e launches the identical vLLM engine. The knobs
-are sourced from the baseline server-args string, not only from a dedicated CLI
-field, and are omitted when unresolved so the GEAK adapter keeps its own
-defaults.
-"""
+"""Serving-launch fidelity forwarding for the GEAK handoff."""
 
 from __future__ import annotations
 

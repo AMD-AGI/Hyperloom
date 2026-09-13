@@ -10,8 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 _GLOBAL_RANK_RE = re.compile(r"(?:^|[-_.])rank[-_]?(\d+)(?=[-_.]|$)", re.IGNORECASE)
-# SGLang trace names encode the rank as ``TP-<n>``. A compact token such as
-# ``tp8`` describes a tensor-parallel world size in paths and is not a rank.
+# SGLang trace names encode the rank as ``TP-<n>``.
 _TP_RANK_RE = re.compile(r"(?:^|[-_.])tp[-_](\d+)(?=[-_.]|$)", re.IGNORECASE)
 _RANK_RES = (_GLOBAL_RANK_RE, _TP_RANK_RE)
 

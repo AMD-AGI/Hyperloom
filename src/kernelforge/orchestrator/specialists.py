@@ -76,26 +76,14 @@ _PROBE_LEDGER_NAME = "probe_ledger.jsonl"
 _PROBE_BUDGET_NAME = "round_budget.json"
 _PROBE_SECTION_TITLE = "## Scratch probe ledger"
 
-# What the probe's MCP child needs from this process and would not otherwise
-# get. The MCP client does NOT merge the parent environment into a stdio
-# server's: it merges only ``get_default_environment()``, which on this platform
-# is HOME, LOGNAME, PATH, SHELL, TERM and USER. So the child would start with no
-# import path (this repo runs from a source checkout), and the benchmark driver
-# it re-runs -- whose environment ``sweep_case`` builds from that stripped
-# ``os.environ`` -- would compile and dispatch with no ROCm and no device
-# selection.
-#
-# An allow-list rather than ``os.environ`` wholesale, on purpose: the child is a
-# measurement sandbox, and what reaches it should be what a measurement needs
-# and nameable as such. Same shape as ``agent._pr_kb_child_env``.
+# What the probe's MCP child needs from this process and would not otherwise get.
 _PROBE_CHILD_ENV_VARS = (
     # The child's own launch: `python -m kernelforge...` from a checkout.
     "PYTHONPATH",
     "PYTHONHOME",
     "VIRTUAL_ENV",
     "CONDA_PREFIX",
-    # ROCm toolchain and runtime: without these the driver finds no compiler
-    # and no libraries.
+    # ROCm toolchain and runtime: without these the driver finds no compiler and no libraries.
     "ROCM_PATH",
     "HIP_PATH",
     "HIP_PLATFORM",
@@ -103,50 +91,32 @@ _PROBE_CHILD_ENV_VARS = (
     "LD_LIBRARY_PATH",
     "PYTORCH_ROCM_ARCH",
     "GPU_TARGET",
-    # Which device this campaign may touch. Absent, the driver runs on device 0,
-    # which on a shared node is somebody else's.
+    # Which device this campaign may touch.
     "HIP_VISIBLE_DEVICES",
     "ROCR_VISIBLE_DEVICES",
     "CUDA_VISIBLE_DEVICES",
     "GPU_DEVICE_ORDINAL",
     # Build caches, and the aiter cache isolation this campaign installs in
-    # ``loop.aiter_cache.configure_aiter_cache_isolation``. Not an optimisation:
-    # aiter's ``get_module`` imports the ``.so`` out of ``AITER_JIT_DIR`` by
-    # name and never checks it against the source, so a child that fell back to
-    # the shared default cache could return a number labelled ``measured`` for
-    # a binary built from other source. The cheaper cost is the same file's
-    # >26 min cold rebuild on gfx950, which would blow the probe's ceiling
-    # while it held the device lock.
+    # ``loop.aiter_cache.configure_aiter_cache_isolation``.
     "TRITON_CACHE_DIR",
     "TORCHINDUCTOR_CACHE_DIR",
     "AITER_ROOT_DIR",
     "AITER_JIT_DIR",
-    # FlyDSL is the third compiler behind that isolation. Unforwarded, the
-    # child falls back to aiter's own default, which is inside the workspace.
-    # Named rather than forwarded by a "FLYDSL_" prefix on purpose: the family
-    # also holds RUN_ONLY and ENABLE_CACHE, which would change what is measured.
+    # FlyDSL is the third compiler behind that isolation.
     "FLYDSL_RUNTIME_CACHE_DIR",
     "FORGE_AITER_CACHE_ROOT",
     "FORGE_AITER_CACHE_OWNER_PID",
     "TMPDIR",
-    # The rank count the campaign measures under. ``cli.py`` says of it that
-    # without it "the contract is verified against a configuration the campaign
-    # never measures", which is as true of a probe as of the contract.
+    # The rank count the campaign measures under.
     "FORGE_NPROC_PER_NODE",
 )
-# Whole families rather than named members: the HSA and AMD runtime knobs a node
-# is configured with are open-ended, and a probe that ran without them would not
-# be measuring the configuration the campaign measures.
+# Whole families rather than named members: the HSA and AMD runtime knobs a node is configured with are open-ended,
+# and a probe that ran without them would not be measuring the configuration the campaign measures.
 _PROBE_CHILD_ENV_PREFIXES = ("HSA_", "AMD_", "ROCM_", "TRITON_")
 
 
 def _device_lock_path(workspace: Path) -> Path:
-    """The campaign sentinel a fan-out lane's serialized driver locks.
-
-    Imported here rather than at module scope: ``kernelforge.loop`` imports
-    the orchestrator while it is being imported itself, so the module-level
-    import is circular.
-    """
+    """The campaign sentinel a fan-out lane's serialized driver locks."""
     from kernelforge.loop.fanout import campaign_device_lock_path
 
     return campaign_device_lock_path(workspace)
@@ -163,20 +133,7 @@ def _probe_child_env() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class SpecialistProbeConfig:
-    """Bound the scratch measurement one analysis phase may run.
-
-    ``scratch_root`` must lie outside the canonical tree: the probe writes only
-    there, which is what leaves the read-only guarantee on the workspace intact.
-    Under it, each ROUND gets a tree of its own that is removed when the round
-    ends.
-
-    ``max_probes`` and ``budget_sec`` are the ROUND's, shared by every
-    assignment it dispatches, not one assignment's. How many assignments a round
-    has is chosen by a model at runtime, so a per-assignment budget would bound
-    nothing an operator can size. Both are further cut down by the specialist's
-    own session clock at call time; see
-    ``probe_stdio_server.probe_budget_sec``.
-    """
+    """Bound the scratch measurement one analysis phase may run."""
 
     scratch_root: str
     max_probes: int = 6
@@ -193,49 +150,18 @@ class SpecialistProbeConfig:
 
 @dataclass
 class _ProbeRound:
-    """One analysis phase's scratch tree and the budget its specialists share.
-
-    ``error`` carries the round that has no tree. It is a state of its own
-    rather than a None round: a None round means "not inside a round at all",
-    which falls back to a scratch directory under the configured root -- the
-    very root that just failed, and the one place nothing ever removes a
-    per-assignment directory.
-
-    ``reaped`` is written by the teardown rather than at construction, which is
-    the one reason this is not frozen: what the round's own processes left
-    behind is only known once the round has ended, and the caller that has to
-    act on it reads the round after the context manager has closed.
-    """
+    """One analysis phase's scratch tree and the budget its specialists share."""
 
     root: Path | None = None
     budget_path: Path | None = None
     error: str = ""
-    # What the teardown found still running in the round's tree. None where
-    # there was no tree to survey; a report is the answer even when it is clean.
+    # What the teardown found still running in the round's tree.
     reaped: ReapReport | None = None
 
 
 @asynccontextmanager
 async def _probe_round(probe: SpecialistProbeConfig | None):
-    """Give one round its own scratch tree, and take it away when the round ends.
-
-    The tree holds every assignment's ledger and the counters they share, and
-    nothing outlives the round: the ledgers have already been read back into the
-    analyses by the time this returns, and a tree left behind would accumulate
-    one per round for the length of the campaign. Removed on the failure paths
-    too, which is what the ``finally`` is for.
-
-    A probe is a benchmark, so the tree is reaped before it is removed. A
-    specialist killed by its session timeout mid-probe leaves a process holding
-    the GPU the canonical measurement is about to use, and the reaper identifies
-    it by what it holds open under this directory -- so removing the tree first
-    would leave nothing to identify it by. What could not be cleared is recorded
-    on the round for the caller to act on, because the damage is the device's
-    and not this round's.
-
-    Async for that reason alone: the reaper is a coroutine, and the teardown
-    cannot await from a synchronous ``finally``.
-    """
+    """Give one round its own scratch tree, and take it away when the round ends."""
     if probe is None:
         yield None
         return
@@ -244,10 +170,8 @@ async def _probe_round(probe: SpecialistProbeConfig | None):
         root.mkdir(parents=True, exist_ok=True)
         round_root = Path(tempfile.mkdtemp(prefix="round-", dir=str(root)))
     except OSError as error:
-        # Not fatal to the round: the specialists still analyse, they just
-        # cannot measure, and ``_prepare_probe`` reports why. Yielded as a
-        # round with an error rather than as no round, so nothing falls back to
-        # the root that just failed.
+        # Not fatal to the round: the specialists still analyse, they just cannot measure, and ``_prepare_probe``
+        # reports why.
         log.warning("specialist probe scratch root unusable: %s", error)
         yield _ProbeRound(error=f"the round scratch tree could not be created: {error}")
         return
@@ -269,28 +193,21 @@ class _ProbeSetup:
     workspace: str = ""
     unavailable_reason: str = ""
     config: SpecialistProbeConfig | None = None
-    # The counters this round's specialists share. None keeps them per session,
-    # which is what a specialist run outside a round gets.
+    # The counters this round's specialists share.
     budget_path: Path | None = None
-    # The campaign's device sentinel, the same file a fan-out lane's driver
-    # flocks.
+    # The campaign's device sentinel, the same file a fan-out lane's driver flocks.
     device_lock: Path | None = None
-    # This session's own wall clock, threaded through so the probe can refuse a
-    # measurement that would leave the analysis unwritten.
+    # This session's own wall clock, threaded through so the probe can refuse a measurement that would leave the
+    # analysis unwritten.
     session_timeout_sec: float = 0.0
-    # None means the parent did not say. The server treats that as fail-open --
-    # the configured probe budget still bounds every probe -- so the variable is
-    # omitted rather than formatted from a zero default, which would be a past
-    # deadline and would refuse every probe for the whole session.
+    # None means the parent did not say.
     session_deadline: float | None = None
 
     def server_env(self) -> dict[str, str]:
         if self.config is None:
             return {}
         return {
-            # The parent environment the MCP client does not forward for us --
-            # see ``_PROBE_CHILD_ENV_VARS``. First, so nothing here can shadow
-            # the FORGE_PROBE_* values that define the sandbox.
+            # The parent environment the MCP client does not forward for us -- see ``_PROBE_CHILD_ENV_VARS``.
             **_probe_child_env(),
             SCRATCH_ENV: str(self.scratch_dir),
             WORKSPACE_ENV: self.workspace,
@@ -303,15 +220,7 @@ class _ProbeSetup:
         }
 
     def probe_ceiling_sec(self) -> int:
-        """The longest one probe may run, as the prompt states it.
-
-        One number, used in three places: the prompt says it, the MCP client
-        enforces it (plus the server's own grace), and the server clamps every
-        request down to it. The round's wall-clock budget is what one probe may
-        claim at most -- it is shared, so a probe that took all of it leaves the
-        round's other specialists nothing -- but never so much of THIS session
-        that no analysis can be written.
-        """
+        """The longest one probe may run, as the prompt states it."""
         if self.config is None:
             return 0
         return probe_timeout_sec(
@@ -329,10 +238,9 @@ class _ProbeSetup:
                 args=("-m", "kernelforge.mcp_server.probe_stdio_server"),
                 env=self.server_env(),
                 startup_timeout_sec=15,
-                # The ceiling the prompt states, plus the grace the server
-                # allows itself past it: a client that timed out first would
-                # kill the call before the server wrote its ledger line, and
-                # the ledger is the only channel back to this process.
+                # The ceiling the prompt states, plus the grace the server allows itself past it: a client that timed
+                # out first would kill the call before the server wrote its ledger line, and the ledger is the only
+                # channel back to this process.
                 tool_timeout_sec=self.probe_ceiling_sec() + PROBE_TOOL_GRACE_SEC,
                 tools=self.tool_names(),
             )
@@ -345,21 +253,7 @@ class _ProbeSetup:
 
 
 def _deadline_prompt_section(session_timeout_sec: float) -> str:
-    """Tell the specialist how long it has, because nothing else does.
-
-    The session clock reaches the model only through a probe result, so a
-    specialist that never probes -- or one running with the probe off -- works
-    with no idea how long it has. Stated here instead, and stated hard, because
-    the enforcement is a kill: ``asyncio.wait_for`` returns a timeout failure
-    carrying no analysis, the round reads that as infrastructure rather than as
-    a thin answer, and a round whose specialists all did it is abandoned.
-    Nothing writes an analysis on the model's behalf.
-
-    Said as a limit and a self-check rather than as "time is short": this text is
-    built once, before the session starts, when the time is not short. What can
-    truthfully be said up front is the size of the limit and what happens at it;
-    the probe's own refusal is what says the clock has actually run out.
-    """
+    """Tell the specialist how long it has, because nothing else does."""
     total = max(0.0, float(session_timeout_sec))
     reserve = f"{ANALYSIS_RESERVE_SEC:.0f}s"
     return f"""
@@ -495,19 +389,7 @@ def build_specialist_prompts(
     session_timeout_sec: float,
     probe_setup: _ProbeSetup | None = None,
 ) -> tuple[str, str]:
-    """Build one evidence-scoped specialist prompt.
-
-    ``session_timeout_sec`` is the session's own wall clock, stated to the model
-    ahead of everything else: it is the one budget the specialist spends whether
-    or not it measures anything, and the only other place it appears is inside a
-    probe result. See :func:`_deadline_prompt_section`.
-
-    ``probe_setup`` is what ``SpecialistAgent._prepare_probe`` resolved for this
-    assignment. When it carries an enabled probe the system prompt gains the
-    section describing what may be measured and how to label it; otherwise the
-    prompt is exactly the read-only one, and the reason is reported separately
-    in the analysis rather than to the specialist.
-    """
+    """Build one evidence-scoped specialist prompt."""
     if assignment.role_id != definition.role_id:
         raise ValueError("specialist assignment role does not match definition")
     unknown_cases = set(assignment.target_case_ids) - context.case_ids
@@ -516,8 +398,7 @@ def build_specialist_prompts(
 
     system_prompt = (
         f"{_SPECIALIST_SYSTEM_PROMPT}"
-        # Ahead of the probe section, which speaks of "your own session" and
-        # needs that clock established first.
+        # Ahead of the probe section, which speaks of "your own session" and needs that clock established first.
         f"{_deadline_prompt_section(session_timeout_sec)}"
         f"{_probe_prompt_section(probe_setup) if probe_setup else ''}\n"
         f"Specialist role: {definition.description}\n\n"
@@ -591,13 +472,7 @@ class SpecialistAgent:
         usage=None,
         probe_round: _ProbeRound | None = None,
     ) -> SpecialistOutcome:
-        """Run one isolated specialist and normalize every failure.
-
-        ``probe_round`` is the scratch tree and shared budget the pool created
-        for this analysis phase. None -- a specialist run on its own -- gets a
-        scratch directory directly under the configured root and a budget of
-        its own.
-        """
+        """Run one isolated specialist and normalize every failure."""
         started = time.monotonic()
         probe_setup = _ProbeSetup()
         try:
@@ -617,7 +492,6 @@ class SpecialistAgent:
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=self.timeout_sec,
-                        reasoning_effort="max",
                         tool_policy=AgentToolPolicy(
                             read=True,
                             search=True,
@@ -712,10 +586,7 @@ class SpecialistAgent:
                 assignment,
                 "the specialist backend does not serve MCP tools, so the probe could not be offered",
             )
-        # A session with no room for one probe must not be offered one. Below
-        # the analysis reserve every call is refused from the first, and the
-        # prompt section would be promising probes and a budget that the tool
-        # timeout -- one second, at the clamp -- can never deliver.
+        # A session with no room for one probe must not be offered one.
         if float(self.timeout_sec) - ANALYSIS_RESERVE_SEC <= 0:
             return self._no_probe(
                 assignment,
@@ -740,27 +611,20 @@ class SpecialistAgent:
             workspace=str(workspace),
             config=self.probe,
             budget_path=(probe_round.budget_path if probe_round is not None else None),
-            # The campaign's sentinel, not one of the probe's own: the GPU a
-            # probe times on is the one a fan-out lane drives, so a probe and a
-            # lane queue on the same file. The canonical measurement takes no
-            # lock, so it is not in that queue -- see
-            # ``fanout.campaign_device_lock_path``.
+            # The campaign's sentinel, not one of the probe's own: the GPU a probe times on is the one a fan-out lane
+            # drives, so a probe and a lane queue on the same file.
             device_lock=_device_lock_path(workspace),
             session_timeout_sec=float(self.timeout_sec),
             session_deadline=time.time() + float(self.timeout_sec),
         )
         try:
             scratch_dir.mkdir(parents=True, exist_ok=True)
-            # An assignment id repeats across rounds. A round with its own tree
-            # cannot inherit one, but a specialist run outside a round writes
-            # straight under the configured root, where an earlier ledger would
-            # be reported as this session's.
+            # An assignment id repeats across rounds.
             ledger_path.unlink(missing_ok=True)
         except OSError as error:
             return self._no_probe(assignment, f"the scratch root could not be prepared: {error}")
-        # The server validates its own environment and would refuse a session it
-        # cannot serve; a refusal it cannot write to the ledger reads downstream
-        # like a probe nobody called, so the same check runs here, where "not
+        # The server validates its own environment and would refuse a session it cannot serve; a refusal it cannot
+        # write to the ledger reads downstream like a probe nobody called, so the same check runs here, where "not
         # offered, and here is why" is still a thing the parent can report.
         try:
             load_sandbox(candidate.server_env())
@@ -807,13 +671,7 @@ class SpecialistAgent:
 
 @dataclass(frozen=True)
 class SpecialistRunResult:
-    """What one analysis phase produced, and what it left on the device.
-
-    Two answers rather than one because they belong to different owners: the
-    outcomes are the round's analyses, while ``reaped`` is about the GPU every
-    later measurement shares. A round whose specialists all succeeded can still
-    have left a probe running, so the second cannot be inferred from the first.
-    """
+    """What one analysis phase produced, and what it left on the device."""
 
     outcomes: tuple[SpecialistOutcome, ...] = ()
     # The round scratch tree's teardown report, None when the round had no tree.
@@ -850,18 +708,7 @@ class SpecialistPool:
         *,
         usage=None,
     ) -> SpecialistRunResult:
-        """Run all assignments without letting one failure cancel siblings.
-
-        The round's probe budget and scratch tree are created here rather than
-        per assignment: they are the round's unit of account, and the tree is
-        reaped and removed when the round ends however it ends.
-
-        Returns the outcomes together with that teardown's report. The report
-        travels rather than being logged and dropped because a probe that
-        outlived its specialist is holding the device the caller's canonical
-        measurement is about to use, and only the caller can decide not to take
-        it.
-        """
+        """Run all assignments without letting one failure cancel siblings."""
         assignment_ids = [assignment.assignment_id for assignment in assignments]
         if len(set(assignment_ids)) != len(assignment_ids):
             raise ValueError("assignment_id values must be unique")
@@ -891,8 +738,7 @@ class SpecialistPool:
 
         async with _probe_round(probe) as probe_round:
             outcomes = await asyncio.gather(*(run_one(item, probe_round) for item in assignments))
-        # Read after the block, not inside it: the teardown that writes it runs
-        # as the context manager closes.
+        # Read after the block, not inside it: the teardown that writes it runs as the context manager closes.
         return SpecialistRunResult(
             outcomes=tuple(
                 sorted(

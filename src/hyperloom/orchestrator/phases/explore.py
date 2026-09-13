@@ -30,6 +30,7 @@ from ..specialists.runner import SpecialistFailureType
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
+from ..state.orchestration_memory import MEMORY_REQUEST_PROMPT, build_memory_record, parse_memory_reply
 from ..loop.coordinator import (
     FORCE_STALLED_KEEP_ROUNDS,
     FORCE_STALLED_SPECIALIST_ROUNDS,
@@ -225,8 +226,8 @@ class ExplorePhase(CoordinatorCollaborator):
             log_rows.append(planned)
         state.cycle_strategy_log = log_rows[-50:]
 
-    def _cycle_strategy_seed_block(self) -> str:
-        """Render persisted cycle focus facts for orchestration SEED prompts."""
+    def _cycle_strategy_block(self) -> str:
+        """Render persisted cycle focus facts for the orchestration prompt."""
         rows = [r for r in (getattr(self.shared_state, "cycle_strategy_log", []) or []) if isinstance(r, dict)]
         if not rows:
             return ""
@@ -253,10 +254,46 @@ class ExplorePhase(CoordinatorCollaborator):
         lines.append("Advisory only: use this as a prior, not a dispatch gate.")
         return "\n".join(lines)
 
+    async def _capture_cycle_memory(self) -> bool:
+        """Ask Orchestration for the finished cycle's working memory and persist it.
+
+        The turn is stateless, so it carries the same full state projection a
+        reactor pass does; the reply is the only place
+        ``orchestration_memory.next_cycle_directive`` is produced.
+
+        Returns:
+            ``True`` when a record was persisted, ``False`` when no
+            orchestration backend is configured.
+        """
+        backend = self.backends.get("orchestration")
+        if backend is None:
+            return False
+        result = await backend.run(
+            prompt=f"{await self._compose_prompt('orchestration')}\n\n{MEMORY_REQUEST_PROMPT}",
+            system_prompt=await self._load_system_prompt("orchestration"),
+            tools=[],
+            max_turns=0,
+            allow_no_intent=True,
+        )
+        state = self.shared_state
+        record = build_memory_record(
+            parse_memory_reply(getattr(result, "raw_text", "") or ""),
+            tick=int(state.tick or 0),
+            previous=dict(state.orchestration_memory or {}),
+        )
+        if record.get("parse_error"):
+            log.warning(
+                "_capture_cycle_memory: %s; carrying the previous cycle's memory forward",
+                record["parse_error"],
+            )
+        state.orchestration_memory = record
+        state.orchestration_memory_history = [*(state.orchestration_memory_history or []), record][-10:]
+        return True
+
     def _cycle_directive_fallback(self) -> str:
         """Render a deterministic cycle focus from ``_plan_cycle_focus``.
 
-        Used when the LLM checkpoint produced no ``next_cycle_directive``; keeps
+        Used when the memory capture produced no ``next_cycle_directive``; keeps
         every cycle's CYCLE DIRECTIVE section grounded in real telemetry.
         """
         try:
@@ -401,7 +438,7 @@ class ExplorePhase(CoordinatorCollaborator):
         """Medium-intensity soft restart at a macro-cycle boundary.
 
         Recycles transient/per-cycle resources (fresh leases, pruned DB, cleared
-        caches, conversation reset) without losing accumulated optimization state;
+        caches, re-scoped system prompt) without losing accumulated optimization state;
         ``current_best`` / ``optimization_stack`` / ``explore_search`` are
         preserved. Idempotent and best-effort: every step is independently
         guarded so one failure never aborts the run loop.
@@ -420,24 +457,16 @@ class ExplorePhase(CoordinatorCollaborator):
             "prior_cycle": int(prior_cycle),
             "new_cycle": int(new_cycle),
         }
-        # 1) Compact the cycle's conversation into durable memory, re-focus the
-        # orchestration prompt for the new cycle, then reset.
+        # 1) Capture the cycle's working memory, then rebuild the system prompt
+        # for the new cycle around the directive that capture produced.
         try:
-            compacted = await self._maybe_checkpoint_orchestration(
-                tick=int(getattr(self.shared_state, "tick", 0) or 0),
-                phase_changed=True,
-                force=True,
-            )
-            summary["memory_compacted"] = bool(compacted)
-            try:
-                summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
-            except Exception:  # noqa: BLE001 — reseed is best-effort
-                log.exception("cycle soft-restart: orchestration prompt reseed failed")
-            # Reset unconditionally so a no-op checkpoint still reseeds next turn.
-            self._reset_orchestration_conversation()
-            summary["conversation_reset"] = True
-        except Exception:  # noqa: BLE001 — soft restart never aborts the run loop
-            log.exception("cycle soft-restart: conversation reset failed")
+            summary["memory_captured"] = await self._capture_cycle_memory()
+        except Exception:  # noqa: BLE001 — capture never aborts the run loop
+            log.exception("cycle soft-restart: orchestration memory capture failed")
+        try:
+            summary["orch_prompt_reseeded"] = self._reseed_orch_prompt_for_cycle()
+        except Exception:  # noqa: BLE001 — reseed is best-effort
+            log.exception("cycle soft-restart: orchestration prompt reseed failed")
         # 2-3) Reap leases, reclaim orphaned running tasks, prune DB.
         await run_lease_and_db_reclaim(self, summary, reason="cycle_soft_restart")
         # 4) Deep-clean any lingering inference-server processes.
@@ -929,11 +958,14 @@ class ExplorePhase(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_source_file_allowlist
+                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
 
-                roots = resolve_source_file_allowlist()
+                roots = resolve_kernel_search_roots()
                 if roots:
                     params["framework_source_roots"] = list(roots)
+                tree = resolve_framework_tree(str(getattr(state, "framework", "") or ""))
+                if tree:
+                    params["session_framework_tree"] = tree
             except Exception as exc:  # noqa: BLE001
                 log.debug(
                     "specialist warmup: framework_source_roots lookup failed: %r",
@@ -957,6 +989,12 @@ class ExplorePhase(CoordinatorCollaborator):
             params.setdefault("osl", int(state.osl))
         if int(getattr(state, "max_model_len", 0) or 0) > 0:
             params.setdefault("max_model_len", int(state.max_model_len))
+        # The mode selects the specialist's workload block; the corpus shape
+        # supplies its numbers.
+        if getattr(state, "benchmark_mode", "") or "":
+            params.setdefault("benchmark_mode", str(state.benchmark_mode))
+        if getattr(state, "agentx_corpus_shape", None):
+            params.setdefault("agentx_corpus_shape", dict(state.agentx_corpus_shape))
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
@@ -966,28 +1004,22 @@ class ExplorePhase(CoordinatorCollaborator):
             if _arch_notes:
                 params["arch_notes"] = _arch_notes
 
-        # Static-recon specialist extras: structured model_info + checklist-derived
-        # source-hint directories for the recon focus block.
-        if domain == "static_recon_specialist":
-            if "model_info" not in params:
-                _minfo = getattr(state, "model_info", None)
-                if isinstance(_minfo, dict) and _minfo:
-                    params["model_info"] = dict(_minfo)
-            if "source_hint_directories" not in params:
-                try:
-                    from ..knowledge import static_recon_checklist as _src_recon
+        if domain == "static_recon_specialist" and "model_info" not in params:
+            _minfo = getattr(state, "model_info", None)
+            if isinstance(_minfo, dict) and _minfo:
+                params["model_info"] = dict(_minfo)
 
-                    _dirs = _src_recon.source_hint_directories_for(
-                        model_class=str(getattr(state, "model_class", "") or ""),
-                        gpu_type=str(getattr(state, "gpu_type", "") or ""),
-                        precision=str(getattr(state, "precision", "") or ""),
-                    )
-                    if _dirs:
-                        params["source_hint_directories"] = list(_dirs)
-                except Exception:  # noqa: BLE001 — advisory; never block dispatch
-                    log.exception(
-                        "static-recon: source_hint_directories lookup failed",
-                    )
+        # Checklist-derived focus directories; a caller that named its own keeps it.
+        if "source_hint_directories" not in params:
+            from ..knowledge import static_recon_checklist as _src_recon
+
+            _dirs = _src_recon.source_hint_directories_for(
+                model_class=str(getattr(state, "model_class", "") or ""),
+                gpu_type=str(getattr(state, "gpu_type", "") or ""),
+                precision=_src_recon.workload_precision(state),
+            )
+            if _dirs:
+                params["source_hint_directories"] = list(_dirs)
 
         if "target_gap_notes" not in params:
             try:
@@ -1575,22 +1607,15 @@ class ExplorePhase(CoordinatorCollaborator):
                     integrate_params["framework_agent_candidate_id"] = fa_cand
                 if fa_batch:
                     integrate_params["framework_batch_id"] = fa_batch
-            # Propagate the enablement marker (+ optional launch probe) so
-            # integrate_patch applies the runnable_decision gate.
+            # Propagate the enablement marker so integrate_patch applies the
+            # runnable_decision gate.
             if bool(spec_params.get("enablement")):
                 integrate_params["enablement"] = True
                 _forward_enablement_carriers(spec_params, integrate_params)
-                probe = str(spec_params.get("launch_probe") or "").strip()
-                if probe:
-                    integrate_params["launch_probe"] = probe
-                # Forward the pre-patch failure signature for the runnable gate.
-                before_sig = spec_params.get("enablement_before_signature")
-                if isinstance(before_sig, dict):
-                    integrate_params["enablement_before_signature"] = before_sig
-                # Forward the stacked base patches for integrate_patch to re-apply.
-                base_patches = spec_params.get("enablement_base_patches")
-                if isinstance(base_patches, list) and base_patches:
-                    integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+                # Forward the pre-patch boot observation for the runnable gate.
+                before_path = str(spec_params.get("enablement_before_observation_path") or "")
+                if before_path:
+                    integrate_params["enablement_before_observation_path"] = before_path
                 # Forward stacked base setup commands to replay before boot.
                 base_setup = spec_params.get("enablement_setup_commands")
                 if isinstance(base_setup, list) and base_setup:
@@ -1685,12 +1710,9 @@ class ExplorePhase(CoordinatorCollaborator):
             and not done_payload.get("artifacts_written")
         ):
             return
-        # Normally route only when there are config levers to test. For an
-        # ENABLEMENT round ALWAYS route (even a setup-only or empty deliverable):
-        # integrate_patch owns the enablement stall accounting, so an enablement
-        # round must reach it to bump ``enablement_stall_streak`` / clear
-        # ``enablement_stall_streak`` and eventually fire ``enablement_stalled``.
-        # Non-enablement config deliverables keep the strict "levers required" gate.
+        # Route only when there are config levers to test, except for an
+        # ENABLEMENT round, which always routes: a round that does not reach
+        # integrate_patch never reports what its boot did.
         if not config_levers and not is_enablement:
             return
         sid = str(task.task_id or "").strip()
@@ -1739,21 +1761,15 @@ class ExplorePhase(CoordinatorCollaborator):
             integrate_params["framework_batch_id"] = fa_batch
         # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
         # config-lever-only enablement deliverable MUST still flow the enablement
-        # marker + setup_commands into integrate_patch, otherwise the result never
+        # marker + setup_commands into integrate_patch, or the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
-        # the enablement stall streak is only advanced via _maybe_rearm_enablement.
+        # the round is never settled or charged.
         if bool(spec_params.get("enablement")):
             integrate_params["enablement"] = True
             _forward_enablement_carriers(spec_params, integrate_params)
-            probe = str(spec_params.get("launch_probe") or "").strip()
-            if probe:
-                integrate_params["launch_probe"] = probe
-            before_sig = spec_params.get("enablement_before_signature")
-            if isinstance(before_sig, dict):
-                integrate_params["enablement_before_signature"] = before_sig
-            base_patches = spec_params.get("enablement_base_patches")
-            if isinstance(base_patches, list) and base_patches:
-                integrate_params["enablement_base_patches"] = [str(p) for p in base_patches]
+            before_path = str(spec_params.get("enablement_before_observation_path") or "")
+            if before_path:
+                integrate_params["enablement_before_observation_path"] = before_path
             # Merge the stacked base setup commands with any NEW setup_commands the
             # specialist just proposed in this deliverable (e.g. a stack upgrade),
             # so a config-lever-only enablement round actually replays the install
@@ -1898,7 +1914,6 @@ class ExplorePhase(CoordinatorCollaborator):
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
             "tags": list(tags),
             "gap_canonical_id": str(done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""),
-            "empty": bool(done_payload.get("empty")) or len(proposals) == 0,
             "proposals_total": len(proposals),
             "proposal_set": list(proposals),
             "summary": str(done_payload.get("summary") or "")[:480],

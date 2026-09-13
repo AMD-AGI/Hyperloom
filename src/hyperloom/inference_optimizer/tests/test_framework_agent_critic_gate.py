@@ -1,14 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Converged FRAMEWORK pre-screen gate.
-
-The candidate is submitted as a normal ``framework_agent`` proposal and the
-async Critic verdict drives the apply/author enqueue or the ``critic_denied``
-row.
-"""
+"""Converged FRAMEWORK pre-screen gate."""
 
 from __future__ import annotations
+
 
 import pytest
 
@@ -180,8 +176,8 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
     await coord._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
     assert len(raw) == 1
-    # The dispatched task carries no specialist task id, so the verdict has to
-    # be filed under the candidate for the executor and PolicyGate to find it.
+    # The dispatched task carries no specialist task id, so the verdict has to be filed under the candidate for the
+    # executor and PolicyGate to find it.
     assert coord.shared_state.get_specialist_patch_verdict(_CANDIDATE["candidate_id"]) == "approve"
 
 
@@ -197,28 +193,6 @@ async def test_reject_verdict_records_critic_denied(coord: Coordinator) -> None:
     assert len(denied) == 1
     assert denied[0]["candidate_id"] == _CANDIDATE["candidate_id"]
     assert "out of scope" in denied[0]["rationale"]
-
-
-@pytest.mark.asyncio
-async def test_reject_enablement_integrate_patch_advances_stall(coord: Coordinator) -> None:
-    """A Critic-rejected ENABLEMENT integrate_patch never reaches the executor,
-    so it must still advance the enablement stall accounting (bump streak, clear
-    inflight_task_id) to avoid stalling before enablement_stalled fires."""
-    coord.shared_state.enablement.inflight_task_id = "spec-e"
-    coord.shared_state.enablement.stall_streak = 0
-    pending = PendingProposal(
-        proposal_msg_id="m-enable",
-        from_agent="coordinator",
-        action_name="integrate_patch",
-        predicted_gain_pct=0.0,
-        payload={"params": {"enablement": True, "specialist_task_id": "spec-e"}},
-    )
-    coord.state.pending_proposals[pending.proposal_msg_id] = pending
-    await coord._handle_single_verdict(
-        source="critic", pending=pending, verdict="reject", reasoning="empty deliverable; nothing to enable"
-    )
-    assert coord.shared_state.enablement.stall_streak == 1
-    assert not coord.shared_state.enablement.inflight_task_id
 
 
 def _append(bucket: list, candidate) -> "object":

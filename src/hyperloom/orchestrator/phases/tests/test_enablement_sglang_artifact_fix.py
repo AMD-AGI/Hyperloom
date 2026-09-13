@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cross-repo patch grounding, artifact stacking, and accumulated-config replay.
-
-Regression fixtures come from sessions 101858 (two advanced rounds whose envs a
-later KEEP erased) and 101901 (an artifact-only repair whose replay script came
-out empty).
-"""
+"""Cross-repo patch grounding, artifact stacking, and accumulated-config replay."""
 
 from __future__ import annotations
 
@@ -50,16 +45,16 @@ def test_patch_grounds_against_a_candidate_root(tmp_path):
     assert res.verdict == _ps.GROUND_APPLIES
 
 
-def test_patch_absent_from_every_root_is_dropped(tmp_path):
+def test_patch_absent_from_every_root_is_reported_not_dropped(tmp_path):
     aiter = _checkout(tmp_path / "aiter", "aiter_file.py")
     sglang = _checkout(tmp_path / "sglang", "sglang_file.py")
 
     res = _ps.ground_patch_text(_diff("ghost.py"), base_checkout=aiter, candidate_roots=(sglang,))
     assert res.verdict == _ps.GROUND_MISSING_TARGET
-    assert res.is_garbage
+    assert not res.is_garbage
 
 
-def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
+def test_duplicate_matching_roots_are_reported_as_ambiguous(tmp_path):
     base = _checkout(tmp_path / "base", "f.py")
     other = _checkout(tmp_path / "other", "f.py")
     (base / "f.py").write_text("drifted\n", encoding="utf-8")
@@ -68,17 +63,11 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     res = _ps.ground_patch_text(_diff("f.py"), base_checkout=base, candidate_roots=(other,))
     assert res.verdict == _ps.GROUND_AMBIGUOUS_ROOT
     assert res.detail.startswith("ambiguous_root:")
-    assert res.is_garbage
+    assert not res.is_garbage
 
 
 def test_basename_does_not_create_false_ambiguity(tmp_path):
-    """A deep sglang path must not match an aiter tree that holds only the same basename.
-
-    python/sglang/srt/layers/utils.py stripped at high -p levels reduces to utils.py.
-    That bare filename must not be accepted as a match, because any tree that happens
-    to hold a top-level utils.py would then be considered a candidate, triggering
-    false ambiguous_root and dropping the entire patch set.
-    """
+    """A deep sglang path must not match an aiter tree that holds only the same basename."""
     sglang = tmp_path / "sglang"
     sglang.mkdir()
     _git("init", "-q", str(sglang))
@@ -126,14 +115,14 @@ def test_pure_create_lands_in_the_worktree_base(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(patch)],
         base_checkout=base,
         candidate_roots=(other,),
     )
 
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert not spans_roots
 
 
@@ -160,11 +149,11 @@ def test_vet_patches_rescues_a_cross_repo_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("sglang_file.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(patch)], base_checkout=aiter, candidate_roots=(sglang,)
     )
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
     assert not spans_roots
 
@@ -181,14 +170,14 @@ def test_vet_patches_resolves_the_complete_set_once(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=complete,
         candidate_roots=(),
     )
 
     assert kept == patches
-    assert dropped == []
+    assert ungrounded == []
     assert set(grounding.values()) == {_ps.GROUND_APPLIES}
     assert not spans_roots
 
@@ -203,14 +192,14 @@ def test_vet_patches_keeps_a_set_split_across_roots_and_reports_it(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=first,
         candidate_roots=(second,),
     )
 
     assert set(kept) == set(patches)
-    assert dropped == []
+    assert ungrounded == []
     assert spans_roots
 
 
@@ -224,7 +213,7 @@ def test_cross_tree_set_reaches_root_resolution_as_a_miss(tmp_path):
         patch.write_text(_diff(name), encoding="utf-8")
         patches.append(str(patch))
 
-    kept, _dropped, _grounding, spans_roots = _ps.vet_patches(
+    kept, _ungrounded, _grounding, spans_roots = _ps.vet_patches(
         patches,
         base_checkout=first,
         candidate_roots=(second,),
@@ -240,21 +229,22 @@ def test_cross_tree_set_reaches_root_resolution_as_a_miss(tmp_path):
     assert whole_set.reason == "no_matching_root"
 
 
-def test_vet_patches_absent_from_every_root_is_dropped(tmp_path):
-    """A patch whose target exists in no root is still dropped."""
+def test_vet_patches_absent_from_every_root_is_kept_and_recorded(tmp_path):
+    """A patch whose target exists in no root is kept, with the miss recorded."""
     first = _checkout(tmp_path / "first", "first.py")
     second = _checkout(tmp_path / "second", "second.py")
     ghost = tmp_path / "ghost.patch"
     ghost.write_text(_diff("ghost.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches(
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
         [str(ghost)],
         base_checkout=first,
         candidate_roots=(second,),
     )
 
-    assert kept == []
-    assert len(dropped) == 1
+    assert kept == [str(ghost)]
+    assert len(ungrounded) == 1
+    assert ungrounded[0]["verdict"] == _ps.GROUND_MISSING_TARGET
     assert grounding[str(ghost)] == _ps.GROUND_MISSING_TARGET
     assert not spans_roots
 
@@ -280,7 +270,9 @@ def test_patch_grounds_against_a_non_git_tree(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("installed.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=base, candidate_roots=(plain,))
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches(
+        [str(patch)], base_checkout=base, candidate_roots=(plain,)
+    )
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_APPLIES
@@ -292,10 +284,10 @@ def test_no_tree_to_ground_against_keeps_the_patch(tmp_path):
     patch = tmp_path / "fix.patch"
     patch.write_text(_diff("anything.py"), encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
-    assert dropped == []
+    assert ungrounded == []
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
     assert not spans_roots
 
@@ -304,7 +296,7 @@ def test_no_tree_to_ground_against_keeps_a_create_only_patch(tmp_path):
     patch = tmp_path / "create.patch"
     patch.write_text(_CREATE_ONLY_DIFF, encoding="utf-8")
 
-    kept, dropped, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
+    kept, ungrounded, grounding, spans_roots = _ps.vet_patches([str(patch)], base_checkout=None, candidate_roots=())
 
     assert kept == [str(patch)]
     assert grounding[str(patch)] == _ps.GROUND_UNCHECKED
@@ -323,13 +315,7 @@ def test_no_candidate_roots_is_distinct_from_a_miss(tmp_path):
 
 
 def test_create_only_reason_does_not_depend_on_the_candidates(tmp_path):
-    """A create-only set has no pre-image, so candidates cannot speak to it.
-
-    Letting the candidate list rename this reason made the outcome depend on
-    which framework trees happen to exist on the host: a clean CI box, where the
-    allowlist names roots that are all absent, disagreed with a dev box where one
-    of them was real.
-    """
+    """A create-only set has no pre-image, so candidates cannot speak to it."""
     real = _checkout(tmp_path / "root", "present.py")
     absent = tmp_path / "absent"
 
@@ -347,9 +333,16 @@ def test_kept_artifacts_reach_the_replay_script(tmp_path):
     backup = tmp_path / "server_args.py.bak"
     backup.write_text("# original\n", encoding="utf-8")
 
+    # Populate the round archive as snapshot_round would.
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    (art_dir / "000_server_args.py").write_text("# fixed\n", encoding="utf-8")
+    (art_dir / "000_server_args.py.orig").write_text("# original\n", encoding="utf-8")
+
     enablement = EnablementRound()
     enablement.kept_rounds = [
         {
+            "task_id": "s1",
             "patches": [],
             "artifacts": [
                 {
@@ -370,14 +363,19 @@ def test_kept_artifacts_reach_the_replay_script(tmp_path):
 def test_artifact_only_repair_renders_a_replay_script(tmp_path):
     """101901 shipped two artifacts and no diff; its script had no install lines."""
     sources = []
-    for name in ("server_args.py", "quark_w4a4_mxfp4_moe.py"):
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    for idx, name in enumerate(("server_args.py", "quark_w4a4_mxfp4_moe.py")):
         src = tmp_path / name
         src.write_text(f"# {name}\n", encoding="utf-8")
         sources.append(src)
+        # Populate the archive as snapshot_round would.
+        (art_dir / f"{idx:03d}_{name}").write_text(f"# {name}\n", encoding="utf-8")
 
     enablement = EnablementRound()
     enablement.kept_rounds = [
         {
+            "task_id": "s1",
             "patches": [],
             "artifacts": [
                 {"target": f"/sgl-workspace/sglang/python/sglang/srt/{s.name}", "source": str(s)} for s in sources
@@ -423,9 +421,22 @@ def test_generated_artifact_script_installs_and_launches(tmp_path):
     source = tmp_path / "patched.py"
     source.write_text("# patched\n", encoding="utf-8")
     target = tmp_path / "tree" / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# original\n", encoding="utf-8")
+
+    # Populate the round archive as snapshot_round would.
+    art_dir = tmp_path / "reports" / "enablement" / "s1" / "artifacts"
+    art_dir.mkdir(parents=True)
+    (art_dir / "000_mod.py").write_text("# patched\n", encoding="utf-8")
 
     enablement = EnablementRound()
-    enablement.kept_rounds = [{"patches": [], "artifacts": [{"target": str(target), "source": str(source)}]}]
+    enablement.kept_rounds = [
+        {
+            "task_id": "s1",
+            "patches": [],
+            "artifacts": [{"target": str(target), "source": str(source)}],
+        }
+    ]
     rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M")
 
     proc = subprocess.run(
@@ -442,11 +453,7 @@ def test_generated_artifact_script_installs_and_launches(tmp_path):
 
 
 def test_kept_round_keeps_the_envs_earlier_advances_accepted(tmp_path):
-    """101858: two advances accepted three envs; the KEEP bench must carry them.
-
-    The KEEP leg is benched with ``base_extra_envs``, so its effective_config
-    is the whole stack and writing it back over ``accepted_config`` is lossless.
-    """
+    """101858: two advances accepted three envs; the KEEP bench must carry them."""
     enablement = EnablementRound()
     enablement.accepted_config = {
         "extra_envs": {
@@ -458,8 +465,8 @@ def test_kept_round_keeps_the_envs_earlier_advances_accepted(tmp_path):
     }
     base_extra_envs = dict(enablement.accepted_config["extra_envs"])
 
-    # The KEEP round proposes no env of its own; the variant still launches with
-    # the accumulated three, so effective_config comes back holding all of them.
+    # The KEEP round proposes no env of its own; the variant still launches with the accumulated three, so
+    # effective_config comes back holding all of them.
     enablement.accepted_config = {"extra_envs": base_extra_envs, "extra_server_args": ""}
 
     write_setting_script(tmp_path, enablement, "sglang", model="/models/DeepSeek-V4-Pro", tp=8)
@@ -486,7 +493,7 @@ def test_replay_script_is_valid_bash(tmp_path):
 
 
 def test_state_without_the_new_fields_still_loads():
-    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"], "attempts": 3})
+    enablement = EnablementRound.from_dict({"kept_patches": ["/patch1"]})
     assert enablement.kept_patches == ["/patch1"]
     assert enablement.kept_artifacts == []
     assert enablement.last_grounding_drop_reason == []

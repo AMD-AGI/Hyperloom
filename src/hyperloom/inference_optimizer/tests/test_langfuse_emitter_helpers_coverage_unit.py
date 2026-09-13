@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion,
-observation start/end shims, OTEL attribute coercion, trace-attr fallback, and
-JSON/JSONL loaders."""
+"""Coverage for langfuse_emitter SDK-version-tolerant helpers: ns conversion, observation start/end shims, OTEL
+attribute coercion, trace-attr fallback, and JSON/JSONL loaders.
+"""
 
 from __future__ import annotations
 

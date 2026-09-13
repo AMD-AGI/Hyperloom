@@ -232,12 +232,7 @@ def test_local_top_n_ranks_all_sessions_not_only_twenty_recent(tmp_path):
 
 
 def test_rewriting_a_record_keeps_the_measurement_a_consumer_recorded(tmp_path):
-    """A replacing write must not hand the ranking back the claim that lost.
-
-    Ranking trusts a measured value over any claim, and only a consumer that ran
-    the candidate can produce one. Dropping it on rewrite would restore the
-    inflated claim that the measurement exists to correct.
-    """
+    """A replacing write must not hand the ranking back the claim that lost."""
     root = tmp_path / "records"
     store = record_store.LocalRewriteRecords(root)
     source = _artifact(tmp_path, "kernel.py", b"first")

@@ -176,13 +176,7 @@ def test_gate_orchestration_propose_action_ok(gate):
 @pytest.mark.parametrize("precision", ["bf16", "fp8"])
 @pytest.mark.parametrize("backend_order", [None, "forge"])
 def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
-    """Refused by channel, not by applicability.
-
-    The lane is dispatched once at KERNEL entry from a lane budget, so a
-    per-tick re-issue would spend time the allocation never granted. Precision
-    and backend order are still not pre-filtered -- the reason is the same for
-    every combination of them, which is what the parametrization pins.
-    """
+    """Refused by channel, not by applicability."""
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
     if backend_order:
         monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
@@ -200,13 +194,7 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
 
 
 def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
-    """Source rewrite is the controller's, so the kind is unregistered.
-
-    PolicyGate refuses a kind it knows is Coordinator-owned. ``run_optimization``
-    is not one of those any more -- it is nothing at all -- so the refusal comes
-    from the handler lookup instead, with the valid-kind vocabulary attached.
-    Asserting it here keeps the kind from quietly becoming requestable again.
-    """
+    """Source rewrite is the controller's, so the kind is unregistered."""
     from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
 
     assert has_handler("run_optimization") is False
@@ -634,15 +622,14 @@ def test_robustness_role_no_system_prompt_file():
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():
-    # closing_phase and baseline_config_path are Coordinator-only fact fields
-    # locked against non-coordinator update_state.
+    # closing_phase and baseline_config_path are Coordinator-only fact fields locked against non-coordinator
+    # update_state.
     assert "closing_phase" in CORE_STATE_FIELDS
     assert "baseline_config_path" in CORE_STATE_FIELDS
 
 
 def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
-    # A non-core-mutating role must not force wind-down or inject a launch
-    # config path via update_state.
+    # A non-core-mutating role must not force wind-down or inject a launch config path via update_state.
     for field_name, value in (("closing_phase", True), ("baseline_config_path", "/etc/evil.yaml")):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
@@ -656,8 +643,8 @@ def test_gate_update_state_closing_phase_and_baseline_config_rejected(gate):
 
 
 def test_gate_update_state_cannot_move_the_resume_boundary(gate):
-    # resumed_ts dates the current run leg: moving it hands the previous leg's
-    # CLOSE transition back the right to speak for this one.
+    # resumed_ts dates the current run leg: moving it hands the previous leg's CLOSE transition back the right to
+    # speak for this one.
     assert "resumed_ts" in CORE_STATE_FIELDS
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -681,8 +668,8 @@ def test_the_model_cannot_rewrite_the_budget_the_closing_reserve_leaves_it(gate)
 
 
 def test_gate_update_state_cannot_move_a_session_end_time(gate):
-    # stop_ts is the timestamp half of stop_reason, written by the same setter:
-    # locking only the reason lets a model post-date the session's end.
+    # stop_ts is the timestamp half of stop_reason, written by the same setter: locking only the reason lets a model
+    # post-date the session's end.
     assert "stop_ts" in CORE_STATE_FIELDS
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -698,8 +685,8 @@ def test_gate_update_state_cannot_move_a_session_end_time(gate):
 def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
     """Names what the lock prevents: one field, and the run has no usable time left."""
     state = SharedState(session_id="s", max_minutes=100)
-    # Freeze elapsed time: two live ``session_budget_usable_sec`` reads race
-    # the clock by tens of microseconds, which is enough for ``==`` to fail.
+    # Freeze elapsed time: two live ``session_budget_usable_sec`` reads race the clock by tens of microseconds, which
+    # is enough for ``==`` to fail.
     state.elapsed_minutes = lambda **_kw: 90.0  # type: ignore[method-assign]
     honest = state.session_budget_usable_sec()
 
@@ -711,9 +698,7 @@ def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
 
 
 def test_core_state_fields_synced_with_robustness_envelope():
-    # gate.CORE_STATE_FIELDS and the robustness
-    # envelope copy must stay byte-identical. This direct assertion never skips
-    # (unlike the robustness test_role_contract, which needs the optimizer importable).
+    # gate.CORE_STATE_FIELDS and the robustness envelope copy must stay byte-identical.
     from hyperloom.agents.robustness.role.envelope import (
         CORE_STATE_FIELDS as ENVELOPE_CORE_STATE_FIELDS,
     )

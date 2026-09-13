@@ -15,8 +15,8 @@ from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
 
 def test_split_env_and_flags_mixed_tokens() -> None:
-    # Only ``-``-prefixed tokens land in ``flags``; a bare value token following
-    # a space-form flag is dropped (equals-form is the only way a value survives).
+    # Only ``-``-prefixed tokens land in ``flags``; a bare value token following a space-form flag is dropped
+    # (equals-form is the only way a value survives).
     envs, flags = ch._split_env_and_flags("FOO=1 BAR=baz --chunked-prefill-size=2048 --disable-radix-cache")
     assert envs == {"FOO": "1", "BAR": "baz"}
     assert flags == "--chunked-prefill-size=2048 --disable-radix-cache"
@@ -40,8 +40,8 @@ def test_split_env_and_flags_only_flags() -> None:
 
 
 def test_split_env_and_flags_falls_back_on_shlex_error() -> None:
-    # An unbalanced quote makes shlex.split raise, so the ``.split()`` fallback
-    # runs; the unterminated token starts with "-" and lands in ``flags``.
+    # An unbalanced quote makes shlex.split raise, so the ``.split()`` fallback runs; the unterminated token starts
+    # with "-" and lands in ``flags``.
     envs, flags = ch._split_env_and_flags('FOO=1 --flag="unterminated')
     assert envs["FOO"] == "1"
     assert flags == '--flag="unterminated'
@@ -90,8 +90,7 @@ def test_split_launch_flags_strips_profiling_flags() -> None:
 
 
 def test_split_launch_flags_handles_valueless_run_specific_flag() -> None:
-    # ``--pid`` followed by another flag: the run-specific flag is dropped
-    # without eating the next flag.
+    # ``--pid`` followed by another flag: the run-specific flag is dropped without eating the next flag.
     argv = "--pid --disable-radix-cache"
     assert split_launch_flags(argv) == "--disable-radix-cache"
 
@@ -144,8 +143,8 @@ def test_launch_argv_from_log_returns_empty_for_unmarked_framework(
 def test_launch_argv_from_log_falls_back_to_double_dash_scan(
     tmp_path: Path,
 ) -> None:
-    # No regex match, but the line has a "--" run after the marker → the
-    # ``line.find("--")`` fallback path is exercised.
+    # No regex match, but the line has a "--" run after the marker → the ``line.find("--")`` fallback path is
+    # exercised.
     log = tmp_path / "server.log"
     log.write_text(
         "vllm serve --model-path /models/x --mem-fraction-static 0.9\n",

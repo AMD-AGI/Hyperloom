@@ -47,14 +47,7 @@ print("PURE_CODEX_IMPORT_OK")
 
 
 def test_provider_sdks_are_not_core_dependencies(repo_root: Path) -> None:
-    """Keep Claude and Codex SDKs in provider-specific optional extras.
-
-    KernelForge used to declare its own ``codex = ["openai-codex==0.144.4"]``
-    extra. Inside Hyperloom there is a single distribution, and an exact pin
-    alongside Hyperloom's ``openai-codex>=0.144`` would be two contradictory
-    specifiers in one metadata file -- an install-time resolution error rather
-    than anything a test could catch later. The floor is what matters here.
-    """
+    """Keep Claude and Codex SDKs in provider-specific optional extras."""
     pyproject = (repo_root / "pyproject.toml").read_text()
     core_section = pyproject.split("[project.optional-dependencies]", 1)[0]
 

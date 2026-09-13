@@ -31,9 +31,7 @@ def test_single_node_is_a_strict_noop(monkeypatch):
         _v("keep", args="--cuda-graph-max-bs 64"),
     ]
     kept, dropped = apply_multi_node_invalid_variants(grid)
-    # Identity is the production contract: single-node returns the input
-    # list (`return grid, []`), not a copy. Sibling filters copy on their
-    # no-op path; this one does not, so `is` is the pin.
+    # Identity is the production contract: single-node returns the input list (`return grid, []`), not a copy.
     assert kept is grid
     assert dropped == []
 
@@ -57,9 +55,6 @@ def test_multi_node_drops_cuda_graph_max_bs_below_conc(_multi_node, monkeypatch)
 
 def test_conc_zero_does_not_drop(_multi_node, monkeypatch):
     # Documents observable behaviour: CONC=0 never drops anything.
-    # The `conc > 0 and` guard was removed from production because the regex
-    # (\d+) guarantees conc is always >= 0, making the guard unreachable; the
-    # invariant is preserved by `n < conc` being False for all n >= 1 when conc=0.
     monkeypatch.setenv("CONC", "0")
     grid = [_v("low-graph", args="--cuda-graph-max-bs 1")]
     kept, dropped = apply_multi_node_invalid_variants(grid)

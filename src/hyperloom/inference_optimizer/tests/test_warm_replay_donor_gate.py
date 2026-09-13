@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Warm-replay BORROWED config-donor trustworthiness gate.
-
-Covers the donor acceptance gate that prevents cross-model warm-replay from
-borrowing configs that are evidence-free (zero validated gain), cross/unknown
-architecture, or workload-shape incompatible — the empirical root causes of
-neutral/negative warm-replay gains.
-"""
+"""Warm-replay BORROWED config-donor trustworthiness gate."""
 
 from __future__ import annotations
 

@@ -276,11 +276,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     log.warning(message, exc_info=True)
 
         if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
-            # A published bundle, including PARTIAL, is the evidence view for
-            # its own commit. Do not seed it with refs from the prior evidence
-            # commit: that would report a current/non-stale commit while quietly
-            # retaining older paths. Failed unpublished attempts still merge
-            # their checkpoint with ``stale_context`` in the branch below.
+            # A published bundle, including PARTIAL, is the evidence view for its own commit.
             context = self._analysis_bundle.apply(context)
         else:
             context = stale_context

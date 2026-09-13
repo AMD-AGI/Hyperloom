@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression guard for the pre-release E2E leg liveness (stall) check.
-
-``bootstrap-pre-release.sh`` blocks after the demo turn until ``optimize`` writes a
-clean terminal ``stop_reason`` into ``state.json``, and declares a leg dead when nothing has been written for
-``LEG_STALL_GRACE_S``. Two properties of that check killed legs that were provably
-still alive (run 1.0.1a0.dev202608280354+ci, both baremetal-sglang legs):
-
-* the idle window was measured against absolute file mtimes, so the minutes spent
-  inside the two non-streaming ``claude --print`` turns were charged to the leg and
-  the very first loop iteration condemned it;
-* only ``$session`` was watched, while the agent's launcher, its setup/install logs
-  and ``install.sh``'s caches land elsewhere under the leg root -- one leg was reaped
-  26s after it last wrote a file.
-
-These tests exercise the real ``leg_idle_s`` helper out of the script.
-"""
+"""Regression guard for the pre-release E2E leg liveness (stall) check."""
 
 from __future__ import annotations
 
@@ -124,8 +109,8 @@ def test_stall_check_watches_the_leg_root(script: str) -> None:
 def test_agent_turns_are_mirrored_to_nfs(script: str) -> None:
     """SaFE deletes a failed leg's pod, so every agent turn must reach NFS."""
     assert 'agent_log="${session}/agent-${leg}.log"' in script
-    # Every turn goes through the one helper, which is the only place that tees, so no
-    # invocation can bypass the transcript.
+    # Every turn goes through the one helper, which is the only place that tees, so no invocation can bypass the
+    # transcript.
     assert script.count('tee -a "$alog"') == 1
     invocations = [
         line
@@ -197,11 +182,7 @@ def test_bootstrap_publishes_state_json_for_poll_reader(script: str) -> None:
 
 
 def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:
-    """A count-based cap of 3 turns was ~4min of wall clock and killed live installs.
-
-    A framework install runs 10-30min, and each turn ends after ~60-90s, so the budget
-    has to be a deadline plus a liveness check -- never a small turn count.
-    """
+    """A count-based cap of 3 turns was ~4min of wall clock and killed live installs."""
     assert "LEG_TURN_ATTEMPTS" not in script
     assert 'setup_deadline_s="${LEG_SETUP_DEADLINE_S:-2700}"' in script
     assert 'setup_stall_s="${LEG_SETUP_STALL_S:-600}"' in script
@@ -211,11 +192,7 @@ def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:
 
 
 def test_follow_up_turns_resume_the_same_conversation(script: str) -> None:
-    """Re-feeding the prompt as a fresh turn throws away what the agent already knows.
-
-    `--session-id` opens the leg's conversation and `--resume` continues it, so a
-    follow-up turn still knows what it launched and which log it was watching.
-    """
+    """Re-feeding the prompt as a fresh turn throws away what the agent already knows."""
     assert 'agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"' in script
     assert script.count('--resume "$uuid"') == 3  # setup nudge, demo turn, demo re-drive
     for nudge in ("SETUP_RESUME_NUDGE", "DEMO_RESUME_NUDGE"):
@@ -249,11 +226,7 @@ def test_leg_session_uuid_is_stable_and_well_formed(script: str, tmp_path: Path)
 
 
 def test_re_drive_does_not_extend_the_hard_deadline(script: str) -> None:
-    """The stall grace restarts per turn, but the pod-deadline clock must not.
-
-    bootstrap's own deadline has to stay below the SaFE pod timeout, or SaFE pre-empts
-    the pod mid-wait and the clean failure path is lost.
-    """
+    """The stall grace restarts per turn, but the pod-deadline clock must not."""
     body = script.split("run_leg() {", 1)[1]
     assert body.count('start_ts="$(date +%s)"') == 1
     assert 'grace_ts="$(date +%s)"' in body
@@ -271,11 +244,7 @@ def test_demo_prompts_forbid_ending_the_turn_early(script: str) -> None:
 
 
 def test_dockerd_never_runs_on_vfs(script: str) -> None:
-    """vfs copies every layer in full and evicted the host pod twice (200Gi, 1792Gi).
-
-    Only deduplicating drivers may be attempted, and a leg with none available has to
-    fail rather than quietly reproduce the eviction.
-    """
+    """vfs copies every layer in full and evicted the host pod twice (200Gi, 1792Gi)."""
     assert "--storage-driver=vfs" not in script
     drivers = next(line for line in script.splitlines() if line.startswith("DOCKER_DRIVERS="))
     assert "overlay2" in drivers

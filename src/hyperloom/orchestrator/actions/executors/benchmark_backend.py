@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Benchmark backend seam.
-
-Central place that builds the benchmark subprocess command line so the
-optimizer can run against different benchmark engines without every executor
-knowing which engine is active. The default backend is Magpie, whose command is
-``python -m Magpie -v benchmark --benchmark-config CFG --output-dir OUT
---run-mode local``.
-
-The bypass backend implements the same contract (same input YAML, same
-workspace/report artifacts) and is selected via
-HYPERLOOM_BENCHMARK_BACKEND=bypass without touching the executors.
-"""
+"""Benchmark backend seam."""
 
 from __future__ import annotations
 
@@ -20,8 +9,7 @@ import os
 from pathlib import Path
 from typing import Protocol
 
-# Backend selection env var. Absent/empty/unknown resolves to the Magpie
-# backend so existing deployments keep their current behavior.
+# Backend selection env var.
 BENCHMARK_BACKEND_ENV = "HYPERLOOM_BENCHMARK_BACKEND"
 DEFAULT_BENCHMARK_BACKEND = "magpie"
 KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass"})
@@ -39,25 +27,12 @@ class BenchmarkBackend(Protocol):
         config_path: Path,
         output_dir: Path,
     ) -> list[str]:
-        """Return the argv list for one local benchmark run.
-
-        Args:
-            python_exe: Interpreter used to launch the benchmark engine.
-            config_path: Materialized benchmark config YAML.
-            output_dir: Per-task output/workspace directory.
-
-        Returns:
-            The argv list to hand to the subprocess runner.
-        """
+        """Return the argv list for one local benchmark run."""
         ...
 
 
 class MagpieBackend:
-    """Default backend: launches Magpie's local benchmark subprocess.
-
-    The produced command matches the historically hardcoded invocation so this
-    seam is a behavior-preserving refactor.
-    """
+    """Default backend: launches Magpie's local benchmark subprocess."""
 
     name = "magpie"
 
@@ -68,12 +43,7 @@ class MagpieBackend:
         return _resolve_magpie_python()
 
     def lifecycle_eligibility(self, bench: dict) -> dict | None:
-        """Return None to use the default (Magpie script-based) eligibility.
-
-        Magpie keeps the historical behavior: server_lifecycle is decided
-        by the built-in benchmark_script name in :func:`resolve_lifecycle_params`.
-        Returning None signals the caller to run that default path.
-        """
+        """Return None to use the default (Magpie script-based) eligibility."""
         return None
 
     def build_command(
@@ -100,22 +70,12 @@ class MagpieBackend:
 
 
 class BypassBackend:
-    """Bypass backend: launches Hyperloom's own benchmark runner.
-
-    Accepts the same CLI flags as Magpie and reuses the InferenceX scripts,
-    so the input YAML and the workspace/report contract are unchanged. See
-    :mod:`bypass_runner`.
-    """
+    """Bypass backend: launches Hyperloom's own benchmark runner."""
 
     name = "bypass"
 
     def resolve_interpreter(self) -> str:
-        """Return a plain python3 for bypass (no Magpie import needed).
-
-        Prefers the current interpreter, then a PATH ``python3``. bypass
-        drives InferenceX directly, so it must NOT fall back to Magpie's
-        ``/opt/venv/bin/python`` canonical path.
-        """
+        """Return a plain python3 for bypass (no Magpie import needed)."""
         import shutil
         import sys
 
@@ -125,14 +85,7 @@ class BypassBackend:
     _LIFECYCLE_FRAMEWORKS = frozenset({"vllm", "atom", "sglang"})
 
     def lifecycle_eligibility(self, bench: dict) -> dict | None:
-        """Decide bypass server_lifecycle eligibility.
-
-        Eligible for a single-node serving framework with profiling off:
-        bypass honors the YAML ``server_lifecycle`` block (persist server on
-        the first round, reuse on the next, teardown on cleanup), so
-        run_grid's warmup+measure reuse works. Scriptable/diffusion and
-        torch_profiler runs stay ineligible (no persistent server to reuse).
-        """
+        """Decide bypass server_lifecycle eligibility."""
         framework = str(bench.get("framework") or "").lower()
         envs = bench.get("envs") or {}
         try:
@@ -140,10 +93,7 @@ class BypassBackend:
         except (TypeError, ValueError):
             port = 8888
         verdict = {"eligible": False, "framework": framework, "port": port, "reason": ""}
-        # The reuse protocol boots a local server and re-attaches a client
-        # round to it; that only holds single-node. Mirror the Magpie path's
-        # multi-node gate (see _server_lifecycle.resolve_lifecycle_params),
-        # which our non-None verdict would otherwise short-circuit past.
+        # The reuse protocol boots a local server and re-attaches a client round to it; that only holds single-node.
         from ._multi_node_env import is_multi_node
 
         if is_multi_node():
@@ -182,14 +132,7 @@ class BypassBackend:
 
 
 def resolve_backend_name() -> str:
-    """Resolve the active backend name from the environment.
-
-    Unknown values normalize to ``magpie`` so preflight gates (which key off
-    this name) stay aligned with :func:`resolve_backend` runtime selection.
-
-    Returns:
-        The lowercased backend name; ``magpie`` when unset/blank/unknown.
-    """
+    """Resolve the active backend name from the environment."""
     raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
     if not raw or raw not in KNOWN_BENCHMARK_BACKENDS:
         return DEFAULT_BENCHMARK_BACKEND
@@ -197,15 +140,7 @@ def resolve_backend_name() -> str:
 
 
 def resolve_backend() -> BenchmarkBackend:
-    """Resolve the active benchmark backend instance.
-
-    ``bypass`` selects the Hyperloom runner; ``magpie`` (the default) and any
-    unknown value fall back to Magpie so a typo cannot silently disable
-    benchmarking.
-
-    Returns:
-        The selected BenchmarkBackend implementation.
-    """
+    """Resolve the active benchmark backend instance."""
     name = resolve_backend_name()
     if name == "bypass":
         return BypassBackend()
@@ -223,16 +158,7 @@ def build_benchmark_command(
     config_path: Path,
     output_dir: Path,
 ) -> list[str]:
-    """Build the benchmark command using the active backend.
-
-    Args:
-        python_exe: Interpreter used to launch the benchmark engine.
-        config_path: Materialized benchmark config YAML.
-        output_dir: Per-task output/workspace directory.
-
-    Returns:
-        The argv list for one local benchmark run.
-    """
+    """Build the benchmark command using the active backend."""
     return resolve_backend().build_command(
         python_exe=python_exe,
         config_path=config_path,

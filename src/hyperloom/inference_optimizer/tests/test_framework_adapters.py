@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the enablement runtime adapters.
-
-All subprocess calls go through an injected fake ``run`` shim so no ROCm /
-network / real venv is required.
-"""
+"""Tests for the enablement runtime adapters."""
 
 from __future__ import annotations
 
@@ -50,9 +46,7 @@ class _FakeRun:
         return subprocess.CompletedProcess(argv, self.default_rc, "", "")
 
 
-# ---------------------------------------------------------------------------
 # supports / registry
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_supports_missing_arch_not_resource_constraint():
@@ -84,9 +78,7 @@ def test_get_adapter_case_insensitive():
     assert isinstance(get_adapter("SGLang"), SglangAdapter)
 
 
-# ---------------------------------------------------------------------------
 # build_stack_action: ROCm index gating (never PyPI CUDA fallback)
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_no_rocm_index_returns_none(monkeypatch):
@@ -137,9 +129,7 @@ def test_sglang_no_source_no_index_returns_none(monkeypatch):
     assert a.build_stack_action(_gap(), framework="sglang", model="m") is None
 
 
-# ---------------------------------------------------------------------------
 # provision + ROCm verification (mocked run)
-# ---------------------------------------------------------------------------
 
 
 def _wheel_action() -> "ad.EnablementStackAction":
@@ -217,9 +207,7 @@ def test_vllm_provision_requires_index(tmp_path):
     assert "ROCm wheel index" in result.error
 
 
-# ---------------------------------------------------------------------------
 # verify helpers
-# ---------------------------------------------------------------------------
 
 
 def test_verify_torch_is_rocm_true_false():

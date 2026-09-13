@@ -1,17 +1,4 @@
-"""Regression tests for the prep -> baseline handover.
-
-A prep-authored driver is committed as pristine and is then re-run, unchanged,
-by the loop's baseline measurement. Preflight therefore has to validate it in
-the filesystem state the baseline will see: anything the prompt hands the agent
-as a runtime input must survive preparation, and anything preparation deletes
-must not be advertised as a runtime input.
-
-The recorded failure this pins: the prep prompt pointed the agent at the
-invocation specification inside the temporary reference bundle, the agent loaded
-its case table from there at runtime, preflight passed while the bundle still
-existed, and the pristine commit then removed it -- so the very first baseline
-bench crashed and the campaign ran zero optimization iterations.
-"""
+"""Regression tests for the prep -> baseline handover."""
 
 from __future__ import annotations
 
@@ -31,9 +18,8 @@ from kernelforge.loop import task_preparer
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
 
-# A driver that loads its case table from the invocation specification at RUNTIME
-# -- exactly what the recorded agent wrote, and what the contract asks for
-# ("case definitions come from the task's real harness/config").
+# A driver that loads its case table from the invocation specification at RUNTIME -- exactly what the recorded agent
+# wrote, and what the contract asks for ("case definitions come from the task's real harness/config").
 _AUTHORED_DRIVER = '''\
 """Measurement driver whose case table comes from the task specification."""
 import argparse
@@ -96,12 +82,7 @@ def _init_repo(root: Path) -> None:
 
 
 def _runtime_spec_path(prompt: str) -> str:
-    """The path the prompt advertises as the specification's runtime location.
-
-    The document itself is inlined, so the path is carried by the durability
-    statement rather than by a Read instruction; an oversized spec that cannot
-    be inlined still falls back to naming it for a Read.
-    """
+    """The path the prompt advertises as the specification's runtime location."""
     match = re.search(r"`\./([^`]+)` is DURABLE", prompt) or re.search(r"Read on `\./([^`]+)`", prompt)
     assert match, prompt
     return match.group(1)
@@ -259,13 +240,7 @@ def test_undurable_spec_fails_loudly_instead_of_committing_a_broken_driver(tmp_p
 
 
 def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp_path, monkeypatch):
-    """A removal that only half worked breaks the invariant in both directions.
-
-    Preflight would judge the driver against scaffolding the prep commit then
-    deletes, and ``git add -A`` would carry whatever survived into the pristine
-    commit -- and neither is visible afterwards, which is why the retirement has to
-    be checked rather than attempted.
-    """
+    """A removal that only half worked breaks the invariant in both directions."""
 
     def leave_the_bundle_behind(mp):
         real_rmtree = task_preparer._safe_rmtree
@@ -293,12 +268,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp
 
 
 def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(tmp_path, monkeypatch, caplog):
-    """The caller's list is the one list, so it survives a materialization failure.
-
-    Deriving the suite from the materialized copy lost the declared-case gate, the
-    prompt's case table and the durable runtime input in one step, silently, while
-    the caller's own gate one screen earlier had applied that list.
-    """
+    """The caller's list is the one list, so it survives a materialization failure."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -355,12 +325,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
 
 
 def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path, monkeypatch, caplog):
-    """Attempt 2 must not be told to Read a contract that is no longer there.
-
-    ``_open_scaffold`` discarded the result, so the note computed once at the top
-    kept enumerating ``README.md`` and the reference drivers -- in a prompt whose
-    own words are "do NOT rely on memory" -- with nothing logged anywhere.
-    """
+    """Attempt 2 must not be told to Read a contract that is no longer there."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -422,11 +387,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
 
 
 def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
-    """ "Not staged" and "never asked" send the operator to different places.
-
-    Collapsing both into ``False`` made the failure blame the workspace's ignore
-    rules for a query that had not run.
-    """
+    """\"Not staged\" and \"never asked\" send the operator to different places."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     tracked = workspace / "driver.py"
@@ -452,12 +413,7 @@ def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
 
 
 def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeypatch):
-    """An external bundle already ships the spec next to the driver.
-
-    The artifact transaction guards that file as a read-only caller input, so the
-    durable copy must be the one already there — rewriting it canonically would
-    abort the publish and throw away a valid driver.
-    """
+    """An external bundle already ships the spec next to the driver."""
     output_dir = tmp_path / "forge_attempt"
     workspace = output_dir / "workspace"
     workspace.mkdir(parents=True)

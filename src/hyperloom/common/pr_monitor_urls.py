@@ -25,12 +25,7 @@ def kb_store_url(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the KB Service URL used by PR Monitor.
-
-    Local Recipe mode falls back to the default KB Service so PR discovery works
-    without extra configuration. Remote Recipe mode stays strict: its write
-    credentials must include an explicit URL and token.
-    """
+    """Return the KB Service URL used by PR Monitor."""
 
     source = os.environ if env is None else env
     configured = str(value if value is not None else source.get(KB_STORE_URL_ENV, "")).strip().rstrip("/")

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""PR Monitor candidate source client.
-
-Optional replacement for anonymous GitHub Search; talks to the
-``pr_monitor`` REST service. Stdlib-only (``urllib.request``). Hard-fails
-on errors (network / non-200 / bad JSON) so misconfigured nodes don't silently
-fall back to an empty list (CLI surfaces exit code 2). Returns
-:class:`GitHubPr` records shared with the GitHub backend.
-"""
+"""PR Monitor candidate source client."""
 
 from __future__ import annotations
 
@@ -32,17 +25,7 @@ def _require_http_url(url: str) -> None:
 
 
 def _normalise_base_url(base_url: str) -> str:
-    """Trim trailing slash and optional API-version suffix on the base URL.
-
-    Args:
-        base_url (str): The configured pr_monitor base URL.
-
-    Returns:
-        str: The service root URL with any trailing slash or trailing ``/v1`` removed.
-
-    Raises:
-        PRMonitorError: If ``base_url`` is empty.
-    """
+    """Trim trailing slash and optional API-version suffix on the base URL."""
     if not base_url:
         raise PRMonitorError("pr_monitor.base_url is empty")
     base = base_url.rstrip("/")
@@ -52,17 +35,7 @@ def _normalise_base_url(base_url: str) -> str:
 
 
 def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) -> str:
-    """Compose a full URL, urlencoding the query (skipping empty values).
-
-    Args:
-        base_url (str): The pr_monitor base URL.
-        path (str): Request path; a leading slash is added when missing.
-        query (dict[str, Any] | None): Query parameters; ``None``/empty values
-            are skipped.
-
-    Returns:
-        str: The fully composed URL with an encoded query string.
-    """
+    """Compose a full URL, urlencoding the query (skipping empty values)."""
     base = _normalise_base_url(base_url)
     if not path.startswith("/"):
         path = "/" + path
@@ -79,20 +52,7 @@ def _build_url(base_url: str, path: str, query: dict[str, Any] | None = None) ->
 
 
 def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
-    """Return ``(status, body_bytes, content_type)``; raise on transport errors.
-
-    Args:
-        url (str): Fully composed URL to GET.
-        timeout_sec (float): Per-request timeout in seconds.
-
-    Returns:
-        tuple[int, bytes, str]: The HTTP status code, raw body bytes, and the
-            ``Content-Type`` header value.
-
-    Raises:
-        PRMonitorError: On HTTP errors, unreachable hosts, timeouts, or other
-            transport failures.
-    """
+    """Return ``(status, body_bytes, content_type)``; raise on transport errors."""
     _require_http_url(url)
     req = urllib.request.Request(
         url,
@@ -120,18 +80,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
 
 
 def _http_get_json(url: str, *, timeout_sec: float) -> Any:
-    """GET and parse JSON body; raise PRMonitorError on >=400 or bad JSON.
-
-    Args:
-        url (str): Fully composed URL to GET.
-        timeout_sec (float): Per-request timeout in seconds.
-
-    Returns:
-        Any: The parsed JSON payload.
-
-    Raises:
-        PRMonitorError: On a >=400 status or a non-JSON body.
-    """
+    """GET and parse JSON body; raise PRMonitorError on >=400 or bad JSON."""
     status, body, _ = _http_get(url, timeout_sec=timeout_sec)
     if status >= 400:
         raise PRMonitorError(f"pr_monitor HTTP {status} at {url}")
@@ -143,24 +92,11 @@ def _http_get_json(url: str, *, timeout_sec: float) -> Any:
 
 
 def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
-    """Coerce a pr_monitor list item into the shared GitHubPr record.
-
-    Args:
-        item (Any): A single PR list item, expected to be a JSON object.
-        source_url (str): URL the item came from, used in error messages.
-
-    Returns:
-        GitHubPr: The normalised PR record.
-
-    Raises:
-        PRMonitorError: If ``item`` is not an object or lacks an int
-            ``number``.
-    """
+    """Coerce a pr_monitor list item into the shared GitHubPr record."""
     if not isinstance(item, dict):
         raise PRMonitorError(f"pr_monitor item at {source_url} is not a JSON object: {type(item).__name__}")
-    # ``/v1/search/prs`` returns match records shaped as
-    # ``{"summary": {...pr fields...}, "matched_field": ..., "snippet": ...}``.
-    # Normalise them to the same payload shape as the list endpoint.
+    # ``/v1/search/prs`` returns match records shaped as ``{"summary": {...pr fields...}, "matched_field": ...,
+    # "snippet": ...}``.
     summary = item.get("summary")
     if isinstance(summary, dict):
         item = summary
@@ -179,21 +115,7 @@ def _coerce_pr_item(item: Any, *, source_url: str) -> GitHubPr:
 
 
 def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
-    """Normalise a pr_monitor list response into ``list[dict]``.
-
-    Args:
-        payload (Any): The decoded response; a list, or a dict carrying a list
-            under ``items``/``prs``/``data``/``results``.
-        source_url (str): URL the payload came from, used in error messages.
-
-    Returns:
-        list[dict[str, Any]]: The extracted PR objects (non-dict entries
-            dropped).
-
-    Raises:
-        PRMonitorError: If the payload is neither a list nor a dict with a
-            recognised list field.
-    """
+    """Normalise a pr_monitor list response into ``list[dict]``."""
     if isinstance(payload, list):
         items = payload
     elif isinstance(payload, dict):
@@ -225,25 +147,7 @@ def list_perf_prs(
     label: str | None = None,
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """List PRs from pr_monitor.
-
-    Returns :class:`GitHubPr` (same as the GitHub backend) so the dispatcher
-    can union both sources without per-source branching.
-
-    Args:
-        repo_url: Repository URL to list PRs for.
-        base_url: PR Monitor base URL.
-        limit: Maximum number of PRs to return.
-        state: PR state filter (e.g. ``"open"``).
-        label: Optional label filter.
-        timeout_sec: Per-request timeout.
-
-    Returns:
-        A list of :class:`GitHubPr` records.
-
-    Raises:
-        PRMonitorError: On bad repo URL or transport/parse errors.
-    """
+    """List PRs from pr_monitor."""
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:
@@ -268,20 +172,7 @@ def pr_get(
     base_url: str,
     timeout_sec: float = 10.0,
 ) -> dict[str, Any]:
-    """GET ``/v1/repos/{repo}/prs/{number}`` returning the PR detail object.
-
-    Args:
-        repo_slug (str): Repository slug in ``owner/name`` form.
-        number (int): PR number to fetch.
-        base_url (str): pr_monitor service base URL.
-        timeout_sec (float): Per-request timeout. Defaults to 10.0.
-
-    Returns:
-        dict[str, Any]: The PR detail object.
-
-    Raises:
-        PRMonitorError: On transport/parse errors or a non-object response.
-    """
+    """GET ``/v1/repos/{repo}/prs/{number}`` returning the PR detail object."""
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if not isinstance(payload, dict):
@@ -296,21 +187,7 @@ def pr_files(
     base_url: str,
     timeout_sec: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """GET ``/v1/repos/{repo}/prs/{number}/files`` returning the file list.
-
-    Args:
-        repo_slug (str): Repository slug in ``owner/name`` form.
-        number (int): PR number to fetch files for.
-        base_url (str): pr_monitor service base URL.
-        timeout_sec (float): Per-request timeout. Defaults to 10.0.
-
-    Returns:
-        list[dict[str, Any]]: The changed-file objects.
-
-    Raises:
-        PRMonitorError: On transport/parse errors or an unexpected response
-            shape.
-    """
+    """GET ``/v1/repos/{repo}/prs/{number}/files`` returning the file list."""
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/files")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if isinstance(payload, list):
@@ -338,25 +215,7 @@ def pr_patches(
     base_url: str,
     timeout_sec: float = 30.0,
 ) -> str:
-    """GET ``/v1/repos/{repo}/prs/{number}/patches`` and render as unified diff.
-
-    The service returns a JSON patch array, not raw diff text; this synthesises
-    ``diff --git`` / ``--- a/`` / ``+++ b/`` headers per file so ``git apply``
-    can consume it. Honours ``previous_path`` / ``status`` for renames+deletes;
-    items missing ``patch`` (binary) emit only the file header.
-
-    Args:
-        repo_slug: ``owner/name`` repository slug.
-        number: PR number to fetch patches for.
-        base_url: PR Monitor base URL.
-        timeout_sec: Per-request timeout.
-
-    Returns:
-        A unified-diff string suitable for ``git apply``.
-
-    Raises:
-        PRMonitorError: On unexpected payload shapes or transport errors.
-    """
+    """GET ``/v1/repos/{repo}/prs/{number}/patches`` and render as unified diff."""
     url = _build_url(base_url, f"/v1/repos/{repo_slug}/prs/{number}/patches")
     payload = _http_get_json(url, timeout_sec=timeout_sec)
     if isinstance(payload, list):
@@ -416,23 +275,7 @@ def search_perf_prs_via_pr_monitor_search(
     state: str = "open",
     timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
-    """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``.
-
-    Args:
-        repo_url (str): Git URL of the repo; parsed to an ``owner/name`` slug.
-        base_url (str): pr_monitor service base URL.
-        query (str): Free-text search query.
-        limit (int): Maximum number of PRs to return. Defaults to 5.
-        state (str): PR state filter. Defaults to ``"open"``.
-        timeout_sec (float): Per-request timeout. Defaults to 10.0.
-
-    Returns:
-        list[GitHubPr]: The matching PRs (at most ``limit``).
-
-    Raises:
-        PRMonitorError: On an unparseable repo URL or any transport/parse
-            error.
-    """
+    """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
     try:
         repo_slug = _repo_slug(repo_url)
     except ValueError as exc:

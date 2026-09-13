@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the YAML-layer runtime override.
-
-Verifies that runtime_override lands in materialized YAML benchmark.envs
-and that os.environ is never mutated.
-"""
+"""Tests for the YAML-layer runtime override."""
 
 from __future__ import annotations
 
@@ -28,9 +24,7 @@ def _base_yaml(tmp_path: Path, framework: str = "vllm") -> Path:
     return p
 
 
-# ---------------------------------------------------------------------------
 # Unit tests for apply_runtime_override
-# ---------------------------------------------------------------------------
 
 
 def test_path_prefix_prepended():
@@ -78,14 +72,11 @@ def test_empty_override_is_noop():
     assert envs == {"FOO": "bar"}
 
 
-# ---------------------------------------------------------------------------
 # Integration test: override lands in materialized YAML, NOT os.environ
-# ---------------------------------------------------------------------------
 
 
 def test_runtime_override_in_yaml_not_process_env(tmp_path):
-    """The attempt framework_bin must appear in materialized YAML benchmark.envs,
-    and os.environ must be unchanged."""
+    """The attempt framework_bin must appear in materialized YAML benchmark.envs, and os.environ must be unchanged."""
     base_yaml = _base_yaml(tmp_path)
     variant = GridVariant(name="test-rt")
     variant.runtime_override = {
@@ -131,9 +122,7 @@ def test_no_runtime_override_field_is_noop(tmp_path):
     assert "HYPERLOOM_FRAMEWORK_BIN" not in envs
 
 
-# ---------------------------------------------------------------------------
 # compiled-artifact runtime prefixes
-# ---------------------------------------------------------------------------
 
 
 def test_pythonpath_prefixes_multi_entry_ordered_prepended():
@@ -234,9 +223,7 @@ def test_extended_framework_runtime_lands_in_yaml(tmp_path):
     assert "/attempt/console" in envs["PATH"]
 
 
-# ---------------------------------------------------------------------------
 # Fingerprint: runtime_override participates but stays back-compatible
-# ---------------------------------------------------------------------------
 
 
 def test_fingerprint_unchanged_for_empty_override():

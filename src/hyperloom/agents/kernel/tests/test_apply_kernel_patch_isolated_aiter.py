@@ -79,7 +79,7 @@ def test_detect_strategy_isolated_aiter_csrc_compiled_no_rebuild_command(akp, tm
     )
 
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is True
     assert strat["root"] == str(site)
@@ -98,7 +98,7 @@ def test_detect_strategy_isolated_aiter_python_target_never_rebuilds(akp, tmp_pa
     )
 
     target = aiter_pkg / "ops" / "triton" / "k.py"
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is False
     assert strat["rebuild_mode"] == "none"
@@ -124,7 +124,7 @@ def test_installed_aiter_strategy_preserves_symlinked_site_packages(
     )
     target = linked_site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
 
-    strategy = akp._detect_strategy(target, allow_unknown_target=False)
+    strategy = akp._detect_strategy(target)
 
     assert strategy["root"] == str(linked_site.absolute())
     assert strategy["rebuild_mode"] == "runtime_jit"
@@ -140,7 +140,7 @@ def test_detect_strategy_sgl_workspace_aiter_unchanged(akp, monkeypatch):
     )
 
     target = Path("/sgl-workspace/aiter/csrc/kernels/foo.cu")
-    strat = akp._detect_strategy(target, allow_unknown_target=False)
+    strat = akp._detect_strategy(target)
 
     assert strat["compiled"] is True
     assert strat["root"] == "/sgl-workspace/aiter"
@@ -256,10 +256,7 @@ def test_editable_aiter_csrc_python_keeps_source_only_strategy(
         ("/sgl-workspace/aiter/",),
     )
 
-    strategy = akp._detect_strategy(
-        Path("/sgl-workspace/aiter") / relative,
-        allow_unknown_target=False,
-    )
+    strategy = akp._detect_strategy(Path("/sgl-workspace/aiter") / relative)
 
     assert strategy["compiled"] is False
     assert strategy["root"] == "/sgl-workspace/aiter"
@@ -317,10 +314,7 @@ def test_unknown_snapshot_layout_keeps_fail_fast_root(
         "_CACHED_KNOWN_TARGET_ROOTS",
         (str(framework_root) + "/",),
     )
-    strategy = akp._detect_strategy(
-        target,
-        allow_unknown_target=False,
-    )
+    strategy = akp._detect_strategy(target)
     assert strategy["root"] == ""
     assert strategy["deploy_roots"] == []
     patch = tmp_path / "forge.patch"

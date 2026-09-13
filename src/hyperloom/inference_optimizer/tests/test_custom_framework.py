@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ``custom`` framework: an operator's workload, supplied at launch.
-
-Every other framework is described by code and shipped assets. ``custom`` is
-described by two directories the operator passes in, so these lock the seams
-that carry them: the registry entry, the config the loop falls back on, the
-entrypoint lookup, and the measurement contract that replaces the hand-written
-blacklists the shipped frameworks rely on.
-"""
+"""The ``custom`` framework: an operator's workload, supplied at launch."""
 
 from __future__ import annotations
 
@@ -134,9 +127,8 @@ class TestEntrypointAndCheckout:
 
         repo = tmp_path / "my-framework"
         repo.mkdir()
-        # setenv, not delenv: the helper under test writes os.environ directly,
-        # and monkeypatch only restores keys it recorded. delenv on an absent key
-        # records nothing, so the write would outlive the test and land in the
+        # setenv, not delenv: the helper under test writes os.environ directly, and monkeypatch only restores keys it
+        # recorded. delenv on an absent key records nothing, so the write would outlive the test and land in the
         # source-root allowlist every later test computes.
         monkeypatch.setenv("CUSTOM_REPO_PATH", "")
         monkeypatch.setenv("CUSTOM_DIR", "")
@@ -147,19 +139,12 @@ class TestEntrypointAndCheckout:
         assert envs["CUSTOM_REPO_PATH"] == str(repo)
         assert envs["CUSTOM_DIR"] == str(repo)
         assert os.environ.get("CUSTOM_REPO_PATH") == str(repo)
-        # The generic name has to travel in the config, not just os.environ: a
-        # Ray worker inherits the raylet's environment from whenever it booted,
-        # and a stale checkout there wins over anything published afterwards.
+        # The generic name has to travel in the config, not just os.environ: a Ray worker inherits the raylet's
+        # environment from whenever it booted, and a stale checkout there wins over anything published afterwards.
         assert envs["FRAMEWORK_REPO_PATH"] == str(repo)
 
     def test_extra_env_pins_reach_the_benchmark_config(self, monkeypatch):
-        """The operator's only channel for their own knobs has to land in envs.
-
-        The CLI serializes ``--extra-env`` into a JSON env var that, on its own,
-        only the grid filter reads. Left there the pins are neither delivered to
-        the script nor visible to the measurement contract, which is read off
-        the materialized config.
-        """
+        """The operator's only channel for their own knobs has to land in envs."""
         from hyperloom.orchestrator.actions.executors import _workload_envs as we
 
         monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", '{"MYFW_STEPS": "50", "MYFW_CKPT": "/w/x.pt"}')
@@ -267,11 +252,7 @@ class TestMeasurementContract:
         assert dropped == []
 
     def test_a_shipped_framework_keeps_flipping_its_pinned_defaults(self):
-        """A shipped baseline pins knobs at their off value for explore to flip.
-
-        Reading a pin as a lock would drop exactly the A/B legs those pins were
-        written to enable, so the guard has to stay off the shipped configs.
-        """
+        """A shipped baseline pins knobs at their off value for explore to flip."""
         from hyperloom.inference_optimizer.session.paths import asset_root
 
         cfg = yaml.safe_load((asset_root() / "assets" / "configs" / "baseline_xdit.yaml").read_text())
@@ -299,8 +280,8 @@ class TestLaunchValidation:
 
     @pytest.fixture(autouse=True)
     def _bypass_backend(self, monkeypatch):
-        # custom refuses to launch on any other backend; the path assertions in
-        # this class are about the paths, so give them the one that is valid.
+        # custom refuses to launch on any other backend; the path assertions in this class are about the paths, so
+        # give them the one that is valid.
         monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
 
     def test_custom_without_its_paths_exits_instead_of_running(self, monkeypatch):
@@ -342,11 +323,7 @@ class TestLaunchValidation:
 
     @pytest.mark.parametrize("backend", ["", "magpie", "MAGPIE", "  ", "bypasss", "none"])
     def test_custom_refuses_a_backend_that_cannot_run_the_script(self, monkeypatch, tmp_path, backend):
-        """The default backend is Magpie, which cannot run an operator's script.
-
-        Nothing downstream rejects the pairing, so an unset or wrong value used
-        to be accepted and the run simply took the wrong executor.
-        """
+        """The default backend is Magpie, which cannot run an operator's script."""
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"

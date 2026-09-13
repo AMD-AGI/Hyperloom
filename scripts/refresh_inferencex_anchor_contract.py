@@ -41,11 +41,7 @@ from hyperloom.inference_optimizer.tests.test_inferencex_anchor_contract import 
 
 
 def main() -> int:
-    """Refresh the anchor contract record.
-
-    Returns:
-        ``0`` on success, ``1`` when upstream could not be verified.
-    """
+    """Refresh the anchor contract record."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--ref",

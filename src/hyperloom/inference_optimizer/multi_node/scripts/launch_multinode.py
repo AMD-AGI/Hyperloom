@@ -2,21 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node sglang / vllm server launcher, run INSIDE the RayJob head pod.
-
-Waits for ``nnodes`` alive GPU nodes, makes the local (head) node rank 0
-and ranks the rest by NodeManagerAddress, then spawns one NodeAffinity-
-pinned actor per rank that launches the framework detached via
-bash+nohup+setsid (avoiding zombie PIDs / empty logs) and records
-``<pid_dir>/rank_<K>.pid``. Optionally waits on rank-0 ``/health``
-(``--no-wait-health`` to skip). Single-node restarts use the bash path.
-
-In ``--pd-mode disaggregated`` two groups are spawned instead — prefill over
-``nodes[0:pn]`` and decode over ``nodes[pn:]`` — recording
-``prefill_<K>.pid`` / ``decode_<K>.pid`` on internal ports 30000 / 30001. The
-rank-0 probe is replaced by a wait on both legs' ``/health``; the caller fronts
-them with ``launch_router.py`` on 8888 using the endpoints in the JSON summary.
-"""
+"""Multi-node sglang / vllm server launcher, run INSIDE the RayJob head pod."""
 
 from __future__ import annotations
 
@@ -35,17 +21,15 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-# Inference port. Bound by rank 0 in aggregated mode, by the router in
-# disaggregated mode (which proxies to the internal prefill/decode ports).
+# Inference port.
 _INFERENCE_PORT = 8888
-# Loopback-only internal ports for disaggregated PD server groups (router
-# fronts them at _INFERENCE_PORT so the external URL is mode-independent).
+# Loopback-only internal ports for disaggregated PD server groups (router fronts them at _INFERENCE_PORT so the
+# external URL is mode-independent).
 _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
 # Default collective port ($RAYJOB_DIST_INIT_PORT else 29500).
 _DEFAULT_DIST_INIT_PORT = 29500
-# vLLM PD connectors named in ``--pd-transfer-backend`` help. Unknown names
-# still serialize (so a future vLLM connector is not blocked) but warn.
+# vLLM PD connectors named in ``--pd-transfer-backend`` help.
 _VLLM_KV_CONNECTORS: frozenset[str] = frozenset(
     (
         "NixlConnector",
@@ -57,21 +41,14 @@ _VLLM_KV_CONNECTORS: frozenset[str] = frozenset(
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
-    """Derive the decode rendezvous port as ``prefill + 1``.
-
-    Args:
-        prefill_dist_init_port: The prefill group's rendezvous port.
-
-    Returns:
-        int: The decode group's rendezvous port.
-    """
+    """Derive the decode rendezvous port as ``prefill + 1``."""
     return prefill_dist_init_port + 1
 
 
 # sglang PD bootstrap (KV transfer rendezvous) port; override via --pd-bootstrap-port.
 _PD_DEFAULT_BOOTSTRAP_PORT = 8998
-# Max seconds to wait for ray.nodes() to surface every expected pod; raise it
-# when pods queue behind a busy scheduler or a cold image pull.
+# Max seconds to wait for ray.nodes() to surface every expected pod; raise it when pods queue behind a busy scheduler
+# or a cold image pull.
 _NODES_DISCOVERY_TIMEOUT_SEC = int(os.environ.get("RAY_NODES_DISCOVERY_TIMEOUT_SEC", "120"))
 # rank-0 /health probe budget (cold MoE can exceed it; --no-wait-health to bypass).
 _HEALTH_PROBE_TIMEOUT_SEC = int(os.environ.get("SGLANG_HEALTH_PROBE_TIMEOUT_SEC", "1800"))
@@ -102,8 +79,7 @@ _DENIED_SERVER_FLAGS = frozenset(
     }
 )
 _DENIED_SERVER_FLAG_SUFFIXES = ("-dir", "-file", "-path")
-# Tuning knobs exempt from the suffix rule by name only; their values stay
-# constrained by _unsafe_path_value_reason.
+# Tuning knobs exempt from the suffix rule by name only; their values stay constrained by _unsafe_path_value_reason.
 _SUFFIX_EXEMPT_SERVER_FLAGS = frozenset({"--speculative-draft-model-path"})
 
 
@@ -147,15 +123,7 @@ def _flag_value_pairs(tokens: list[str]) -> list[tuple[str, str | None]]:
 
 
 def _denied_extra_args(raw: str) -> list[str]:
-    """Return rejected CLI flags in a pod-side extra-args string.
-
-    Args:
-        raw: Whitespace-separated server flags.
-
-    Returns:
-        list[str]: Denied flag names, plus ``"flag: reason"`` entries for exempt
-        flags whose value is outside the allowed path shape (empty when clean).
-    """
+    """Return rejected CLI flags in a pod-side extra-args string."""
     text = (raw or "").strip()
     if not text:
         return []
@@ -179,30 +147,14 @@ def _denied_extra_args(raw: str) -> list[str]:
 
 
 def _log(msg: str) -> None:
-    """Write a timestamped launcher log line to stderr.
-
-    Args:
-        msg: The message text to emit.
-    """
+    """Write a timestamped launcher log line to stderr."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[launch_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
-    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible.
-
-    Args:
-        target_n (int): Number of alive GPU nodes required.
-        timeout_s (int): Maximum seconds to wait before giving up.
-
-    Returns:
-        list[dict]: The alive GPU node rows from ``ray.nodes()``.
-
-    Raises:
-        RuntimeError: If fewer than ``target_n`` nodes are visible before
-            the timeout elapses.
-    """
+    """Poll ray.nodes() until ``target_n`` alive GPU nodes are visible."""
     started = time.monotonic()
     while True:
         nodes = [n for n in ray.nodes() if n.get("Alive") and float(n.get("Resources", {}).get("GPU", 0)) > 0]
@@ -218,15 +170,7 @@ def _wait_for_nodes(target_n: int, timeout_s: int) -> list[dict]:
 
 
 def _pick_head_first(nodes: list[dict]) -> list[dict]:
-    """Reorder so the local (driver) node is rank 0, rest by NodeManagerAddress.
-
-    Args:
-        nodes: The alive GPU node rows from ``ray.nodes()``.
-
-    Returns:
-        list[dict]: The nodes reordered with the local node first, or all
-        nodes sorted by address when the driver is not on a GPU node.
-    """
+    """Reorder so the local (driver) node is rank 0, rest by NodeManagerAddress."""
     local_addr = ray.util.get_node_ip_address()
     local = [n for n in nodes if n.get("NodeManagerAddress") == local_addr]
     others = sorted(
@@ -255,29 +199,7 @@ def _build_sglang_cmd(
     pd_ib_device: str = "",
     pd_bootstrap_port: int = _PD_DEFAULT_BOOTSTRAP_PORT,
 ) -> list[str]:
-    """Compose the sglang multi-node launch command.
-
-    Only rank 0 gets ``--host``/``--port`` (workers serve no HTTP).
-    ``--trust-remote-code`` is default-on. ``ep > 1`` emits
-    ``--expert-parallel-size N`` for expert parallelism.
-
-    Args:
-        model: Model path passed to the launcher.
-        tp: Tensor-parallel size.
-        nnodes: Total node count for this server group.
-        node_rank: This node's rank within the group.
-        dist_init_addr: Collective rendezvous ``host:port``.
-        extra_args: Extra args appended verbatim to the launcher.
-        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
-        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
-        pd_port: HTTP port bound by rank 0.
-        pd_transfer_backend: KV-transfer backend for PD mode.
-        pd_ib_device: IB/RoCE device list for PD KV transfer.
-        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
-
-    Returns:
-        list[str]: The sglang launch argv.
-    """
+    """Compose the sglang multi-node launch command."""
     cmd = [
         "python3",
         "-m",
@@ -324,25 +246,7 @@ def _build_vllm_cmd(
     pd_kv_rank: int = 0,
     pd_kv_parallel_size: int = 1,
 ) -> list[str]:
-    """vLLM multi-node command for rank 0 (workers are KubeRay-joined and vLLM auto-discovers them via the GCS).
-
-    ``--tensor-parallel-size`` = total cluster GPUs; ``ep > 1`` adds
-    ``--enable-expert-parallel``.
-
-    Args:
-        model: Model path passed to ``vllm serve``.
-        tp: Tensor-parallel size (total cluster GPUs).
-        extra_args: Extra args appended verbatim to the launcher.
-        ep: Expert-parallel size; ``> 1`` enables expert parallelism.
-        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
-        pd_port: HTTP port bound by the server.
-        pd_transfer_backend: KV connector name for PD mode.
-        pd_kv_rank: This group's KV rank in PD mode.
-        pd_kv_parallel_size: Total KV parallel size in PD mode.
-
-    Returns:
-        list[str]: The vLLM launch argv.
-    """
+    """vLLM multi-node command for rank 0 (workers are KubeRay-joined and vLLM auto-discovers them via the GCS)."""
     cmd = [
         "vllm",
         "serve",
@@ -383,12 +287,7 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware < 177 (gates the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
-
-    Returns:
-        bool: ``True`` if MEC firmware is below 177; ``False`` on any probe
-        failure or higher firmware.
-    """
+    """Return True iff rocm-smi reports MEC firmware < 177 (gates the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure."""
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showfw"],
@@ -412,20 +311,10 @@ def _probe_mec_firmware_lt_177() -> bool:
 
 
 def _subprocess_env() -> dict[str, str]:
-    """Build the framework launcher subprocess env.
-
-    Puts ``/opt/venv/bin`` first on PATH (framework venv) and inherits
-    ``os.environ`` (keeps injected API keys / SGLANG_* / VLLM_* tunings).
-    Sets the MI300X tuning trio (SGLANG_USE_AITER / SGLANG_AITER_MLA_PERSIST,
-    and HSA_NO_SCRATCH_RECLAIM when MEC firmware < 177) without clobbering
-    caller-set values.
-
-    Returns:
-        dict[str, str]: The environment mapping for the launcher subprocess.
-    """
+    """Build the framework launcher subprocess env."""
     env = dict(os.environ)
-    # Strip Ray's empty *_VISIBLE_DEVICES mask so the detached framework child
-    # re-discovers all GPUs; honour non-empty overrides.
+    # Strip Ray's empty *_VISIBLE_DEVICES mask so the detached framework child re-discovers all GPUs; honour non-empty
+    # overrides.
     for _vis in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
         if _vis in env and env[_vis].strip() == "":
             env.pop(_vis, None)
@@ -450,22 +339,7 @@ def _detach_framework_launch(
     sub_env: dict[str, str],
     node_rank: int,
 ) -> int:
-    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init; fails fast with a log tail).
-
-    Args:
-        cmd: The framework launcher argv.
-        log_file: Path the launcher's stdout/stderr is appended to.
-        pid_file: Path the spawned launcher PID is written to.
-        sub_env: Environment passed to the spawn shell.
-        node_rank: This node's rank, used in log/error messages.
-
-    Returns:
-        int: The PID of the detached framework process.
-
-    Raises:
-        RuntimeError: If the spawn shell fails, the PID file is missing or
-            invalid, or the process exits within 0.5s of launch.
-    """
+    """Start ``cmd`` detached from the Ray worker via bash+nohup+setsid (reparents under init; fails fast with a log tail)."""
     sub_env = dict(sub_env)
     sub_env.setdefault("PYTHONUNBUFFERED", "1")
     log_q = shlex.quote(str(log_file))
@@ -540,53 +414,19 @@ def _spawn_remote(
     pd_kv_parallel_size: int = 1,
     pid_file_name: str = "",
 ) -> int:
-    """Spawn the framework launcher detached on the local actor's pod, recording the PID.
-
-    ``torch_profiler_dir`` (if set) is exported as
-    ``SGLANG_TORCH_PROFILER_DIR`` for shared-path traces.
-
-    Args:
-        framework: ``sglang`` or ``vllm``.
-        model: Model path passed to the launcher.
-        tp: Tensor-parallel size.
-        nnodes: Total node count for this server group.
-        node_rank: This node's rank within the group.
-        head_ip: Rendezvous head IP.
-        dist_init_port: Collective rendezvous port.
-        pid_dir: Directory the PID file is written to.
-        log_dir: Directory the log file is written to.
-        extra_args: Extra args appended verbatim to the launcher.
-        torch_profiler_dir: Optional shared dir exported as
-            ``SGLANG_TORCH_PROFILER_DIR``.
-        ep: Expert-parallel size.
-        pd_role: PD disaggregation role (``prefill``/``decode``) or empty.
-        pd_port: HTTP port bound in PD mode.
-        pd_transfer_backend: KV-transfer backend for PD mode.
-        pd_ib_device: IB/RoCE device list for PD KV transfer.
-        pd_bootstrap_port: sglang PD bootstrap rendezvous port.
-        pd_kv_rank: vLLM KV rank for PD mode.
-        pd_kv_parallel_size: vLLM total KV parallel size for PD mode.
-        pid_file_name: Optional role-tagged PID file name.
-
-    Returns:
-        int: The spawned framework PID, or ``0`` for a no-op vLLM worker rank.
-
-    Raises:
-        RuntimeError: If ``framework`` is unsupported, or the detached launch
-            fails.
-    """
+    """Spawn the framework launcher detached on the local actor's pod, recording the PID."""
     Path(pid_dir).mkdir(parents=True, exist_ok=True)
     Path(log_dir).mkdir(parents=True, exist_ok=True)
-    # PD mode runs two groups with overlapping rank numbers; caller passes
-    # a role-tagged pid_file_name so they don't collide on disk.
+    # PD mode runs two groups with overlapping rank numbers; caller passes a role-tagged pid_file_name so they don't
+    # collide on disk.
     fname = pid_file_name or f"rank_{node_rank}.pid"
     log_fname = f"{Path(fname).stem}.log" if pid_file_name else f"rank_{node_rank}.log"
     pid_file = Path(pid_dir) / fname
     log_file = Path(log_dir) / log_fname
 
     sub_env = _subprocess_env()
-    # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared
-    # dir when a reused server skips this launch.
+    # Fall back to $HYPERLOOM_MN_PROFILE_TRACE_DIR so traces still reach a shared dir when a reused server skips this
+    # launch.
     tpd = (torch_profiler_dir or "").strip() or os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if tpd:
         # Pin profiler output to a shared dir; mkdir failure is non-fatal.
@@ -618,8 +458,8 @@ def _spawn_remote(
             pd_bootstrap_port=pd_bootstrap_port,
         )
     elif fw == "vllm":
-        # vLLM multi-node: workers are already KubeRay-joined to the GCS, so
-        # worker actors do nothing; rank-0 vllm serve discovers them.
+        # vLLM multi-node: workers are already KubeRay-joined to the GCS, so worker actors do nothing; rank-0 vllm
+        # serve discovers them.
         if node_rank != 0:
             sys.stderr.write(
                 f"[rank {node_rank}] vllm worker: no-op (KubeRay already "
@@ -653,17 +493,7 @@ _ROLLBACK_TIMEOUT_SEC = 30
 
 
 def _rollback_remote(pid: int) -> str:
-    """SIGTERM a spawned rank's process group, ON the node that owns the PID.
-
-    Must run as a NodeAffinity-pinned actor on that rank's own node: the PID is
-    resolvable only in the namespace that produced it.
-
-    Args:
-        pid: The PID reported by that node's spawn actor.
-
-    Returns:
-        str: A short human-readable outcome for the driver's log.
-    """
+    """SIGTERM a spawned rank's process group, ON the node that owns the PID."""
     import os as _os
     import signal as _signal
 
@@ -680,19 +510,7 @@ def _rollback_remote(pid: int) -> str:
 
 
 def _rank0_pid_from_log(pid_dir: str) -> int | None:
-    """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort).
-
-    The PID dir is passed explicitly rather than derived from the log dir: the
-    two are no longer siblings once the logs move to a shared filesystem, and a
-    PID is only meaningful on its own node so its dir stays node-local ``/tmp``.
-
-    Args:
-        pid_dir (str): The rank PID directory; ``{pid_dir}/rank_0.pid`` is read
-            before falling back to the default temp-directory location.
-
-    Returns:
-        int | None: The rank-0 PID, or ``None`` if it cannot be read.
-    """
+    """Read rank 0 PID from ``{pid_dir}/rank_0.pid`` (best-effort)."""
     try:
         pid_path = pathlib.Path(pid_dir) / "rank_0.pid"
         if not pid_path.is_file():
@@ -702,8 +520,7 @@ def _rank0_pid_from_log(pid_dir: str) -> int | None:
         return None
 
 
-# Fatal patterns scanned in rank_0.log (catches crashes the lingering nohup
-# wrapper PID hides).
+# Fatal patterns scanned in rank_0.log (catches crashes the lingering nohup wrapper PID hides).
 _FATAL_LOG_PATTERNS: tuple[str, ...] = (
     "Traceback (most recent call last):",
     "KeyError:",
@@ -731,15 +548,7 @@ _FATAL_SCAN_TAIL_BYTES = 256 * 1024
 
 
 def _scan_log_for_fatal(log_file: Path) -> str | None:
-    """Scan a log file's tail for a fatal traceback / framework error.
-
-    Args:
-        log_file: Path to the log file to scan.
-
-    Returns:
-        str | None: The first matched fatal line, or ``None`` if none found
-        or the log cannot be read.
-    """
+    """Scan a log file's tail for a fatal traceback / framework error."""
     try:
         if not log_file.is_file():
             return None
@@ -764,15 +573,7 @@ def _scan_log_for_fatal(log_file: Path) -> str | None:
 
 
 def _scan_rank0_log_for_fatal(log_dir: str) -> str | None:
-    """Scan rank_0.log tail for a fatal traceback / framework error.
-
-    Args:
-        log_dir: Directory containing ``rank_0.log``.
-
-    Returns:
-        str | None: The first matched fatal line, or ``None`` if none found
-        or the log cannot be read.
-    """
+    """Scan rank_0.log tail for a fatal traceback / framework error."""
     return _scan_log_for_fatal(Path(log_dir) / "rank_0.log")
 
 
@@ -781,18 +582,7 @@ def _wait_health(
     rank0_pid: int | None = None,
     log_dir: str | None = None,
 ) -> bool:
-    """Poll rank-0 ``/health``; True on first 200, else False on timeout, rank-0 death, or a fatal ``rank_0.log`` error.
-
-    Args:
-        timeout_s: Maximum seconds to poll before giving up.
-        rank0_pid: Optional rank-0 PID; the wait aborts early if it dies.
-        log_dir: Optional directory whose ``rank_0.log`` is scanned for fatal
-            errors to abort early.
-
-    Returns:
-        bool: ``True`` on a first healthy response; ``False`` on timeout,
-        confirmed rank-0 death, or a fatal log error.
-    """
+    """Poll rank-0 ``/health``; True on first 200, else False on timeout, rank-0 death, or a fatal ``rank_0.log`` error."""
     import urllib.request
     import urllib.error
 
@@ -835,36 +625,7 @@ def _wait_pd_legs_health(
     timeout_s: int,
     log_dir: str | None = None,
 ) -> bool | None:
-    """Poll both PD legs' own ``/health`` until each answers, within one budget.
-
-    The router that will own the public port is submitted by the caller only
-    after this driver returns, so there is nothing to probe there yet -- but the
-    legs answer on their own ports, and they are what "the cluster is up" means.
-
-    Returning before that made this job's terminal status meaningless: it went
-    SUCCEEDED seconds after the ranks were spawned, while the weight load still
-    had tens of minutes to run, so a caller retrying mid-boot could not tell a
-    booting cluster from a dead one.
-
-    Liveness is decided by ``/health`` (reachable over the network) and each
-    leg's own log, never by a PID. This driver runs on the head, but the decode
-    group's leader runs on a *different* node, so its PID lives in that node's
-    namespace: ``os.kill`` here would raise ``ProcessLookupError`` for a
-    perfectly healthy remote leg and false-fail the launch. The aggregated path
-    keeps its PID check only because rank 0 is co-located with this driver.
-
-    Args:
-        prefill_url: Base URL of the prefill group's rank 0.
-        decode_url: Base URL of the decode group's rank 0.
-        timeout_s: Shared budget for both legs.
-        log_dir: Optional directory holding ``{role}_0.log``; each leg's own log
-            is scanned for a fatal error to abort early, and its tail is emitted
-            on that abort so the caller can see why the leg died.
-
-    Returns:
-        bool | None: True once both legs answer, False when a leg's log shows a
-        fatal crash, None on timeout (undetermined, as for rank 0).
-    """
+    """Poll both PD legs' own ``/health`` until each answers, within one budget."""
     import urllib.error
     import urllib.request
 
@@ -887,8 +648,8 @@ def _wait_pd_legs_health(
                         continue
             except (urllib.error.URLError, OSError):
                 pass
-            # A remote leg's PID is not ours to os.kill; a fatal in its own log is
-            # the cross-node-safe proof of death (the nohup wrapper hides crashes).
+            # A remote leg's PID is not ours to os.kill; a fatal in its own log is the cross-node-safe proof of death
+            # (the nohup wrapper hides crashes).
             leg_log = _leg_log(role)
             if leg_log is not None:
                 fatal_line = _scan_log_for_fatal(leg_log)
@@ -908,16 +669,7 @@ _LOG_TAIL_BYTES = 8192
 
 
 def _emit_log_tail(log_file: Path) -> None:
-    """Append the tail of a log file to stderr if it exists.
-
-    Seeks to the last ``_LOG_TAIL_BYTES`` rather than reading the whole file:
-    the logs now live on a shared filesystem, and slurping a multi-hundred-MB
-    server log over the network on the failure path (both PD legs) would be a
-    heavy read for an 8 KiB tail.
-
-    Args:
-        log_file (Path): Path to the log file to tail.
-    """
+    """Append the tail of a log file to stderr if it exists."""
     name = log_file.name
     try:
         sz = log_file.stat().st_size if log_file.is_file() else 0
@@ -933,21 +685,12 @@ def _emit_log_tail(log_file: Path) -> None:
 
 
 def _emit_rank0_log_tail(log_dir: Path) -> None:
-    """Append the tail of ``rank_0.log`` to stderr if the file exists.
-
-    Args:
-        log_dir (Path): Directory containing ``rank_0.log``.
-    """
+    """Append the tail of ``rank_0.log`` to stderr if the file exists."""
     _emit_log_tail(log_dir / "rank_0.log")
 
 
 def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
-    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail).
-
-    Args:
-        log_dir: Directory containing ``rank_0.log``.
-        rank0_pid: The rank-0 PID to probe, or ``None`` to skip.
-    """
+    """Emit rank-0 diagnostics after a short settle (a ``rank_0.log`` tail)."""
     if rank0_pid is None or rank0_pid <= 0:
         return
     time.sleep(3)
@@ -960,18 +703,7 @@ def _log_rank0_post_spawn(log_dir: Path, rank0_pid: int | None) -> None:
 
 
 def main() -> int:
-    """Parse CLI arguments and launch the multi-node server group(s).
-
-    Connects to the in-pod Ray cluster, discovers and rank-orders nodes,
-    spawns one launcher actor per rank (aggregated or PD-disaggregated),
-    emits a JSON summary to stdout, and optionally waits for rank-0
-    ``/health``.
-
-    Returns:
-        int: Process exit code; ``0`` on success (or slow-but-alive boot),
-        ``1`` on a spawn failure, ``2`` on invalid args or a confirmed
-        framework early-exit / fatal log error.
-    """
+    """Parse CLI arguments and launch the multi-node server group(s)."""
     p = argparse.ArgumentParser(
         prog="launch_multinode.py",
         description="Spawn one sglang/vllm rank per RayJob node via ray actors.",
@@ -1008,8 +740,8 @@ def main() -> int:
         "`--enable-expert-parallel`. Caller (orchestrator "
         "helper) is responsible for ensuring ep <= tp.",
     )
-    # PD disaggregation args: `aggregated` is one TP group; `disaggregated` splits
-    # into prefill/decode groups fronted by the router.
+    # PD disaggregation args: `aggregated` is one TP group; `disaggregated` splits into prefill/decode groups fronted
+    # by the router.
     p.add_argument(
         "--pd-mode",
         choices=("aggregated", "disaggregated"),
@@ -1110,9 +842,7 @@ def main() -> int:
 
     # Spawn one actor per rank (num_gpus=0; the framework reserves GPUs itself).
     SpawnActor = ray.remote(num_cpus=1, num_gpus=0)(_spawn_remote)
-    # tag -> (node_id, real PID). A PID is only meaningful in the namespace that
-    # produced it, and this driver shares one only with rank 0 (_pick_head_first),
-    # so every PID travels with the node that owns it.
+    # tag -> (node_id, real PID).
     pids: dict[str, tuple[str, int]] = {}
     refs: list[tuple[str, str, Any]] = []  # (tag, node_id, actor_ref)
 
@@ -1215,10 +945,6 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             _log(f"{tag}: spawn FAILED: {type(exc).__name__}: {exc}")
             # Roll back already-spawned ranks so no half-started servers leak.
-            # Each kill is dispatched to the node that owns the PID; PIDs are
-            # namespace-local and are never signalled from here. A pid <= 0 is
-            # the vLLM worker sentinel and names no process -- os.getpgid(0)
-            # would resolve to this driver's own process group.
             for tag2, (node_id2, p2) in pids.items():
                 if p2 <= 0:
                     _log(f"rolling back {tag2}: sentinel pid={p2} (no process); skipped")
@@ -1235,8 +961,8 @@ def main() -> int:
                     )
                     _log(f"rolling back {tag2} pid={p2} on node={node_id2[:16]}...: {outcome}")
                 except Exception as rb_exc:  # noqa: BLE001
-                    # An unreachable rank keeps its GPUs until the platform
-                    # reclaims the cluster, so it is reported rather than dropped.
+                    # An unreachable rank keeps its GPUs until the platform reclaims the cluster, so it is reported
+                    # rather than dropped.
                     _log(
                         f"WARN rollback of {tag2} pid={p2} on node={node_id2[:16]}... "
                         f"FAILED: {type(rb_exc).__name__}: {rb_exc}; that rank may "
@@ -1264,8 +990,7 @@ def main() -> int:
         "pd_mode": pd_mode,
     }
     if pd_mode == "disaggregated":
-        # Emit internal endpoints + bootstrap port so the CLI can submit the
-        # router without re-discovering nodes.
+        # Emit internal endpoints + bootstrap port so the CLI can submit the router without re-discovering nodes.
         summary["pd_prefill_nodes"] = pn
         summary["pd_decode_nodes"] = dn
         summary["pd_prefill_tp"] = ptp
@@ -1284,9 +1009,8 @@ def main() -> int:
         _log("--no-wait-health set; not probing /health")
         return 0
 
-    # PD: the router that owns 8888 does not exist yet (the caller submits it
-    # once this driver returns), so wait on the legs themselves. Doing this is
-    # what lets a terminal status here mean the cluster served.
+    # PD: the router that owns 8888 does not exist yet (the caller submits it once this driver returns), so wait on
+    # the legs themselves.
     if pd_mode == "disaggregated":
         _log(f"polling both PD legs' /health for up to {_HEALTH_PROBE_TIMEOUT_SEC}s")
         _legs_ready = _wait_pd_legs_health(
@@ -1319,8 +1043,7 @@ def main() -> int:
         return 0
     # Tail the log (timeout or early rank-0 death) for the framework's last words.
     _emit_rank0_log_tail(Path(args.log_dir))
-    # Tri-state liveness: True=alive, False=confirmed dead, None=unknown. Only
-    # confirmed death flips to FAILED (return 2); alive/unknown return 0 + WARN.
+    # Tri-state liveness: True=alive, False=confirmed dead, None=unknown.
     _r0_alive: bool | None = None
     if _r0_pid is not None and _r0_pid > 0:
         try:
@@ -1352,8 +1075,7 @@ def main() -> int:
             f"1800s /health stall)."
         )
         return 2
-    # A fatal traceback in rank_0.log proves a crash even when the nohup
-    # wrapper PID lingers.
+    # A fatal traceback in rank_0.log proves a crash even when the nohup wrapper PID lingers.
     _fatal_line = _scan_rank0_log_for_fatal(args.log_dir)
     if _fatal_line:
         snap = {

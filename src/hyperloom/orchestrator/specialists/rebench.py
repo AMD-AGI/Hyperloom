@@ -1,23 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Optional gate-comparable rebench helper for GPU specialists.
-
-Reuses the real Magpie serving + benchmark path (``run_grid``) on the
-specialist's leased cards. The ``integrate_patch`` gate stays the single
-authoritative measure of truth.
-
-The helper runs the server on the cards the subprocess already has pinned via
-``ROCR_VISIBLE_DEVICES``.
-
-CLI usage (from inside a specialist subprocess)::
-
-    python -m hyperloom.orchestrator.specialists.rebench \
-        --config <magpie.yaml> --output <dir> [--port 0] \
-        [--extra-args "<server args>"] [--env KEY=VAL ...]
-
-prints a single JSON result object to stdout.
-"""
+"""Optional gate-comparable rebench helper for GPU specialists."""
 
 from __future__ import annotations
 
@@ -51,11 +35,7 @@ def _resolve_port(port: int | None) -> int:
 
 
 def _current_leased_cards() -> str:
-    """Return the cards the subprocess is pinned to (for result reporting).
-
-    Returns:
-        str: The ``ROCR_VISIBLE_DEVICES`` (then HIP/CUDA) value, or ``""``.
-    """
+    """Return the cards the subprocess is pinned to (for result reporting)."""
     for var in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         val = os.environ.get(var, "").strip()
         if val:
@@ -76,32 +56,7 @@ async def run_specialist_rebench(
     benchmark_script: str | None = None,
     magpie_python: str | None = None,
 ) -> dict[str, Any]:
-    """Run one gate-comparable benchmark on the specialist's leased cards.
-
-    Reuses the real Magpie serving + benchmark path (``run_grid``) with a
-    single identity variant. The server runs on the cards already pinned into
-    the subprocess env (``ROCR_VISIBLE_DEVICES``).
-
-    Args:
-        config_path: Base Magpie YAML to template from; ``None`` falls back to
-            the packaged default baseline config.
-        output_dir: Directory the rebench writes its config / server pid / and
-            benchmark output under (conventionally inside the worktree).
-        base_extra_args: Server args merged ahead of the variant's args
-            (e.g. the current-best stack args, to compare apples-to-apples).
-        extra_envs: Per-run environment overrides (e.g. tuned config env vars).
-        port: Server port; ``None``/``0`` uses an OS-assigned port.
-        variant_timeout_sec: Per-variant wall-clock timeout.
-        model_path: Overrides the benchmark model path when set.
-        gpu_type: Pins the generic ``{framework}_{gpu_type}.sh`` benchmark.
-        benchmark_script: Force-pins a benchmark script.
-        magpie_python: Interpreter that can import Magpie.
-
-    Returns:
-        A result dict with ``ok``, ``output_throughput`` (the gate-comparable
-        number), latency fields, ``status``, ``workspace``, ``port``,
-        ``gpu_ids`` and any ``warnings`` / ``error``.
-    """
+    """Run one gate-comparable benchmark on the specialist's leased cards."""
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
     resolved_port = _resolve_port(port)
@@ -171,8 +126,8 @@ async def run_specialist_rebench(
         "ok": ok,
         "status": rb.status,
         "output_throughput": getattr(rb, "output_throughput", None),
-        # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
-        # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+        # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``; the emitted keys stay ``ttft_ms`` /
+        # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
         "workspace": str(getattr(rb, "workspace", "") or ""),
@@ -184,14 +139,7 @@ async def run_specialist_rebench(
 
 
 def _parse_env_pairs(pairs: list[str] | None) -> dict[str, str]:
-    """Parse ``KEY=VAL`` CLI ``--env`` pairs into a dict.
-
-    Args:
-        pairs: Raw ``KEY=VAL`` strings, or ``None``.
-
-    Returns:
-        The parsed environment-override mapping (malformed entries skipped).
-    """
+    """Parse ``KEY=VAL`` CLI ``--env`` pairs into a dict."""
     out: dict[str, str] = {}
     for item in pairs or []:
         key, sep, val = str(item).partition("=")
@@ -201,14 +149,7 @@ def _parse_env_pairs(pairs: list[str] | None) -> dict[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: run one rebench and print a JSON result to stdout.
-
-    Args:
-        argv: Optional argument vector (defaults to ``sys.argv[1:]``).
-
-    Returns:
-        int: ``0`` when the rebench succeeded, ``1`` otherwise.
-    """
+    """CLI entry point: run one rebench and print a JSON result to stdout."""
     parser = argparse.ArgumentParser(
         prog="specialist_rebench",
         description=(

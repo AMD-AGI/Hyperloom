@@ -133,9 +133,8 @@ class TestBuildReport:
         assert report.requires_e2e_validation is False
 
     def test_forced_candidate_promoted_despite_no_improvement(self):
-        # split-K CSV: microbench shows no improvement (best=1.0) but candidate=True
-        # forces e2e validation + deployment (recommended_env populated). Guards the
-        # promotion gate against silently dropping a real e2e-only gain.
+        # split-K CSV: microbench shows no improvement (best=1.0) but candidate=True forces e2e validation +
+        # deployment (recommended_env populated).
         result = TuneResult(
             tuner_name="a8w8_blockscale",
             status="no_improvement",
@@ -166,12 +165,7 @@ class TestBuildReport:
         assert "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE" in report.recommended_env
 
     def test_partial_failure_not_fatal(self):
-        """One tuner fails, another succeeds with no improvement.
-
-        The batch is not fatal -- status stays "ok" -- but the crash must not be
-        rounded down to "no_improvement" either. That rounding is what let 14
-        hard failures read as "this model has no headroom" for a week.
-        """
+        """One tuner fails, another succeeds with no improvement."""
         failed = TuneResult(tuner_name="vllm_moe_triton", status="failed", error="unsupported", error_class="api_error")
         ok = TuneResult(
             tuner_name="fmoe_ck",

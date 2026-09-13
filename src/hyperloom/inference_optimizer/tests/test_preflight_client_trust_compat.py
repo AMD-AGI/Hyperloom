@@ -1,12 +1,4 @@
-"""Run-time assertion of the SGLang custom-tokenizer trust patch.
-
-``MAGPIE_TRUST_REMOTE_CODE=1`` is set for every run, but it is inert unless
-Magpie's SGLang scripts were patched to forward it: upstream never passes the
-``trust`` argument, so ``benchmark_serving.py`` keeps its ``--trust-remote-code``
-default of False and transformers refuses to execute a model's custom tokenizer
-code. ``install.sh`` applies that patch; preflight pip-installs Magpie on its
-own and used to skip it.
-"""
+"""Run-time assertion of the SGLang custom-tokenizer trust patch."""
 
 from __future__ import annotations
 
@@ -115,13 +107,7 @@ def test_is_idempotent_without_rewriting(upstream_magpie: Path):
 
 
 def test_still_applies_after_the_eval_concurrency_strip(tmp_path: Path):
-    """Order independence from the eval-concurrency fix.
-
-    The legacy MI300X patcher needs the still-flagged ``run_eval`` line and
-    bails out entirely once the strip removed it, discarding the trust rewrite
-    it had already computed. The client-trust patcher must not share that
-    coupling, otherwise a tree that saw the strip first is stuck unpatchable.
-    """
+    """Order independence from the eval-concurrency fix."""
     stripped = _UPSTREAM_SGLANG_MI300X_SH.replace(" --concurrent-requests $CONC", "")
     _write_scripts(tmp_path, mi300x=stripped)
     assert "--concurrent-requests" not in stripped

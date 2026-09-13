@@ -40,23 +40,7 @@ def prior_score(
     ledger: list[dict[str, Any]] | None = None,
     min_samples: int = 1,
 ) -> float:
-    """Compute a KB-derived pre-benchmark priority for a PR candidate.
-
-    The score is advisory only: callers should use it to sort candidates
-    before expensive benchmarking, never to bypass throughput/accuracy gates.
-    Cold starts (no matching history) return ``0.0``.
-
-    Args:
-        candidate: Candidate object or candidate dict.
-        gap_canonical_id: Current canonical gap id; falls back to the candidate.
-        gap_keywords: Current gap keywords; falls back to the candidate.
-        ledger: Historical ``lessons.jsonl`` records.
-        min_samples: Minimum associated records needed to emit a non-zero score.
-
-    Returns:
-        A score in ``[0, 1]`` combining exact/fuzzy association, historical
-        throughput gain, and historical integration success.
-    """
+    """Compute a KB-derived pre-benchmark priority for a PR candidate."""
     records = ledger or []
     if not records:
         return 0.0
@@ -117,11 +101,7 @@ def prior_score(
     avg_association = sum(weights) / len(weights)
 
     def _realized_gain(rec: dict[str, Any]) -> float:
-        """Throughput a record actually delivered, else 0.
-
-        A reverted candidate's throughput was never kept, and an accuracy
-        regression disqualifies it outright, so neither may raise the prior.
-        """
+        """Throughput a record actually delivered, else 0."""
         if str(rec.get("outcome") or "") != "integrated":
             return 0.0
         if to_float(rec.get("accuracy_delta_pct"), default=0.0) < 0.0:
@@ -164,22 +144,7 @@ def winner_decision(
     accuracy: float | None,
     completed: str,
 ) -> tuple[bool, str]:
-    """Apply throughput / accuracy / completed gates for a candidate.
-
-    Short-circuits on the first failing gate: (1) throughput > 0 and ratio
-    >= ``min_throughput_ratio``; (2) when baseline accuracy is set, accuracy
-    present and drop <= ``max_accuracy_drop``; (3) ``completed`` "K/N" must
-    have K == N.
-
-    Args:
-        req: The explore request carrying baseline and thresholds.
-        throughput: Candidate throughput, or ``None`` if unmeasured.
-        accuracy: Candidate accuracy, or ``None`` if unmeasured.
-        completed: Benchmark completion marker in ``"K/N"`` form.
-
-    Returns:
-        A ``(is_winner, reason)`` tuple; ``reason`` is always set for audit.
-    """
+    """Apply throughput / accuracy / completed gates for a candidate."""
     if throughput is None or throughput <= 0:
         return False, "missing throughput"
     if req.baseline.throughput <= 0:
@@ -211,20 +176,7 @@ def candidate_score(
     throughput: float | None,
     accuracy: float | None,
 ) -> float:
-    """Compute a sortable ranking score for a candidate.
-
-    The score is ``throughput_ratio - accuracy_drop_penalty`` (higher is
-    better); missing throughput scores ``0.0`` so failed candidates sort to
-    the tail.
-
-    Args:
-        req: The explore request carrying baseline and thresholds.
-        throughput: Candidate throughput, or ``None`` if unmeasured.
-        accuracy: Candidate accuracy, or ``None`` if unmeasured.
-
-    Returns:
-        The ranking score as a float.
-    """
+    """Compute a sortable ranking score for a candidate."""
     if throughput is None or throughput <= 0 or req.baseline.throughput <= 0:
         return 0.0
     ratio = throughput / req.baseline.throughput

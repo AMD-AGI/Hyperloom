@@ -2,17 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node sglang / vllm server killer (counterpart to ``launch_multinode.py``).
-
-Per alive node, a node-pinned actor SIGTERMs each
-``rank_*``/``prefill_*``/``decode_*``/``router*`` PID-file process group under
-``--pid-dir``, waits ``GRACE``, then SIGKILLs, then blocks (per-stage timeouts,
-best-effort) until those pids exit, the rendezvous/serving ports drain and GPU
-VRAM is reclaimed; overruns are reported as ``still_alive`` / ``ports_busy`` /
-``gpu_busy`` rather than raising. Idempotent (missing/dead PIDs = success).
-Only kills PIDs from ``--pid-dir``, never ``pkill -f sglang`` (IR-5). Returns 0
-on success.
-"""
+"""Multi-node sglang / vllm server killer (counterpart to ``launch_multinode.py``)."""
 
 from __future__ import annotations
 
@@ -29,48 +19,28 @@ from pathlib import Path
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-# Default rendezvous / serving ports to drain before returning success, so the
-# subsequent launch_multinode.py can bind rank-0's TCPStore + HTTP without
-# colliding with a still-dying prior server (the cause of "Rank N scheduler
-# died during initialization (exit -6)" + NCCL "TCPStore shut down too early"
-# on restart). dist-init defaults to $RAYJOB_DIST_INIT_PORT else 29500; 8888 is
-# the aggregated inference port; 30000/30001 are the PD prefill/decode ports.
+# Default rendezvous / serving ports to drain before returning success, so the subsequent launch_multinode.py can bind
+# rank-0's TCPStore + HTTP without colliding with a still-dying prior server (the cause of "Rank N scheduler died
+# during initialization (exit -6)" + NCCL "TCPStore shut down too early" on restart). dist-init defaults to
+# $RAYJOB_DIST_INIT_PORT else 29500; 8888 is the aggregated inference port; 30000/30001 are the PD prefill/decode
+# ports.
 _DEFAULT_DIST_INIT_PORT = 29500
 
-# _kill_remote runs SIGTERM -> sleep(grace) -> SIGKILL sequentially per pid file,
-# so a node with K pid files spends up to K*grace in the grace phase. main() does
-# not know K per node (each actor globs its own remote pid_dir), so budget the
-# ray.get timeout for this many pid files/node (ranks + prefill/decode/router).
-# Over-budgeting is harmless (ray.get returns as soon as the actor does); only
-# under-budgeting would falsely mark a successful kill as FAILED.
+# _kill_remote runs SIGTERM -> sleep(grace) -> SIGKILL sequentially per pid file, so a node with K pid files spends up
+# to K*grace in the grace phase. main() does not know K per node (each actor globs its own remote pid_dir), so budget
+# the ray.get timeout for this many pid files/node (ranks + prefill/decode/router).
 _GRACE_PID_BUDGET = 16
 
 
 def _log(msg: str) -> None:
-    """Write a timestamped progress line to stderr and flush it.
-
-    Args:
-        msg (str): The message text to emit.
-    """
+    """Write a timestamped progress line to stderr and flush it."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
     sys.stderr.write(f"[kill_multinode {ts}] {msg}\n")
     sys.stderr.flush()
 
 
 def _pid_alive(pid: int) -> bool:
-    """Return True if ``pid`` is a live (non-zombie) process.
-
-    A killed sglang scheduler whose launcher parent is already dead lingers as
-    a zombie (``<defunct>``) until pid-1 reaps it; SIGKILL cannot clear it. A
-    zombie has already released every resource (GPU/VRAM/ports included), so it
-    must count as gone — otherwise the death-wait spins on it for no reason.
-
-    Args:
-        pid: Process id to probe.
-
-    Returns:
-        bool: True only when the process exists and is not a zombie.
-    """
+    """Return True if ``pid`` is a live (non-zombie) process."""
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
@@ -78,8 +48,8 @@ def _pid_alive(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             data = fh.read()
-        # Fields: "pid (comm) state ...". comm may contain ')', so split after
-        # the last ')': the state char is two bytes past it.
+        # Fields: "pid (comm) state ...". comm may contain ')', so split after the last ')': the state char is two
+        # bytes past it.
         rparen = data.rfind(b")")
         if rparen != -1 and data[rparen + 2 : rparen + 3] == b"Z":
             return False
@@ -89,19 +59,7 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _wait_pids_gone(pids: list[int], timeout_s: float) -> list[int]:
-    """Poll until every pid exits, escalating SIGKILL to the group on the way.
-
-    A returned "SUCCEEDED" kill that leaves the sglang scheduler workers still
-    dying keeps the rendezvous/serving ports bound, so the next launch aborts.
-    Block here until the process group is truly gone (or timeout).
-
-    Args:
-        pids: Process ids that were signalled.
-        timeout_s: Max seconds to wait for all pids to disappear.
-
-    Returns:
-        list[int]: Pids still alive after ``timeout_s`` (empty on success).
-    """
+    """Poll until every pid exits, escalating SIGKILL to the group on the way."""
     deadline = time.time() + max(0.0, timeout_s)
     while time.time() < deadline:
         alive = [pid for pid in pids if _pid_alive(pid)]
@@ -120,18 +78,7 @@ def _wait_pids_gone(pids: list[int], timeout_s: float) -> list[int]:
 
 
 def _port_free(port: int) -> bool:
-    """Return True if a fresh listener can bind the wildcard ``port`` now.
-
-    Bind without SO_REUSEADDR so a live process still holding the port reports
-    EADDRINUSE (a dead process's listen socket is released immediately, so
-    there are no TIME_WAIT false positives for a listen port).
-
-    Args:
-        port: TCP port number to probe.
-
-    Returns:
-        bool: True when the port is bindable (free).
-    """
+    """Return True if a fresh listener can bind the wildcard ``port`` now."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("0.0.0.0", port))  # nosec B104 - bind probe checks whether the public service port is free.
@@ -143,15 +90,7 @@ def _port_free(port: int) -> bool:
 
 
 def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
-    """Poll until every port is bindable, returning any still busy at timeout.
-
-    Args:
-        ports: TCP ports the next launch's rank-0 must bind.
-        timeout_s: Max seconds to wait for all ports to drain.
-
-    Returns:
-        list[int]: Ports still busy after ``timeout_s`` (empty on success).
-    """
+    """Poll until every port is bindable, returning any still busy at timeout."""
     if not ports:
         return []
     deadline = time.time() + max(0.0, timeout_s)
@@ -163,20 +102,7 @@ def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
 
 
 def _gpu_vram_used_mb() -> list[float] | None:
-    """Return per-GPU used VRAM (MiB) via rocm-smi, or None if unavailable.
-
-    Uses ``rocm-smi --showmeminfo vram --json`` so it works without HIP device
-    visibility (the kill actor runs with num_gpus=0). Best-effort: any parse or
-    exec failure returns None so the caller skips the GPU-free wait.
-
-    This duplicates ``hyperloom.common.rocm_smi`` on purpose: the pod copy of
-    this script is heredoc'd in and run by a bare ``python3``, so hyperloom is
-    not importable there.
-
-    Returns:
-        list[float] | None: Used VRAM per GPU in MiB, or None when rocm-smi is
-        missing / unparseable.
-    """
+    """Return per-GPU used VRAM (MiB) via rocm-smi, or None if unavailable."""
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showmeminfo", "vram", "--json"],
@@ -207,22 +133,7 @@ def _gpu_vram_used_mb() -> list[float] | None:
 
 
 def _wait_gpu_free(threshold_mb: float, timeout_s: float) -> list[float]:
-    """Wait until every GPU's used VRAM drops below ``threshold_mb``.
-
-    ROCm reclaims a dead process's VRAM asynchronously, so a launch fired the
-    instant the pids exit can hit a still-occupied GPU and abort the scheduler
-    during init (``EOFError`` / exit -6). Block until the driver has actually
-    returned the memory. Best-effort: returns [] immediately when rocm-smi is
-    unavailable.
-
-    Args:
-        threshold_mb: Per-GPU used-VRAM ceiling considered "free".
-        timeout_s: Max seconds to wait for reclamation.
-
-    Returns:
-        list[float]: Per-GPU used VRAM (MiB) still above threshold at timeout
-        (empty on a clean reclaim or when rocm-smi is unavailable).
-    """
+    """Wait until every GPU's used VRAM drops below ``threshold_mb``."""
     deadline = time.time() + max(0.0, timeout_s)
     while True:
         used = _gpu_vram_used_mb()
@@ -235,12 +146,7 @@ def _wait_gpu_free(threshold_mb: float, timeout_s: float) -> list[float]:
 
 
 def _gpu_total_used_mb() -> float | None:
-    """Return total used VRAM (MiB) summed across all GPUs, or None.
-
-    Returns:
-        float | None: Sum of per-GPU used VRAM in MiB, or None when rocm-smi is
-        unavailable / unparseable.
-    """
+    """Return total used VRAM (MiB) summed across all GPUs, or None."""
     used = _gpu_vram_used_mb()
     if used is None:
         return None
@@ -248,22 +154,7 @@ def _gpu_total_used_mb() -> float | None:
 
 
 def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
-    """Return VRAM (MiB) held by processes in ``pgids`` per rocm-smi --showpids.
-
-    Attributes VRAM to THIS workload by matching each listed pid's process group
-    (a killed launcher is a pg leader via setsid, so its GPU child shares the
-    pgid). This is what scopes the post-kill reclaim wait to our own memory
-    instead of a co-tenant's unrelated allocation on another GPU. Must be sampled
-    BEFORE the kill (a dead pid leaves --showpids immediately while its VRAM
-    reclaims asynchronously).
-
-    Args:
-        pgids: Process-group ids owned by this workload.
-
-    Returns:
-        float | None: MiB our process groups hold (0.0 when none match), or None
-        when rocm-smi is missing / non-zero / unparseable (caller uses fallback).
-    """
+    """Return VRAM (MiB) held by processes in ``pgids`` per rocm-smi --showpids."""
     if not pgids:
         return 0.0
     try:
@@ -308,22 +199,7 @@ def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
 
 
 def _wait_gpu_reclaimed(target_used_mb: float, slack_mb: float, timeout_s: float) -> float | None:
-    """Wait until total used VRAM falls to ``target_used_mb`` (our footprint freed).
-
-    ``target_used_mb`` is the pre-kill total minus this workload's footprint, so
-    unrelated static allocations on other GPUs are already baked in and never
-    extend the wait. Best-effort: returns None immediately when rocm-smi is
-    unavailable.
-
-    Args:
-        target_used_mb: Total used-VRAM (MiB) expected once our memory is freed.
-        slack_mb: Tolerance above target (driver rounding / idle baseline noise).
-        timeout_s: Max seconds to wait for reclamation.
-
-    Returns:
-        float | None: None on a clean reclaim (or rocm-smi unavailable);
-        otherwise the residual total used VRAM (MiB) still above target+slack.
-    """
+    """Wait until total used VRAM falls to ``target_used_mb`` (our footprint freed)."""
     deadline = time.time() + max(0.0, timeout_s)
     while True:
         total = _gpu_total_used_mb()
@@ -346,35 +222,7 @@ def _kill_remote(
     gpu_free_timeout_s: float = 120.0,
     gpu_fallback_timeout_s: float = 45.0,
 ) -> dict:
-    """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary.
-
-    One sweep covers both aggregated and PD-disaggregated modes (unused
-    patterns are no-ops). After signalling, block until every killed process
-    truly exits, the rendezvous/serving ports drain, and the GPUs reclaim their
-    VRAM, so the next launch's rank-0 binds its TCPStore + HTTP and inits its
-    scheduler on a clean GPU (avoiding EADDRINUSE and the async-VRAM-reclaim
-    ``EOFError`` / exit -6 scheduler abort).
-
-    Args:
-        pid_dir: Directory containing the PID files to sweep.
-        grace_sec: Seconds to wait between SIGTERM and SIGKILL.
-        drain_ports: Ports to wait free after processes exit (rank-0 only binds
-            them; worker nodes drain instantly).
-        death_timeout_s: Max seconds to wait for signalled pids to disappear.
-        port_timeout_s: Max seconds to wait for ``drain_ports`` to free.
-        gpu_free_threshold_mb: Reclaim-target slack (MiB), and the per-GPU
-            used-VRAM ceiling for the fallback path.
-        gpu_free_timeout_s: Max seconds to wait for our footprint to be reclaimed
-            (primary, workload-scoped path).
-        gpu_fallback_timeout_s: Max seconds for the coarse per-card fallback wait
-            used only when our footprint cannot be attributed (rocm-smi/showpids
-            unavailable); time-boxed so a co-tenant's GPU cannot stall teardown.
-
-    Returns:
-        dict: Summary with ``killed``, ``stale``, ``missing`` lists plus
-        ``still_alive`` / ``ports_busy`` / ``gpu_busy`` diagnostics (empty on a
-        clean teardown).
-    """
+    """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary."""
     summary: dict[str, list] = {
         "killed": [],
         "stale": [],
@@ -395,9 +243,8 @@ def _kill_remote(
         + list(p.glob("router*.pid"))
     )
 
-    # Pre-kill GPU snapshot: record OUR process groups + system-wide used VRAM
-    # so the post-kill wait targets only our reclaim. Sampled now because a dead
-    # pid drops out of rocm-smi --showpids before its VRAM is actually freed.
+    # Pre-kill GPU snapshot: record OUR process groups + system-wide used VRAM so the post-kill wait targets only our
+    # reclaim.
     pre_pgids: set[int] = set()
     for pf in pid_files:
         try:
@@ -502,9 +349,7 @@ def _kill_remote(
             # PID file already gone; nothing to clean up.
             pass
 
-    # Block until the signalled processes truly exit, then until the
-    # rendezvous/serving ports drain. Returning before both leaves the next
-    # launch's rank-0 racing a still-dying server for the TCPStore/HTTP port.
+    # Block until the signalled processes truly exit, then until the rendezvous/serving ports drain.
     if killed_pids:
         still = _wait_pids_gone(killed_pids, death_timeout_s)
         if still:
@@ -517,8 +362,8 @@ def _kill_remote(
             _log(f"WARN ports still bound after {port_timeout_s:.0f}s: {busy}")
     if killed_pids:
         if gpu_total_before_mb is not None and gpu_footprint_mb:
-            # Primary: wait only for OUR footprint to be reclaimed system-wide;
-            # a co-tenant's static VRAM on other GPUs is already in the target.
+            # Primary: wait only for OUR footprint to be reclaimed system-wide; a co-tenant's static VRAM on other
+            # GPUs is already in the target.
             target_mb = gpu_total_before_mb - gpu_footprint_mb
             residual = _wait_gpu_reclaimed(target_mb, gpu_free_threshold_mb, gpu_free_timeout_s)
             if residual is not None:
@@ -528,9 +373,8 @@ def _kill_remote(
                     f"{target_mb:.0f}+{gpu_free_threshold_mb:.0f} MiB after {gpu_free_timeout_s:.0f}s"
                 )
         else:
-            # Fallback (footprint unattributable): coarse per-card threshold wait,
-            # time-boxed at gpu_fallback_timeout_s so an unrelated co-tenant GPU
-            # cannot stall teardown.
+            # Fallback (footprint unattributable): coarse per-card threshold wait, time-boxed at
+            # gpu_fallback_timeout_s so an unrelated co-tenant GPU cannot stall teardown.
             busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_fallback_timeout_s)
             if busy:
                 summary["gpu_busy"] = [str(mb) for mb in busy]
@@ -540,17 +384,7 @@ def _kill_remote(
 
 
 def main() -> int:
-    """Parse CLI arguments and fan out kill actors across all alive nodes.
-
-    Connects to the in-pod Ray cluster, schedules one pinned kill actor per
-    alive node, collects each node's kill summary, and prints the aggregate
-    as JSON to stdout.
-
-    Returns:
-        int: ``0`` when every node finished its kill cleanly (having nothing to
-        kill counts as clean); ``1`` when any node errored, left a signalled pid
-        alive, or left a rendezvous/serving port bound.
-    """
+    """Parse CLI arguments and fan out kill actors across all alive nodes."""
     p = argparse.ArgumentParser(
         prog="kill_multinode.py",
         description="Kill every multi-node server process spawned by launch_multinode.py.",
@@ -623,8 +457,8 @@ def main() -> int:
         )
         refs.append((node_id[:16], ref))
 
-    # Actor upper bound: per-pid grace (budgeted for up to _GRACE_PID_BUDGET pid
-    # files/node) + death-wait + port-wait + gpu-wait + margin.
+    # Actor upper bound: per-pid grace (budgeted for up to _GRACE_PID_BUDGET pid files/node) + death-wait + port-wait
+    # + gpu-wait + margin.
     get_timeout = int(
         args.grace_sec * _GRACE_PID_BUDGET + args.death_timeout + args.port_timeout + args.gpu_free_timeout + 30
     )
@@ -639,13 +473,9 @@ def main() -> int:
     sys.stdout.write(json.dumps(out, indent=2) + "\n")
     sys.stdout.flush()
 
-    # The caller sequences LAUNCH directly after this, so an incomplete kill has
-    # to be reported as a failure: a surviving pid or a bound rendezvous/serving
-    # port leaves the next rank 0 racing a dying server for the TCPStore / :8888.
-    #
-    # gpu_busy is advisory only. Its fallback reclaim wait is a coarse per-card
-    # threshold that an unrelated co-tenant's VRAM can trip, and _wait_gpu_free
-    # is time-boxed so it cannot stall teardown.
+    # The caller sequences LAUNCH directly after this, so an incomplete kill has to be reported as a failure: a
+    # surviving pid or a bound rendezvous/serving port leaves the next rank 0 racing a dying server for the TCPStore /
+    # :8888.
     blocking = ("error", "still_alive", "ports_busy")
     bad = {node: {k: summary[k] for k in blocking if summary.get(k)} for node, summary in out.items()}
     bad = {node: reasons for node, reasons in bad.items() if reasons}

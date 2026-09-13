@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Phase-budget overrun signal.
-
-Fires ``phase_budget_nearly_exhausted`` (MEDIUM) when the current phase has
-consumed at least ``warn_used_pct`` of its cap. Silent for unlimited-cap
-phases, during the closing phase, and once a stop_reason is set.
-"""
+"""Phase-budget overrun signal."""
 
 from __future__ import annotations
 
@@ -18,11 +13,7 @@ from .symptom import Symptom, SymptomSeverity
 
 @dataclass
 class PhaseBudgetConfig:
-    """Tunables for :func:`evaluate_phase_budget_signals`.
-
-    Attributes:
-        warn_used_pct (float): Fire when ``used_pct >= warn_used_pct``.
-    """
+    """Tunables for :func:`evaluate_phase_budget_signals`."""
 
     warn_used_pct: float = 90.0
 
@@ -32,17 +23,7 @@ def evaluate_phase_budget_signals(
     *,
     config: PhaseBudgetConfig | None = None,
 ) -> list[Symptom]:
-    """Emit a symptom when the current phase has nearly exhausted its budget.
-
-    Args:
-        ctx (ReactorContext): Per-tick input carrying ``phase`` and
-            ``phase_budget`` rows parsed from the Coordinator prompt.
-        config (PhaseBudgetConfig | None): Tunables; defaults to
-            :class:`PhaseBudgetConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: At most one MEDIUM symptom per tick.
-    """
+    """Emit a symptom when the current phase has nearly exhausted its budget."""
     cfg = config or PhaseBudgetConfig()
     snap = ctx.shared_state
     if snap.closing_phase or snap.stop_reason:

@@ -29,7 +29,7 @@ The runtime parser (`runtime.inbox_parser.parse_inbox_prompt`) returns:
 
 For every `topic=proposal` row in the inbox the Critic must emit one
 `review_verdict` intent. If no proposal is present, the runtime emits a
-`send_message{topic=heartbeat}` so the Coordinator never times out on an
+`send_message{topic=observation}` so the Coordinator never times out on an
 empty envelope.
 
 The intent envelope shape is:
@@ -68,7 +68,7 @@ The intent envelope shape is:
 | Critic situation | `source` |
 |---|---|
 | Normal LLM-driven verdict | `critic` |
-| Runtime returned heartbeat or `needs_review` due to missing context | `critic_unavailable` |
+| Runtime returned an idle intent or `needs_review` due to missing context | `critic_unavailable` |
 | Forced timeout fallback | `timeout` |
 | Mock backend (tests / dry-run) | `mock` |
 

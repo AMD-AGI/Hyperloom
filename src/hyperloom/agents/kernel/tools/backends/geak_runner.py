@@ -2,21 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main).
-
-This is a WHOLE-pipeline e2e optimizer (not a per-kernel backend like
-``forge``). Its code lives in GEAK
-(``interface/run_e2e.py`` + ``e2e_workflow/``). Hyperloom invokes it ONCE at the
-KERNEL_AGENT phase via the stable ``interface/run_e2e.py`` contract: we write a
-``handoff.json`` (Hyperloom best config + workload), call the runner, and read
-back a ``result.json`` (optimized launch script + bench script + throughput +
-per-kernel report).
-
-All Claude-SDK / Workflow / ``--effort`` detail lives INSIDE the optimizer's
-``interface/run_e2e.py``; this module only marshals the two JSON files and the
-subprocess. See GEAK ``interface/run_e2e.md`` for the contract. The
-GEAK_* env-var / function names are the stable handle.
-"""
+"""GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main)."""
 
 from __future__ import annotations
 
@@ -40,8 +26,8 @@ def _resolve_runner() -> str:
         roots.append(root)
     cache_dir = os.environ.get("HYPERLOOM_CACHE_DIR", "").strip()
     if cache_dir:
-        # install.sh clones GEAK per revision as <cache>/GEAK@<sha>; prefer the
-        # newest such checkout, then the bare dir. Mirrors paths.resolve_dep_dir.
+        # install.sh clones GEAK per revision as <cache>/GEAK@<sha>; prefer the newest such checkout, then the bare
+        # dir.
         pinned = sorted(
             (p for p in Path(cache_dir).glob("GEAK@*") if p.is_dir()),
             key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
@@ -61,19 +47,7 @@ def _resolve_runner() -> str:
 
 
 def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python_bin: str = "") -> dict:
-    """Run GEAK e2e once and return the parsed result.json (+ run metadata).
-
-    Args:
-        handoff: handoff.json payload (Hyperloom best config + workload).
-        output_dir: where handoff.json / result.json are written.
-        timeout_s: subprocess timeout (default 12h).
-        python_bin: python interpreter for the runner (default the current one).
-
-    Returns:
-        dict: the normalized result.json plus ``returncode`` /
-        ``stdout_tail`` / ``stderr_tail`` / ``elapsed_s`` / ``handoff_path`` /
-        ``result_path``. On failure ``status == "error"``.
-    """
+    """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     handoff_path = output_dir / "handoff.json"
@@ -85,17 +59,16 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     cmd = [py, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
-    # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to
-    # self-stop before the outer subprocess kill. Split the inner SOFT deadline
-    # from the outer HARD kill so run_e2e can flush result.json before SIGKILL.
+    # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to self-stop before the outer subprocess
+    # kill.
     grace_raw = os.environ.get("GEAK_FLUSH_GRACE_S", "").strip()
     flush_grace = int(grace_raw) if grace_raw.isdigit() and int(grace_raw) > 0 else 180
     inner_timeout = max(60, timeout_s - flush_grace)
     env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
 
     started = time.time()
-    # start_new_session=True -> run_e2e + its vllm/node children share a process
-    # group we can signal as a unit (prevents leaked-server orphans).
+    # start_new_session=True -> run_e2e + its vllm/node children share a process group we can signal as a unit
+    # (prevents leaked-server orphans).
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,

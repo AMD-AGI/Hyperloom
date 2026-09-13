@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pytest
@@ -24,20 +25,8 @@ from kernelforge.config import Config
 
 
 @pytest.fixture(autouse=True)
-def isolated_provider_registry(monkeypatch):
-    """Give every test in this module its own copy of the provider registry.
-
-    ``register_agent_provider`` writes into module-level state that outlives
-    the test that called it, and the registry offers no way to unregister. Each
-    fake registered below would therefore stay visible to every later test in
-    the same worker process, which is how these tests came to depend on the
-    order xdist happened to shard them in. Discovery runs first so the snapshot
-    already holds the built-ins and any installed plugin; the module globals
-    are then rebound to copies that monkeypatch drops during teardown.
-    """
-    registry.discover_agent_providers()
-    monkeypatch.setattr(registry, "_providers", dict(registry._providers))
-    monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+def _isolate_provider_registry(isolated_provider_registry):
+    """Apply the shared registry isolation to every test in this module."""
 
 
 @pytest.fixture
@@ -149,12 +138,13 @@ def test_builtin_model_ownership_predicates() -> None:
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
     assert claude.default_model == "claude-opus-5"
-    assert claude.fallback_model == "claude-opus-4-8"
-    assert codex.default_model == "gpt-5.6"
-    assert codex.fallback_model == "gpt-5.5"
+    assert codex.default_model == "gpt-5.6-sol"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")
     assert codex.owns_model("gpt-5.6")
+    # The gateway's deployment name is suffixed; the family predicate has to
+    # keep recognising it or the default id routes to no provider at all.
+    assert codex.owns_model("gpt-5.6-sol")
     assert codex.owns_model("o3-mini")
     assert codex.owns_model("internal-codex-preview")
     assert not codex.owns_model("olmo-7b")
@@ -162,15 +152,6 @@ def test_builtin_model_ownership_predicates() -> None:
     assert not codex.owns_model("openchat-3.5")
     assert not codex.owns_model("claude-opus-5")
     assert not codex.owns_model("")
-    assert resolve_agent_runtime("claude").fallback_model == "claude-opus-4-8"
-    assert (
-        resolve_agent_runtime(
-            "claude",
-            model="claude-opus-4-8",
-        ).fallback_model
-        == ""
-    )
-    assert resolve_agent_runtime("codex").fallback_model == "gpt-5.5"
 
 
 def test_default_runtime_uses_high_reasoning_effort() -> None:
@@ -178,16 +159,14 @@ def test_default_runtime_uses_high_reasoning_effort() -> None:
     assert config.agent_reasoning_effort == "high"
 
 
-def test_provider_probe_falls_back_to_supported_model() -> None:
+def test_provider_probe_failure_does_not_retry_another_model() -> None:
     attempted_models = []
 
     class Backend(_FakeBackend):
         def probe(self, *, cwd, usage=None):
             del cwd, usage
             attempted_models.append(self.runtime.model)
-            if self.runtime.model == "future-model":
-                raise AgentProviderUnavailableError("model not served")
-            return AgentRunResult(text="OK")
+            raise AgentProviderUnavailableError("model not served")
 
     def factory(runtime):
         backend = Backend(name=runtime.provider)
@@ -199,16 +178,64 @@ def test_provider_probe_falls_back_to_supported_model() -> None:
             name="modelprobe",
             factory=factory,
             default_model="future-model",
-            fallback_model="stable-model",
             capabilities=AgentCapabilities(probe=True),
         )
     )
     runtime = resolve_agent_runtime("modelprobe")
-    backend = create_registered_backend(runtime, probe_cwd="/tmp")
+    with pytest.raises(AgentProviderUnavailableError, match="model not served"):
+        create_registered_backend(runtime, probe_cwd="/tmp")
 
-    assert attempted_models == ["future-model", "stable-model"]
-    assert backend.runtime.model == "stable-model"
-    assert "future-model" in backend.model_fallback_reason
+    assert attempted_models == ["future-model"]
+
+
+def test_unavailable_provider_logs_and_does_not_probe(caplog) -> None:
+    """Preflight failure is logged as provider unavailability, not a model probe."""
+    _register_fake("offlinecli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli")
+    with caplog.at_level(logging.WARNING, logger="kernelforge.agent_backends.registry"):
+        with pytest.raises(AgentProviderUnavailableError, match="offlinecli"):
+            create_registered_backend(runtime)
+
+    assert "agent provider unavailable" in caplog.text
+    assert "offlinecli" in caplog.text
+
+
+def test_fallback_provider_failure_raises_combined_error() -> None:
+    """When both the primary and fallback providers fail, both names are reported."""
+    _register_fake("offlinecli", unavailable=True)
+    _register_fake("backupcli", unavailable=True)
+    runtime = resolve_agent_runtime("offlinecli", fallback_provider="backupcli")
+    with pytest.raises(
+        AgentProviderUnavailableError,
+        match="offlinecli unavailable:.*fallback backupcli unavailable",
+    ):
+        create_registered_backend(runtime)
+
+
+def test_broken_entry_point_is_isolated(monkeypatch) -> None:
+    """A plugin that fails to load is recorded and skipped, not raised."""
+
+    class _EntryPoint:
+        name = "brokencli"
+
+        @staticmethod
+        def load():
+            raise RuntimeError("boom")
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            if group == registry.PROVIDER_ENTRY_POINT_GROUP:
+                return [_EntryPoint()]
+            return []
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+    monkeypatch.setattr(registry, "_plugin_errors", {})
+    registry.discover_agent_providers(force=True)
+    assert "brokencli" in registry._plugin_errors
+    with pytest.raises(ValueError, match="plugin error"):
+        get_agent_provider("brokencli")
 
 
 def test_select_prefers_model_owning_provider() -> None:

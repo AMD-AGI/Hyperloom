@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the shared host CPU platform probe.
-
-Every case builds a fake ``/sys`` + ``/proc`` tree under ``tmp_path``, so these
-run identically on any host and assert the degradation rules the three call
-sites depend on.
-"""
+"""Tests for the shared host CPU platform probe."""
 
 from __future__ import annotations
 
@@ -81,12 +76,7 @@ def test_absent_sysfs_is_not_a_failure(tmp_path):
 
 
 def test_missing_numa_tree_does_not_produce_nps0(tmp_path):
-    """A container seeing CPUs but no node tree must not report a fake NPS0.
-
-    NPS0 is not a value any BIOS can hold, so a reader comparing the record
-    against a target cannot tell it apart from a real misconfiguration. None
-    says the question was unanswerable on this host, which is the truth.
-    """
+    """A container seeing CPUs but no node tree must not report a fake NPS0."""
     root = _host(tmp_path, nodes=0)
     assert numa_node_count(root=root) is None
     assert nodes_per_socket(root=root) is None
@@ -148,9 +138,7 @@ def _amdgpu(root: Path, *addresses: str) -> Path:
 
 
 def test_gpus_outside_pci_domain_zero_are_counted(tmp_path):
-    """A host large enough to need several PCI domains puts its GPUs outside
-    ``0000:``, and that is the hardware this record exists to describe. Matching
-    ``0000:`` alone reported no accelerators on exactly those machines."""
+    """A host large enough to need several PCI domains puts its GPUs outside ``0000:``, and that is the hardware this record exists to describe."""
     root = _amdgpu(
         tmp_path,
         "0002:00:01.0",
@@ -187,8 +175,8 @@ def test_platform_fingerprint_unavailable_when_probe_returns_none(monkeypatch):
 
 
 def test_platform_fingerprint_outer_failure_is_status_error(monkeypatch):
-    # Use a non-RuntimeError to pin the broad `except Exception` net; narrowing
-    # it to `except RuntimeError` would let OSError/AttributeError escape.
+    # Use a non-RuntimeError to pin the broad `except Exception` net; narrowing it to `except RuntimeError` would let
+    # OSError/AttributeError escape.
     def _boom():
         raise OSError("probe exploded")
 
@@ -213,8 +201,8 @@ def _make_plat():
 
 def test_platform_fingerprint_gpu_block_degrades_stack_survives(monkeypatch):
     """GPU block error must not corrupt the stack block (per-block independence)."""
-    # platform_fingerprint takes no injectable `root`; these error tiers are
-    # unreachable through a fake sysfs tree, so we monkeypatch module globals.
+    # platform_fingerprint takes no injectable `root`; these error tiers are unreachable through a fake sysfs tree, so
+    # we monkeypatch module globals.
     monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
 
     def _gpu_boom():
@@ -244,8 +232,8 @@ def test_platform_fingerprint_stack_block_degrades_gpu_survives(monkeypatch):
     assert got["status"] == "ok"
     assert got["multi_node_session"] is True
     assert got["stack"] == {"status": "error"}
-    # GPU block must carry real content — presence of gfx_arch confirms the
-    # table lookup ran rather than producing the error sentinel.
+    # GPU block must carry real content — presence of gfx_arch confirms the table lookup ran rather than producing the
+    # error sentinel.
     assert got["gpu"] != {"status": "error"}
     assert "gfx_arch" in got["gpu"]
 

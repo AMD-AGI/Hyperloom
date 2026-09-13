@@ -5,20 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""The variant hard cap has to survive a canonical AgentX warmup.
-
-Found by running the AgentX path end to end with nothing disabled: a GLM-5.2
-variant launched 09:47:41 was killed at 11:47:41.575 -- the synthetic cap minus
-its reserve -- with twenty-plus connections dropping in the same millisecond
-while the server was still prefilling with 55 requests running. aiperf reports
-that as ``warmup_failure`` because a cancelled root warmup credit is terminal,
-so the subprocess kill never appears in the abort reason and the round looks
-like a workload problem.
-
-The caps involved are all sized for the synthetic 1024/1024 shape: 7800s for
-integrate, 2400s for explore, 1800s for the conc sweep. ``baseline`` already
-derives an AgentX-aware cap; only that path got it.
-"""
+"""The variant hard cap has to survive a canonical AgentX warmup."""
 
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     agentx_variant_timeout_sec,
@@ -29,11 +16,7 @@ SYNTHETIC_CAPS = (1800, 2400, 7800)
 
 
 def test_default_path_is_untouched(monkeypatch):
-    """AgentX off must behave exactly as before -- it is an opt-in branch.
-
-    This is the property that matters most: AgentX is a new benchmark branch,
-    not the default, so with it disabled every cap has to come back unchanged.
-    """
+    """AgentX off must behave exactly as before -- it is an opt-in branch."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     for cap in (*SYNTHETIC_CAPS, 99, 36000):
         assert agentx_variant_timeout_sec(cap) == cap
@@ -85,13 +68,7 @@ class _StateWithMode:
 
 
 def test_persisted_state_raises_the_cap_when_the_env_var_is_gone(monkeypatch):
-    """The original report: a resumed session whose shell lost HYPERLOOM_AGENTX.
-
-    ``benchmark_mode`` is stamped at seed precisely so it survives a restart.
-    Without consulting it the round reads as synthetic here and is killed by the
-    synthetic cap mid-warmup -- the failure this helper exists to prevent,
-    reached by the one route it did not cover.
-    """
+    """The original report: a resumed session whose shell lost HYPERLOOM_AGENTX."""
     from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)

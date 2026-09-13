@@ -1,18 +1,225 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.0.0, the first stable release, including flag-aware configuration fingerprints, the kernel fusion and best-result salvage fixes, warm-replay optimization accounting, and consolidated environment-variable filtering."
-    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, Primus-Claw, bare metal, kernel optimization"
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.0, including the vendored KernelForge kernel-optimization agent, the merged framework optimization phase, agentic-replay grading on total token throughput, compute-partition awareness, and the single concurrency sweep."
+    "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.0.0 (`pyproject.toml`). For the
+The current packaged version is 1.1.0 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.1.0 release
+
+The [1.1.0 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0)
+is the first feature release after the 1.0.0 stable release. Kernel
+optimization now ships in the box: KernelForge is vendored into the Hyperloom
+wheel as the built-in kernel-opt agent, so there is no separate checkout to
+clone or install. The optimization loop itself is shorter — configuration
+search and source landing become two arms of one phase, and the redundant
+confirmation benchmark after every KEEP is gone.
+
+This release also adds first-class support for agentic-replay workloads: an
+AgentX run is graded on total token throughput under an interactivity veto,
+which is the axis a submission is ranked on, and the sweep produces the chart
+that goes with it. Compute-partition shape (`SPX`/`DPX`/`QPX`/`CPX`) is now
+recorded and checked on every session, with a separate operator script to
+measure which shape a workload wants.
+
+1.1.0 carries a number of breaking changes to the CLI, the environment
+variables, and the session record. The ones that need a plan before upgrading
+are marked below; the full per-change list is in
+[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
+
+### 1.1.0 highlights
+
+- **The EXPLORE phase is merged into FRAMEWORK_AGENT** *(breaking change — CLI, exit reasons, in-flight sessions)*:
+  the chain is now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`.
+  Configuration search and source/upstream landing are two arms of one phase,
+  worked in parallel; the phase advances only when both are dry, and one arm
+  plateauing raises `switch_bottleneck` for the next macro-cycle instead of
+  ending the phase while the other lever still pays.
+
+  **Before upgrading**: `--no-explore` is removed rather than aliased, because
+  the two arms cannot be disabled separately and the flag's new meaning would be
+  wider than what an operator script asked for — use `--no-framework-agent`.
+  `--max-minutes-explore-pct` and `--phase-budget-explore-pct` are aliases for
+  the framework budget option (merged phase default share `0.40`, against `0.50`
+  for KERNEL_AGENT). The `explore_*` and `framework_agent_*` exit reasons are
+  replaced by `optimize_no_more_leverage`, `optimize_phase_budget_exhausted` and
+  `optimize_budget_cap`. **A session recorded at `EXPLORE` cannot be resumed by
+  this build** — the Coordinator refuses at startup rather than re-running
+  PRELUDE on top of an existing baseline and KEPT stack. Archived sessions still
+  read; they just cannot be continued.
+
+  Two consequences worth naming: the `framework_agent` action is retired, so
+  upstream PRs land through `integrate_patch` with `patch_source='upstream_pr'`
+  and their workspaces move from `runs/framework_agent/<task_id>/` to
+  `runs/integrate_patch/<task_id>/`; and `pr_intel_specialist` is replaced by
+  `candidate_discovery_specialist`, which owns finding, ranking and judging
+  upstream candidates. Because one phase now carries both levers, gain is
+  attributed by `lever_kind` (`config`, `source_patch`, `upstream_pr`,
+  `enablement`, `kernel`) rather than by phase, and
+  `attribution.lever_breakdown` splits validated gain by it.
+
+- **KernelForge ships inside Hyperloom as the built-in kernel-opt agent**:
+  its source is vendored into `src/kernelforge/`, and Hyperloom is the sole
+  source from here on. Installing Hyperloom installs forge — there is no private
+  repository to clone and no separate distribution to `pip install`. Its
+  knowledge base, examples and serving patches ship in the wheel, so they
+  resolve from an installed distribution rather than from a checkout. The
+  orchestrator's kernel-agent dispatch path is unchanged, `KERNEL_OPT_BACKEND_ORDER`
+  still selects between the forge and geak backends, and eight kernel backends
+  remain (CK, FlyDSL, Triton, Gluon, AITER, HIP, hipBLASLt, and fusion). The
+  `intellikit` backend is removed: nothing in Hyperloom could reach it.
+
+- **The forge CLI stops absorbing options it does not declare** *(breaking change — remove these from your scripts and environment)*:
+  `forge-loop` and `forge-rewrite-by-flydsl` were the last tolerant entry points,
+  discarding an undeclared option with a warning and proceeding on the defaults.
+  That exemption existed for a consumer in a separate repository; vendoring put
+  producer and consumer in one wheel, so what the tolerance still absorbed was
+  typos and renames — seven shipped examples kept passing a flag that had been
+  renamed out from under them and ran an inferred backend while exiting 0. Both
+  commands now fail with click's own error and exit 2 before any GPU work starts.
+
+  Alongside it: `$FORGE_PATH` is removed and **not** honoured as an override
+  (use `$KERNELFORGE_PROJECT_ROOT`, which defaults to
+  `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge`);
+  `forge-gemm-tune` is gone as a console script and as a distribution, invoked
+  now as `kernelforge gemm-tune`; the kernel-backend vocabulary is normalized, so
+  the CLI flag is `--kernel-backend` taking a bare name (`triton`), the
+  campaign-config key is `kernel_backend`, and a config carrying the retired key
+  fails at load rather than migrating silently; and `FORGE_MAX_ITERS` /
+  `FORGE_COMPILED_MAX_ITERS` are gone, having fed a cap that was never applied.
+  Because `FORGE_` stays on the dotenv prefix allowlist, a stale `FORGE_PATH` or
+  a retired spelling of `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS` is still
+  forwarded into the run and then ignored; the latter is detected and warned
+  about once per run, because an operator who had switched compiled kernel
+  backends off would otherwise silently get them back. `CHANGELOG.md` carries
+  the retired spellings verbatim for anyone migrating a script.
+
+- **An AgentX run is graded on total token throughput under an interactivity
+  constraint**: the corpus an agentic replay runs averages ~114k prompt tokens
+  against ~810 output tokens per request, so grading on output throughput alone
+  optimizes about 1% of the token budget — a measured baseline read 25978 tok/s
+  total against 183 tok/s output. Total token throughput is now the objective and
+  interactivity p90 (`OSL/E2EL`) is a veto rather than a weighted term. It is
+  default-on under `HYPERLOOM_AGENTX=1`; `HYPERLOOM_PERF_METRIC` overrides in
+  both directions and `HYPERLOOM_PERF_NOISE_PCT` (default `5.0`) sets the veto
+  band. Scriptable frameworks keep output-throughput grading, candidate and
+  reference are always read off the same axis, and the final report names the
+  grading mode. A measurement the scenario judged invalid is no longer
+  selectable anywhere in the run, so an unverified number cannot become the
+  denominator of every gain that follows it.
+
+- **AgentX installs and repairs its own benchmark client**: the pinned aiperf
+  install was gated on a runtime mode flag being true in the installer's
+  process, so provisioning without `HYPERLOOM_AGENTX`/`INSTALL_AIPERF` and
+  turning AgentX on later left a box that could not run it — 11 of 13
+  provisioning runs on one cluster logged the skip. Install time now keys on
+  whether the build ships `assets/agentx/`, and run time repairs what is still
+  missing, once per process. A client that is genuinely absent stops the run on
+  the first occurrence with the new `agentx_client_unavailable` stop reason
+  instead of opening an enablement round — routed as an ordinary launch failure
+  it cost a full 24h budget, because a specialist cannot tell a supply gap from a
+  framework bug. `install.sh` gains `--only-aiperf` to add AgentX support to a
+  box provisioned without it.
+
+- **SWEEP is one concurrency sweep, and it produces the chart a submission is
+  read on** *(breaking change — resumed sessions carrying the old exit reasons)*:
+  the workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its three axes
+  carried nothing under an agentic replay — request shapes come from the trace
+  corpus — and the concurrency axis is what `conc_sweep` already swept.
+  `conc_sweep` is now the only sweep, on by default for both workloads, and every
+  rung carries `intvty_p90`, `input_throughput` and `tpot_p90_ms` alongside the
+  output-axis figures. The default ladder is per workload
+  (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under
+  `HYPERLOOM_AGENTX`); `--conc-sweep-concs` still overrides both. The `sweep`
+  action is gone from the LLM catalogue, the executor registry and the phase
+  contract, and `conc_sweep_done` / `conc_sweep_failed` collapse into
+  `sweep_done` / `sweep_failed` with no alias for the old spelling.
+
+- **The post-KEEP confirmation round is removed** *(breaking change — session record)*:
+  an `explore` variant and an `integrate_patch` candidate were each re-benched
+  once more after they had already been graded, and the second measurement
+  overwrote the first as the reported number. For `explore` that round ran third
+  on an already-warmed server, so it carried more cache than the round it
+  overwrote and the inflated value became the anchor the next variant was graded
+  against; removing it takes the bias out of the reported gain and saves a full
+  benchmark per KEEP. Both now report the round that graded them. Removed from
+  the session record: the `KEEP_UNSTABLE` outcome, the `keep_unstable_in_stack`
+  result key, and the `stack_rebench_tput` / `stack_rebench_workspace` /
+  `stack_rebench_warnings` fields; `enable_stack_rebench` and
+  `rebench_stable_threshold_pct` are no longer read from task params. Expect more
+  `fallback` and `no_promote` verdicts from GEAK's same-harness revalidation,
+  which now measures cold like every other explore.
+
+- **The card's compute-partition shape is recorded, checked, and published**:
+  an MI300-series card split into `SPX`/`DPX`/`QPX`/`CPX` trades per-request
+  latency for aggregate throughput, and until now nothing recorded which shape a
+  number came from — two runs of the same configuration in `SPX` and in `CPX`
+  were indistinguishable in the history. The observed mode now goes into the
+  platform fingerprint alongside NPS and the session report names it on
+  partitioned runs. `--compute-partition-mode` *asserts* the mode the card is
+  already in and refuses the session if it is in another one or cannot be read;
+  `--streams-per-partition` (default `2`) sizes the concurrent streams per
+  partition. **The optimizer never sets the mode** — that is privileged and
+  evicts every GPU context, so the card must be in its mode before `optimize`
+  starts. The new `python3 scripts/partition_mode_sweep.py` is where the
+  privileged set lives: it sets each mode in turn on one card, runs the same
+  benchmark on every partition that mode creates with all of them loaded
+  together, sums the throughput, and restores the entry mode on the way out,
+  including after a failure or a Ctrl-C.
+
+  **Operator note**: launch now refuses a session whose streams provably will not
+  fit one partition, sized from the checkpoint's weight bytes as a lower bound.
+  The arithmetic costs milliseconds and the failure it replaces is an
+  out-of-memory crash hours in. When the checkpoint cannot be sized the session
+  runs and says so.
+
+- **The `deterministic` trace-analysis route is gone** *(breaking change — remove it from your configuration)*:
+  `HYPERLOOM_TRACE_ANALYSIS_ROUTE` and the `analysis_route` payload key take
+  `agent` or `bypass`, and `tracelens_analysis.py` no longer accepts
+  `--analysis-route`. The route maintained a second candidate-extraction pipeline
+  beside the one `analysis.md` already defines; `bypass` serves the same no-LLM
+  intent by reading the profiler trace directly and needs no TraceLens checkout.
+  A request still naming `deterministic` is rejected with `invalid_analysis_route`
+  before TraceLens or an LLM is started. Only an omitted route defaults to
+  `agent`; an explicit unknown value no longer falls back to a route that may
+  spend an LLM session. Relatedly, the two tool-free LLM source tiers and
+  `HYPERLOOM_LLM_SOURCE_PROVIDER` / `HYPERLOOM_LLM_SOURCE_PREVIEW` are removed in
+  favour of one tool-enabled review session — their failure mode was not coming
+  up empty but coming up confidently wrong, which ranking paths by keyword cannot
+  tell apart. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
+
+- **A published Recipe carries three columns instead of five**:
+  `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
+  `config`/`patch`/`kernel`, each owned end to end by one SDK facade. The
+  `explore` and `framework` source overlays merge into a single `patch` column,
+  and replay order is the lexicographic order of the zero-padded stack/member
+  indices in each overlay ref, so `patch_timeline` is gone. Warm replay is keyed
+  to the recorded apply root: a record that cannot name the checkout its gain was
+  measured on is skipped whole rather than applied to a different tree.
+
+- **Fixes an operator will notice**: the server-boot timeout default is 7200s,
+  up from 2700s, because a 1.56 TB MXFP4 MoE checkpoint reads for ~37 minutes
+  before the first JIT and the baseline died to a timeout unrelated to the
+  workload. `--extra-env` now reaches the benchmark for every framework, not only
+  the `custom` path, and outranks the config — a change in precedence for a
+  `custom` workload whose YAML sets the same key. Untrusted diffs are vetted
+  before `git apply`, which previously skipped every patch supplied directly,
+  including every upstream PR diff. The framework accuracy gate never passed:
+  `_bench_candidate` read a field that does not exist on `VariantResult`, so a
+  baseline accuracy blocked every KEEP with `accuracy_unavailable_reject`. The
+  upstream-PR arm was gated shut at dispatch. Test trees no longer ship in the
+  wheel (627 test entries), and rocprof-compute's Python dependencies — which
+  `install.sh` claimed arrived with the KernelForge root install and never did —
+  now ship as the `forge-profiling` extra.
 
 ## Hyperloom 1.0.0 release
 

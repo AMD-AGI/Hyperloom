@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Packaging-lint guard for ``pyproject.toml``.
-
-Checks run in both directions, because each catches a different defect:
-
-* declaration -> tree: setuptools silently ignores a ``package-data`` glob that
-  matches nothing, so deleting a file leaves invisible rot at build time.
-* tree -> declaration: a newly added asset that no glob covers is silently left
-  out of the wheel, which breaks code that reads it from the install.
-
-Wheel *contents* are asserted separately by ``.github/workflows/packaging.yml``,
-which builds a real wheel; this module only needs the source tree.
-"""
+"""Packaging-lint guard for ``pyproject.toml``."""
 
 from __future__ import annotations
 
@@ -23,21 +12,19 @@ from pathlib import Path
 
 import pytest
 
-# Directory names whose contents never ship. Kept in sync with the
-# ``packages.find`` exclude patterns by test_test_packages_are_excluded_*.
+# Directory names whose contents never ship.
 _TEST_DIR_NAMES = frozenset({"tests", "test", "testing"})
 
-# Files under src/ that intentionally stay out of the wheel. Anything else that
-# no declaration covers is a packaging bug, so keep this list justified.
+# Files under src/ that intentionally stay out of the wheel.
 _UNPACKAGED_ASSETS = (
     # Developer-only tooling, meaningless in an installed package.
     "**/.gitignore",
     "**/.ci-deferred/*",
-    # Container image build context: the Dockerfile clones the repo and the
-    # scripts hardcode /opt/Hyperloom, so they are only used from a checkout.
+    # Container image build context: the Dockerfile clones the repo and the scripts hardcode /opt/Hyperloom, so they
+    # are only used from a checkout.
     "hyperloom/inference_optimizer/assets/quick-start/*",
-    # The gemm-tune subpackage's own docs describe the source tree (how to run
-    # the tuner from a checkout), not the installed package.
+    # The gemm-tune subpackage's own docs describe the source tree (how to run the tuner from a checkout), not the
+    # installed package.
     "kernelforge/gemm_tune/*.md",
 )
 

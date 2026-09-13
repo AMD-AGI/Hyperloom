@@ -65,22 +65,7 @@ def test_package_dir_real_stdlib():
 
 
 class TestVllmRegisteredSource:
-    """The registry, not the path convention, decides which file vLLM runs.
-
-    The entries below are shaped like real ``ModelRegistry.models`` values read
-    off vllm 0.1.dev19253+g5f76ae224, which is what the code has to survive:
-
-    ==========================  ===========================================  =========================
-    architecture                module_name                                  class_name
-    ==========================  ===========================================  =========================
-    ``LlamaForCausalLM``        ``vllm.model_executor.models.llama``         ``LlamaForCausalLM``
-    ``DeepseekV4ForCausalLM``   ``vllm.models.deepseek_v4``                  ``DeepseekV4ForCausalLM``
-    ``DeepseekV32ForCausalLM``  ``vllm.model_executor.models.deepseek_v2``   ``DeepseekV3ForCausalLM``
-    ==========================  ===========================================  =========================
-
-    The first two differ in layout, and the third is one of the 93 entries whose
-    class is not named after the architecture.
-    """
+    """The registry, not the path convention, decides which file vLLM runs."""
 
     def _registry(self, monkeypatch, models: dict):
         """Publish ``models`` as ``ModelRegistry.models`` in a fake vllm package."""
@@ -186,11 +171,7 @@ class TestVllmRegisteredSource:
 
 @pytest.mark.skipif(importlib.util.find_spec("vllm") is None, reason="vllm not installed")
 def test_the_real_registry_resolves_to_a_file_in_the_vllm_package(tmp_path):
-    """Run the resolution against the installed vLLM, which CI cannot do.
-
-    The hermetic tests above assert against entries transcribed by hand, so they
-    agree with the code even if both are wrong about vLLM. This one does not.
-    """
+    """Run the resolution against the installed vLLM, which CI cannot do."""
     (tmp_path / "config.json").write_text(
         json.dumps({"architectures": ["LlamaForCausalLM"], "model_type": "llama"}),
         encoding="utf-8",

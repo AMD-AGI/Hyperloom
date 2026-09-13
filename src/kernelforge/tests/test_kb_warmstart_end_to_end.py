@@ -498,16 +498,11 @@ def test_gpu_model_mismatch_has_no_candidate_or_reference_directory(
 
 
 def _declare_failing_task_suite(workspace: Path) -> None:
-    """Give the consumer an arena task config whose own suite rejects everything.
-
-    The mla_decode shape: the driver's SNR probe is happy, and the task's own
-    tolerance is what the kernel actually breaks.
-    """
+    """Give the consumer an arena task config whose own suite rejects everything."""
     workspace.joinpath("config.yaml").write_text(
         yaml.safe_dump(
             {
-                # Step 1 has to pass for the gate to reach the tolerance the
-                # kernel actually breaks.
+                # Step 1 has to pass for the gate to reach the tolerance the kernel actually breaks.
                 "compile_command": [f"{sys.executable} -c 'pass'"],
                 "correctness_command": [
                     f"{sys.executable} -c " + repr("raise AssertionError('normalized max err 0.02468 exceeds 0.02')")
@@ -523,16 +518,7 @@ def test_a_warm_start_failing_the_task_suite_is_not_adopted_or_published(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
-    """A 33.4 dB kernel that breaks the task's tolerance cannot become the start.
-
-    The SNR probe passes on this candidate, every performance gate passes, and
-    the task's own suite fails: the warm start must reject it, leave the
-    consumer pristine, and publish nothing. Because the CLI reaches its
-    ``--return-after-read-KB`` result only through ``applied``, a rejection here
-    is also what keeps such a kernel out of the run's answer -- see
-    ``test_a_warm_start_rejected_by_the_task_suite_is_not_returned`` in
-    tests/test_forge_loop_resume.py.
-    """
+    """A 33.4 dB kernel that breaks the task's tolerance cannot become the start."""
     producer, producer_kernel, producer_base, producer_sources = _initialize_workspace(
         tmp_path,
         "producer",

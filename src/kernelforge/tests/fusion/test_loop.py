@@ -57,10 +57,9 @@ class _ScriptedCampaign:
 
 
 class TestNoEarlyExit:
-    """Under the nomination contract every kept recipe is an independent sibling,
-    so the loop runs the whole recipe budget instead of stopping at the first
-    keeper. The strongest keeper is still reported through ``best``/``best_recipe``
-    for the combine-path callers that ignore ``patches``."""
+    """Under the nomination contract every kept recipe is an independent sibling, so the loop runs the whole recipe
+    budget instead of stopping at the first keeper.
+    """
 
     def test_runs_every_recipe_even_after_a_keep(self, tmp_path):
         # Two recipes both keep; the loop must attempt BOTH, not stop at #1.

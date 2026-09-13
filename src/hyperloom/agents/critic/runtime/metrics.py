@@ -12,50 +12,26 @@ from threading import Lock
 
 @dataclass
 class _Counter:
-    """A monotonically increasing counter keyed by label sets.
-
-    Attributes:
-        name (str): Metric name.
-        values (dict[tuple[tuple[str, str], ...], float]): Accumulated totals
-            keyed by a sorted tuple of label ``(key, value)`` pairs.
-    """
+    """A monotonically increasing counter keyed by label sets."""
 
     name: str
     values: dict[tuple[tuple[str, str], ...], float] = field(default_factory=dict)
 
     def inc(self, labels: dict[str, str] | None = None, by: float = 1.0) -> None:
-        """Increment the counter for a given label set.
-
-        Args:
-            labels (dict[str, str] | None): Label key/value pairs identifying
-                the series; ``None`` targets the empty label set.
-            by (float): Amount to add.
-        """
+        """Increment the counter for a given label set."""
         key = tuple(sorted((labels or {}).items()))
         self.values[key] = self.values.get(key, 0.0) + by
 
 
 @dataclass
 class _Histogram:
-    """A sample-collecting histogram keyed by label sets.
-
-    Attributes:
-        name (str): Metric name.
-        samples (dict[tuple[tuple[str, str], ...], list[float]]): Observed
-            values keyed by a sorted tuple of label ``(key, value)`` pairs.
-    """
+    """A sample-collecting histogram keyed by label sets."""
 
     name: str
     samples: dict[tuple[tuple[str, str], ...], list[float]] = field(default_factory=lambda: defaultdict(list))
 
     def observe(self, value: float, labels: dict[str, str] | None = None) -> None:
-        """Record one observed value.
-
-        Args:
-            value (float): The sample value to record.
-            labels (dict[str, str] | None): Label key/value pairs identifying
-                the series; ``None`` targets the empty label set.
-        """
+        """Record one observed value."""
         key = tuple(sorted((labels or {}).items()))
         self.samples[key].append(float(value))
 
@@ -70,14 +46,7 @@ class MetricsRegistry:
         self._histograms: dict[str, _Histogram] = {}
 
     def counter(self, name: str) -> _Counter:
-        """Get or lazily create a counter by name.
-
-        Args:
-            name (str): Metric name.
-
-        Returns:
-            _Counter: The existing or newly created counter for ``name``.
-        """
+        """Get or lazily create a counter by name."""
         with self._lock:
             counter = self._counters.get(name)
             if counter is None:
@@ -86,14 +55,7 @@ class MetricsRegistry:
             return counter
 
     def histogram(self, name: str) -> _Histogram:
-        """Get or lazily create a histogram by name.
-
-        Args:
-            name (str): Metric name.
-
-        Returns:
-            _Histogram: The existing or newly created histogram for ``name``.
-        """
+        """Get or lazily create a histogram by name."""
         with self._lock:
             hist = self._histograms.get(name)
             if hist is None:
@@ -106,11 +68,7 @@ _registry = MetricsRegistry()
 
 
 def get_registry() -> MetricsRegistry:
-    """Return the process-wide metrics registry singleton.
-
-    Returns:
-        MetricsRegistry: The shared registry instance.
-    """
+    """Return the process-wide metrics registry singleton."""
     return _registry
 
 

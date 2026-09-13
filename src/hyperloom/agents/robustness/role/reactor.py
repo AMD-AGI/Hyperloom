@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reactor: the heart of the robustness role.
-
-A single :meth:`Reactor.tick` runs the pipeline: :class:`DegradeRouter` ->
-:class:`Classifier` -> :class:`ActionLadder` -> :class:`PolicyAware` filter ->
-:class:`FindingSink` persist -> return validated intents. The Reactor holds tick
-state but no business logic (that lives in classifier + ladder) so transports
-can be swapped.
-"""
+"""Reactor: the heart of the robustness role."""
 
 from __future__ import annotations
 
@@ -48,21 +41,10 @@ class ReactorComponents:
 
 
 class Reactor:
-    """Stateful pipeline driver.
-
-    Each call to :meth:`tick` advances the internal tick index. The
-    reactor is single-task: callers must not run multiple ``tick`` coros
-    concurrently against the same instance.
-    """
+    """Stateful pipeline driver."""
 
     def __init__(self, components: ReactorComponents) -> None:
-        """Initialise the reactor from its component bundle.
-
-        Args:
-            components (ReactorComponents): Bundle of the router,
-                classifier, ladder, policy and optional sink / RCA engine /
-                state store the pipeline drives each tick.
-        """
+        """Initialise the reactor from its component bundle."""
         self._router = components.router
         self._classifier = components.classifier
         self._ladder = components.ladder
@@ -74,34 +56,17 @@ class Reactor:
 
     @property
     def tick_index(self) -> int:
-        """Current in-process tick index.
-
-        Returns:
-            int: Number of ``tick`` calls served by this instance.
-        """
+        """Current in-process tick index."""
         return self._tick_index
 
     async def tick(self, ctx: ReactorContext) -> list[Intent]:
-        """Run one pipeline tick and return the validated intents.
-
-        Advances the tick index, collects a source snapshot, classifies
-        symptoms, runs the action ladder, filters intents through the
-        policy gate, persists findings, and flushes cross-tick state.
-
-        Args:
-            ctx (ReactorContext): Per-tick input parsed from the
-                Coordinator prompt or inbox.
-
-        Returns:
-            list[Intent]: Intents that passed policy validation this tick.
-        """
+        """Run one pipeline tick and return the validated intents."""
         self._tick_index += 1
         now_unix = ctx.now_unix or time.time()
 
         data = await self._router.collect(ctx)
         symptoms = self._classifier.classify(data, ctx)
-        # Prefer the session-wide tick so ladder cooldowns and finding stamps
-        # survive subprocess restarts.
+        # Prefer the session-wide tick so ladder cooldowns and finding stamps survive subprocess restarts.
         authoritative_tick = self._resolve_authoritative_tick(ctx)
         result = await self._ladder.decide(
             symptoms,
@@ -140,29 +105,14 @@ class Reactor:
         return validated_intents
 
     def _resolve_authoritative_tick(self, ctx: ReactorContext) -> int:
-        """Pick the most reliable tick index for this reactor pass.
-
-        Prefers the Coordinator's session-wide ``ctx.shared_state.tick``,
-        else the in-memory counter (tests / first tick before the prompt is
-        written).
-
-        Args:
-            ctx: Reactor context for the current tick.
-
-        Returns:
-            The resolved authoritative tick index.
-        """
+        """Pick the most reliable tick index for this reactor pass."""
         shared_tick = ctx.shared_state.tick or 0
         if shared_tick > 0:
             return int(shared_tick)
         return self._tick_index
 
     async def _flush_state_store(self) -> None:
-        """Flush cross-tick detector state to disk off the event loop.
-
-        No-op when no state store is configured. Failures are logged and
-        swallowed so a flush error never crashes the tick.
-        """
+        """Flush cross-tick detector state to disk off the event loop."""
         if self._state_store is None:
             return
         try:

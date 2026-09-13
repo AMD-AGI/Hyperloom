@@ -1,9 +1,4 @@
-"""Tests for the versioned serving patch assets.
-
-These guard the interface contract that the Hyperloom applier depends on:
-the directory layout, the manifest, and the presence of a patch file for every
-supported version.
-"""
+"""Tests for the versioned serving patch assets."""
 
 from __future__ import annotations
 

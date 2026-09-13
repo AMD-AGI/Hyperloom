@@ -121,10 +121,10 @@ class TestDenseCommonCandidateIsolation:
 
 
 class TestStemMatches:
-    """`_stem_matches` must treat the stem as a whole token, not a substring:
-    the dense tuner names nest by prefix, so a plain `in` test lets a shorter
-    tuner steal a longer sibling's candidate CSV (the a8w8_blockscale ->
-    a8w8_blockscale_bpreshuffle regression)."""
+    """`_stem_matches` must treat the stem as a whole token, not a substring: the dense tuner names nest by prefix, so
+    a plain `in` test lets a shorter tuner steal a longer sibling's candidate CSV (the a8w8_blockscale ->
+    a8w8_blockscale_bpreshuffle regression).
+    """
 
     def test_exact_stem_matches(self):
         from kernelforge.gemm_tune.tuners._aiter_dense_common import _stem_matches

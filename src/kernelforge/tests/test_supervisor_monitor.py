@@ -1,12 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the AVO self-supervision monitor (loop/supervisor.py).
-
-``SupervisionMonitor`` is pure state logic (no LLM, no I/O): it decides WHEN the
-loop should call a supervisor to break a stall. These tests pin that decision
-contract — stall threshold, cooldown, unlimited interventions, and
-reset-on-improvement. The "is it circling / dead-ended" semantic judgment is NOT
-made here (it moved to the LLM supervisor), so there is no cycle-detection test."""
+"""Unit tests for the AVO self-supervision monitor (loop/supervisor.py)."""
 
 from __future__ import annotations
 

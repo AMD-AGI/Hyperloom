@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude.
-
-An in-process MCP server registers ``emit_intent`` so each
-``ToolUseBlock`` becomes one validated :class:`Intent`. SDK import is lazy
-(clear :class:`BackendError` if missing); ``sdk_query_factory`` /
-``sdk_options_cls`` / ``mcp_*_factory`` are test seams that bypass the real
-SDK + network.
-"""
+"""ClaudeBackend — uses ``claude-agent-sdk`` to drive Claude."""
 
 from __future__ import annotations
 
@@ -65,14 +58,7 @@ log = logging.getLogger(__name__)
 
 
 def _input_side_total(usage: dict[str, Any]) -> int:
-    """Total input-side tokens (fresh + cache read + cache creation) of a usage dict.
-
-    Args:
-        usage (dict[str, Any]): An Anthropic-shaped usage dict.
-
-    Returns:
-        int: The summed input side; ``0`` when no counters are present.
-    """
+    """Total input-side tokens (fresh + cache read + cache creation) of a usage dict."""
     return (
         safe_int(usage.get("input_tokens"))
         + safe_int(usage.get("cache_read_input_tokens"))
@@ -81,28 +67,16 @@ def _input_side_total(usage: dict[str, Any]) -> int:
 
 
 def _context_tokens_estimate(usage: dict[str, Any], *, num_turns: int) -> int:
-    """Mean per-request context size implied by call-cumulative usage.
-
-    Args:
-        usage (dict[str, Any]): The call-cumulative usage dict.
-        num_turns (int): Internal turns the call took; ``<= 1`` means the sum
-            already describes a single request.
-
-    Returns:
-        int: The per-request estimate, or ``0`` when usage carries no counters.
-    """
+    """Mean per-request context size implied by call-cumulative usage."""
     total = _input_side_total(usage)
     return total // num_turns if num_turns > 1 else total
 
 
 def _build_output_instructions(allowed_intents: frozenset[IntentType]) -> str:
     """Render the output-format suffix for a role's allowed intent set."""
-    import json as _json
-
     contract = payload_contract(allowed_intents)
     constraints = constraints_sentence(allowed_intents)
     constraints_line = f"\n-{constraints}" if constraints else ""
-    heartbeat = _json.dumps({"topic": "heartbeat", "body_md": "ok"})
     return f"""
 ==== OUTPUT FORMAT (REQUIRED) ====
 You MUST communicate with the system by calling the `{EMIT_INTENT_TOOL_NAME}`
@@ -117,8 +91,6 @@ Tool input shape:
   }}
 
 - Required keys per intent_type: {contract}.{constraints_line}
-- If you have nothing to say, call once with intent_type=send_message and
-  payload={heartbeat}.
 
 Keep payload bodies focused on NEW information. Do not restate context already
 in SharedState, your inbox, or analysis.md — reference it and summarize only
@@ -127,16 +99,12 @@ what changed. Match length to substance.
 """.strip()
 
 
-# Conversational-mode floors: a persistent ReAct turn pulls context tools before
-# emitting, so it needs more turns + wall-clock budget.
-_CONVERSATIONAL_MIN_MAX_TURNS: int = 12
-_CONVERSATIONAL_DEFAULT_TIMEOUT_SEC: float = 300.0
 # Global floor, applied by ``run()`` to every mode: Claude Code counts the
 # model's own text message as a turn, so a low max_turns trips before any output.
 _RAW_COMPLETION_MIN_MAX_TURNS: int = 8
 
-# Retried timeouts get a progressively larger idle budget so a genuinely slow
-# gateway is not re-killed at the same wall.
+# Retried timeouts get a progressively larger idle budget so a genuinely slow gateway is not re-killed at the same
+# wall.
 _RETRY_IDLE_TIMEOUT_MULTIPLIER: float = 2.0
 
 
@@ -150,8 +118,7 @@ def _intent_fingerprint(intent: Intent) -> str:
     )
 
 
-# Built-in tools disallowed in raw_completion mode so the model produces
-# exactly one text turn (no agentic tool loop).
+# Built-in tools disallowed in raw_completion mode so the model produces exactly one text turn (no agentic tool loop).
 _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash",
     "BashOutput",
@@ -170,8 +137,7 @@ _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "SlashCommand",
 )
 
-# Env-driven reasoning effort / extended thinking. A per-role override wins over
-# the shared override; kernel defaults to ``low`` and orchestration to ``medium``.
+# Env-driven reasoning effort / extended thinking.
 _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
@@ -179,18 +145,15 @@ _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
 _CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
+# Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
+_EFFORT_ROLES: dict[str, tuple[str, str]] = {
+    "orchestration": (_EFFORT_ENV_ORCH, "medium"),
+    "kernel": (_EFFORT_ENV_KERNEL, "low"),
+}
+
 
 def _import_sdk() -> tuple[Any, Any, Any]:
-    """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise.
-
-    Returns:
-        A tuple of the SDK ``query`` callable, the ``ClaudeAgentOptions``
-        class, and the imported SDK module.
-
-    Raises:
-        BackendError: If ``claude_agent_sdk`` is not installed or is missing
-            the required ``query`` / ``ClaudeAgentOptions`` attributes.
-    """
+    """Return ``(query, ClaudeAgentOptions, sdk_module)`` or raise."""
     try:
         sdk = importlib.import_module("claude_agent_sdk")
     except ImportError as exc:
@@ -202,49 +165,33 @@ def _import_sdk() -> tuple[Any, Any, Any]:
 
 @dataclass
 class ClaudeBackend:
-    """Production Claude backend. Implements :class:`Backend`.
-
-    Args:
-        model: Claude model id; defaults to ``ANTHROPIC_MODEL`` env or library default.
-        api_key_env: Env var checked at construction (``ANTHROPIC_API_KEY`` by default).
-        max_turns_default: Agent-loop budget when caller doesn't override; floored at 8.
-        enable_mcp_emit_intent: Registers the in-process MCP ``emit_intent`` tool.
-        capture_turn_diagnostics: Capture full turn diagnostics for orchestration tracing.
-        allowed_intents: Role's permitted intent set; drives the output-format suffix.
-    """
+    """Production Claude backend. Implements :class:`Backend`."""
 
     model: str | None = None
     api_key_env: str = "ANTHROPIC_API_KEY"
     # Nominal budget only: run() floors every mode at _RAW_COMPLETION_MIN_MAX_TURNS
-    # (8), so values below 8 have no effect; conversational mode raises it to 12.
-    max_turns_default: int = 4
-    # Persistent-conversation mode: resume the SAME SDK session across ticks,
-    # feeding only a per-tick delta. kernel / critic / robustness stay stateless.
-    conversational: bool = False
+    # (8), so values below 8 have no effect.
+    max_turns_default: int = 12
+    effort_role: str = "kernel"
     enable_mcp_emit_intent: bool = True
     capture_turn_diagnostics: bool = False
-    # Raw single-shot completion mode: skips the emit_intent server + suffix,
-    # disallows all tools, and returns ``raw_text`` without an emitted intent.
+    # Raw single-shot completion mode: skips the emit_intent server + suffix, disallows all tools, and returns
+    # ``raw_text`` without an emitted intent.
     raw_completion: bool = False
     # Role's allowed intent set for the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
-    # Attribution labels for the spend this backend's turns produce. One class
-    # serves several roles -- ``executors`` reuses it for in-process specialists
-    # -- so a fixed label would file their spend under orchestration and leave
-    # the rollup unable to tell the two apart. Defaults keep the orchestrator's.
+    # Attribution labels for the spend this backend's turns produce.
     attribution_component: str = "orchestration"
     attribution_operation: str = "orchestrate_turn"
-    # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
-    # streamed SDK messages before the turn is aborted. Env override:
-    # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
+    # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
+    # aborted.
     call_timeout_s: float = field(
         default_factory=lambda: parse_call_timeout_env(
             "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
             default=120.0,
         )
     )
-    # Bounded transient-failure retry/backoff. Env override via
-    # INFERENCE_OPTIMIZER_LLM_RETRY_* (ATTEMPTS=1 disables).
+    # Bounded transient-failure retry/backoff.
     retry_policy: RetryPolicy = field(default_factory=RetryPolicy.from_env)
 
     # Test seams — set these to bypass SDK import / network calls.
@@ -255,15 +202,11 @@ class ClaudeBackend:
     mcp_tool_factory: Callable[..., Any] | None = None
 
     name: str = "claude"
-    # Which prompt modules describe a surface this backend actually has. Read
-    # by the prompt builder, which cannot infer it from the role.
+    # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
-    # SDK session token captured last turn; replayed via ``resume`` in
-    # conversational mode. ``reset_conversation()`` clears it.
-    _session_id: str | None = field(default=None, init=False)
     # Read-only context-pull MCP server config, set via
     # ``set_context_provider`` and merged into the SDK options.
     _context_server_config: Any | None = field(default=None, init=False)
@@ -273,17 +216,7 @@ class ClaudeBackend:
     _active_stderr: list[str] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
-        """Resolve the SDK and optionally register the ``emit_intent`` tool.
-
-        Imports the real SDK unless test seams already supply ``query`` /
-        options, records a soft warning when the API-key env var is unset,
-        disables MCP tooling in ``raw_completion`` mode, and otherwise builds
-        the in-process ``emit_intent`` MCP server config.
-
-        Raises:
-            BackendError: If the SDK cannot be imported and no test factories
-                were provided to substitute for it.
-        """
+        """Resolve the SDK and optionally register the ``emit_intent`` tool."""
         if self.sdk_query_factory is None or self.sdk_options_cls is None:
             try:
                 query, opts_cls, mod = _import_sdk()
@@ -299,23 +232,6 @@ class ClaudeBackend:
                     self.sdk_module = mod
         if not os.environ.get(self.api_key_env):
             self.calls.append({"warn": f"{self.api_key_env} not set in env"})
-        if self.conversational:
-            # Persistent ReAct turns need more turns + a longer idle budget than
-            # the stateless default; operator env override still wins.
-            if self.max_turns_default < _CONVERSATIONAL_MIN_MAX_TURNS:
-                self.max_turns_default = _CONVERSATIONAL_MIN_MAX_TURNS
-            if (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC",
-                    "",
-                ).strip()
-                == ""
-            ):
-                # No operator override -> raise the idle-timeout floor.
-                self.call_timeout_s = max(
-                    self.call_timeout_s,
-                    _CONVERSATIONAL_DEFAULT_TIMEOUT_SEC,
-                )
         if self.raw_completion:
             self.enable_mcp_emit_intent = False
         if self.enable_mcp_emit_intent:
@@ -333,9 +249,7 @@ class ClaudeBackend:
                 self.mcp_server_config = cfg
                 self.mcp_tool_name = EMIT_INTENT_TOOL_QUALIFIED
 
-    # ------------------------------------------------------------------
     # Backend protocol
-    # ------------------------------------------------------------------
     async def run(
         self,
         prompt: str,
@@ -346,22 +260,7 @@ class ClaudeBackend:
         max_turns: int = 1,
         allow_no_intent: bool = False,
     ) -> BackendTurnResult:
-        """Run a single backend turn against Claude and parse the result.
-
-        Args:
-            prompt: User prompt for this turn.
-            system_prompt: Optional system prompt override.
-            tools: Tool names to enable for the turn.
-            disallowed_tools: Tool names to remove from the available set.
-                Applied additively on top of any ``raw_completion`` denylist.
-            max_turns: Maximum agent turns; falls back to the backend
-                default when falsy.
-            allow_no_intent: When ``True``, relax the guard that requires
-                an ``emit_intent`` (e.g. for summary/checkpoint turns).
-
-        Returns:
-            The parsed :class:`BackendTurnResult` for the turn.
-        """
+        """Run a single backend turn against Claude and parse the result."""
         full_prompt = self._compose_prompt(prompt)
         self._begin_turn_diagnostic(
             prompt=full_prompt,
@@ -369,22 +268,16 @@ class ClaudeBackend:
             tools=tools or [],
         )
         max_turns_use = max_turns or self.max_turns_default
-        # Claude Code counts the model's own text/tool messages as turns, so a
-        # literal max_turns=1 trips ("Reached maximum number of turns (1)")
-        # before the model can emit any tool call or intent — newer bundled CLI
-        # builds raise this as an error rather than returning a partial result.
-        # Callers that pass max_turns=1 to mean "one agentic step" (e.g. the
-        # specialist runner's per-turn loop) therefore need headroom. Apply the
-        # raw-completion floor to every mode, not just raw_completion.
+        # Claude Code counts the model's own text/tool messages as turns, so a literal max_turns=1 trips ("Reached
+        # maximum number of turns (1)") before the model can emit any tool call or intent — newer bundled CLI builds
+        # raise this as an error rather than returning a partial result.
         max_turns_use = max(max_turns_use, _RAW_COMPLETION_MIN_MAX_TURNS)
-        resume_session = self._session_id if self.conversational else None
         try:
             options = self._build_options(
                 tools=tools or [],
                 disallowed_tools=disallowed_tools or [],
                 max_turns=max_turns_use,
                 system_prompt=system_prompt,
-                resume_session_id=resume_session,
             )
         except BaseException as exc:
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
@@ -392,35 +285,20 @@ class ClaudeBackend:
         self._update_turn_options(
             options,
             max_turns=max_turns_use,
-            resume_session=resume_session,
         )
 
-        # Each attempt bounds the gap BETWEEN streamed SDK messages (silence
-        # budget), not the total turn; each retry amplifies the idle budget.
+        # Each attempt bounds the gap BETWEEN streamed SDK messages (silence budget), not the total turn; each retry
+        # amplifies the idle budget.
         attempt_state = {"n": 0}
 
         async def _one_attempt() -> tuple[Any, ...]:
-            """Run one SDK invocation under an amplified per-attempt idle timeout.
-
-            Returns:
-                The collected ``_invoke_and_collect`` result tuple.
-
-            Raises:
-                asyncio.TimeoutError: If the stream stays idle (no new message)
-                    for longer than this attempt's amplified idle budget.
-            """
+            """Run one SDK invocation under an amplified per-attempt idle timeout."""
             attempt_state["n"] += 1
             idle_timeout_s = self.call_timeout_s * (_RETRY_IDLE_TIMEOUT_MULTIPLIER ** (attempt_state["n"] - 1))
             return await self._invoke_and_collect(full_prompt, options, idle_timeout_s=idle_timeout_s)
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
-            """Record a transient-failure retry warning into the call log.
-
-            Args:
-                attempt: The 1-based attempt number that failed.
-                exc: The transient exception raised by the attempt.
-                delay: Seconds to wait before the next retry.
-            """
+            """Record a transient-failure retry warning into the call log."""
             self.calls.append(
                 {
                     "warn": (f"claude SDK transient failure (attempt {attempt}): {exc!r}; retrying in {delay:.2f}s"),
@@ -463,36 +341,14 @@ class ClaudeBackend:
             raise error from exc
         except BaseException as exc:
             self._finish_turn_diagnostic(outcome="backend_error", error=exc)
-            # Once retries are exhausted, anything the SDK stream raised is a
-            # provider call that produced nothing usable — including the gateway
-            # 400s (``litellm.BadRequestError: AnthropicException``) this
-            # telemetry exists to count. Marking it here matches what Codex
-            # already does for its own API errors, and keeps the failure out of
-            # the Coordinator's "unexpected crash" path. ``NoIntentEmitted`` is
-            # raised below, outside this block, so a call that succeeded with
-            # unusable output stays distinct. Cancellation is a BaseException
-            # and is re-raised untouched.
+            # Once retries are exhausted, anything the SDK stream raised is a provider call that produced nothing
+            # usable — including the gateway 400s (``litellm.BadRequestError: AnthropicException``) this telemetry
+            # exists to count.
             if isinstance(exc, Exception) and not isinstance(exc, LLMCallFailed):
                 raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
             raise
         if self._active_turn_diagnostic is not None:
             self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
-            self._active_turn_diagnostic["new_session"] = bool(session_id and not resume_session)
-        # Capture the SDK session token for the next conversational resume;
-        # only overwrite on a non-empty id.
-        if self.conversational:
-            log.info(
-                "claude[conv] turn: resumed=%s prev_session=%s "
-                "new_session=%s tool_blocks=%d intents=%d prompt_chars=%d",
-                bool(resume_session),
-                (resume_session or "")[-12:],
-                (session_id or "")[-12:],
-                tool_block_count,
-                len(intents),
-                len(full_prompt),
-            )
-            if session_id:
-                self._session_id = session_id
         cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
         cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = safe_int(usage.get("input_tokens") if usage else None)
@@ -530,60 +386,34 @@ class ClaudeBackend:
             metadata={
                 "tool_blocks": tool_block_count,
                 "model": self.model,
-                # Pairs this turn's token row with its conversation row; both
-                # halves are written from this one metadata dict.
+                # Pairs this turn's token row with its conversation row; both halves are written from this one
+                # metadata dict.
                 "call_id": new_call_id(),
                 # Why the model stopped ("end_turn" / "max_tokens" / ...).
-                # Without it a truncated reply looks like a malformed one.
                 "stop_reason": stop_reason,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                # Per-request context size; the counters above sum the call's
-                # internal turns and are spend, not size.
+                # Per-request context size; the counters above sum the call's internal turns and are spend, not size.
                 "context_tokens_peak": safe_int(usage.get("context_tokens_peak") if usage else None),
-                # Full conversation text so the caller (which holds the
-                # session_dir / component / tick context the stateless
-                # backend lacks) can persist it to conversations.jsonl.
-                # The composed prompt carries the user turn; the system
-                # prompt is snapshotted per scope under agents/<role>/.
+                # Full conversation text so the caller (which holds the session_dir / component / tick context the
+                # stateless backend lacks) can persist it to conversations.jsonl.
                 "prompt": full_prompt,
                 "response": raw_text,
             },
         )
 
-    # ------------------------------------------------------------------
     # Internals
-    # ------------------------------------------------------------------
     def _compose_prompt(self, prompt: str) -> str:
-        """Append the emit_intent output-format suffix unless in raw mode.
-
-        The suffix is rendered from :attr:`allowed_intents` so only the
-        intents this role may emit are listed.
-
-        Args:
-            prompt (str): The base turn prompt.
-
-        Returns:
-            str: The prompt unchanged in ``raw_completion`` mode, otherwise the
-            prompt with the required output-format instructions appended.
-        """
+        """Append the emit_intent output-format suffix unless in raw mode."""
         if self.raw_completion:
             return prompt
         intents = self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
         return f"{prompt}\n\n{_build_output_instructions(intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
-        """Attach (or clear) the read-only context-pull MCP server.
-
-        ``None`` detaches it. Best-effort: a build failure is recorded as a
-        soft warning and leaves the backend usable without the pull tools.
-
-        Args:
-            provider: The context provider to back the pull tools, or ``None``
-                to detach the context-tools server.
-        """
+        """Attach (or clear) the read-only context-pull MCP server."""
         if provider is None:
             self._context_server_config = None
             return
@@ -597,22 +427,6 @@ class ClaudeBackend:
         except Exception as exc:  # noqa: BLE001
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
-
-    @property
-    def context_tools_mounted(self) -> bool:
-        """Whether the read-only context-pull tools are live this turn.
-
-        ``set_context_provider`` degrades to a soft warning when the MCP build
-        fails, so a caller must not infer availability from having called it.
-        """
-        return self._context_server_config is not None
-
-    def reset_conversation(self) -> None:
-        """Drop the captured session so the next ``run`` starts fresh.
-
-        Used after a checkpoint/compaction or resume rebuild.
-        """
-        self._session_id = None
 
     def get_turn_diagnostic(self) -> dict[str, Any]:
         """Return the most recently completed turn diagnostic."""
@@ -648,7 +462,6 @@ class ClaudeBackend:
     ) -> None:
         if not self.capture_turn_diagnostics:
             return
-        previous_session = self._session_id if self.conversational else None
         self._active_stderr = []
         self._active_turn_diagnostic = {
             "backend": type(self).__name__,
@@ -657,10 +470,7 @@ class ClaudeBackend:
             "sdk_version": getattr(self.sdk_module, "__version__", None),
             "cli_version": os.environ.get("CLAUDE_CODE_VERSION") or None,
             "gateway_endpoint": self._gateway_endpoint_identifier(),
-            "resume_requested": bool(previous_session),
-            "previous_session_id_hash": self._session_hash(previous_session),
             "session_id_hash": None,
-            "new_session": None,
             "max_turns": None,
             "timeout_sec": self.call_timeout_s,
             "reasoning_effort": None,
@@ -680,7 +490,7 @@ class ClaudeBackend:
             "stderr_tail": [],
         }
 
-    def _update_turn_options(self, options: Any, *, max_turns: int, resume_session: str | None) -> None:
+    def _update_turn_options(self, options: Any, *, max_turns: int) -> None:
         diag = self._active_turn_diagnostic
         if diag is None:
             return
@@ -705,17 +515,9 @@ class ClaudeBackend:
                 if self._context_server_config is not None:
                     servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         diag["max_turns"] = max_turns
-        diag["resume_requested"] = bool(resume_session)
         diag["allowed_tools"] = [str(tool) for tool in allowed or []]
         diag["mcp_servers"] = sorted(str(name) for name in (servers or {}))
-        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
-        default_effort = "medium" if self.conversational else "low"
-        diag["reasoning_effort"] = kwargs.get(
-            "effort",
-            getattr(
-                options, "effort", (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default_effort).strip()
-            ),
-        )
+        diag["reasoning_effort"] = kwargs.get("effort", getattr(options, "effort", self._resolve_effort()))
         diag["thinking"] = kwargs.get(
             "thinking",
             getattr(options, "thinking", {"type": (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()}),
@@ -754,28 +556,8 @@ class ClaudeBackend:
         disallowed_tools: list[str] | None = None,
         max_turns: int,
         system_prompt: str | None,
-        resume_session_id: str | None = None,
     ) -> Any:
-        """Build the SDK options object for one turn.
-
-        In ``raw_completion`` mode all tools are disallowed so the model emits a
-        single text turn; otherwise the qualified ``emit_intent`` tool and MCP
-        server are wired into the allow-list. CLI stderr is captured for
-        postmortems in both modes.
-
-        Args:
-            tools (list[str]): Caller-provided allowed tool names.
-            disallowed_tools (list[str] | None): Additional tool names to deny.
-                Merged with the ``raw_completion`` denylist when both apply.
-            max_turns (int): Agent-loop budget to pass through to the SDK.
-            system_prompt (str | None): Optional system prompt for the turn.
-            resume_session_id (str | None): SDK session token to resume; set
-                by the caller only in conversational mode, ``None`` starts a
-                fresh session.
-
-        Returns:
-            Any: A constructed ``ClaudeAgentOptions`` instance.
-        """
+        """Build the SDK options object for one turn."""
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
@@ -784,8 +566,6 @@ class ClaudeBackend:
             kwargs["cli_path"] = cli_path
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
-        if resume_session_id:
-            kwargs["resume"] = resume_session_id
         self._apply_sdk_env_options(kwargs)
         self._apply_effort_options(kwargs)
         if self.raw_completion:
@@ -797,8 +577,7 @@ class ClaudeBackend:
             kwargs["disallowed_tools"] = deny
             kwargs["stderr"] = self._stderr_sink
             return self._instantiate_options(kwargs)
-        # Drop the bare "emit_intent" name; the MCP-qualified form wires into the
-        # SDK tool registry.
+        # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
             allowed.append(self.mcp_tool_name)
@@ -823,12 +602,7 @@ class ClaudeBackend:
         return self._instantiate_options(kwargs)
 
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
-        """Pin Claude Code subprocess auth to the current Hyperloom env.
-
-        When a Hyperloom process has explicit Anthropic/gateway env, pass that
-        env to the SDK subprocess and disable settings sources so the run is
-        hermetic (Claude Code otherwise reads ``~/.claude`` config).
-        """
+        """Pin Claude Code subprocess auth to the current Hyperloom env."""
         kwargs.update(
             claude_sdk_env_options(
                 model=self.model,
@@ -837,14 +611,19 @@ class ClaudeBackend:
             )
         )
 
-    def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
-        """Add env-driven reasoning effort + adaptive thinking to the options.
+    def _resolve_effort(self) -> str:
+        """Reasoning-effort tier for this backend's role.
 
-        Role is inferred from ``conversational`` (True => orchestration).
+        Returns:
+            The role's env override, else the shared override, else the role
+            default from :data:`_EFFORT_ROLES`.
         """
-        role_env = _EFFORT_ENV_ORCH if self.conversational else _EFFORT_ENV_KERNEL
-        default = "medium" if self.conversational else "low"
-        effort = (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+        role_env, default = _EFFORT_ROLES.get(self.effort_role, _EFFORT_ROLES["kernel"])
+        return (os.environ.get(role_env) or os.environ.get(_EFFORT_ENV) or default).strip().lower()
+
+    def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
+        """Add env-driven reasoning effort + adaptive thinking to the options."""
+        effort = self._resolve_effort()
         if effort in _VALID_EFFORT:
             kwargs["effort"] = effort
         thinking = (os.environ.get(_THINKING_ENV) or "adaptive").strip().lower()
@@ -852,22 +631,11 @@ class ClaudeBackend:
             kwargs["thinking"] = {"type": thinking}
 
     def _instantiate_options(self, kwargs: dict[str, Any]) -> Any:
-        """Build the SDK options.
-
-        Args:
-            kwargs: Keyword arguments to pass to the SDK options constructor.
-
-        Returns:
-            A constructed SDK options instance.
-        """
+        """Build the SDK options."""
         return self.sdk_options_cls(**kwargs)
 
     def _stderr_sink(self, line: str) -> None:
-        """Default stderr handler — append to ``self.calls`` for postmortems.
-
-        Args:
-            line (str): One line of CLI stderr output; blank lines are dropped.
-        """
+        """Default stderr handler — append to ``self.calls`` for postmortems."""
         text = line.strip()
         if text:
             self.calls.append({"stderr": text})
@@ -877,34 +645,17 @@ class ClaudeBackend:
     async def _invoke_and_collect(
         self, prompt: str, options: Any, *, idle_timeout_s: float | None = None
     ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
-        """Stream SDK messages, collecting intents, raw text, tool counts,
-        the latest `ResultMessage.usage` dict, the SDK ``session_id`` and the
-        model's ``stop_reason``.
-
-        Args:
-            prompt: The composed prompt to stream to the SDK.
-            options: The SDK options object configuring this turn.
-            idle_timeout_s: When set, the max wall-clock allowed to wait for the
-                *next* streamed message before raising ``asyncio.TimeoutError``.
-                Bounds a stalled gateway without capping total turn time, so a
-                slow-but-live reasoning model is never killed (issue #679).
-
-        Returns:
-            A tuple ``(intents, raw_text, tool_block_count, usage, session_id,
-            stop_reason)`` where ``usage`` is the latest cumulative usage dict
-            plus a per-request ``context_tokens_peak``, ``session_id`` is the
-            SDK session token (or ``None``), and ``stop_reason`` is the last
-            reason the model reported (or ``None``).
+        """Stream SDK messages, collecting intents, raw text, tool counts, the latest `ResultMessage.usage` dict, the
+        SDK ``session_id`` and the model's ``stop_reason``.
         """
         intents: list[Intent] = []
         text_chunks: list[str] = []
         result_chunks: list[str] = []
         tool_block_count = 0
-        # Defense in depth: identical wrapper envelopes in one query are the
-        # parser retry storm. Native duplicates still count separately.
+        # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
         seen_fallback_intents: set[str] = set()
-        # Every usage dict the stream reports, in order: the last is cumulative
-        # over the call, the ones before it describe single requests.
+        # Every usage dict the stream reports, in order: the last is cumulative over the call, the ones before it
+        # describe single requests.
         usages: list[dict[str, Any]] = []
         num_turns = 0
         session_id: str | None = None
@@ -913,8 +664,8 @@ class ClaudeBackend:
         try:
             stream_iter = stream.__aiter__()
             while True:
-                # Idle timeout: bound only the wait for the NEXT message; a
-                # fully silent gateway trips ``asyncio.TimeoutError``.
+                # Idle timeout: bound only the wait for the NEXT message; a fully silent gateway trips
+                # ``asyncio.TimeoutError``.
                 try:
                     if idle_timeout_s is not None:
                         message = await asyncio.wait_for(stream_iter.__anext__(), timeout=idle_timeout_s)
@@ -949,16 +700,15 @@ class ClaudeBackend:
                         txt = self._extract_text(block)
                         if txt:
                             text_chunks.append(txt)
-                # ResultMessage.result duplicates the streamed TextBlocks; keep
-                # it separate to avoid double-counting.
+                # ResultMessage.result duplicates the streamed TextBlocks; keep it separate to avoid double-counting.
                 result_text = getattr(message, "result", None)
                 if isinstance(result_text, str) and result_text:
                     result_chunks.append(result_text)
                 msg_turns = getattr(message, "num_turns", None)
                 if isinstance(msg_turns, int) and msg_turns > 0:
                     num_turns = msg_turns
-                # Both AssistantMessage and the terminal ResultMessage carry it;
-                # last seen wins, so the call's own reason ends up reported.
+                # Both AssistantMessage and the terminal ResultMessage carry it; last seen wins, so the call's own
+                # reason ends up reported.
                 msg_stop = getattr(message, "stop_reason", None)
                 if isinstance(msg_stop, str) and msg_stop:
                     stop_reason = msg_stop
@@ -966,13 +716,7 @@ class ClaudeBackend:
                 if isinstance(msg_usage, dict) and msg_usage:
                     usages.append(dict(msg_usage))
         except Exception as exc:
-            # The SDK raises on a terminal ResultMessage with is_error=True. Two
-            # such subtypes are NON-fatal turn boundaries, not real failures, and
-            # any intents/text already streamed must be kept:
-            #   * "error result: success"                    (older max-turns-on-success)
-            #   * "Reached maximum number of turns (N)"       (newer CLI: hitting the
-            #     per-call max_turns cap mid-agentic-loop — expected when a caller
-            #     runs a bounded step; the collected partial turn is still usable)
+            # The SDK raises on a terminal ResultMessage with is_error=True.
             err_str = str(exc)
             _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
             if _non_fatal:
@@ -993,8 +737,8 @@ class ClaudeBackend:
             else:
                 raise
         finally:
-            # Best-effort: close the (async-gen) stream so an idle-timeout abort
-            # doesn't leak a half-consumed generator. Errors here are never fatal.
+            # Best-effort: close the (async-gen) stream so an idle-timeout abort doesn't leak a half-consumed
+            # generator.
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 try:
@@ -1017,28 +761,11 @@ class ClaudeBackend:
 
     @staticmethod
     def _iter_blocks(message: Any):
-        """Return the content blocks of an SDK message as a list.
-
-        Args:
-            message (Any): An SDK message that may carry a ``content`` list.
-
-        Returns:
-            list: The message's content blocks, or an empty list when absent.
-        """
+        """Return the content blocks of an SDK message as a list."""
         return list(getattr(message, "content", None) or [])
 
     def _is_tool_use_for_emit_intent(self, block: Any) -> bool:
-        """Whether a content block is an ``emit_intent`` tool-use call.
-
-        Matches by class name, then checks the tool name.
-
-        Args:
-            block (Any): A single SDK content block.
-
-        Returns:
-            bool: ``True`` if the block is a tool-use for the (qualified or
-            bare) ``emit_intent`` tool.
-        """
+        """Whether a content block is an ``emit_intent`` tool-use call."""
         cls_name = type(block).__name__
         if cls_name not in ("ToolUseBlock", "ServerToolUseBlock"):
             return False
@@ -1046,17 +773,7 @@ class ClaudeBackend:
         return name in (EMIT_INTENT_TOOL_NAME, EMIT_INTENT_TOOL_QUALIFIED)
 
     def _parse_tool_use_block(self, block: Any) -> Intent | None:
-        """Validate one ``emit_intent`` tool-use block into an :class:`Intent`.
-
-        Args:
-            block (Any): A tool-use block whose ``input`` carries
-                ``intent_type`` and ``payload``, or Claude Code's
-                ``__unparsedToolInput.raw`` wrapper around that JSON.
-
-        Returns:
-            Intent | None: The validated intent, or ``None`` if validation
-            fails (the failure is logged, not raised).
-        """
+        """Validate one ``emit_intent`` tool-use block into an :class:`Intent`."""
         block_input = getattr(block, "input", None) or {}
         if not isinstance(block_input, dict):
             block_input = {}
@@ -1119,17 +836,7 @@ class ClaudeBackend:
 
     @staticmethod
     def _extract_text(block: Any) -> str:
-        """Extract plain text from a content block across block shapes.
-
-        Handles SDK ``TextBlock`` objects, ``{"type": "text"}`` dicts, and any
-        object exposing a string ``text`` attribute.
-
-        Args:
-            block (Any): A single content block.
-
-        Returns:
-            str: The block's text, or an empty string when none is present.
-        """
+        """Extract plain text from a content block across block shapes."""
         if type(block).__name__ == "TextBlock":
             return getattr(block, "text", "") or ""
         if isinstance(block, dict) and block.get("type") == "text":

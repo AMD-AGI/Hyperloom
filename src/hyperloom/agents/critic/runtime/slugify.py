@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic slug generation per ``kb-critic-integration-contract`` Appendix D.
-
-Critic and Alchemist share this so the same fact collapses onto one
-``(scope, kind, slug)`` tuple; any change is a breaking SDK bump (D.5).
-:func:`slugify` is ASCII-only (raises :class:`SlugifyError` on empty /
-non-ASCII / too-short); :func:`slugify_safe` wraps it, optionally using a
-``translate_fn`` and otherwise falling back to
-``<fallback_prefix>-<sha256(topic)[:8]>``.
-"""
+"""Deterministic slug generation per ``kb-critic-integration-contract`` Appendix D."""
 
 from __future__ import annotations
 
@@ -33,33 +25,12 @@ _TRUNC_LEN = 72
 
 
 def _ascii_only(text: str) -> bool:
-    """Report whether a string contains only ASCII characters.
-
-    Args:
-        text (str): The string to test.
-
-    Returns:
-        bool: True when every character is in the ASCII range.
-    """
+    """Report whether a string contains only ASCII characters."""
     return bool(_ASCII_RE.match(text))
 
 
 def slugify(topic: str) -> str:
-    """ASCII-only deterministic slug.
-
-    See contract Appendix D.2 for the step-by-step spec.
-
-    Args:
-        topic (str): The topic string to slugify.
-
-    Returns:
-        str: The deterministic slug (hash-suffixed when over the max length).
-
-    Raises:
-        SlugifyError: If ``topic`` is not a string, is empty/whitespace,
-            contains non-ASCII characters, collapses to empty, or is shorter
-            than the minimum length.
-    """
+    """ASCII-only deterministic slug."""
     if not isinstance(topic, str):
         raise SlugifyError(f"topic must be str, got {type(topic).__name__}")
     if not topic.strip():
@@ -92,26 +63,7 @@ def slugify_safe(
     *,
     fallback_prefix: str = "auto",
 ) -> str:
-    """Non-ASCII safe wrapper (contract §7.2 / G-6).
-
-    * Pure ASCII → :func:`slugify`.
-    * Non-ASCII + ``translate_fn`` provided → ``slugify(translate_fn(topic))``.
-    * Non-ASCII without translate_fn (or translate_fn raises) → the
-      deterministic fallback ``<prefix>-<sha8>`` so writes remain idempotent.
-
-    Args:
-        topic (str): The topic string to slugify.
-        translate_fn (Callable[[str], str] | None): Optional translator used
-            to romanise non-ASCII input before slugifying.
-        fallback_prefix (str): Prefix for the deterministic hash fallback.
-
-    Returns:
-        str: A slug — from :func:`slugify`, from the translated text, or the
-        ``<prefix>-<sha8>`` fallback.
-
-    Raises:
-        SlugifyError: If ``topic`` is not a non-empty string.
-    """
+    """Non-ASCII safe wrapper (contract §7.2 / G-6)."""
     if not isinstance(topic, str) or not topic.strip():
         raise SlugifyError("empty: topic is empty or whitespace-only")
     normalised = unicodedata.normalize("NFKC", topic)

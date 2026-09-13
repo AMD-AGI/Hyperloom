@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""High-level KB write façade used by the decision reviewer.
-
-Never raises for transport / 4xx errors — catches, dead-letters, and
-returns a typed :class:`WriteResult` so the pipeline never blocks on KB
-issues. Triggers: :meth:`write_verdict` (upsert; ``advise`` skipped),
-:meth:`write_kb_drafts` (batch insert ``on_conflict=upsert``),
-:meth:`add_contradiction` (contradicts edge). Plus :meth:`list_priors`
-(read, TTL'd cache backed by :class:`SessionMemory`).
-"""
+"""High-level KB write façade used by the decision reviewer."""
 
 from __future__ import annotations
 
@@ -48,8 +40,7 @@ from .session_memory import SessionMemory
 from .slugify import slugify, slugify_safe
 
 
-# Verdicts that should produce a KB write. ``advise`` is a pure dispatch
-# decision with no reusable lesson, so it is skipped.
+# Verdicts that should produce a KB write.
 _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
     {
         "approve",
@@ -60,8 +51,8 @@ _KB_RELEVANT_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-# Circuit-breaker defaults: after ``threshold`` consecutive transport
-# failures, reads/writes short-circuit for ``cooldown`` seconds.
+# Circuit-breaker defaults: after ``threshold`` consecutive transport failures, reads/writes short-circuit for
+# ``cooldown`` seconds.
 _DEFAULT_BREAKER_THRESHOLD = 1
 _DEFAULT_BREAKER_COOLDOWN_SECONDS = 60.0
 
@@ -80,28 +71,13 @@ class WriteContext:
 
 @dataclass
 class WriteResult:
-    """Outcome of a KB write attempt.
-
-    Statuses:
-        ok            — request returned 2xx.
-        dead_lettered — write failed (transport or 4xx) and is queued for
-                        cron replay; the review pipeline still proceeds.
-        skipped       — pre-condition prevented the write (verdict not
-                        relevant, missing scope, no topic, etc.).
-        disabled      — ``KB_WRITE_ENABLED=false`` or the breaker is open
-                        (``reason="kb_unreachable"``).
-    """
+    """Outcome of a KB write attempt."""
 
     status: str
     detail: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serialisable copy of the write result.
-
-        Returns:
-            dict[str, Any]: ``{"status": ..., "detail": ...}`` with ``detail``
-            copied so callers cannot mutate internal state.
-        """
+        """Return a JSON-serialisable copy of the write result."""
         return {"status": self.status, "detail": dict(self.detail)}
 
 
@@ -117,17 +93,7 @@ class KBWriter:
         dead_letter: DeadLetter | None = None,
         time_fn=time.time,
     ):
-        """Wire the writer to a KB client and read its env-driven config.
-
-        Args:
-            client (KBClient): The underlying KB client to call.
-            session_memory (SessionMemory | None): Store used for the prior
-                cache; a default is created when ``None``.
-            dead_letter (DeadLetter | None): Dead-letter queue for failed
-                writes; a default is created when ``None``.
-            time_fn (Callable[[], float]): Clock used for breaker timing;
-                injectable for tests. Defaults to :func:`time.time`.
-        """
+        """Wire the writer to a KB client and read its env-driven config."""
         self.client = client
         self.session_memory = session_memory or SessionMemory()
         self.dead_letter = dead_letter or DeadLetter()
@@ -145,20 +111,11 @@ class KBWriter:
 
     # Circuit-breaker helpers
     def is_kb_unreachable(self) -> bool:
-        """Return True iff the breaker is currently open.
-
-        Returns:
-            bool: ``True`` while the cooldown window is still in the future.
-        """
+        """Return True iff the breaker is currently open."""
         return self._time_fn() < self._unreachable_until
 
     def kb_breaker_state(self) -> dict[str, Any]:
-        """Snapshot for ``judge_bundle.notes`` / metrics dashboards.
-
-        Returns:
-            dict[str, Any]: Breaker state with ``open``, ``remaining_seconds``,
-            ``consecutive_failures``, ``threshold`` and ``cooldown_seconds``.
-        """
+        """Snapshot for ``judge_bundle.notes`` / metrics dashboards."""
         now = self._time_fn()
         return {
             "open": now < self._unreachable_until,
@@ -169,12 +126,7 @@ class KBWriter:
         }
 
     def _record_kb_failure(self, endpoint: str, exc: Exception) -> None:
-        """Account a transport error and possibly open the breaker.
-
-        Args:
-            endpoint (str): The KB endpoint that failed (for metric labels).
-            exc (Exception): The transport exception (recorded via metrics).
-        """
+        """Account a transport error and possibly open the breaker."""
         self._consecutive_failures += 1
         get_registry().counter(CRITIC_KB_UNREACHABLE_TOTAL).inc(
             {
@@ -206,27 +158,7 @@ class KBWriter:
         limit: int = 10,
         ctx: WriteContext | None = None,
     ) -> dict[str, Any]:
-        """Look up KB priors with caching + circuit-breaker short-circuit.
-
-        Returns ``{priors, cache, cache_key, [error]}``. ``cache`` is one of
-        ``hit`` / ``miss`` / ``disabled`` / ``kb_unreachable``. The function
-        never raises — KB transport / 4xx errors translate into an empty
-        ``priors`` list with the failure mode reflected in ``cache`` and an
-        ``error`` field.
-
-        Args:
-            scope (dict[str, Any]): Scope filter for the KB query.
-            kind (str | None): Optional row-kind filter.
-            topic (str | None): Optional topic, folded into the cache key.
-            limit (int): Maximum number of priors to request.
-            ctx (WriteContext | None): When set, enables the per-session prior
-                cache keyed by ``ctx.session_id``.
-
-        Returns:
-            dict[str, Any]: ``{priors, cache, cache_key}`` plus optional
-            ``error`` / ``breaker`` fields; ``cache`` is one of
-            ``hit``/``miss``/``disabled``/``kb_unreachable``.
-        """
+        """Look up KB priors with caching + circuit-breaker short-circuit."""
         if not self.read_enabled:
             return {"priors": [], "cache": "disabled", "cache_key": ""}
 
@@ -266,8 +198,7 @@ class KBWriter:
                 "breaker": self.kb_breaker_state(),
             }
         except KBError as exc:
-            # 4xx / validation errors — KB is up, request was bad. Don't trip
-            # the breaker; keep priors empty and surface the error.
+            # 4xx / validation errors — KB is up, request was bad.
             return {
                 "priors": [],
                 "cache": "miss",
@@ -290,24 +221,7 @@ class KBWriter:
         session_context: dict[str, Any] | None = None,
         ctx: WriteContext,
     ) -> WriteResult:
-        """Write a single verdict lesson to KB.
-
-        Skips non-reusable verdicts, builds a scope/slug/importance, and
-        upserts with dead-letter fallback. Never raises for transport/4xx
-        errors — those become a ``dead_lettered`` result.
-
-        Args:
-            verdict (dict[str, Any]): The verdict payload (``verdict``,
-                ``reasoning``, evidence, etc.).
-            packet_context (dict[str, Any]): Request context for scope build.
-            session_context (dict[str, Any] | None): Stored session context
-                used to fill scope gaps.
-            ctx (WriteContext): Per-write metadata (session, topic, etc.).
-
-        Returns:
-            WriteResult: Status ``ok`` / ``dead_lettered`` / ``skipped`` /
-            ``disabled`` with details.
-        """
+        """Write a single verdict lesson to KB."""
         if not self.write_enabled:
             return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
         if self.is_kb_unreachable():
@@ -382,23 +296,7 @@ class KBWriter:
         session_context: dict[str, Any] | None = None,
         ctx: WriteContext,
     ) -> WriteResult:
-        """Batch-write session-close KB drafts.
-
-        Each draft is mapped to a kind/slug/importance and upserted via
-        ``batch_insert`` with ``on_conflict=upsert``. Individual drafts that
-        fail mapping/slugging are collected under ``rejected``; transport/4xx
-        failures dead-letter the whole batch.
-
-        Args:
-            kb_drafts (list[dict[str, Any]]): The draft entries to write.
-            packet_context (dict[str, Any]): Request context for scope build.
-            session_context (dict[str, Any] | None): Stored session context.
-            ctx (WriteContext): Per-write metadata (session, etc.).
-
-        Returns:
-            WriteResult: Status ``ok`` / ``dead_lettered`` / ``skipped`` /
-            ``disabled`` with details (including any ``rejected`` drafts).
-        """
+        """Batch-write session-close KB drafts."""
         if not self.write_enabled:
             return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
         if not kb_drafts:
@@ -515,19 +413,7 @@ class KBWriter:
         old_ids: list[str],
         ctx: WriteContext,
     ) -> WriteResult:
-        """Add ``contradicts`` edges from a new row to older rows.
-
-        Edge writes are supplemental and best-effort: failures return a
-        ``skipped`` result rather than dead-lettering.
-
-        Args:
-            new_id (str): Source KB row id for the contradiction.
-            old_ids (list[str]): Target KB row ids being contradicted.
-            ctx (WriteContext): Per-write metadata.
-
-        Returns:
-            WriteResult: Status ``ok`` / ``skipped`` / ``disabled`` with details.
-        """
+        """Add ``contradicts`` edges from a new row to older rows."""
         if not self.write_enabled:
             return WriteResult("disabled", {"reason": "KB_WRITE_ENABLED=false"})
         if self.is_kb_unreachable():
@@ -558,16 +444,7 @@ class KBWriter:
         payload: dict[str, Any],
         ctx: WriteContext,
     ) -> WriteResult:
-        """Upsert a payload, dead-lettering any transport/4xx failure.
-
-        Args:
-            payload (dict[str, Any]): The upsert payload to send.
-            ctx (WriteContext): Per-write metadata recorded with dead letters.
-
-        Returns:
-            WriteResult: Status ``ok`` on success or ``dead_lettered`` on any
-            KB error (the queued entry is replayable by the cron).
-        """
+        """Upsert a payload, dead-lettering any transport/4xx failure."""
         try:
             response = self.client.upsert(payload)
             get_registry().counter(CRITIC_KB_WRITE_TOTAL).inc(
@@ -610,17 +487,7 @@ class KBWriter:
 
 # Helpers
 def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
-    """Derive a slug-safe topic from verdict.reasoning when not provided.
-
-    Takes the first 8 ASCII words of the reasoning text to stay within
-    slugify length bounds.
-
-    Args:
-        verdict (dict[str, Any]): The verdict payload (uses ``reasoning``).
-
-    Returns:
-        str | None: The derived topic, or ``None`` if there is no usable text.
-    """
+    """Derive a slug-safe topic from verdict.reasoning when not provided."""
     reasoning = (verdict.get("reasoning") or "").strip()
     if not reasoning:
         return None
@@ -631,18 +498,7 @@ def _topic_from_reasoning(verdict: dict[str, Any]) -> str | None:
 
 
 def slug_for_kind(kind: str, topic: str, draft: dict[str, Any] | None = None) -> str:
-    """Build a slug for ``(kind, topic, draft)``.
-
-    Args:
-        kind (str): The KB row kind (e.g. ``params_catalog``, ``model_profile``,
-            ``pitfall``, ``technique``).
-        topic (str): The base topic text to slugify.
-        draft (dict[str, Any] | None): Optional draft providing kind-specific
-            fields (e.g. ``action``, ``model``).
-
-    Returns:
-        str: A slug appropriate to the kind.
-    """
+    """Build a slug for ``(kind, topic, draft)``."""
     draft = draft or {}
     if kind == "params_catalog":
         param_name = draft.get("action") or topic

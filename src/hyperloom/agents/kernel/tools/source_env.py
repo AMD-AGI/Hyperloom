@@ -5,26 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Discover installed kernel-source trees + versions for the v2 resolver.
-
-The resolver never trusts a stored absolute path; it searches the *actually
-installed* source trees for a kernel's definition. This module answers where
-those trees are and which versions they are (so a built index can be cached per
-version).
-
-Discovery has two parts:
-
-1. **Known serving frameworks** (``vllm`` / ``sglang`` / ``aiter``) are located
-   by name so their versions are reported even when they ship no native source
-   (e.g. pip-installed vLLM has no ``csrc``).
-2. **Auto-enumeration**: every other importable package that ships GPU kernel
-   source (a ``csrc``/``kernels`` dir containing ``.cu``/``.cuh``/... files) is
-   discovered automatically, so new libraries need no code change.
-
-``$HYPERLOOM_DISCOVER_ONLY`` (csv) restricts discovery to named packages (faster,
-avoids probing unrelated trees). ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` (``name=path``
-csv) pins a package to an explicit directory.
-"""
+"""Discover installed kernel-source trees + versions for the v2 resolver."""
 
 from __future__ import annotations
 
@@ -44,8 +25,7 @@ __all__ = [
     "version_tag",
 ]
 
-# Serving frameworks always located by name (for version + JSON hints), even
-# when they ship no native source.
+# Serving frameworks always located by name (for version + JSON hints), even when they ship no native source.
 _KNOWN = ("vllm", "sglang", "aiter")
 
 # Subdirectories (relative to a package dir) that hold GPU kernel source.
@@ -65,9 +45,7 @@ class FrameworkRoot:
     csrc_roots: tuple[Path, ...] = field(default_factory=tuple)
 
 
-# ----------------------------------------------------------------------------
 # Locating packages
-# ----------------------------------------------------------------------------
 def _env_source_roots() -> dict[str, Path]:
     """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` (``name=path`` csv)."""
     out: dict[str, Path] = {}
@@ -108,11 +86,7 @@ def _locate(name: str, env_roots: dict[str, Path]) -> Path | None:
 
 
 def _package_dirs(env_roots: dict[str, Path]) -> dict[str, Path]:
-    """All candidate top-level package dirs, keyed by dir name (first wins).
-
-    Sources: every child of a ``site-packages``/``dist-packages`` dir on
-    ``sys.path``, plus explicit override paths.
-    """
+    """All candidate top-level package dirs, keyed by dir name (first wins)."""
     dirs: dict[str, Path] = {}
     for entry in sys.path:
         base = Path(entry)
@@ -125,16 +99,9 @@ def _package_dirs(env_roots: dict[str, Path]) -> dict[str, Path]:
     return dirs
 
 
-# ----------------------------------------------------------------------------
 # Version + native source
-# ----------------------------------------------------------------------------
 def _version(name: str, root: Path | None) -> str:
-    """Installed version: dist metadata first, then a ``_version.py`` literal.
-
-    The source fallback covers packages that ship no dist metadata (e.g. aiter
-    in the pip-built vLLM ROCm images) but record a version file; it avoids
-    importing the package (which can require a GPU at import time).
-    """
+    """Installed version: dist metadata first, then a ``_version.py`` literal."""
     try:
         return importlib_metadata.version(name)
     except (importlib_metadata.PackageNotFoundError, ValueError, OSError):
@@ -174,19 +141,9 @@ def _canonical(pkg_name: str) -> str:
     return pkg_name[: -len("_meta")] if pkg_name.endswith("_meta") else pkg_name
 
 
-# ----------------------------------------------------------------------------
 # Discovery
-# ----------------------------------------------------------------------------
 def discover_frameworks() -> dict[str, FrameworkRoot]:
-    """Discover installed kernel-source libraries + versions.
-
-    Known serving frameworks are located by name (so their versions are always
-    reported); any other package shipping native kernel source is auto-detected.
-    ``$HYPERLOOM_DISCOVER_ONLY`` restricts the result to named packages.
-
-    Returns:
-        Mapping of framework name to :class:`FrameworkRoot` for each one found.
-    """
+    """Discover installed kernel-source libraries + versions."""
     env_roots = _env_source_roots()
     only = _discover_only()
     out: dict[str, FrameworkRoot] = {}
@@ -218,18 +175,9 @@ def discover_frameworks() -> dict[str, FrameworkRoot]:
     return out
 
 
-# ----------------------------------------------------------------------------
 # Cache key + reporting
-# ----------------------------------------------------------------------------
 def _dir_signature(path: Path) -> str:
-    """Recursive change signature for a source dir.
-
-    Walks the whole tree (not just the immediate children) and folds in the
-    newest native-file ``mtime_ns`` plus the native-file count, so an edit to a
-    file in a *nested* subdirectory -- the common case, and exactly what the
-    kernel agent does when it rewrites a ``.cu`` mid-tree -- changes the
-    signature and invalidates a stale cached index.
-    """
+    """Recursive change signature for a source dir."""
     try:
         count = 0
         max_mtime_ns = 0
@@ -250,12 +198,7 @@ def _dir_signature(path: Path) -> str:
 
 
 def fingerprint(frameworks: dict[str, FrameworkRoot]) -> str:
-    """Stable cache key over roots + versions + recursive csrc signatures.
-
-    Changes when a different framework/version is installed or any native source
-    file under a csrc root is added, removed, or modified (including in nested
-    subdirectories), so a cached index is reused iff still valid.
-    """
+    """Stable cache key over roots + versions + recursive csrc signatures."""
     parts: list[str] = []
     for name in sorted(frameworks):
         fr = frameworks[name]

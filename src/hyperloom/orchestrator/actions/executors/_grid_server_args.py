@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Server-argument composition helpers.
-
-Shared by the explore / integrate_patch / grid executors and the workload-env
-builder: merge/remove/replace semantics for ``EXTRA_*_ARGS``, last-wins dedupe
-for vLLM/atom single-value flags, shell-safety validation, JSON-valued flag
-compaction/repair, the sglang watchdog / context-length / attention-backend /
-MoE-runner injections, and ``apply_runtime_benchmark_overrides`` for the
-materialized Magpie YAML. Nothing here runs a benchmark — the run/parse/
-winner-selection loop lives in :mod:`._grid_runner`.
-"""
+"""Server-argument composition helpers."""
 
 from __future__ import annotations
 
@@ -34,35 +25,7 @@ _NUMERIC_VALUE_RE = re.compile(r"^\d+(?:[.,]\d+)*$")
 
 
 def validate_server_args_shell_safe(server_args: str | None) -> str:
-    """Reject server-arg strings that would be shell control syntax.
-
-    Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
-    this is the final sink-side guard against LLM/payload content escaping from
-    argv-like flags into shell control operators.
-
-    A flag may be followed by more than one value token (argparse ``nargs="+"``
-    semantics). ``--cuda-graph-bs 1 2 4 8`` is a real sglang invocation and is
-    already recognized as multi-valued by :data:`_MULTI_VALUE_FLAGS`; requiring
-    exactly one value here rejected it at the sink while the explore side let it
-    through.
-
-    The relaxation is scoped rather than blanket, because "any flag anywhere
-    earlier permits any bare token afterwards" stops rejecting anything at all:
-
-    * ``--flag=value`` already carries its value, so a bare token after it is
-      unambiguously positional.
-    * a flag in :data:`_MULTI_VALUE_FLAGS` takes an unlimited value list -- but
-      every entry in that whitelist is a list of batch sizes, so the list is
-      still digits-only. Letting the whitelist waive the token shape as well
-      would readmit ``--cuda-graph-bs 1 2 run.sh``.
-    * any other flag takes one arbitrary value; further tokens are accepted only
-      while they still look like list elements (digits), never as bare words.
-      That covers an ``nargs="+"`` flag not yet on the whitelist -- those carry
-      batch sizes or lengths -- without readmitting ``--foo bar some_script.sh``.
-
-    Shell control characters are blocked separately above, so this remains a
-    secondary "this looks like argv" guard.
-    """
+    """Reject server-arg strings that would be shell control syntax."""
     args = str(server_args or "").strip()
     if not args:
         return ""
@@ -94,28 +57,12 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
 
 
 def merge_server_args(*parts: str | None) -> str:
-    """Merge server arg strings preserving left-to-right override semantics.
-
-    Only removes empty chunks; does NOT de-duplicate option names, because
-    repeated flags are how later args override base args (e.g. ``--block-size
-    1`` then ``--block-size 256``).
-
-    Args:
-        *parts (str | None): Server-arg chunks to merge, in override order;
-            empty/``None`` chunks are dropped.
-
-    Returns:
-        str: The space-joined non-empty chunks.
-    """
+    """Merge server arg strings preserving left-to-right override semantics."""
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
 def _unwrap_one_pair(s: str) -> str:
-    """Strip one balanced pair of outer shell quotes from *s* when safe to do so.
-
-    JSON blobs (inner content starts with ``{`` or ``[``) are never touched
-    because they contain double quotes that must survive into the downstream arg.
-    """
+    """Strip one balanced pair of outer shell quotes from *s* when safe to do so."""
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
         inner = s[1:-1]
         if inner and not inner.startswith(("{", "[")) and s[0] not in inner and not any(ch.isspace() for ch in inner):
@@ -124,20 +71,7 @@ def _unwrap_one_pair(s: str) -> str:
 
 
 def _unwrap_shell_quotes(token: str) -> str:
-    """Drop one balanced pair of shell quotes from a token produced by shlex.
-
-    ``shlex.split(..., posix=False)`` keeps quote bytes in the token it returns,
-    which is exactly what protects a JSON value's inner double quotes. But a
-    plain operand written as ``--tool-call-parser 'kimi'`` or
-    ``--tool-call-parser='kimi'`` must not keep its wrappers, because Magpie
-    expands ``EXTRA_*_ARGS`` unquoted and the wrappers would reach argv
-    literally.
-
-    For a leading-dash token the unwrap is applied to the right-hand side of
-    the first ``=`` only, so token boundaries never shift and the flag name is
-    never altered. A JSON value (starting with ``{`` or ``[``) is left verbatim
-    in both positions.
-    """
+    """Drop one balanced pair of shell quotes from a token produced by shlex."""
     if token.startswith("-") and "=" in token:
         flag, _, value = token.partition("=")
         unwrapped = _unwrap_one_pair(value)
@@ -146,27 +80,7 @@ def _unwrap_shell_quotes(token: str) -> str:
 
 
 def _split_args_preserving_json(text: str) -> list[str] | None:
-    """Tokenize a server-arg string WITHOUT stripping JSON's inner double quotes.
-
-    ``shlex.split(text)`` defaults to ``posix=True``, which consumes every quote
-    byte. Splitting a JSON-valued flag that way and space-joining the result
-    turns a stored-valid ``--compilation-config {"mode":3}`` into
-    ``{mode:3}``, and vLLM then aborts at argv parse with
-    ``Invalid JSON: key must be a string``. Valid blobs are compacted first (so
-    a blob is a single whitespace-free word) and then split in non-POSIX mode,
-    which preserves the quote bytes verbatim — a lossless round trip.
-
-    Returns ``None`` when the string is not tokenizable at all, so callers can
-    leave the input untouched rather than guess.
-
-    Deliberately not :func:`tokenize_server_args_preserving_json`, which shares
-    the same tokenizing core but a different contract: it returns the tokens
-    raw for a caller that inspects them, and fails closed when a blob was split
-    by embedded whitespace. Rewriting a string means the wrappers must come off
-    (see :func:`_unwrap_shell_quotes`), and a removal must degrade to "leave it
-    alone" rather than reject the whole string — ``strip_benchmark_harness_flags``
-    routes every composed variant through here.
-    """
+    """Tokenize a server-arg string WITHOUT stripping JSON's inner double quotes."""
     try:
         tokens = shlex.split(_reserialize_json_blobs(text), posix=False)
     except ValueError:
@@ -175,36 +89,18 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
-    """Remove flag specs from a server-arg string.
-
-    ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
-    its following value when one is present; ``"--foo=bar"`` removes that exact
-    token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
-    unparseable inputs are left untouched rather than guessed.
-
-    Tokenization is quote-preserving (:func:`_split_args_preserving_json`), so
-    every flag this function does NOT remove survives byte-for-byte, JSON values
-    included. This matters far beyond explicit removals:
-    :func:`strip_benchmark_harness_flags` routes EVERY composed variant through
-    here with a non-empty denylist, so a lossy round trip would corrupt a
-    sibling ``--compilation-config`` even for a variant that removes nothing.
-    """
-    # Normalized up front as well as inside the tokenizer, so the
-    # nothing-to-remove early return below hands back the same shape a caller
-    # with a non-empty denylist would get. Invalid substrings are preserved
-    # byte-for-byte, and the pass is idempotent, so the second application
-    # inside :func:`_split_args_preserving_json` is a no-op.
+    """Remove flag specs from a server-arg string."""
+    # Normalized up front as well as inside the tokenizer, so the nothing-to-remove early return below hands back the
+    # same shape a caller with a non-empty denylist would get.
     args = _reserialize_json_blobs(str(server_args or "").strip())
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
-    # Non-POSIX split plus the wrapper strip: a plain operand written as
-    # ``--tool-call-parser 'kimi_k3'`` -- or ``--tool-call-parser='kimi_k3'`` --
-    # must not keep its quotes, because Magpie expands EXTRA_*_ARGS unquoted and
-    # they would reach argv literally. _unwrap_shell_quotes only touches
-    # whitespace-free content, and on a leading-dash token only the value side of
-    # the first ``=``, so a JSON blob (starts with ``{``/``[``) is never affected
-    # and token boundaries cannot shift.
+    # Non-POSIX split plus the wrapper strip: a plain operand written as ``--tool-call-parser 'kimi_k3'`` -- or
+    # ``--tool-call-parser='kimi_k3'`` -- must not keep its quotes, because Magpie expands EXTRA_*_ARGS unquoted and
+    # they would reach argv literally. _unwrap_shell_quotes only touches whitespace-free content, and on a
+    # leading-dash token only the value side of the first ``=``, so a JSON blob (starts with ``{``/``[``) is never
+    # affected and token boundaries cannot shift.
     tokens = _split_args_preserving_json(args)
     if tokens is None:
         return args
@@ -252,17 +148,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    # No re-serialisation on the way out: the tokens are already JSON-compacted
-    # and the non-POSIX split kept each one byte-for-byte, so re-joining the
-    # survivors cannot corrupt a sibling flag. After-the-fact re-quoting was
-    # never a workable alternative -- _repair_unquoted_json has to guess where
-    # the quotes went, and a value like ``["+fused_rms_norm_gated"]`` (whose
-    # ``+`` the heuristic cannot reconstruct) is unrecoverable once damaged.
+    # No re-serialisation on the way out: the tokens are already JSON-compacted and the non-POSIX split kept each one
+    # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
     return " ".join(out)
 
 
-# Serving-ineligible harness flags. Enroll here; compose_server_args strips them
-# from what a grid launches and _lift_to_current_best from what a KEEP persists.
+# Serving-ineligible harness flags.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
@@ -279,10 +170,7 @@ def compose_server_args(
     remove_args: Any = None,
     args_mode: str = "append",
 ) -> str:
-    """Compose inherited/base/variant args with optional remove/replace semantics.
-
-    Always applies :func:`strip_benchmark_harness_flags` to the result.
-    """
+    """Compose inherited/base/variant args with optional remove/replace semantics."""
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
         raw = merge_server_args(base_extra_args, variant_extra_args)
@@ -295,13 +183,7 @@ def compose_server_args(
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
     result = strip_benchmark_harness_flags(composed)
-    # Compare against the RAW inputs, not against ``composed``. The tripwire
-    # exists to catch a lossy round trip inside ``remove_server_args`` -- and
-    # ``composed`` is already that function's output, so damage done there makes
-    # the "before" side unparseable too, ``healthy_before`` False, and the
-    # tripwire silent on exactly the failure it was written for. The one or two
-    # earlier removal calls are inside the window now. Flags the removal specs
-    # deliberately dropped are not reported: the loop walks what survived.
+    # Compare against the RAW inputs, not against ``composed``.
     _warn_on_damaged_json_values(raw, result)
     return result
 
@@ -323,19 +205,7 @@ def _json_flag_values(args: str) -> dict[str, list[str]]:
 
 
 def _warn_on_damaged_json_values(before: str, after: str) -> None:
-    """Log loudly when composition turned a parseable JSON flag value unparseable.
-
-    This is a regression tripwire, not a repair. The composer damaged
-    ``--compilation-config`` for an entire optimization session by shlex
-    round-tripping it lossily: the value stayed a single shell word, so nothing
-    downstream looked wrong, and the only symptom was every variant server dying
-    at argv parse ~18s in while the baseline (which never routes through
-    :func:`compose_server_args`) ran clean for 4206s. The damage was silent
-    because ``_repair_unquoted_json`` "succeeded" on the sibling
-    ``--speculative-config`` and merely returned ``None`` for the one blob it
-    could not reconstruct. Emitting a loud, greppable line here converts that
-    class of failure from a multi-round mystery into one log grep.
-    """
+    """Log loudly when composition turned a parseable JSON flag value unparseable."""
     try:
         was = _json_flag_values(before)
         now = _json_flag_values(after)
@@ -361,39 +231,15 @@ def _parses_as_json(value: str) -> bool:
     return True
 
 
-# A JSON "bareword": an identifier-like token that appears where a double-quoted
-# JSON key or string value should be (letters/digits/underscore plus the ``.``,
-# ``/``, ``-`` common in model ids and paths). An optional leading ``+``/``-``
-# sign covers vLLM's custom-op toggles (``custom_ops:["+fused_rms_norm_gated"]``)
-# — without it the repair silently failed on exactly those values. A sign is
-# only accepted when a letter/underscore follows, so numbers (``-1``) and
-# ``true``/``false``/``null`` are still handled separately and stay unquoted.
+# A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
+# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths).
 _JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 
 
 def _repair_unquoted_json(blob: str) -> str | None:
-    """Best-effort repair of a JSON blob whose double quotes were stripped.
-
-    A shlex round-trip (``shlex.split`` then space-join without re-quoting)
-    strips the inner double quotes of a JSON-valued server arg, turning a
-    stored-valid ``{"method":"ngram"}`` into ``{method:ngram}`` — which vLLM's
-    ``json.loads`` rejects at boot. Re-quote bare object keys and bare string
-    values, then VALIDATE by parsing: return the compact valid-JSON string, or
-    ``None`` when it still does not parse (caller keeps the blob verbatim).
-
-    This is a narrowly scoped recovery heuristic for known JSON-valued server
-    flags after shlex damage, not a general parser for JSON-like syntax.
-
-    It is NOT the fix for the composer: :func:`remove_server_args` no longer
-    damages JSON in the first place (it tokenizes quote-preservingly). This
-    remains only as a recovery layer for strings that were already persisted in
-    damaged form by the earlier lossy round trip, or that arrive damaged from
-    another producer. Never rely on it for newly composed args — a blob is only
-    repairable when every stripped-quote value happens to be re-quotable, which
-    is not decidable in general.
-    """
+    """Best-effort repair of a JSON blob whose double quotes were stripped."""
 
     def _quote_value(m: "re.Match[str]") -> str:
         prefix, word = m.group(1), m.group(2)
@@ -414,22 +260,7 @@ def compact_json_server_args(
     server_args: str | None,
     framework: str | None,
 ) -> str:
-    """Normalize JSON-valued server args for unquoted Magpie expansion.
-
-    Magpie's scripts expand ``$EXTRA_*_ARGS`` UNQUOTED, so shell quote wrappers
-    stored by a prior ``shlex.join`` become literal argv bytes and separator
-    spaces inside JSON values are word-split. Re-serialising each valid JSON
-    object/array removes both hazards for every framework, including sglang
-    (the default when ``framework`` is missing).
-
-    JSON string values that themselves contain spaces cannot survive unquoted
-    expansion and are left intact rather than corrupted; callers must reject
-    those values before launch.
-
-    Empty strings and strings with no ``{``/``[`` are returned unchanged. Any
-    blob that does not parse (and cannot be safely repaired) retains its complete
-    original substring, including balanced shell wrappers.
-    """
+    """Normalize JSON-valued server args for unquoted Magpie expansion."""
     args = str(server_args or "").strip()
     if not args or ("{" not in args and "[" not in args):
         return args
@@ -437,16 +268,7 @@ def compact_json_server_args(
 
 
 def _reserialize_json_blobs(args: str) -> str:
-    """Normalize every JSON object/array while preserving invalid substrings.
-
-    Framework-agnostic core shared by :func:`compact_json_server_args`,
-    :func:`remove_server_args`, and the GBrain recipe sanitizer. Each balanced
-    ``{...}``/``[...]`` blob is re-serialised with compact separators; a blob
-    whose inner double quotes were stripped by an earlier shlex round-trip is
-    repaired via :func:`_repair_unquoted_json`. Directly-adjacent shell single
-    quotes are removed only when parsing or repair succeeds. Otherwise the full
-    original substring is retained byte-for-byte.
-    """
+    """Normalize every JSON object/array while preserving invalid substrings."""
     if "{" not in args and "[" not in args:
         return args
     out: list[str] = []
@@ -456,9 +278,6 @@ def _reserialize_json_blobs(args: str) -> str:
         ch = args[i]
         if ch in "{[":
             # A prior shlex.join can wrap a JSON token in shell single quotes.
-            # These args are later expanded from an environment variable
-            # without eval, so the wrappers become literal argv characters.
-            # Strip only directly-adjacent wrappers around the balanced blob.
             single_quote_wrapped = i > 0 and args[i - 1] == "'" and out and out[-1] == "'"
             # Walk to the balanced close, honouring quoted strings.
             depth = 0
@@ -490,15 +309,11 @@ def _reserialize_json_blobs(args: str) -> str:
             try:
                 rendered = json.dumps(json.loads(blob), separators=(",", ":"))
             except Exception:
-                # A prior shlex round-trip can strip the JSON double quotes,
-                # leaving an unquoted-bareword object (``{"m":"ngram"}`` ->
-                # ``{m:ngram}``) that vLLM's json.loads rejects at boot. Try to
-                # re-quote bare keys/values.
+                # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
+                # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
                 rendered = _repair_unquoted_json(blob)
             if rendered is None:
                 # Keep both wrappers when the content is not valid/repairable.
-                # The opening quote is already in ``out``; leave the closing
-                # quote for the next loop iteration.
                 out.append(blob)
                 i = j
             else:
@@ -512,22 +327,13 @@ def _reserialize_json_blobs(args: str) -> str:
     return "".join(out)
 
 
-# Flags whose values may be JSON or otherwise space-bearing. Kept public so the
-# coordinator and launch paths share one catalogue; JSON presence must NOT make
-# dedup abandon the entire arg string. Actual whitespace-bearing argv tokens are
-# detected by :func:`tokenize_server_args_preserving_json` and fail closed.
+# Flags whose values may be JSON or otherwise space-bearing.
 SPACE_VALUE_FLAGS = (
     "--json-model-override-args",
     "--override-generation-config",
     "--tool-call-parser",
-    # JSON-object-valued flags: after ``compact_json_server_args`` these are a
-    # single space-free shell word, but their value still contains inner double
-    # quotes (``{"cudagraph_mode":"PIECEWISE"}``). ``dedup_vllm_server_args``
-    # tokenizes with ``shlex.split`` (which STRIPS those quotes) and rejoins
-    # without re-quoting, corrupting the JSON to ``{cudagraph_mode:PIECEWISE}``
-    # -> vLLM boot fails with ``Invalid JSON``. Listing them here makes both
-    # dedup helpers leave the whole arg string untouched (round-trip safe), the
-    # same contract already relied on for the flags above.
+    # JSON-object-valued flags: after ``compact_json_server_args`` these are a single space-free shell word, but their
+    # value still contains inner double quotes (``{"cudagraph_mode":"PIECEWISE"}``).
     "--compilation-config",
     "--speculative-config",
     "--hf-overrides",
@@ -541,9 +347,8 @@ _MULTI_VALUE_FLAGS = (
     "--cuda-graph-max-bs",
 )
 
-# vLLM / atom argparse-style single-value options safe to collapse last-wins.
-# vLLM hard-errors on a duplicate / conflicting flag (e.g.
-# ``--attention-backend``); collapsing to last-wins keeps the variant override.
+# vLLM / atom argparse-style single-value options safe to collapse last-wins. vLLM hard-errors on a duplicate /
+# conflicting flag (e.g. ``--attention-backend``); collapsing to last-wins keeps the variant override.
 _VLLM_SINGLE_VALUE_FLAGS = frozenset(
     {
         "--attention-backend",
@@ -565,18 +370,7 @@ _VLLM_SINGLE_VALUE_FLAGS = frozenset(
 def tokenize_server_args_preserving_json(
     server_args: str | None,
 ) -> tuple[str, list[str]] | None:
-    """Tokenize server args without stripping JSON's inner double quotes.
-
-    Valid JSON blobs are normalized first, then ``shlex``'s non-POSIX mode keeps
-    their quote bytes intact. The unquoted ``EXTRA_*_ARGS`` transport cannot
-    represent an argv token containing whitespace; those inputs (including JSON
-    strings with spaces and quoted non-JSON values) return ``None`` so callers
-    can fail closed rather than silently changing token boundaries.
-
-    Returns:
-        ``(normalized_text, tokens)`` when every token is transport-safe;
-        otherwise ``None``.
-    """
+    """Tokenize server args without stripping JSON's inner double quotes."""
     normalized = _reserialize_json_blobs(str(server_args or "").strip())
     if not normalized:
         return "", []
@@ -585,8 +379,7 @@ def tokenize_server_args_preserving_json(
     except ValueError:
         return None
     for token in tokens:
-        # A balanced JSON value must remain one token. Non-zero depth at a token
-        # boundary means an embedded whitespace split it.
+        # A balanced JSON value must remain one token.
         depth = 0
         in_string = False
         escaped = False
@@ -608,9 +401,8 @@ def tokenize_server_args_preserving_json(
             return None
         if any(ch.isspace() for ch in token):
             return None
-        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with
-        # whitespace into edge-quoted pieces (``"my`` / ``parser"``). Reject
-        # any such edge, not only a token carrying both wrappers.
+        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with whitespace into edge-quoted pieces
+        # (``"my`` / ``parser"``).
         if token.startswith(("'", '"')) or token.endswith(("'", '"')):
             return None
     return normalized, tokens
@@ -620,28 +412,7 @@ def dedup_vllm_server_args(
     server_args: str | None,
     framework: str | None,
 ) -> str:
-    """Collapse repeated vLLM/atom single-value flags to last-wins.
-
-    vLLM crashes on duplicated single-value flags; sglang tolerates repeats, so
-    this is scoped to the vllm/atom framework envs and is a no-op for sglang.
-    Only the flags in :data:`_VLLM_SINGLE_VALUE_FLAGS` are touched; every other
-    token is preserved verbatim and in order. For each affected flag the LAST
-    occurrence wins, matching the override intent of :func:`merge_server_args`.
-
-    JSON values are treated as opaque, quote-preserving tokens while unrelated
-    duplicated flags are still collapsed. Returns ``server_args`` unchanged
-    when the framework is sglang, the string is empty, carries a multi-value
-    flag, or cannot be represented by Magpie's unquoted argv transport.
-
-    Args:
-        server_args (str | None): The server-arg string to dedupe.
-        framework (str | None): Framework name; matched case-insensitively
-            (sglang is a no-op).
-
-    Returns:
-        str: The deduped server-arg string, or the input unchanged when no
-        dedupe applies.
-    """
+    """Collapse repeated vLLM/atom single-value flags to last-wins."""
     args = str(server_args or "").strip()
     if not args:
         return args
@@ -687,19 +458,7 @@ def dedup_vllm_server_args(
 
 
 def _shell_safe_dedupe(args: str) -> str:
-    """Last-wins dedupe for single-token-valued flags only.
-
-    Collapses repeated ``--flag value`` (or ``--flag=value``) pairs whose value
-    is a single whitespace-free token, keeping the last occurrence. JSON values
-    remain opaque tokens; actual whitespace-bearing argv values fail closed.
-
-    Args:
-        args (str): The server-arg string to dedupe.
-
-    Returns:
-        str: The last-wins deduped string, or the input unchanged when it cannot
-        be represented by the unquoted argv transport.
-    """
+    """Last-wins dedupe for single-token-valued flags only."""
     if not args.strip():
         return ""
     if any(f in args for f in _MULTI_VALUE_FLAGS):
@@ -741,9 +500,8 @@ def _shell_safe_dedupe(args: str) -> str:
     return rendered if rendered != normalized else normalized
 
 
-# sglang scheduler watchdog timeout injection: the first request's JIT compile
-# can exceed sglang's default watchdog, firing SIGQUIT mid-warmup. Inject a
-# longer timeout unless the user already pinned one.
+# sglang scheduler watchdog timeout injection: the first request's JIT compile can exceed sglang's default watchdog,
+# firing SIGQUIT mid-warmup.
 DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC = 1800
 
 SGLANG_WATCHDOG_TIMEOUT_ENV = "SGLANG_WATCHDOG_TIMEOUT"
@@ -755,16 +513,7 @@ _SGLANG_WATCHDOG_RE = re.compile(r"--watchdog-timeout(?:[=\s]|$)")
 
 
 def resolve_sglang_watchdog_timeout() -> int:
-    """Resolve the sglang scheduler watchdog timeout in seconds.
-
-    Reads ``$SGLANG_WATCHDOG_TIMEOUT`` (integer seconds) and falls back to
-    :data:`DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC` when the env var is unset,
-    empty, non-integer, or non-positive. A malformed value logs a warning
-    and uses the default rather than crashing the YAML materialization.
-
-    Returns:
-        int: The resolved watchdog timeout in seconds.
-    """
+    """Resolve the sglang scheduler watchdog timeout in seconds."""
     raw = os.environ.get(SGLANG_WATCHDOG_TIMEOUT_ENV, "").strip()
     if not raw:
         return DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC
@@ -793,21 +542,7 @@ def inject_sglang_watchdog_timeout(
     server_args: str | None,
     framework: str | None,
 ) -> str:
-    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs.
-
-    Returns ``server_args`` unchanged when the framework is not sglang
-    (empty/unknown is treated as sglang) or the flag is already present.
-    Otherwise appends the value from :func:`resolve_sglang_watchdog_timeout`;
-    no other flag is touched.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-
-    Returns:
-        str: ``server_args`` with ``--watchdog-timeout`` appended, or unchanged
-        for non-sglang frameworks or when the flag is already present.
-    """
+    """Append ``--watchdog-timeout <N>`` to ``server_args`` for sglang runs."""
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args
@@ -817,10 +552,8 @@ def inject_sglang_watchdog_timeout(
     return merge_server_args(args, f"{_SGLANG_WATCHDOG_FLAG} {timeout}")
 
 
-# sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens``
-# off the model's ``max_position_embeddings``, so a huge native window balloons
-# the aiter workspace_buffer past GPU memory. Cap to ISL+OSL+headroom (floored,
-# clamped to the native window) unless the flag is already pinned.
+# sglang ``--context-length`` cap injection: sglang sizes ``max_total_tokens`` off the model's
+# ``max_position_embeddings``, so a huge native window balloons the aiter workspace_buffer past GPU memory.
 DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS = 2048
 
 DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS = 8192
@@ -842,18 +575,7 @@ _SGLANG_DUAL_CHUNK_BACKEND = "dual_chunk_flash_attn"
 
 
 def _resolve_nonneg_int_env(name: str, default: int) -> int:
-    """Read a non-negative integer env override, else return ``default``.
-
-    A blank/non-integer/negative value logs a warning and falls back to the
-    default rather than crashing the YAML materialization.
-
-    Args:
-        name (str): Environment variable name to read.
-        default (int): Fallback value when unset/invalid.
-
-    Returns:
-        int: The parsed non-negative integer, or ``default``.
-    """
+    """Read a non-negative integer env override, else return ``default``."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
@@ -879,20 +601,7 @@ def _resolve_nonneg_int_env(name: str, default: int) -> int:
 
 
 def resolve_sglang_context_cap(isl: int, osl: int) -> int:
-    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload.
-
-    Returns ``max(isl + osl + headroom, floor)`` (headroom / floor are
-    operator-tunable via ``$SGLANG_CONTEXT_HEADROOM_TOKENS`` /
-    ``$SGLANG_CONTEXT_FLOOR_TOKENS``). Caller clamps to the model's native
-    window before injecting.
-
-    Args:
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-
-    Returns:
-        int: ``max(isl + osl + headroom, floor)``.
-    """
+    """Resolve the sglang ``--context-length`` cap for an ISL+OSL workload."""
     headroom = _resolve_nonneg_int_env(
         SGLANG_CONTEXT_HEADROOM_ENV,
         DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
@@ -911,13 +620,7 @@ def validate_warm_replay_context_length(
     osl: int,
     max_model_len: int | str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Validate a replayed SGLang context window without changing its config.
-
-    Exact Recipe identities do not include workload shape. A champion may
-    therefore carry ``--context-length`` from a shorter run even though the
-    current ISL+OSL no longer fits. Compatible or absent pins are preserved
-    byte-for-byte; incompatible pins fail the replay preflight.
-    """
+    """Validate a replayed SGLang context window without changing its config."""
     args = str(server_args or "")
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args, {"status": "not_sglang"}
@@ -979,39 +682,7 @@ def inject_sglang_context_length(
     osl: int,
     max_model_len: int | str | None = None,
 ) -> str:
-    """Append ``--context-length <N>`` to ``server_args`` for sglang runs.
-
-    Returns ``server_args`` unchanged when the framework is not sglang
-    (empty/unknown treated as sglang), the flag is already present, or the
-    model's ``max_position_embeddings`` cannot be read. Otherwise appends
-    ``min(max_pos, max_model_len, cap)`` from :func:`resolve_sglang_context_cap`;
-    only this flag is added.
-
-    sglang sizes its window off ``--context-length`` (it does not honor
-    ``--max-model-len``), so without this clamp a workload cap above the run's
-    explicit ``--max-model-len`` would inject a self-contradictory config. The
-    ``max_model_len`` ceiling is applied only when it is a positive value.
-
-    Under ``HYPERLOOM_AGENTX`` the ISL/OSL cap is skipped entirely: the AgentX
-    corpus carries its own lengths and ISL/OSL are placeholders, so the window
-    is ``min(max_pos, max_model_len)``.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path used to read
-            ``max_position_embeddings``.
-        isl (int): Input sequence length.
-        osl (int): Output sequence length.
-        max_model_len (int | str | None): The run's explicit ``MAX_MODEL_LEN``
-            ceiling; clamps ``--context-length`` so it never exceeds it. Ignored
-            when unset, non-positive, or non-integer.
-
-    Returns:
-        str: ``server_args`` with ``--context-length`` appended, or unchanged
-        for non-sglang frameworks, when the flag is present, or when the model
-        window cannot be read.
-    """
+    """Append ``--context-length <N>`` to ``server_args`` for sglang runs."""
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args
@@ -1022,13 +693,9 @@ def inject_sglang_context_length(
     max_pos = _load_model_max_position_embeddings(str(model_path or ""))
     if not max_pos:
         return args
-    # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and
-    # the ISL+OSL+headroom ceiling (8192 at the 1024/1024 defaults) would pin
-    # sglang's window two orders of magnitude below what the corpus needs --
-    # every oversized trace then 4xxs. Corpus length is a property of the
-    # workload, not of a synthetic shape, so the cap does not apply; the model's
-    # own window, clamped by an explicit MAX_MODEL_LEN, is the only ceiling.
-    # Imported lazily: _workload_envs imports this module.
+    # AgentX replays a fixed trace corpus, so ISL/OSL are placeholders here and the ISL+OSL+headroom ceiling (8192 at
+    # the 1024/1024 defaults) would pin sglang's window two orders of magnitude below what the corpus needs -- every
+    # oversized trace then 4xxs.
     from ._workload_envs import agentx_enabled
 
     if agentx_enabled():
@@ -1045,21 +712,7 @@ def inject_sglang_context_length(
 
 
 def _resolve_dual_chunk_backend(gpu_type: str | None = None) -> str:
-    """Pick the dual-chunk attention backend for the current hardware.
-
-    ``dual_chunk_flash_attn`` is the only backend sglang accepts when the
-    model declares ``dual_chunk_attention_config``. It requires sm90+; on
-    AMD/ROCm the preflight gate blocks these models before they reach here.
-    Override via ``$HYPERLOOM_DUAL_CHUNK_BACKEND``.
-
-    Args:
-        gpu_type (str | None): Caller-known GPU type; accepted for parity but
-            the canonical backend is returned regardless.
-
-    Returns:
-        str: ``$HYPERLOOM_DUAL_CHUNK_BACKEND`` when set, else
-        ``dual_chunk_flash_attn``.
-    """
+    """Pick the dual-chunk attention backend for the current hardware."""
     override = os.environ.get("HYPERLOOM_DUAL_CHUNK_BACKEND", "").strip()
     if override:
         return override
@@ -1072,29 +725,7 @@ def inject_sglang_attention_backend(
     model_path: str | None,
     gpu_type: str | None = None,
 ) -> str:
-    """Append an ``--attention-backend`` for dual-chunk sglang models.
-
-    Models that declare ``dual_chunk_attention_config`` make sglang hard-reject
-    its default aiter backend. The backend is picked by
-    :func:`_resolve_dual_chunk_backend`; ``gpu_type`` (when known by the caller)
-    takes precedence over runtime autodetect.
-
-    Returns ``server_args`` unchanged when: framework is not sglang, an
-    ``--attention-backend`` is already pinned (operator wins), or the model
-    config has no dual-chunk block (fail-safe: inject nothing).
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path checked for a dual-chunk config.
-        gpu_type (str | None): Caller-known GPU type; takes precedence over
-            autodetect.
-
-    Returns:
-        str: ``server_args`` with ``--attention-backend`` appended, or unchanged
-        for non-sglang frameworks, when already pinned, or for non-dual-chunk
-        models.
-    """
+    """Append an ``--attention-backend`` for dual-chunk sglang models."""
     args = str(server_args or "").strip()
     if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
         return args
@@ -1116,26 +747,20 @@ def inject_sglang_attention_backend(
     )
 
 
-# sglang MoE runner backend injection: sglang's default routes MoE models
-# through aiter's CK 2-stage fused-MoE kernel, whose JIT build is broken in some
-# ROCm images. Inject the ROCm-capable ``triton`` backend for MoE models on AMD
-# unless the operator already pinned one. Override via
-# ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND``.
-HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV = "HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND"
-
-DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND = "triton"
-
+# sglang MoE runner backend: Hyperloom no longer forces a backend. sglang's own
+# ``--moe-runner-backend auto`` correctly follows ``SGLANG_USE_AITER`` (aiter
+# when the harness pre-shuffles MoE weights for it, triton otherwise) without
+# crashing on current sglang/ROCm images; verified end-to-end on a real MoE
+# checkpoint before this override was removed. ``moe_runner_requires_aiter``
+# below is still used to strip an *inherited* ``--moe-runner-backend`` that
+# would crash an aiter-only quant scheme (grid variants, baseline retries).
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
 
-# sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the
-# aiter backend (the others fall through to a bare ``pass``, so the first
-# forward pass dies on a missing ``runner``). Two are selected online through
-# ``--quantization`` rather than the checkpoint's own config: quark_int4fp8_moe
-# always, and mxfp4 only when the checkpoint is NOT mxfp4-serialized (sglang
-# then routes to its dynamic-quant MoE method, which is aiter-only too).
+# sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the aiter backend (the others fall through
+# to a bare ``pass``, so the first forward pass dies on a missing ``runner``).
 _AITER_ONLY_ONLINE_QUANT_METHODS = frozenset({"quark_int4fp8_moe"})
 
 _AITER_ONLY_UNLESS_SERIALIZED_QUANT_METHOD = "mxfp4"
@@ -1144,17 +769,7 @@ _SGLANG_QUANTIZATION_RE = re.compile(r"--quantization[=\s]+(\S+)")
 
 
 def _online_quant_requires_aiter_moe_runner(server_args: str, model_path: str) -> bool:
-    """Whether ``--quantization`` selects an aiter-only MoE scheme.
-
-    Args:
-        server_args (str): The server-arg string to read ``--quantization`` from.
-        model_path (str): Model path, used to tell a serialized mxfp4
-            checkpoint (which gets the backend-flexible method) from an online
-            dynamic-quant one.
-
-    Returns:
-        bool: ``True`` when the selected scheme only has an aiter MoE runner.
-    """
+    """Whether ``--quantization`` selects an aiter-only MoE scheme."""
     match = _SGLANG_QUANTIZATION_RE.search(server_args or "")
     if not match:
         return False
@@ -1170,86 +785,13 @@ def _online_quant_requires_aiter_moe_runner(server_args: str, model_path: str) -
 
 
 def moe_runner_requires_aiter(server_args: str | None, model_path: str | None) -> bool:
-    """Whether this model + server args resolve to an aiter-only MoE scheme.
-
-    Folds the two ways sglang can land on such a scheme: the checkpoint's own
-    Quark MX-FP4 config, and an online ``--quantization`` selection.
-
-    Args:
-        server_args (str | None): Server args, read for ``--quantization``.
-        model_path (str | None): Model path whose ``config.json`` is inspected.
-
-    Returns:
-        bool: ``True`` when only the aiter MoE runner can serve this model.
-    """
+    """Whether this model + server args resolve to an aiter-only MoE scheme."""
     from hyperloom.inference_optimizer.cli.model_gate import _model_moe_runner_requires_aiter
 
     path = str(model_path or "")
     return _model_moe_runner_requires_aiter(path) or _online_quant_requires_aiter_moe_runner(
         str(server_args or ""),
         path,
-    )
-
-
-def inject_sglang_moe_runner_backend(
-    server_args: str | None,
-    framework: str | None,
-    model_path: str | None,
-    gpu_type: str | None = None,
-) -> str:
-    """Append a ``--moe-runner-backend`` for MoE sglang models on AMD/ROCm.
-
-    Returns ``server_args`` unchanged when: framework is not sglang, a
-    ``--moe-runner-backend`` is already pinned (operator wins), the GPU is not
-    an AMD/ROCm runner, the model is not Mixture-of-Experts (fail-safe: inject
-    nothing), or the checkpoint carries a quant scheme only the aiter runner
-    implements. Otherwise appends the backend from
-    ``$HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND`` (default ``triton``); only this
-    flag is added.
-
-    Args:
-        server_args (str | None): The server-arg string to augment.
-        framework (str | None): Framework name; empty/unknown treated as sglang.
-        model_path (str | None): Model path checked for Mixture-of-Experts.
-        gpu_type (str | None): Caller-known GPU type; used to gate AMD/ROCm.
-
-    Returns:
-        str: ``server_args`` with ``--moe-runner-backend`` appended, or unchanged
-        for non-sglang frameworks, when already pinned, off AMD/ROCm, for
-        non-MoE models, or for aiter-only MoE quant schemes.
-    """
-    args = str(server_args or "").strip()
-    if server_args_env_name(framework) != "EXTRA_SGLANG_ARGS":
-        return args
-    if _SGLANG_MOE_RUNNER_BACKEND_RE.search(args):
-        return args
-    from hyperloom.inference_optimizer.cli.model_gate import _model_is_moe
-    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-
-    if not _resolve_amd_gpu_type(gpu_type):
-        return args
-    if not _model_is_moe(str(model_path or "")):
-        return args
-    # An aiter-only MoE scheme has no triton runner: injecting one crashes the
-    # server on the first forward pass. Let sglang resolve the backend itself.
-    if moe_runner_requires_aiter(args, str(model_path or "")):
-        log.info(
-            "MoE model with an aiter-only quant scheme: skipping "
-            "--moe-runner-backend injection (the triton runner has no "
-            "implementation for it)."
-        )
-        return args
-    backend = (
-        os.environ.get(HYPERLOOM_SGLANG_MOE_RUNNER_BACKEND_ENV, "").strip() or DEFAULT_SGLANG_AMD_MOE_RUNNER_BACKEND
-    )
-    log.info(
-        "MoE model on AMD/ROCm: injecting --moe-runner-backend %s (aiter CK "
-        "2-stage fused-MoE JIT build is broken in this image).",
-        backend,
-    )
-    return merge_server_args(
-        args,
-        f"{_SGLANG_MOE_RUNNER_BACKEND_FLAG} {backend}",
     )
 
 
@@ -1262,26 +804,7 @@ def apply_runtime_benchmark_overrides(
     conc: Any = None,
     agentx_mode: bool | None = None,
 ) -> dict[str, Any]:
-    """Apply runtime env/CLI overrides to a Magpie benchmark YAML.
-
-    Single shared path for baseline/profile and grid executors.
-    ``benchmark_script`` (must be pre-sanitized via :func:`sanitize_script_name`)
-    force-selects a specific Magpie script, applied AFTER the
-    ``gpu_type``-derived generic script so the operator pick wins.
-
-    Args:
-        bench (dict[str, Any]): The Magpie ``benchmark`` config to mutate.
-        model_path (str | None): Overrides ``benchmark.model`` when set.
-        gpu_type (str | None): Pins ``runner_type`` and the generic
-            ``{framework}_{gpu_type}.sh`` script.
-        benchmark_script (str | None): Pre-sanitized script name that
-            force-selects a Magpie script (applied last).
-        agentx_mode (bool | None): Explicit AgentX decision; when omitted, an
-            already-materialized AgentX script or the ambient env decides.
-
-    Returns:
-        dict[str, Any]: The mutated ``benchmark["envs"]`` mapping.
-    """
+    """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
     if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
         agentx_mode = True
 
@@ -1294,9 +817,8 @@ def apply_runtime_benchmark_overrides(
 
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
-        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's
-        # resolver doesn't fall through to InferenceX native scripts that
-        # ignore ``EXTRA_*_ARGS``.
+        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
+        # native scripts that ignore ``EXTRA_*_ARGS``.
         framework = str(bench.get("framework") or "").lower()
         if framework:
             bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
@@ -1306,19 +828,16 @@ def apply_runtime_benchmark_overrides(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
 
-    # AgentX switch on the shared rebuild path: without this, the gpu_type block
-    # above re-pins the synthetic {framework}_{gpu_type}.sh and silently reverts
-    # a materialize-time AgentX swap (grid/baseline/profile executors rebuild via
-    # this function). No-op when HYPERLOOM_AGENTX is off. Lazy import avoids a
-    # module-load cycle with _workload_envs.
+    # AgentX switch on the shared rebuild path: without this, the gpu_type block above re-pins the synthetic
+    # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
+    # rebuild via this function).
     from ._workload_envs import apply_agentx_switch, apply_scriptable_runtime_defaults
 
     apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs = bench.setdefault("envs", {})
-    # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare
-    # {framework}_{gpu_type}.sh over the bundled absolute path the materialize
-    # path resolved, so grid variants must re-apply the scriptable defaults.
+    # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the
+    # bundled absolute path the materialize path resolved, so grid variants must re-apply the scriptable defaults.
     apply_scriptable_runtime_defaults(
         bench,
         envs,
@@ -1329,8 +848,7 @@ def apply_runtime_benchmark_overrides(
         val = os.environ.get(env_key, "").strip()
         if not val:
             continue
-        # TP yaml-explicit wins: a stale state.tp must not downgrade a
-        # YAML-pinned TP.
+        # TP yaml-explicit wins: a stale state.tp must not downgrade a YAML-pinned TP.
         if env_key == "TP":
             yaml_tp = envs.get("TP")
             if yaml_tp not in (None, 0, "", "0"):

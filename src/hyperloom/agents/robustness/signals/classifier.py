@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run all signal rules and de-duplicate Symptoms.
-
-A single :data:`_SIGNAL_REGISTRY` declares every rule in evaluation order: its
-config slot, whether it is a pure evaluator or a stateful detector, the
-state-store slot for detectors, and any cross-entry kwargs. :meth:`Classifier.classify`
-walks the registry in order, then folds duplicates via ``Symptom.dedup_key()``
-(highest severity wins on ties). The registry is the single source both the
-classifier and :func:`factory.build_reactor_components` read, so the
-Config->SignalConfig wiring cannot drift from the run order.
-"""
+"""Run all signal rules and de-duplicate Symptoms."""
 
 from __future__ import annotations
 
@@ -22,7 +13,6 @@ from ..sources.base import SourceData
 from ..state_store import DetectorStateStore
 from .aiter_jit import AiterJitConfig, AiterJitDetector
 from .budget import BudgetConfig, evaluate_budget_signals
-from .conversation_progress import ConversationProgressConfig, evaluate_conversation_progress_signals
 from .crash import CrashConfig, evaluate_crash_signals
 from .critic_health import (
     CriticHealthConfig,
@@ -75,15 +65,7 @@ _TRACELENS_STATE_KEY: str = "tracelens_cli_latch"
 
 @dataclass(frozen=True)
 class SignalSpec:
-    """One row of the signal registry — a rule in the classifier pipeline.
-
-    Exactly one of ``evaluator`` / ``detector_cls`` is set:
-
-    * ``evaluator`` — a pure module-level ``evaluate_*`` function called as
-      ``evaluator(ctx, [data,] config=cfg, **extra)``.
-    * ``detector_cls`` — a stateful detector constructed once with its config
-      and a per-slot state view, then driven via ``.evaluate(ctx, data)``.
-    """
+    """One row of the signal registry — a rule in the classifier pipeline."""
 
     name: str
     config_attr: str | None
@@ -92,33 +74,18 @@ class SignalSpec:
     detector_cls: type | None = None
     state_view_key: str | None = None
     # Whether the stateless evaluator takes ``SourceData`` positionally.
-    # ``evaluate_budget_signals(ctx, *, config)`` does NOT — it is pure-context.
     needs_source_data: bool = True
-    # Produce extra kwargs for the evaluator from the live classifier, used for
-    # cross-entry injection (e.g. external_deps borrows the TraceLens latch).
+    # Produce extra kwargs for the evaluator from the live classifier, used for cross-entry injection (e.g.
+    # external_deps borrows the TraceLens latch).
     extra_kwargs_factory: "Callable[[Classifier], dict[str, Any]] | None" = None
 
 
 def _external_deps_extra_kwargs(classifier: "Classifier") -> dict[str, Any]:
-    """Inject the shared TraceLens CLI latch into ``evaluate_external_deps_signals``.
-
-    The latch is a configless one-shot helper owned by the classifier (so the rule
-    fires at most once per session); it is a sibling of the external_deps row
-    rather than its own signal.
-
-    Args:
-        classifier (Classifier): The live classifier holding the built latch.
-
-    Returns:
-        dict[str, Any]: The ``tracelens_latch`` kwarg for the evaluator.
-    """
+    """Inject the shared TraceLens CLI latch into ``evaluate_external_deps_signals``."""
     return {"tracelens_latch": classifier._tracelens_latch}  # noqa: SLF001 — same-module owner
 
 
-# The single ordered registry. ORDER IS PART OF THE CONTRACT: ``classify``
-# appends in this order and ``_dedup`` keeps the first-inserted symptom on an
-# equal-severity tie. ``kernel_pipeline`` intentionally appears via two rows
-# (stateful RayPendingDetector + stateless evaluator) sharing one config slot.
+# The single ordered registry.
 _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
     SignalSpec("stall", "stall", StallConfig, evaluator=evaluate_stall_signals),
     SignalSpec("crash", "crash", CrashConfig, evaluator=evaluate_crash_signals),
@@ -148,13 +115,6 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         "phase_budget",
         PhaseBudgetConfig,
         evaluator=evaluate_phase_budget_signals,
-        needs_source_data=False,
-    ),
-    SignalSpec(
-        "conversation_progress",
-        "conversation_progress",
-        ConversationProgressConfig,
-        evaluator=evaluate_conversation_progress_signals,
         needs_source_data=False,
     ),
     SignalSpec(
@@ -209,8 +169,8 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         CriticHealthConfig,
         evaluator=evaluate_critic_health_signals,
     ),
-    # Ray-pending is stateful; the other two live in the module helper — both
-    # driven off one KernelPipelineConfig slot.
+    # Ray-pending is stateful; the other two live in the module helper — both driven off one KernelPipelineConfig
+    # slot.
     SignalSpec(
         "ray_pending",
         "kernel_pipeline",
@@ -230,8 +190,7 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
         StateIntegrityConfig,
         evaluator=evaluate_state_integrity_signals,
     ),
-    # TraceLens CLI latch is owned by the classifier and injected here so it
-    # fires at most once per session.
+    # TraceLens CLI latch is owned by the classifier and injected here so it fires at most once per session.
     SignalSpec(
         "external_deps",
         "external_deps",
@@ -244,32 +203,20 @@ _SIGNAL_REGISTRY: tuple[SignalSpec, ...] = (
 
 @dataclass
 class Classifier:
-    """Compose the configured signal evaluators via :data:`_SIGNAL_REGISTRY`.
+    """Compose the configured signal evaluators via :data:`_SIGNAL_REGISTRY`."""
 
-    Rather than 19 typed config fields, the classifier takes a single
-    ``configs`` map keyed by ``SignalSpec.config_attr``; any slot the caller
-    omits falls back to the registry's default ``config_factory``. Stateful
-    rules are built once in :meth:`__post_init__` with their persistence views.
-    """
-
-    # Config slot overrides keyed by ``SignalSpec.config_attr``; omitted slots
-    # use the registry default. Built by ``factory.build_reactor_components``.
+    # Config slot overrides keyed by ``SignalSpec.config_attr``; omitted slots use the registry default.
     configs: Mapping[str, Any] = field(default_factory=dict)
     extra_evaluators: list[SignalEvaluator] = field(default_factory=list)
-    # Cross-tick persistence for stateful sub-detectors so they survive
-    # subprocess restarts; ``None`` keeps everything in-memory only.
+    # Cross-tick persistence for stateful sub-detectors so they survive subprocess restarts; ``None`` keeps everything
+    # in-memory only.
     state_store: "DetectorStateStore | None" = None
     _configs: dict[str, Any] = field(init=False, repr=False)
     _detectors: dict[str, Any] = field(init=False, repr=False)
     _tracelens_latch: TraceLensCliFiredOnce = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Resolve the config map and construct the stateful sub-detectors.
-
-        Each config slot resolves to the caller override or the registry
-        default. Each detector receives a per-name state view from
-        ``state_store`` (or ``None`` for in-memory operation).
-        """
+        """Resolve the config map and construct the stateful sub-detectors."""
         store = self.state_store
         self._configs = {}
         for spec in _SIGNAL_REGISTRY:
@@ -294,29 +241,11 @@ class Classifier:
 
     @property
     def signal_configs(self) -> dict[str, Any]:
-        """Resolved config slot map (override-or-default per registry entry).
-
-        Returns:
-            dict[str, Any]: A copy of the resolved ``config_attr -> config``
-                map; covers every distinct registry config slot.
-        """
+        """Resolved config slot map (override-or-default per registry entry)."""
         return dict(self._configs)
 
     def classify(self, data: SourceData, ctx: ReactorContext) -> list[Symptom]:
-        """Run every registered signal in order and return de-duplicated symptoms.
-
-        Walks :data:`_SIGNAL_REGISTRY` (stateful detectors + pure evaluators),
-        appends any ``extra_evaluators``, then folds duplicates via
-        :func:`_dedup`.
-
-        Args:
-            data (SourceData): Collected source data for this tick.
-            ctx (ReactorContext): Reactor context for this tick.
-
-        Returns:
-            list[Symptom]: De-duplicated symptoms ordered by severity (HIGH
-                first) then name and subject.
-        """
+        """Run every registered signal in order and return de-duplicated symptoms."""
         symptoms: list[Symptom] = []
         for spec in _SIGNAL_REGISTRY:
             symptoms.extend(self._run_spec(spec, ctx, data))
@@ -330,16 +259,7 @@ class Classifier:
         ctx: ReactorContext,
         data: SourceData,
     ) -> list[Symptom]:
-        """Invoke one registry entry and return its symptoms.
-
-        Args:
-            spec (SignalSpec): The registry row to run.
-            ctx (ReactorContext): Reactor context for the current tick.
-            data (SourceData): Collected source data for the current tick.
-
-        Returns:
-            list[Symptom]: Symptoms emitted by the detector / evaluator.
-        """
+        """Invoke one registry entry and return its symptoms."""
         if spec.detector_cls is not None:
             return self._detectors[spec.name].evaluate(ctx, data)
         evaluator = spec.evaluator
@@ -356,15 +276,7 @@ class Classifier:
 
 
 def _dedup(symptoms: list[Symptom]) -> list[Symptom]:
-    """Collapse symptoms sharing a dedup key, keeping the highest severity.
-
-    Args:
-        symptoms (list[Symptom]): Raw symptoms from all evaluators.
-
-    Returns:
-        list[Symptom]: De-duplicated symptoms sorted by descending severity,
-            then name, then subject.
-    """
+    """Collapse symptoms sharing a dedup key, keeping the highest severity."""
     by_key: dict[tuple[str, ...], Symptom] = {}
     for sym in symptoms:
         key = sym.dedup_key()

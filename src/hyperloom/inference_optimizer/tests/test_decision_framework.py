@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Decision-framework regression tests.
-
-Covers the Coordinator-owned kernel and gemm lanes mirroring their results into
-``shared_state``, the native-source guards and batch selection in the
-run_optimization handler, and the retirement of kernels stuck in
-PARTIAL.
-"""
+"""Decision-framework regression tests."""
 
 from __future__ import annotations
 
@@ -91,10 +85,7 @@ async def test_trace_analyze_does_not_record_kernel_opt(
 async def test_run_gemm_tuning_response_records_to_shared_state(
     session_dir,
 ):
-    """``run_gemm_tuning`` is a Coordinator-owned lane the model can no longer
-    REQUEST (the intent path denies it), so the recording is exercised on the
-    live entrypoint every dispatch converges on: ``_handle_gemm_tuning_result``
-    records the result and persists the state."""
+    """``run_gemm_tuning`` is a Coordinator-owned lane the model can no longer REQUEST (the intent path denies it), so the recording is exercised on the live entrypoint every dispatch converges on: ``_handle_gemm_tuning_result`` records the result and persists the state."""
     c = Coordinator(session_dir, backends=_silent_backends())
     try:
         c.shared_state.kernel_optimizer = "native"
@@ -117,8 +108,8 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
             }
         )
 
-        # The E2E validator rewrites the stored result to its measured outcome,
-        # and the history keeps exactly one row for the one dispatch.
+        # The E2E validator rewrites the stored result to its measured outcome, and the history keeps exactly one row
+        # for the one dispatch.
         last = c.shared_state.last_gemm_tuning
         assert last["status"] == "complete"
         assert last["best_speedup"] == 1.2

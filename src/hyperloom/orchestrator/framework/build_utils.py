@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reusable, injectable build utilities for off-loop targeted builds.
-
-All subprocess calls go through injectable ``run`` shims so every function can
-be tested without a GPU or compiler.  No PATH is hard-coded.
-"""
+"""Reusable, injectable build utilities for off-loop targeted builds."""
 
 from __future__ import annotations
 
@@ -16,9 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-# ---------------------------------------------------------------------------
 # Argv safety
-# ---------------------------------------------------------------------------
 
 _UNSAFE_TOKENS: frozenset[str] = frozenset({";", "&&", "||", "|", ">", ">>", "<", "<<", "`"})
 _UNSAFE_CHARS_RE = re.compile(r"[;&|`$<>\r\n]")
@@ -26,18 +20,7 @@ _SHELL_NAMES: frozenset[str] = frozenset({"bash", "dash", "sh", "zsh", "ksh"})
 
 
 def coerce_build_argv(cmd: list[str] | str | None) -> list[str]:
-    """Return a safe argv list; reject shell strings and control operators.
-
-    Args:
-        cmd: The raw build command (list, shell-style string, or None).
-
-    Returns:
-        list[str]: The coerced argv, empty when *cmd* is falsy.
-
-    Raises:
-        ValueError: If shell operators, control chars, or a ``sh -c`` pattern
-            are detected.
-    """
+    """Return a safe argv list; reject shell strings and control operators."""
     if not cmd:
         return []
     if isinstance(cmd, str):
@@ -59,9 +42,7 @@ def coerce_build_argv(cmd: list[str] | str | None) -> list[str]:
     return argv
 
 
-# ---------------------------------------------------------------------------
 # Injectable subprocess runner
-# ---------------------------------------------------------------------------
 
 _RunCallable = Callable[..., Any]
 
@@ -107,9 +88,7 @@ def run_argv(
         return RunResult(returncode=-1, timed_out=True, command=list(argv), cwd=str(cwd))
 
 
-# ---------------------------------------------------------------------------
 # ROCm torch constraint file
-# ---------------------------------------------------------------------------
 
 _TORCH_HIP_PROBE = (
     "import sys, importlib.metadata; "
@@ -130,15 +109,7 @@ def write_rocm_torch_constraints(
     *,
     run: _RunCallable = subprocess.run,
 ) -> str:
-    """Write a pip constraint file pinning the installed ROCm torch (and triton).
-
-    Probes the interpreter for ``torch.version.hip``; raises
-    :class:`AbiMismatchError` when torch is a CUDA / CPU build.
-
-    Raises:
-        AbiMismatchError: If torch is not a ROCm build.
-        RuntimeError: If the torch version cannot be determined.
-    """
+    """Write a pip constraint file pinning the installed ROCm torch (and triton)."""
     # Check ROCm
     hip_res = run(
         [python_exe, "-c", _TORCH_HIP_PROBE],
@@ -174,9 +145,7 @@ def write_rocm_torch_constraints(
     return str(constraint_path)
 
 
-# ---------------------------------------------------------------------------
 # ROCm toolchain alignment check
-# ---------------------------------------------------------------------------
 
 
 def check_rocm_toolchain_alignment(
@@ -184,20 +153,7 @@ def check_rocm_toolchain_alignment(
     env: Mapping[str, str] | None = None,
     run: _RunCallable = subprocess.run,
 ) -> tuple[bool, str]:
-    """Advisory ROCm toolchain probe.
-
-    Returns ``ok=False`` only when hipcc is present and its
-    ``hip/hip_runtime_api.h`` lacks ``hipDeviceAttributePciChipId`` (a
-    ROCm-7.x-era symbol); a missing hipcc is warn-only, and the ROCM_PATH
-    comparison is computed but discarded.
-
-    Args:
-        env: Environment to use for subprocess calls (``None`` inherits process env).
-        run: Injectable runner.
-
-    Returns:
-        tuple[bool, str]: ``(ok, message)`` — ``ok=False`` means fatal.
-    """
+    """Advisory ROCm toolchain probe."""
     import os
 
     effective_env = dict(env) if env is not None else dict(os.environ)
@@ -247,9 +203,7 @@ def check_rocm_toolchain_alignment(
     return True, "ok"
 
 
-# ---------------------------------------------------------------------------
 # Torch ABI probe
-# ---------------------------------------------------------------------------
 
 _ABI_PROBE = (
     "import sys, json, importlib.metadata, torch; "
@@ -268,15 +222,7 @@ def probe_torch_abi(
     *,
     run: _RunCallable = subprocess.run,
 ) -> dict[str, Any]:
-    """Return torch/Python ABI facts from the given interpreter.
-
-    Args:
-        python_exe: Python interpreter path to probe.
-        run: Injectable runner.
-
-    Returns:
-        dict: Keys ``torch_version``, ``hip_version``, ``python_version``, ``is_rocm``.
-    """
+    """Return torch/Python ABI facts from the given interpreter."""
     import json
 
     res = run([python_exe, "-c", _ABI_PROBE], capture_output=True, text=True, timeout=30)
@@ -289,23 +235,11 @@ def probe_torch_abi(
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
 
 
-# ---------------------------------------------------------------------------
 # Version-sorted tag list (sort -V -r equivalent for autoselect)
-# ---------------------------------------------------------------------------
 
 
 def sort_tags_desc(tags: list[str] | tuple[str, ...]) -> list[str]:
-    """Return *tags* in descending version order (newest first).
-
-    Mirrors ``git tag -l 'v*' | sort -V -r``.  Non-version-like tags are
-    placed last.
-
-    Args:
-        tags: Iterable of git tag strings.
-
-    Returns:
-        list[str]: Tags sorted newest-first.
-    """
+    """Return *tags* in descending version order (newest first)."""
     import packaging.version  # available via pip; already a transitive dep
 
     def _key(t: str):

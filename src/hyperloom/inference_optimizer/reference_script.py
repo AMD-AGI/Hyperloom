@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Reference launch-recipe parsing and rendering.
-
-A *reference recipe* is an operator-supplied launch script (local path or URL).
-The optimizer lifts its **static, fully-resolved** server flags plus the
-``export`` lines the denylist allows, and uses them as the lowest-priority base
-for the baseline server args (the optimisation phase can still override). The shell is never
-executed — anything dynamic (``$VARS``: TP/CONC/ISL/OSL/model/port) is skipped,
-because the optimizer's normal env seeding already owns those.
-"""
+"""Reference launch-recipe parsing and rendering."""
 
 from __future__ import annotations
 
@@ -24,8 +16,8 @@ from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_s
 
 log = logging.getLogger(__name__)
 
-# Flags that never belong in the lifted base: the optimizer's env seeding owns
-# the workload + I/O, so drop these even when fully resolved.
+# Flags that never belong in the lifted base: the optimizer's env seeding owns the workload + I/O, so drop these even
+# when fully resolved.
 _DROP_FLAGS = frozenset(
     {
         "--port",
@@ -131,8 +123,7 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a
-    source that cannot be read or shell-parsed."""
+    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a source that cannot be read or shell-parsed."""
     text = _read_source(source)
 
     envs = _extract_envs(text)
@@ -180,11 +171,7 @@ _SELF_DEFAULT_RE = re.compile(r"^\$\{([A-Za-z_][A-Za-z0-9_]*):?-(.*)\}$")
 
 
 def _resolve_self_default(key: str, val: str) -> str | None:
-    """Return the literal default of ``${key:-default}``, else ``None``.
-
-    Only the *self*-referential form counts: ``export FOO=${BAR:-1}`` depends on
-    an unrelated variable, so its default is not FOO's effective value here.
-    """
+    """Return the literal default of ``${key:-default}``, else ``None``."""
     m = _SELF_DEFAULT_RE.match(val)
     if not m or m.group(1) != key:
         return None
@@ -196,13 +183,7 @@ def _extract_server_args(
     tokens: list[str],
     framework: str,
 ) -> tuple[str, str | None]:
-    """Walk entrypoint tokens as (flag, value) pairs; keep static flags only.
-
-    Returns ``(server_args, model_basename_or_None)``. A flag whose value
-    contains ``$`` is dropped together with its value (no orphan flags). The
-    positional model and drop-listed flags are removed from ``server_args`` but
-    the model is captured for caller-side model-gating.
-    """
+    """Walk entrypoint tokens as (flag, value) pairs; keep static flags only."""
     tokens = _strip_redirection(tokens)
     # Skip the entrypoint prefix itself.
     fw = str(framework or "").strip().lower()
@@ -274,9 +255,13 @@ def _extract_server_args(
     return " ".join(kept), model
 
 
-# git -C resolves a relative patch path against the target tree, not the caller,
-# so the script dir is baked in.
-_APPLY_PATCH_FUNC = """\
+#: ``vcs`` value of a framework root with no version control of its own.
+#: Duplicates ``orchestrator.bringup.trees.VCS_NONE``, which this layer cannot
+#: import without inverting the package layering.
+VCS_NONE = "none"
+
+# git -C resolves a relative patch path against the target tree, not the caller, so the script dir is baked in.
+_APPLY_PATCH_GIT = """\
 apply_patch() {
   local patch_file="$SCRIPT_DIR/$1"
   for lvl in 1 0 2 3 4 5 6 7 8; do
@@ -288,6 +273,34 @@ apply_patch() {
   echo "ERROR: could not apply $patch_file at any strip level" >&2
   return 1
 }"""
+
+# For a root with no git of its own -- an installed wheel -- where ``git
+# apply`` has nothing to run against.
+_APPLY_PATCH_NO_GIT = """\
+apply_patch() {
+  local patch_file="$SCRIPT_DIR/$1"
+  for lvl in 1 0 2 3 4 5 6 7 8; do
+    if patch -p"$lvl" --fuzz=0 --dry-run -d "$FRAMEWORK_ROOT" -i "$patch_file" >/dev/null 2>&1; then
+      patch -p"$lvl" --fuzz=0 -d "$FRAMEWORK_ROOT" -i "$patch_file"
+      return 0
+    fi
+  done
+  echo "ERROR: could not apply $patch_file at any strip level" >&2
+  return 1
+}"""
+
+
+def _apply_patch_func(framework_root_vcs: str) -> str:
+    """Return the ``apply_patch`` helper that matches the target tree's kind.
+
+    Args:
+        framework_root_vcs: The framework root's vcs discriminant. Only
+            :data:`VCS_NONE` selects the POSIX ``patch`` channel.
+
+    Returns:
+        str: The shell function body.
+    """
+    return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
 
 
 def render_reference_script(
@@ -301,44 +314,11 @@ def render_reference_script(
     gpu_type: str | None = None,
     setup_commands: list[str] | None = None,
     framework_root: str | None = None,
+    framework_root_vcs: str = "",
     runtime: str | None = None,
     rounds: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render a runnable ``*.sh`` artifact from a launch recipe.
-
-    With only the base parameters, renders the ``current_setting.sh`` summary
-    for the current optimization best. When ``setup_commands``, ``framework_root``
-    or ``rounds`` are supplied, renders an ``enablement_setting.sh`` that
-    additionally installs dependencies, replays the accepted enablement rounds,
-    and launches the server.
-
-    Args:
-        framework: Framework identifier (``sglang``, ``vllm``, ``atom``, …).
-        server_args: Extra server-arg CLI fragment.
-        envs: Extra environment variable exports (values containing shell
-            variable references are skipped).
-        model: Model path, emitted as ``export MODEL=<path>`` so the launch line
-            can reference ``$MODEL``.  A bare basename is emitted as a comment
-            instead, since it cannot be launched.
-        tp: Tensor-parallel degree, emitted as ``export TP=<n>``.
-        max_model_len: Context length cap, emitted as ``export MAX_MODEL_LEN=<n>``.
-        gpu_type: GPU type string, emitted as ``export GPU_TYPE=<s>``.
-        setup_commands: Ordered install commands to run before launching.
-            Only emit when generating an enablement artifact.
-        framework_root: Framework source tree root where patches are applied.
-            Emitted as ``export FRAMEWORK_ROOT=<path>`` and used in the
-            ``apply_patch`` helper. Required for a round carrying patches.
-        runtime: If non-empty, a note is appended warning that this enablement
-            round relied on an isolated attempt venv at the given path and the
-            script does not reproduce that layer.
-        rounds: Accepted enablement rounds in order, each
-            ``{"patches": [...], "artifacts": [...]}`` with script-relative
-            paths. A round's patches precede its artifacts, matching the order
-            integrate_patch applied them.
-
-    Returns:
-        The script text, always terminated by a newline.
-    """
+    """Render a runnable ``*.sh`` artifact from a launch recipe."""
     fw = str(framework or "sglang").strip().lower()
     has_enablement = bool(setup_commands or framework_root or rounds)
 
@@ -355,8 +335,8 @@ def render_reference_script(
     if exported_model:
         lines.append(f"export MODEL={shlex.quote(str(model))}")
     elif model:
-        # A bare basename cannot be launched; the parser records one when the
-        # operator recipe named the model without a path.
+        # A bare basename cannot be launched; the parser records one when the operator recipe named the model without
+        # a path.
         lines.append(f"# model: {model}")
     if has_enablement and not exported_model:
         # The launch line dereferences $MODEL, which set -u would kill first.
@@ -372,8 +352,7 @@ def render_reference_script(
     for k, v in (envs or {}).items():
         if not str(k).strip() or _has_var(str(v)):
             continue
-        # The artifact is archived and uploaded, so a credential-shaped value is
-        # named but never written out.
+        # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
         if is_secret_shaped_env_name(k):
             lines.append(f"# export {k}=<redacted; supply manually>")
         else:
@@ -393,7 +372,7 @@ def render_reference_script(
     if rounds:
         if any(rnd.get("patches") for rnd in rounds):
             lines.append("")
-            lines.append(_APPLY_PATCH_FUNC)
+            lines.append(_apply_patch_func(framework_root_vcs))
         for rnd in rounds:
             if rnd.get("patches"):
                 lines.append("")

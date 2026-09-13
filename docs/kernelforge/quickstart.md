@@ -223,24 +223,19 @@ The result file:
 
 ## Step 5: Learn from the experiment
 
-When a campaign finishes it runs its own postmortem — pitfalls from regressions, optimizations from improvements — and reports what it kept:
+Every iteration is appended to the run's experience ledger in the workspace, so
+the agent carries what it already tried into the next round instead of
+rediscovering it:
 
 ```
-  Lessons learned: 3
-  Transfer rules discovered: 1
+forge_experiments/forge_experience.md    # what the agent reads back
+forge_experiments/experience.jsonl       # the machine-readable record
 ```
 
-The lesson documents land under the backend's `learned/` directory in the writable
-knowledge base — `$KERNELFORGE_PROJECT_ROOT/knowledge_base`, defaulting to
-`~/.cache/hyperloom/kernelforge/knowledge_base` — and the (config, performance)
-pairs go to the tuning database:
-
-```
-knowledge_base/triton/learned/optimization_BLOCK_N_256.md
-knowledge_base/triton/learned/methodology_Plateau_at_0480_ms.md
-```
-
-Next time a campaign runs on a similar kernel, these lessons are automatically injected into the agent's prompt.
+When a run ends, its best solution and the measurements behind it are published
+to the knowledge base through the experience store. A later run on a similar
+kernel reads those records back (`read_best_solution` / `read_top_solutions`)
+and warm-starts from them rather than from a blank prompt.
 
 ## Step 6: Optimize your own kernel
 

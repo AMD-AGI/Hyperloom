@@ -1,25 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Give the forge-loop a git workspace over a framework tree, owning none of it.
-
-The loop keeps and reverts with ``git add -u`` and ``git restore``, which only
-see TRACKED files, and its commits are its deliverable: it expects a workspace
-it may write history into. Fusion cannot hand it a copy, because the benchmark
-and the serving gate import the framework from its real install path, so it
-edits the live tree and isolates the git side instead.
-
-``git init --separate-git-dir`` leaves a one-line ``.git`` pointer file in the
-tree and keeps every object under the run's output directory, so git resolves
-the shadow from the tree itself and the location never reaches a child process.
-A tree that already owns ``.git`` (an editable checkout) cannot take a pointer
-without losing its own repository, so that case routes through
-``GIT_DIR``/``GIT_WORK_TREE`` instead, which the agent does inherit.
-
-Only the framework package is indexed. An installed framework sits beside
-gigabytes of unrelated wheels, and the exclude that keeps them out of the index
-also keeps git from walking them when it looks for untracked files.
-"""
+"""Give the forge-loop a git workspace over a framework tree, owning none of it."""
 
 from __future__ import annotations
 
@@ -40,9 +22,7 @@ _GIT_TIMEOUT_SEC = 120
 #: unnamed, ``main`` or ``master`` branch, and a fresh repository is on one.
 SHADOW_BRANCH = "forge-fusion"
 
-# Whitelist: exclude every top-level entry, then re-admit the indexed ones. Git
-# will not descend into an excluded directory, so re-admitting the directory
-# itself is what makes this work. Artifact patterns come last to apply inside it.
+# Whitelist: exclude every top-level entry, then re-admit the indexed ones.
 _EXCLUDE_HEADER = "/*\n"
 _EXCLUDE_ARTIFACTS = "".join(f"{glob}\n" for glob in runtime_gitignore_globs())
 
@@ -63,14 +43,7 @@ def _relative(root: Path, path: str) -> str:
 
 
 def _index_scope(repo_root: str, source_file: str) -> str:
-    """The one entry under ``repo_root`` worth indexing: the framework package.
-
-    Taken as the first path component of ``source_file`` relative to
-    ``repo_root``, so a PEP 420 namespace package resolves like a conventional
-    one. That prefix is also what a canonical KB source path is anchored to,
-    which keeps a diff taken here applicable where the KB later replays it.
-    Returns "" when the source does not live under the root.
-    """
+    """The one entry under ``repo_root`` worth indexing: the framework package."""
     if not repo_root or not source_file:
         return ""
     try:
@@ -82,13 +55,7 @@ def _index_scope(repo_root: str, source_file: str) -> str:
 
 @dataclass
 class ShadowRepo:
-    """A git repository over the framework tree whose history nobody else owns.
-
-    ``root`` is the work tree and what the loop receives as ``--workspace``;
-    ``git_dir`` holds every object and ref, under the run's output directory.
-    ``pointer_path`` is the ``.git`` file this wrote, removed on disposal; it is
-    empty on the editable-checkout path, where ``env`` carries GIT_DIR instead.
-    """
+    """A git repository over the framework tree whose history nobody else owns."""
 
     root: str
     git_dir: str
@@ -98,12 +65,7 @@ class ShadowRepo:
     pointer_path: str = ""
 
     def reset_to_base(self) -> bool:
-        """Put the framework tree back as the campaign found it.
-
-        ``clean`` takes no pathspec because the exclude file lists only cache
-        directories safe to leave behind; artefacts that affect measurement
-        (compiled extensions, build output) are tracked and restored by reset.
-        """
+        """Put the framework tree back as the campaign found it."""
         for args in (("reset", "--hard", "-q", self.base_commit), ("clean", "-fdq")):
             result = _git(self.root, *args, env=self.env)
             if result.returncode != 0:
@@ -117,13 +79,7 @@ class ShadowRepo:
         return True
 
     def dispose(self) -> None:
-        """Drop the repository, and the placeholders the author never wrote into.
-
-        Only the EMPTY placeholders: one with content holds a fused kernel the
-        export still has to read, and the run's own restore removes those after.
-        A leftover git dir is inert scratch under the output directory, and this
-        runs in a ``finally`` where raising would mask the campaign's own error.
-        """
+        """Drop the repository, and the placeholders the author never wrote into."""
         for path in self.created_paths:
             target = Path(path)
             if target.is_file() and target.stat().st_size == 0:
@@ -136,18 +92,7 @@ class ShadowRepo:
 def ensure_git_workspace(
     repo_root: str, source_file: str, *, git_dir: str, extra_paths: tuple[str, ...] = ()
 ) -> ShadowRepo | None:
-    """Build a repository over ``repo_root`` whose git data lives in ``git_dir``.
-
-    ``extra_paths`` are files the campaign must find already TRACKED -- the
-    placeholder the author writes its fused kernel into. Each is created empty,
-    overwriting whatever a crashed earlier run left there, because the loop
-    stages a keep with ``git add -u`` and a file untracked at the base commit
-    can never enter a commit, so the kept state would not match what was
-    benchmarked.
-
-    Returns None when no workspace could be established, which the caller must
-    treat as "the loop cannot keep or revert here".
-    """
+    """Build a repository over ``repo_root`` whose git data lives in ``git_dir``."""
     if not repo_root or not Path(repo_root).is_dir():
         return None
     scope = _index_scope(repo_root, source_file)
@@ -158,9 +103,8 @@ def ensure_git_workspace(
     root = Path(repo_root).resolve()
     git_path = Path(git_dir)
     pointer = root / ".git"
-    # --separate-git-dir MOVES an existing repository into the target, and
-    # dispose() would then delete the developer's history, so a tree that owns
-    # .git is routed through the environment the agent inherits instead.
+    # --separate-git-dir MOVES an existing repository into the target, and dispose() would then delete the developer's
+    # history, so a tree that owns .git is routed through the environment the agent inherits instead.
     detached = pointer.exists()
     if detached:
         log.warning(
@@ -178,9 +122,8 @@ def ensure_git_workspace(
             placeholder = Path(path)
             placeholder.parent.mkdir(parents=True, exist_ok=True)
             placeholder.write_text("", encoding="utf-8")
-        # A placeholder normally sits inside the package the scope admits, but a
-        # framework whose source is directly in the export root has no such
-        # package, so each is named too.
+        # A placeholder normally sits inside the package the scope admits, but a framework whose source is directly in
+        # the export root has no such package, so each is named too.
         indexed = list(dict.fromkeys([scope, *(_relative(root, p) for p in extra_paths)]))
 
         # The exclude goes into the git dir, which only exists once init has run.
@@ -197,8 +140,7 @@ def ensure_git_workspace(
             ("config", "user.name", "forge-fuse"),
             ("add", "--", *indexed),
             ("commit", "-q", "-m", "fusion baseline", "--no-gpg-sign"),
-            # After the commit, so the branch points at it and not at an unborn
-            # HEAD. ``git init -b`` needs a newer git than this runs on.
+            # After the commit, so the branch points at it and not at an unborn HEAD.
             ("checkout", "-q", "-b", SHADOW_BRANCH),
             ("rev-parse", "HEAD"),
         ):

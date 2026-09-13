@@ -121,19 +121,12 @@ def read_controller_result(
 
 
 def record_controller_llm_usage(*, result: dict[str, Any], session_dir: Path) -> int:
-    """Append one ``llm_calls`` row per forge-loop the Controller ran.
-
-    The Controller is a child process and cannot reach Hyperloom's ledger while
-    it runs, so it records what each operator's forge-loop spent in its durable
-    state and the spend is filed once the child is gone. Returns how many rows
-    were appended.
-
-    Best-effort: a trace write must never fail a KERNEL phase that already
-    produced patches.
-    """
-    rows = result.get("forge_llm_usage")
-    if not isinstance(rows, list):
-        return 0
+    """Append one ``llm_calls`` row per model call the Controller paid for."""
+    rows: list[Any] = []
+    for key in ("forge_llm_usage", "analysis_llm_usage"):
+        listed = result.get(key)
+        if isinstance(listed, list):
+            rows.extend(listed)
     appended = 0
     for row in rows:
         if not isinstance(row, dict):

@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Regression tests for the k001/k002 identity dedup in untried_hot_reusable_kernels.
-
-When a trace carries no ``task_groups`` metadata, every hot-kernel row degenerates
-to its own synthetic id. One physical CK GEMM then shows up under several ids
-(k001/k002) with identical (source_file, name, gpu_pct). Before the fix, rejecting
-the id that was actually attempted (k001) left its twin (k002) forever "untried",
-so kernel_work_pending() never went False and KERNEL_AGENT spun until the wall
-cap. The identity dedup collapses the twins so a single rejection retires both.
-"""
+"""Regression tests for the k001/k002 identity dedup in untried_hot_reusable_kernels."""
 
 from __future__ import annotations
 
@@ -38,8 +30,8 @@ def _hot(kid, *, name, src="model.py", gpu_pct=47.8):
 
 
 def test_twin_ids_collapse_when_one_is_rejected():
-    # k001 and k002 are the SAME kernel (identical src/name/gpu_pct). k001 was
-    # attempted and rejected; k002 must NOT resurface as untried.
+    # k001 and k002 are the SAME kernel (identical src/name/gpu_pct). k001 was attempted and rejected; k002 must NOT
+    # resurface as untried.
     hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="gemm_a8w8")]
     attempts = {
         "k001": {
@@ -57,8 +49,7 @@ def test_twin_ids_collapse_when_one_is_rejected():
 
 
 def test_distinct_kernels_are_not_collapsed():
-    # Different name => different identity => NOT the same kernel. Rejecting k001
-    # must leave the genuinely-distinct k002 still owing an attempt.
+    # Different name => different identity => NOT the same kernel.
     hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="attention_fwd")]
     attempts = {
         "k001": {
@@ -76,17 +67,7 @@ def test_distinct_kernels_are_not_collapsed():
 
 
 def test_an_op_fanout_sibling_retires_with_its_representative():
-    # Op fanout: two different operations over one file. The batch filter
-    # dispatches the stronger one and reports the other as
-    # ``opfanout_merged_into``, which means no backend ever saw it and so writes
-    # no ledger row of its own. The representative's row records the merge, and
-    # that is what retires the sibling: without it k002 owes an attempt no
-    # dispatch will ever make, kernel_work_pending() never goes False, and
-    # KERNEL redispatches the entry batch every tick while ``report`` stays
-    # forbidden -- the same spin the identity dedup closes, reached through the
-    # dispatcher instead of through synthetic ids. The identity key cannot see
-    # it: op fanout is by definition several *different* operations, so name and
-    # gpu_pct both differ.
+    # Op fanout: two different operations over one file.
     hot = [
         _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
         _hot("k002", name="attention_fwd", gpu_pct=7.0),
@@ -108,10 +89,7 @@ def test_an_op_fanout_sibling_retires_with_its_representative():
 
 
 def test_a_sibling_the_representative_did_not_cover_still_owes_an_attempt():
-    # The retirement follows the recorded merge, not the shared file. Two ops in
-    # one file that the dispatcher never merged are two units of work, which is
-    # what several real-session regressions in test_shared_state_kernel_opt.py
-    # depend on.
+    # The retirement follows the recorded merge, not the shared file.
     hot = [
         _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
         _hot("k002", name="attention_fwd", gpu_pct=7.0),
@@ -132,8 +110,7 @@ def test_a_sibling_the_representative_did_not_cover_still_owes_an_attempt():
 
 
 def test_no_attempts_all_untried_but_deduped():
-    # No attempts at all: both twins collapse to a single untried entry (one
-    # kernel, one attempt owed), not two.
+    # No attempts at all: both twins collapse to a single untried entry (one kernel, one attempt owed), not two.
     hot = [_hot("k001", name="gemm_a8w8"), _hot("k002", name="gemm_a8w8")]
     state = _state(hot)
 
@@ -143,9 +120,8 @@ def test_no_attempts_all_untried_but_deduped():
 
 
 def test_geometry_only_shape_excluded_from_untried():
-    # A reusable kernel with a resolved source but shape_dispatchable=False
-    # (geometry-only provenance) fails the kernel-opt gate, so it must never
-    # enter the untried queue and spin KERNEL_AGENT.
+    # A reusable kernel with a resolved source but shape_dispatchable=False (geometry-only provenance) fails the
+    # kernel-opt gate, so it must never enter the untried queue and spin KERNEL_AGENT.
     geom = _hot("k001", name="combine_kernel")
     geom["shape_dispatchable"] = False
     ok = _hot("k002", name="gemm_a8w8")
@@ -157,8 +133,8 @@ def test_geometry_only_shape_excluded_from_untried():
 
 
 def test_missing_shape_dispatchable_field_stays_untried():
-    # TraceLens path never emits shape_dispatchable; absent field must be treated
-    # as dispatchable so the main path is not regressed.
+    # TraceLens path never emits shape_dispatchable; absent field must be treated as dispatchable so the main path is
+    # not regressed.
     hot = [_hot("k001", name="gemm_a8w8")]  # no shape_dispatchable key
     state = _state(hot)
 

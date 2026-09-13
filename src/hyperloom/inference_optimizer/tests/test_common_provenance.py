@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the shared provenance builder (hyperloom.common.provenance).
-
-All hermetic: env is injected as a dict and ``probe=False`` disables every
-subprocess/package/marker probe, so no ROCm/git/pkg presence is assumed.
-"""
+"""Unit tests for the shared provenance builder (hyperloom.common.provenance)."""
 
 from __future__ import annotations
 
@@ -117,12 +113,7 @@ def test_gfx_env_normalized_and_fallback():
 
 
 def test_gfx_ignores_build_target_env():
-    """PYTORCH_ROCM_ARCH names compile targets, not the installed device.
-
-    Both shapes were wrong on an MI355X: the multi-arch list resolved to its
-    first entry (gfx90a, MI200), and a single-valued vendor-image setting was
-    wrong while looking plausible. Either must fall through to the probe.
-    """
+    """PYTORCH_ROCM_ARCH names compile targets, not the installed device."""
     build_list = {"PYTORCH_ROCM_ARCH": "gfx90a;gfx942;gfx950;gfx1100"}
     assert detect_gfx_arch(build_list, probe=False) is None
     assert detect_gfx_arch({"PYTORCH_ROCM_ARCH": "gfx942"}, probe=False) is None
@@ -131,13 +122,7 @@ def test_gfx_ignores_build_target_env():
 
 
 def test_gfx_resolves_from_gpu_type_without_probing():
-    """--gpu-type answers the question rocminfo would, and is always present.
-
-    Excluding PYTORCH_ROCM_ARCH left detection resting entirely on rocminfo,
-    which is not on PATH after either install script -- so bare-metal nodes went
-    from a wrong arch to no arch. gpu_type is fixed for the session and already
-    the KB's hardware dimension, so it resolves without shelling out at all.
-    """
+    """--gpu-type answers the question rocminfo would, and is always present."""
     assert detect_gfx_arch({}, gpu_type="mi355x", probe=False) == "gfx950"
     assert detect_gfx_arch({}, gpu_type="MI300X", probe=False) == "gfx942"
     # The session env carries it too, when args are not threaded through.
@@ -258,8 +243,8 @@ def test_detect_image_from_marker(monkeypatch):
 
 
 def test_detect_image_probe_false_skips_markers(monkeypatch):
-    # probe=False must be hermetic: no marker reads even if a marker would match
-    # (else provenance becomes host-dependent and non-reproducible for hashing).
+    # probe=False must be hermetic: no marker reads even if a marker would match (else provenance becomes
+    # host-dependent and non-reproducible for hashing).
     def _boom(p):
         raise AssertionError("marker file must not be read when probe=False")
 
@@ -296,16 +281,7 @@ def test_code_revision_falls_back_when_git_absent(monkeypatch):
 
 
 def _installed(venv_root, name: str, version: str) -> str:
-    """A distribution installed under ``venv_root`` and nowhere this process looks.
-
-    Builds the ``bin/python -> python3.12 -> <base>`` symlink chain a real venv
-    has, so a lookup that resolves the interpreter path lands on the base
-    prefix (``/usr``) instead of the venv and finds no ``site-packages``. A
-    fixture of plain non-existent paths cannot catch that: ``Path.resolve()``
-    does not follow symlinks that are not there.
-
-    Returns the interpreter path preflight would publish for that venv.
-    """
+    """A distribution installed under ``venv_root`` and nowhere this process looks."""
     site = venv_root / "lib" / "python3.12" / "site-packages"
     info = site / f"{name}-{version}.dist-info"
     info.mkdir(parents=True)
@@ -318,10 +294,7 @@ def _installed(venv_root, name: str, version: str) -> str:
 
 
 def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
-    """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel
-    pins its own torch. The orchestrator's interpreter cannot see that venv, so
-    without following the interpreter preflight resolved, every bare-metal vLLM
-    report recorded the framework it actually served with as "unknown"."""
+    """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel pins its own torch."""
     python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
     fp = _prov.detect_stack_fingerprint(
         {"HYPERLOOM_RESOLVED_FRAMEWORK": "vllm", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": python_exe}, probe=True
@@ -343,13 +316,7 @@ def test_an_operator_pin_still_wins_over_the_resolved_interpreter(tmp_path):
 
 
 def test_an_interpreter_whose_prefix_yields_nothing_falls_back(tmp_path):
-    """No ``site-packages`` under the prefix means the derivation failed.
-
-    A system prefix keeps packages in ``dist-packages`` and a vanished venv has
-    no tree at all; treating either as an authoritative empty answer would
-    report "unknown" for a framework this process can see. Only a prefix that
-    really yields ``site-packages`` speaks for the run.
-    """
+    """No ``site-packages`` under the prefix means the derivation failed."""
     fp = _prov.detect_stack_fingerprint(
         {
             "HYPERLOOM_RESOLVED_FRAMEWORK": "vllm",
@@ -361,10 +328,7 @@ def test_an_interpreter_whose_prefix_yields_nothing_falls_back(tmp_path):
 
 
 def test_a_real_venv_without_the_distribution_is_authoritative(tmp_path):
-    """A resolved venv that genuinely lacks the package must not be papered over.
-
-    This process may well have its own copy, but the run is not served by it.
-    """
+    """A resolved venv that genuinely lacks the package must not be papered over."""
     venv_root = tmp_path / "vllm-venv"
     (venv_root / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
     bin_dir = venv_root / "bin"
@@ -382,13 +346,7 @@ def test_a_real_venv_without_the_distribution_is_authoritative(tmp_path):
 
 
 def test_an_installer_venv_root_is_not_consulted(tmp_path):
-    """Provenance records a resolution, it does not perform one.
-
-    ``$VLLM_VENV_ROOT`` is host state the installer only ever writes, so on its
-    own it cannot say whether that tree still holds vLLM. Preflight leads its
-    candidate list with it and probes it; only that outcome is published here.
-    Reading the raw variable would be a second, weaker discovery path.
-    """
+    """Provenance records a resolution, it does not perform one."""
     root = tmp_path / "installer-venv"
     _installed(root, "vllm", "0.27.1+rocm723")
     fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
@@ -405,14 +363,7 @@ def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
 
 
 def test_the_lever_is_what_came_back_not_what_was_asked_for():
-    """A config deliverable is a config lever, whoever dispatched it.
-
-    Observed on a real MI355X session: the local-exploration arm asked for a
-    source patch and the specialist returned ``--max-num-batched-tokens``. It
-    was recorded as a framework source lesson with an empty ``changed_files``,
-    and had it been kept, the source arm would have been credited for a
-    configuration win.
-    """
+    """A config deliverable is a config lever, whoever dispatched it."""
     from hyperloom.inference_optimizer.breakdown.agent_ownership import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
@@ -439,11 +390,7 @@ def test_the_lever_is_what_came_back_not_what_was_asked_for():
 
 
 def test_an_explicit_stamp_still_outranks_the_derivation():
-    """Callers that do know the lever keep saying so.
-
-    An upstream PR carries server args in its integrate params on the way to
-    the bench; the fetched diff is still what it moves.
-    """
+    """Callers that do know the lever keep saying so."""
     from hyperloom.inference_optimizer.breakdown.agent_ownership import (
         LEVER_UPSTREAM_PR,
         patch_lever_kind,

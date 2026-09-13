@@ -16,8 +16,8 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 
 
-# Derived, not copied: a hand-maintained list goes stale silently when a domain
-# is added, and fails en masse when one is removed.
+# Derived, not copied: a hand-maintained list goes stale silently when a domain is added, and fails en masse when one
+# is removed.
 _DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS))
 
 
@@ -107,32 +107,28 @@ def _rich_inputs(**overrides):
         warm_start_lessons=[
             {
                 "confidence": 0.9,
-                "attrs": {
-                    "statement": "enable cudagraph",
-                    "measured_impact": {
-                        "gain_pct": 5.0,
-                        "throughput_after": 100.0,
-                        "stack_depth_at_apply": 2,
-                        "measured_at": "2026-01-02T00:00:00",
-                    },
-                    "validated_count": 3,
-                    "source_session_ids": ["s1", "s2"],
-                    "framework_version": "0.6.1",
+                "statement": "enable cudagraph",
+                "measured_impact": {
+                    "gain_pct": 5.0,
+                    "throughput_after": 100.0,
+                    "stack_depth_at_apply": 2,
+                    "measured_at": "2026-01-02T00:00:00",
                 },
+                "validated_count": 3,
+                "source_session_ids": ["s1", "s2"],
+                "framework_version": "0.6.1",
             },
-            {"attrs": {}},  # filtered
+            {},  # filtered
         ],
         warm_start_pitfalls=[
             {
                 "confidence": 0.8,
-                "attrs": {
-                    "description": "do not enforce eager",
-                    "severity": "high",
-                    "validated_count": 2,
-                    "source_session_id": "s9",
-                },
+                "description": "do not enforce eager",
+                "severity": "high",
+                "validated_count": 2,
+                "source_session_id": "s9",
             },
-            {"attrs": {}},  # filtered
+            {},  # filtered
         ],
         framework_source_roots=("/src/vllm",),
         source_hint_directories=("/src/vllm/v1",),
@@ -168,9 +164,7 @@ def test_cold_start_directive():
 
 
 def test_cold_start_does_not_ask_for_a_field_the_safety_gate_forbids():
-    """It used to direct the fallback proposals to carry ``confidence: low`` --
-    a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped
-    the guard on exactly the round where it was the only source of ideas."""
+    """It used to direct the fallback proposals to carry ``confidence: low`` -- a field in FORBIDDEN_PROPOSAL_FIELDS -- so a compliant specialist tripped the guard on exactly the round where it was the only source of ideas."""
     inp = SpecialistPromptInputs(
         task_id="t",
         domain=get_domain("serving_specialist"),
@@ -252,3 +246,7 @@ def test_format_version_note_empty_when_same_or_unknown():
     assert _format_version_note(inp, {}) == ""
     note = _format_version_note(inp, {"framework_version": "0.9"})
     assert "0.9" in note
+
+
+class TestTheAgentXWorkloadBranch:
+    """A specialist on an agentic replay must not be handed the ISL/OSL knobs: they are inert placeholders there."""

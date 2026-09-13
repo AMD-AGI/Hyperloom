@@ -1,24 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ask an agent to author a tuner from a mandate.
+"""Ask an agent to author one tuner from a mandate.
 
-``kernelforge.llm`` is imported inside the call, never at module scope. The standalone
-wheel is meant to be the only thing a GPU box has to install to tune, and a test
-asserts it imports with no ``kernelforge`` present; pulling an agent provider
-in at import time would quietly make the LLM stack a tuning dependency. Absent,
-this returns "unavailable" and the caller carries on without a generated tuner,
-which is the same outcome as the gate being closed.
-
-The agent writes one file and is told what it will be judged on. It is not shown
-the existing tuners: the point of this tier is a capability nothing else has, and
-a script derived from one that does is either the wrong shape or evidence the
-gate should not have opened.
+The optional LLM dependency is imported lazily. Writable sessions run in an
+isolated git worktree so the guard can snapshot and roll back the generated file.
 """
 
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +20,9 @@ from .mandate import TunerMandate
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 1800
+
+#: Allow backend discovery and script authoring; ``timeout_s`` remains the hard limit.
+MAX_AUTHORING_TURNS = 120
 
 _SYSTEM_PROMPT = """\
 You author one GPU kernel tuning script, to a fixed contract, and nothing else.
@@ -90,25 +85,18 @@ def generate_tuner(
     timeout_s: int = DEFAULT_TIMEOUT_S,
     retry_note: str = "",
 ) -> GeneratedTuner:
-    """Author a tuner script into ``work_dir``; never raises.
-
-    Args:
-        mandate: What the script has to cover and produce.
-        work_dir: Sandbox directory; the agent may only write here.
-        model: Provider model override, or "" for the configured default.
-        timeout_s: Wall clock for the authoring session.
-        retry_note: Why the previous attempt was rejected, when retrying.
-    """
+    """Author a tuner script into ``work_dir``; never raises."""
     work_dir.mkdir(parents=True, exist_ok=True)
     script_path = work_dir / "tuner.py"
 
     try:
-        from kernelforge.agent_backends.base import AgentRunSpec
+        from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
         from kernelforge.agent_backends.registry import (
             create_registered_backend,
             resolve_agent_runtime,
             select_default_agent_provider,
         )
+        from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
     except ImportError as exc:
         return GeneratedTuner(
             False,
@@ -118,15 +106,24 @@ def generate_tuner(
         )
 
     try:
-        # ``resolve_agent_runtime`` needs a provider name; picking one is a
-        # separate step that also checks the CLI is actually installed. Passing
-        # the model lets a Codex model route to Codex rather than to whichever
-        # backend happens to be registered first.
+        # ``resolve_agent_runtime`` needs a provider name; picking one is a separate step that also checks the CLI is
+        # actually installed.
         chosen = select_default_agent_provider(model)
-        runtime = resolve_agent_runtime(chosen.name, model=model, timeout_sec=timeout_s)
+        runtime = resolve_agent_runtime(
+            chosen.name,
+            # The model variable is per-provider, so it is only readable once
+            # the provider is settled.
+            model=model or resolve_agent_model(chosen.name),
+            timeout_sec=timeout_s,
+            reasoning_effort=resolve_agent_reasoning_effort(),
+        )
         backend = create_registered_backend(runtime)
     except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")
+
+    isolated = _isolate(work_dir)
+    if isolated is not None:
+        return isolated
 
     spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
@@ -134,6 +131,9 @@ def generate_tuner(
         cwd=str(work_dir),
         writable=True,
         timeout_sec=timeout_s,
+        # Pre-approve tools because unattended sessions cannot answer permission
+        # prompts; shell access is required to enumerate installed kernel ids.
+        tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True, max_turns=MAX_AUTHORING_TURNS),
         target_files=[str(script_path)],
         allow_untracked=True,
     )
@@ -146,15 +146,56 @@ def generate_tuner(
     provider = str(getattr(backend, "name", "") or "")
     session = str(getattr(result, "session_id", "") or "")
     if not script_path.is_file():
+        # Preserve the agent's explanation for diagnosis and the next retry.
+        said = " ".join(str(getattr(result, "text", "") or "").split())[-600:]
         return GeneratedTuner(
             False,
             None,
-            f"the session ended ({getattr(result, 'end_reason', '?')}) without writing {script_path.name}",
+            f"the session ended ({getattr(result, 'end_reason', '?')}) without writing {script_path.name}"
+            + (f"; it said: {said}" if said else "; it said nothing"),
             provider,
             session,
         )
     log.info("tier3: %s authored %s", provider or "agent", script_path)
     return GeneratedTuner(True, script_path, "", provider, session)
+
+
+def _isolate(work_dir: Path) -> GeneratedTuner | None:
+    """Initialize ``work_dir`` as its own git repository for workspace safety.
+
+    This provides a local baseline and rollback target without exposing an
+    enclosing operator checkout. Return an error or None.
+    """
+    if (work_dir / ".git").exists():
+        return None
+    steps = (
+        ("init", "-q"),
+        ("config", "user.email", "tier3@kernelforge.invalid"),
+        ("config", "user.name", "kernelforge tier3"),
+        # A baseline commit, so rollback has something to roll back to.
+        ("commit", "-q", "--allow-empty", "-m", "empty sandbox"),
+    )
+    for args in steps:
+        try:
+            done = subprocess.run(
+                ["git", *args],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return GeneratedTuner(False, None, f"could not prepare a sandbox worktree: git {args[0]}: {exc}")
+        if done.returncode != 0:
+            detail = (done.stderr or done.stdout or "").strip()[:300]
+            return GeneratedTuner(
+                False,
+                None,
+                f"could not prepare a sandbox worktree: git {args[0]} failed: {detail}",
+            )
+    log.info("tier3: initialised a sandbox worktree at %s for the authoring session", work_dir)
+    return None
 
 
 def _run(backend: Any, spec: Any) -> Any:

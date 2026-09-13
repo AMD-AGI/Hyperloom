@@ -1,36 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Top-level orchestration for the external baseline comparison step.
-
-The :func:`analyze` entry point is the **only** function the action
-executor calls; everything else here is helper code kept module-local
-so the executor file stays tiny.
-
-Flow:
-
-1. Map the local model path to a canonical InferenceX API name. Miss →
-   return a ``BaselineSummary`` with ``status="skipped"``.
-2. Fetch the model's benchmark rows live from the InferenceX API and keep
-   only rows whose ``hardware`` / ``isl`` / ``osl`` (and ``precision`` when
-   supplied) match our run. Unknown GPU / no shape match / API failure →
-   ``status="no_match"``. Every reference number is thus API-measured, never
-   LLM-authored.
-3. Project each matched row into a ``BaselinePoint``; pick the best per-GPU
-   throughput row as ``best`` and record every concurrency (deduplicated,
-   sorted by conc) for the report.
-4. Materialise the summary to disk:
-
-   * ``target_analysis/target_baseline.json`` — machine-readable
-   * ``target_analysis/target_analysis_report.md`` — short human note
-
-   and, on success, a measured ``competitor_target.json`` (``source`` = the
-   live API URL) so the advisory gap is driven by real InferenceX
-   data rather than any LLM-authored estimate.
-
-All paths derived via :mod:`session_paths` — no hand-rolled string
-concatenation under the session dir.
-"""
+"""Top-level orchestration for the external baseline comparison step."""
 
 from __future__ import annotations
 
@@ -52,30 +23,6 @@ from .types import BaselinePoint, BaselineQuery, BaselineSummary
 
 
 # --- InferenceX model name mapping -------------------------------------------
-#
-# InferenceX (https://inferencex.semianalysis.com) refers to models by short
-# human names (``MiniMax-M2.5``, ``DeepSeek-R1-0528``), but local weights
-# typically live at HuggingFace-style paths like
-# ``/models/MiniMaxAI-MiniMax-M2.5``. The mapping below owns that
-# translation.
-#
-# Hard rules:
-#
-# * The mapping is **best-effort**. When we are not confident, we return
-#   ``None`` and the caller gracefully skips target_analysis. Never raise.
-# * The known-models list is hardcoded here (it changes ~monthly) so name
-#   mapping stays offline and deterministic; we never hit ``/filters``.
-#   (The measured rows themselves DO come from a live
-#   ``/benchmarks?model=<name>`` GET in ``analyze``, bounded by
-#   ``INFERENCEX_TIMEOUT_SEC`` / ``INFERENCEX_MAX_ATTEMPTS``.)
-# * Matching is case-insensitive; vendor prefixes from common HF repo
-#   conventions (``MiniMaxAI-``, ``deepseek-ai-``, ``meta-llama-``, ...) are
-#   stripped before comparison.
-#
-# If you add a new model to the upstream you must add it here. Nothing validates
-# this list against the InferenceX API, and the unit tests in
-# ``src/hyperloom/inference_optimizer/tests/test_baseline_comparison.py`` only
-# smoke-check the tuple's size — drift is silent.
 
 KNOWN_INFERENCEX_MODELS: tuple[str, ...] = (
     "DeepSeek-R1-0528",
@@ -96,29 +43,7 @@ _VENDOR_PREFIX_RE = re.compile(
 
 
 def to_inferencex_name(model_path_or_name: str) -> str | None:
-    """Translate a local path / HF repo string into an InferenceX display name.
-
-    Returns the canonical name from :data:`KNOWN_INFERENCEX_MODELS` if a
-    match is found, ``None`` otherwise. Caller treats ``None`` as
-    "skip target_analysis for this run" — never as an error.
-
-    Matching algorithm:
-
-    1. Take the basename (``Path.name``).
-    2. Try a case-insensitive exact match against the known list first, so
-       canonical names that themselves begin with a vendor-like token (e.g.
-       ``DeepSeek-R1-0528``, ``Qwen-3.5-397B-A17B``) are not mangled.
-    3. Otherwise strip a leading vendor prefix and match again, which handles
-       HF-style paths like ``MiniMaxAI-MiniMax-M2.5``.
-
-    Args:
-        model_path_or_name (str): A local weights path, HuggingFace repo
-            string, or bare model name to translate.
-
-    Returns:
-        str | None: The canonical InferenceX display name when a confident
-            match is found, otherwise ``None``.
-    """
+    """Translate a local path / HF repo string into an InferenceX display name."""
     if not model_path_or_name:
         return None
     raw = str(model_path_or_name).strip()
@@ -128,9 +53,8 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
     candidate = Path(raw).name if ("/" in raw or "\\" in raw) else raw
     stripped = _VENDOR_PREFIX_RE.sub("", candidate, count=1)
 
-    # Try the full candidate before the vendor-stripped form: several canonical
-    # InferenceX names start with a token the prefix regex would strip
-    # (``DeepSeek-``, ``Qwen-``), so stripping first would break exact matches.
+    # Try the full candidate before the vendor-stripped form: several canonical InferenceX names start with a token
+    # the prefix regex would strip (``DeepSeek-``, ``Qwen-``), so stripping first would break exact matches.
     for needle in (candidate.casefold(), stripped.casefold()):
         for known in KNOWN_INFERENCEX_MODELS:
             if known.casefold() == needle:
@@ -140,16 +64,7 @@ def to_inferencex_name(model_path_or_name: str) -> str | None:
 
 
 def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
-    """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo.
-
-    Args:
-        points (list[BaselinePoint]): Candidate points, possibly with
-            duplicate ``(conc, decode_tp)`` combos.
-
-    Returns:
-        list[BaselinePoint]: Best point per ``(conc, decode_tp)``,
-            sorted by those two keys.
-    """
+    """Keep the highest ``tput_per_gpu`` per (conc, decode_tp) combo."""
     best: dict[tuple[int, int], BaselinePoint] = {}
     for p in points:
         key = (p.conc, p.decode_tp)
@@ -160,17 +75,7 @@ def _dedup_by_conc(points: list[BaselinePoint]) -> list[BaselinePoint]:
 
 
 def _format_report_md(summary: BaselineSummary) -> str:
-    """Render a human-readable markdown summary of the external-baseline lookup.
-
-    Intentionally avoids printing a gap percentage — the contract is
-    "facts only, no derived KPI".
-
-    Args:
-        summary (BaselineSummary): The summary to render.
-
-    Returns:
-        str: The markdown report text (newline-terminated).
-    """
+    """Render a human-readable markdown summary of the external-baseline lookup."""
     q = summary.query
     lines: list[str] = []
     lines.append(f"# Target analysis — external baseline ({summary.status})")
@@ -237,21 +142,7 @@ def _persist(
     *,
     session_dir: Path,
 ) -> tuple[Path, Path]:
-    """Write JSON + MD into ``<session_dir>/target_analysis/``.
-
-    Uses :mod:`session_paths` for path computation. Returns the
-    ``(json_path, md_path)`` tuple so the executor can surface them
-    on the bus event.
-
-    Args:
-        summary (BaselineSummary): The analysis artefact to serialise.
-        session_dir (Path): Session root under which the
-            ``target_analysis/`` output directory is created.
-
-    Returns:
-        tuple[Path, Path]: The ``(json_path, md_path)`` of the written
-            JSON and Markdown report files.
-    """
+    """Write JSON + MD into ``<session_dir>/target_analysis/``."""
     from ..session.session_paths import (
         target_analysis_dir,
         target_analysis_report_md,
@@ -271,20 +162,7 @@ def _persist(
 
 
 def _row_to_point(row: dict[str, Any]) -> BaselinePoint | None:
-    """Project one raw InferenceX benchmark record into a ``BaselinePoint``.
-
-    The API reports latencies in **seconds** under ``metrics`` (``mean_ttft``
-    / ``mean_tpot`` / ``mean_e2el``); they are converted to milliseconds here.
-    Returns ``None`` when the record has no ``metrics`` or a non-positive
-    ``tput_per_gpu`` (numeric sanity gate).
-
-    Args:
-        row: A single raw benchmark record from the InferenceX API.
-
-    Returns:
-        A ``BaselinePoint`` built from the record, or ``None`` when it has no
-        usable positive ``tput_per_gpu``.
-    """
+    """Project one raw InferenceX benchmark record into a ``BaselinePoint``."""
     if not isinstance(row, dict):
         return None
     metrics = row.get("metrics")
@@ -311,24 +189,7 @@ def _write_measured_competitor_target(
     points: list[BaselinePoint],
     source: str,
 ) -> bool:
-    """Persist a measured ``competitor_target.json`` (``source`` = live API URL).
-
-    This is the advisory feed: the gap block reads this file, so
-    writing only API-measured rows here guarantees optimization direction is
-    guided by real InferenceX numbers, never LLM-authored estimates. The
-    interactivity field mirrors ``gap_analysis``' own ``1000 / tpot_ms``
-    convention. Never raises; returns ``False`` when nothing was written.
-
-    Args:
-        session_dir: Session directory to write the target into.
-        query: The resolved comparison query (gpu / model / framework /
-            precision recorded on the target).
-        points: The deduplicated measured reference points.
-        source: Provenance string (the live InferenceX API URL).
-
-    Returns:
-        bool: ``True`` when at least one sourced row was persisted.
-    """
+    """Persist a measured ``competitor_target.json`` (``source`` = live API URL)."""
     per_conc: list[dict[str, Any]] = []
     for p in points:
         interactivity = (1000.0 / p.mean_tpot_ms) if p.mean_tpot_ms > 0 else 0.0
@@ -362,16 +223,7 @@ def _write_measured_competitor_target(
 
 
 def _clear_competitor_target(session_dir: Path) -> None:
-    """Remove any existing ``competitor_target.json``. Best-effort, never raises.
-
-    Only a successful, dimension-aligned InferenceX match may leave a
-    competitor target on disk. On every skip / no_match outcome we drop a
-    stale file (e.g. a scout-authored one left by an older run or a resumed
-    session) so the gap advisory can never read a non-API source.
-
-    Args:
-        session_dir: Session directory whose competitor target should be cleared.
-    """
+    """Remove any existing ``competitor_target.json``. Best-effort, never raises."""
     try:
         from ..session import session_paths
 
@@ -391,42 +243,7 @@ def analyze(
     isl: int = 0,
     osl: int = 0,
 ) -> BaselineSummary:
-    """Build the target-analysis summary from live InferenceX measurements.
-
-    Reference numbers are fetched from the InferenceX benchmarks API and
-    dimension-aligned against our run (hardware / isl / osl, plus precision
-    when supplied). No numbers are ever LLM-authored. Persists the
-    ``BaselineSummary`` disk contract (report) and, on success, a measured
-    ``competitor_target.json`` (advisory feed).
-
-    Never raises. ``BaselineSummary.status`` is one of:
-
-    * ``ok``       — at least one API-measured row matched our shape
-    * ``skipped``  — model name mapping miss OR ``compare_against_gpu``
-                     was empty
-    * ``no_match`` — unknown GPU / no shape match / empty API result /
-                     fetch failure
-
-    ``reason`` mirrors ``status`` with finer granularity:
-    ``ok`` / ``model_mapping_miss`` / ``no_target_gpu_configured`` /
-    ``unsupported_target_gpu`` / ``dimension_mismatch`` /
-    ``precision_mismatch`` / ``no_inferencex_data`` / ``fetch_error`` /
-    ``no_valid_rows``.
-
-    Args:
-        session_dir: Session directory used to persist the resulting summary
-            and the measured advisory target.
-        model_path: Model path or name to map to a canonical InferenceX name.
-        compare_against_gpu: Target GPU to compare against; when empty the
-            analysis is skipped.
-        framework: Optional framework name recorded on the query.
-        precision: Optional precision label used to align rows.
-        isl: Input sequence length used to align rows (strict).
-        osl: Output sequence length used to align rows (strict).
-
-    Returns:
-        The persisted ``BaselineSummary`` describing the comparison outcome.
-    """
+    """Build the target-analysis summary from live InferenceX measurements."""
     canonical_model = to_inferencex_name(model_path) or ""
     query = BaselineQuery(
         model=canonical_model,
@@ -440,11 +257,7 @@ def analyze(
     source = base_url()
 
     def _skip(status: str, reason: str, warning: str) -> BaselineSummary:
-        """Persist and return a no-data summary (skipped / no_match cases).
-
-        Also clears any stale ``competitor_target.json`` so the advisory feed
-        never surfaces a non-API source when there is no measured match.
-        """
+        """Persist and return a no-data summary (skipped / no_match cases)."""
         summary = BaselineSummary(
             query=query,
             fetched_at=now,
@@ -491,9 +304,7 @@ def analyze(
                 "unsupported_target_gpu",
                 f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}",
             )
-        # GPU present but no comparable row. Distinguish a precision-only miss
-        # (same GPU/shape exists at a different precision) from a shape miss so
-        # the strict precision filter is observable rather than silent.
+        # GPU present but no comparable row.
         if query.precision:
             shape_rows = find_reference_rows(
                 rows,

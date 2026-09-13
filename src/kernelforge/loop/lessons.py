@@ -1,68 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-iteration factual records written by the resumed Implementer session.
-
-Each iteration records actions that may exist only in the Implementer's
-conversation, including attempts reverted before the final candidate:
-
-  * The implementer session is RESUMED (so the model still has the whole
-    conversation in context) under a READ-ONLY tool policy and with no hooks.
-  * It is asked to record every direction it actually tried and the observed
-    result of each, without deciding whether later iterations should continue or
-    abandon a direction.
-  * The returned text is written to ``forge_experiments/lessons/iter_NNN.md``
-    by THIS module, not by the model (mirrors ``profile_analyst``), so the
-    session needs no write access anywhere.
-  * After the outer loop decides KEEP/REVERT, it appends one machine-written
-    ``OUTCOME:`` line. The resumed session records attempted actions and observed
-    results; the loop records what canonical validation and measurement decided.
-
-The next iteration's prompt gets the last few documents verbatim plus the
-absolute path of the directory, so the agent can inspect the full factual
-history on demand rather than carrying it in context. The model's response is
-stored as free-form text; apart from the ``HELD-FIXED:`` marker lines described
-below, no output schema or headline contract is imposed.
-
-Every document also carries the scope its observations were taken under: the
-scored cases they were measured on, the constants that were pinned while
-measuring, and whether the iteration measured a negative at all. A negative
-result is evidence only inside that scope. Outside it — another scored case, or
-a pinned value that has since moved in the declared source files — the record is
-rendered as re-openable and the next iteration is told it needs a fresh
-measurement rather than the note. A document that recorded no negative has
-nothing to re-open, so an unrecorded premise does not re-open it.
-
-A document may also close a direction by claiming it CANNOT be reached at
-all. That claim is not a measurement and is not re-opened by the same things a
-measurement is, so it carries its own obligation: the cheapest experiment that
-would have falsified it, actually run. Until that experiment exists the claim
-is rendered re-openable no matter how many numbers the document quotes around
-it — a real measurement standing next to a false premise is exactly how the
-premise survives review. Which sentences are such a claim is the summarizing
-session's own answer, written on a marker line: nothing here reads the prose
-for the word, so an untested premise stated without the marker is recorded as
-unanswered rather than as an obligation, and what keeps it from closing an axis
-is then the citation rule printed beside the document, not this check.
-
-The same marker also carries the opposite outcome, because an experiment run
-against a "cannot" can come out against it. A record reporting its own premise
-FALSE is not an obligation discharged; it is the axis shown reachable, and it
-is rendered as a direction the next iteration must re-enter rather than one it
-may. One document carries one such verdict, and the strongest of its markers
-wins: a record making three "cannot" claims while answering for one of them
-certifies nothing about the other two, so every rendering that leaves a
-document suppressing anything says which claim was answered and that the rest
-were not.
-
-Where a scope could not be checked — a source that could not be read, one that
-could not be parsed, or a name the source mentions without binding it to
-anything readable — the rendered note says it was not checked instead of
-reporting the constant as gone. "Not checked" and "not assigned" are different
-facts, and a wrong premise closes an axis that a missing one only re-opens.
-Only a name absent from a source set that was checked in full is reported as
-unassigned.
-"""
+"""Per-iteration factual records written by the resumed Implementer session."""
 
 from __future__ import annotations
 
@@ -77,86 +16,48 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-# How many recent lesson documents are inlined into the implementer prompt. Older
-# iterations stay on disk and are reachable through the directory pointer.
+# How many recent lesson documents are inlined into the implementer prompt.
 DEFAULT_RECENT_LESSONS = 5
 
-# Hard ceiling on the inlined block. The per-document word budget below is a
-# soft instruction the model can overshoot; this is the deterministic backstop.
-# Oldest documents are dropped first (mirrors ``prompt_view``'s trimming), so a
-# single verbose document degrades the window instead of blowing the prompt.
+# Hard ceiling on the inlined block.
 DEFAULT_MAX_PROMPT_CHARS = 10000
 
-# Soft word budget stated to the summarizer. Deliberately not enforced by
-# truncation: cutting a document mid-sentence would corrupt the record of an
-# attempted direction.
+# Soft word budget stated to the summarizer.
 SUMMARY_WORD_BUDGET = 250
 
-# Below this many seconds left, skip the summarizer and record the outcome
-# only. This is about whether there is time to PRODUCE the summary — it is
-# deliberately NOT the loop's session-admission reserve, which is orders of
-# magnitude larger. A campaign that stops for the day is resumed later, and
-# that next session reads this very document, so the last iteration of a
-# session is exactly the one whose record matters most.
+# Below this many seconds left, skip the summarizer and record the outcome only.
 SUMMARY_MIN_SECONDS = 120
 
 # Session end reasons that mean the implementer was cut off rather than finishing.
-# The summarizer is told to flag these, so a later iteration can tell an
-# unfinished exploration apart from a settled negative result.
 _CUTOFF_END_REASONS = frozenset({"turn_cap", "block_budget_exhausted"})
 
-# Marker lines that carry a document's validity condition. ``SCOPE:`` is written
-# by the loop from what it actually measured; ``HELD-FIXED:`` is asked of the
-# summarizer, which is the only party that knows what a sweep pinned.
+# Marker lines that carry a document's validity condition.
 SCOPE_PREFIX = "SCOPE:"
 HELD_FIXED_PREFIX = "HELD-FIXED:"
 
-# The companion marker to ``HELD-FIXED:``. The loop can see its own verdict on
-# the one candidate it measured; it cannot see the four directions the session
-# tried and reverted before that one, and those are where most of a document's
-# negatives live. So the summarizer -- the only party that can see them -- is
-# asked to state on one line whether ANY direction measured worse.
+# The companion marker to ``HELD-FIXED:``.
 NEGATIVES_PREFIX = "NEGATIVES:"
 
-# The marker for the other kind of closure. ``NEGATIVES:`` answers "did
-# anything measure worse"; this one answers "did anything here claim a
-# direction cannot be reached, and what was run against that claim". The two
-# are independent: the closures that suppressed winning routes in past
-# campaigns quoted real measurements AND rested on an untested premise, so a
-# document can need both lines.
+# The marker for the other kind of closure.
 DISPROOF_PREFIX = "DISPROOF:"
 
-# What that line may say to mean "no direction measured worse". Anything else
-# after the marker is read as naming at least one negative; an absent or empty
-# marker is read as nothing recorded, which is not a "no".
+# What that line may say to mean "no direction measured worse".
 _NO_NEGATIVES_WORDS = frozenset({"none", "no", "nothing", "n/a", "na"})
 
-# What a ``DISPROOF:`` line may say to mean "this record claims no direction is
-# unreachable", and the words that open one meaning "I ran the experiment".
-# Everything else after the marker — including a named experiment nobody ran — is read as
-# an outstanding obligation, because the direction that is safe to be wrong in
-# is the one that re-opens an axis rather than the one that closes it.
+# What a ``DISPROOF:`` line may say to mean "this record claims no direction is unreachable", and the words that open
+# one meaning "I ran the experiment".
 _NO_CLAIM_WORDS = frozenset({"none", "no", "nothing", "n/a", "na"})
 _DISPROOF_RUN_WORDS = ("tested", "ran")
 
-# The words for the other outcome of that same experiment. They are deliberately
-# NOT run words: "tested" says the falsifying experiment happened, these say it
-# came out AGAINST the claim — the "cannot" is wrong and the axis it closed is
-# reachable. Read as a run word, "DISPROOF: falsified — gfx950 accepts the
-# instruction" scored an obligation as discharged and left the closure it had
-# just destroyed still suppressing the route, which is the inversion this whole
-# marker exists to prevent.
+# The words for the other outcome of that same experiment.
 _DISPROVED_WORDS = ("disproved", "disproven", "falsified")
 
-# What a scope field says when nothing was recorded for it. Spelled out rather
-# than left blank so a reader cannot mistake an unrecorded scope for a universal
-# one -- that mistake is what turns one measurement into a standing ban.
+# What a scope field says when nothing was recorded for it.
 NOT_RECORDED = "(not recorded)"
 
 _HELD_FIXED_PAIR = re.compile(r"([A-Za-z_][A-Za-z0-9_.]*)\s*=\s*([^,;]+)")
 
-# What may sit inside a scored case id ("decode-t16", "gemm_4096.bf16"). Used as
-# the boundary around an id so one id cannot match inside a longer one.
+# What may sit inside a scored case id ("decode-t16", "gemm_4096.bf16").
 _ID_CHAR = r"[A-Za-z0-9_.\-]"
 
 SUMMARIZER_ROLE = (
@@ -176,83 +77,7 @@ def is_cutoff(end_reason: str) -> bool:
 
 @dataclass(frozen=True)
 class LessonScope:
-    """The conditions one iteration's observations were taken under.
-
-    ``cases`` are the scored cases the iteration measured on — the whole suite,
-    or the subset a restricted lane was assigned. ``held_fixed`` are the
-    constants the session pinned while measuring, as ``(name, value)`` pairs.
-    ``lane_restricted`` records that ``cases`` is narrower than the suite
-    because the round said so, not because the measurement happened to skip
-    the rest.
-
-    ``carries_negative`` is whether any direction recorded in the document
-    measured worse. It decides whether an unrecorded premise matters — a
-    document with no negative in it has nothing to re-open.
-
-    It has two sources, because neither sees the whole document. The loop sees
-    only the one final candidate it measured: a revert, a crash, a build
-    failure, an in-session rejection. It cannot see a direction the session
-    tried and reverted before that candidate, and the record is explicitly
-    asked to include those. So the summarizer's ``NEGATIVES:`` marker supplies
-    the rest, and the loop's own verdict overrides it when the two disagree.
-
-    ``None`` means neither could answer: a document written before this field
-    existed, or one whose summarizer left the marker out. It is not a "no" —
-    it is treated exactly as conservatively as a recorded negative.
-
-    ``disproof`` answers the question a measurement cannot answer: when the
-    document claims a direction CANNOT be reached, what was run against that
-    claim. It exists because "does the closure carry a number" turned out not
-    to discriminate. Three closures that each suppressed a winning route were
-    reviewed: one carried no number, one quoted a real 0.206 → 0.237 ms
-    regression, one quoted a real 153.9 us row. All three were wrong for the
-    same reason — the feasibility premise beside the number ("this build
-    cannot reach it", "this needs a data-dependent branch", "that is not one
-    of the editable files") had never been tested, and two of them were false.
-    A number is evidence about the variant that was run; it is not evidence
-    about the route that was never attempted.
-
-    Its five states are five different facts:
-
-      * the experiment text — the cheapest falsifying experiment, named and
-        actually run, with the claim surviving it. Only this keeps a "cannot"
-        in scope and suppressing;
-      * ``CLAIM_DISPROVED`` followed by what was run — the same experiment,
-        come out the other way: the claim is FALSE and the direction it closed
-        is reachable. This is the strongest answer the marker can carry, and
-        the only one that is a fact about the route rather than about the
-        variant that was run, so it does not merely re-open the direction, it
-        tells the next iteration to re-enter it;
-      * ``UNDISPROVEN_CLAIM`` — the document claims a direction cannot be
-        reached and nothing was run against that claim. Re-openable, whatever
-        else the document measured;
-      * ``NO_FEASIBILITY_CLAIM`` — the document claims no such thing, so there
-        is no obligation to discharge and its measured negatives are read on
-        their own terms;
-      * ``None`` — nobody answered: a document from before this field existed,
-        or a summarizer that left the marker out. Not a "no claim": it does
-        not certify that anything was tested, so a bare "cannot" sentence
-        inside such a document closes nothing on its own. It is deliberately
-        NOT rendered as an outstanding obligation either, because that would
-        convict every document written before the field of a claim it may
-        never have made, and a verdict every document receives stops
-        discriminating between them.
-
-    One value covers the whole document, and that is a known limit rather than
-    a claim about every sentence in it. A record making three "cannot" claims
-    and answering for one of them yields one verdict, so a discharged or
-    disproved answer here says what happened to the claim someone answered
-    for and nothing at all about the others; the silence about them is not
-    visible in this field. It is bounded on the dangerous side only: an
-    outstanding obligation beats a discharged one when both are recorded
-    (``parse_disproof_marker``), and the renderings that leave a document
-    suppressing anything say aloud that the other claims are uncertified.
-    Making the verdict per-claim would have to put a list where this field
-    holds one value, give the SCOPE line a repeatable field with its own
-    separator, and keep a line written under the present format parseable by
-    the reader that follows — a format change, and a wider one than the branch
-    that made the obligation work at all.
-    """
+    """Iteration conditions; answering for one of them does not certify other claims."""
 
     cases: tuple[str, ...] = ()
     held_fixed: tuple[tuple[str, str], ...] = ()
@@ -261,62 +86,29 @@ class LessonScope:
     disproof: str | None = None
 
 
-# How the negative flag is spelled on the SCOPE line. All three states are
-# written out, including the unknown one: claiming "no measured negative" over
-# a document nobody checked is the false statement this whole line exists to
-# prevent. A line carrying none of the three is one from before the flag
-# existed, and that is the same third fact, not a "no".
+# How the negative flag is spelled on the SCOPE line.
 CARRIES_NEGATIVE = "carries a measured negative"
 NO_NEGATIVE = "no measured negative"
 NEGATIVE_NOT_RECORDED = "whether anything measured worse was not recorded"
 
-# How the disproof obligation is spelled on the SCOPE line. The two sentinel
-# answers are their own rendering, so the round trip needs no second
-# vocabulary; the two answers that carry evidence are that evidence written
-# behind ``DISPROOF_RUN`` or ``CLAIM_DISPROVED``, which say which way the
-# experiment came out. As with the negative flag, the unrecorded state is
-# written out rather than left off the line: a reader who cannot see the
-# difference between "no such claim" and "nobody asked" will collapse them
-# into the first. No rendering here is a prefix of another, so the fields
-# parse the same whatever order they are read in — and ``CLAIM_DISPROVED``
-# and ``UNDISPROVEN_CLAIM`` are the pair that has to stay apart, since
-# "disproved by X" and "not disproved" are opposite verdicts and a reader
-# matching one inside the other would report an axis closed exactly where it
-# was proved open.
+# How the disproof obligation is spelled on the SCOPE line.
 NO_FEASIBILITY_CLAIM = "no feasibility claim"
 UNDISPROVEN_CLAIM = "feasibility claim not disproved"
 DISPROOF_RUN = "feasibility claim tested by "
 CLAIM_DISPROVED = "feasibility claim disproved by "
 DISPROOF_NOT_RECORDED = "whether a feasibility claim was disproved was not recorded"
 
-# Longest named experiment kept on the SCOPE line. The line is inlined verbatim
-# into the next iteration's prompt, and a summarizer that answers the "cheapest
-# experiment" question with a paragraph must not push the fields after it out
-# of a reader's sight. A cut rendering is marked, as elsewhere in this file.
+# Longest named experiment kept on the SCOPE line.
 _MAX_DISPROOF_CHARS = 120
 
 
 def is_claim_disproved(disproof: str | None) -> bool:
-    """Whether a disproof answer reports the document's own "cannot" as FALSE.
-
-    The disproved answer carries evidence, so it cannot be one flat sentinel;
-    it is that sentinel followed by what was run, and this is the one place
-    that knows it. Callers ask here rather than comparing prefixes, so the
-    verdict that re-opens an axis is never missed by a reader that only knew
-    about the sentinels it could compare with ``==``.
-    """
+    """Whether a disproof answer reports the document's own \"cannot\" as FALSE."""
     return disproof is not None and disproof.startswith(CLAIM_DISPROVED)
 
 
 def _disproved_evidence(text: str) -> str | None:
-    """What stands behind a disproved answer, or ``None`` if it is not one.
-
-    Matched against the prefix without its trailing space, so an answer that
-    reports the claim false and carries nothing behind it is still recognised
-    as that answer. Recognising it is what lets it be rendered as an open
-    obligation; a reading that matched nothing would record it as a question
-    nobody put, and the one thing the line certainly did was put it.
-    """
+    """What stands behind a disproved answer, or ``None`` if it is not one."""
     if text == CLAIM_DISPROVED.rstrip():
         return ""
     if text.startswith(CLAIM_DISPROVED):
@@ -332,20 +124,7 @@ def _clipped(text: str) -> str:
 
 
 def _disproof_field(disproof: str | None) -> str:
-    """One scope's disproof answer as it appears on the SCOPE line.
-
-    A named experiment is free text a model wrote, so it is folded onto one
-    line and its pipes become slashes before it joins a pipe-separated line:
-    an experiment name must not be able to forge a field. An answer that folds
-    away to nothing is rendered as unrecorded rather than as an experiment,
-    which is what an empty answer actually is.
-
-    A disproved claim whose evidence folds away to nothing is rendered as an
-    outstanding obligation instead. "The premise is false" with nothing behind
-    it cannot be repeated by the iteration that reads it, exactly as an unnamed
-    experiment cannot, and the answer that survives being wrong is the one that
-    re-opens the axis without asserting anything about the route.
-    """
+    """One scope's disproof answer as it appears on the SCOPE line."""
     if disproof is None:
         return DISPROOF_NOT_RECORDED
     text = " ".join(disproof.split()).replace("|", "/")
@@ -433,12 +212,7 @@ def _parse_pairs(text: str) -> tuple[tuple[str, str], ...]:
 
 
 def parse_held_fixed(text: str) -> tuple[tuple[str, str], ...]:
-    """The constants the summarizer recorded as pinned, across a document.
-
-    Only ``HELD-FIXED:`` lines are read: a pair found anywhere in the prose is
-    as likely to be a result as a premise, and a wrong premise is worse than a
-    missing one — a missing one re-opens the axis, a wrong one closes it.
-    """
+    """The constants the summarizer recorded as pinned, across a document."""
     found: dict[str, str] = {}
     for line in (text or "").splitlines():
         stripped = line.strip()
@@ -450,21 +224,7 @@ def parse_held_fixed(text: str) -> tuple[tuple[str, str], ...]:
 
 
 def parse_negatives_marker(text: str) -> bool | None:
-    """Whether the document says any direction it records measured worse.
-
-    Three outcomes, because they are three different facts:
-
-      * ``True``  — a ``NEGATIVES:`` line names at least one direction that
-        measured worse;
-      * ``False`` — a ``NEGATIVES:`` line says none did;
-      * ``None``  — there is no usable marker. An older document, or a reply
-        that ignored the contract. That is not a "no": the question was never
-        answered, and answering it "no" on the document's behalf would promote
-        an unchecked negative into a standing ban.
-
-    Any line naming something wins over a line saying none: the marker is a
-    presence check, and a document that names one negative carries one.
-    """
+    """Whether the document says any direction it records measured worse."""
     verdict: bool | None = None
     for line in (text or "").splitlines():
         stripped = line.strip().lstrip("-*# ").strip()
@@ -482,49 +242,7 @@ def parse_negatives_marker(text: str) -> bool | None:
 
 
 def parse_disproof_marker(text: str) -> str | None:
-    """What the document says it ran against its own "cannot" claims.
-
-    Five outcomes, matching ``LessonScope.disproof``:
-
-      * ``CLAIM_DISPROVED`` plus what was run — a line opens with a word from
-        ``_DISPROVED_WORDS`` and names the evidence: the experiment happened
-        and the claim lost;
-      * the experiment text — a line opens with a run word and names the
-        experiment: it happened and the claim survived;
-      * ``UNDISPROVEN_CLAIM`` — a line says a direction cannot be reached but
-        the experiment that would settle it was not run, or says it was run —
-        or won — without naming what was run. An unnamed experiment is not a
-        disproof either way: the whole point of the marker is that a later
-        iteration can repeat it;
-      * ``NO_FEASIBILITY_CLAIM`` — a line says this record claims no direction
-        is unreachable;
-      * ``None`` — no usable marker. An older document or a reply that ignored
-        the contract; the question was never put, which is not an answer to it.
-
-    A disproved claim wins over every other answer, an outstanding obligation
-    wins over a discharged one, and all of them win over "no claim". The first
-    two rankings point the same way: a disproved claim and an undisproven one
-    both re-open a direction, and ranking the disproved one first only ever
-    turns "you may re-enter this" into "this is reachable, re-enter it". A
-    document that says "cannot" once and stays silent about it elsewhere
-    carries the claim, exactly as one that names one negative carries a
-    negative — and the direction to be wrong in is the one that re-opens an
-    axis, never the one that closes it.
-
-    ``DISPROOF: tested — <experiment>`` still means the experiment ran and the
-    claim survived, which is the only answer that leaves a "cannot"
-    suppressing. It is read that way and not conservatively because the
-    summarizer is now taught three outcome words, not two: a session holding a
-    falsifying result has ``disproved`` to write, so choosing ``tested`` is an
-    answer about the outcome rather than silence about it. Reading ``tested``
-    as ambiguous instead would leave no word in the contract that can ever
-    discharge an obligation, which is not a stricter version of this mechanism
-    but a different one — "no feasibility claim ever closes anything" — and
-    that decision belongs to the loop's policy, not to the parser for one
-    marker line. What is left of the risk is bounded: the named text is
-    rendered verbatim beside the document, so a reader meets the evidence the
-    word was attached to.
-    """
+    """What the document says it ran against its own \"cannot\" claims."""
     verdict: str | None = None
     disproved: str | None = None
     undisproven = False
@@ -557,10 +275,7 @@ def parse_disproof_marker(text: str) -> str | None:
     return verdict
 
 
-# Longest rendering of one assigned value kept for comparison and display. A
-# constant pinned to a whole expression is rare; a wrapped one would only make
-# the rendered note unreadable. A cut rendering is marked, so a truncated
-# expression reaching a prompt cannot be read as a complete one.
+# Longest rendering of one assigned value kept for comparison and display.
 _MAX_VALUE_CHARS = 60
 _TRUNCATION_MARK = " ..."
 
@@ -587,11 +302,7 @@ def _value_text(node: ast.AST) -> str:
 
 
 def _is_constant_expr(node: ast.AST) -> bool:
-    """Whether a node is a literal the source pins, not a name it forwards.
-
-    ``num_warps=8`` pins 8; ``BLOCK_N=BLOCK_N`` forwards a caller's local and
-    says nothing about the value. Only the first is a fact about the source.
-    """
+    """Whether a node is a literal the source pins, not a name it forwards."""
     if isinstance(node, ast.Constant):
         return True
     if isinstance(node, ast.UnaryOp):
@@ -604,14 +315,7 @@ def _is_constant_expr(node: ast.AST) -> bool:
 
 
 def _unpacked_pairs(target: ast.AST, value: ast.AST) -> list[tuple[ast.AST, ast.AST]] | None:
-    """``a, b = 1, 2`` element by element, or None when it cannot be paired.
-
-    ``BLOCK_M, BLOCK_N = 64, 32`` pins each name to its own element. Recording
-    the whole right-hand side against both would render "BLOCK_N is now
-    (64, 32)" — a false statement about the source. A starred target, a length
-    mismatch, or a right-hand side that is not a literal sequence cannot be
-    paired at all, and the caller reports those as a value it did not read.
-    """
+    """``a, b = 1, 2`` element by element, or None when it cannot be paired."""
     if not (
         isinstance(target, ast.Tuple | ast.List)
         and isinstance(value, ast.Tuple | ast.List)
@@ -624,12 +328,7 @@ def _unpacked_pairs(target: ast.AST, value: ast.AST) -> list[tuple[ast.AST, ast.
 
 
 def _as_number(text: str) -> float | None:
-    """One rendered value as a number, or None when it is not one.
-
-    ``16`` and ``16.0`` are the same pin written two ways, and ``0x10`` is a
-    third. Comparing the renderings as text reports the kernel as having moved
-    when nothing moved, which re-opens a negative on a formatting difference.
-    """
+    """One rendered value as a number, or None when it is not one."""
     try:
         value = ast.literal_eval((text or "").strip())
     except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
@@ -650,30 +349,7 @@ def _still_pinned(pinned: str, observed: Sequence[str]) -> bool:
 
 
 def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[str, ...]] | None:
-    """What each named constant is bound to in ``source``.
-
-    Four outcomes, because they are four different facts:
-
-      * a name mapped to one or more values — it is bound, here is what to;
-      * a name mapped to an EMPTY tuple — the name is in the source but nothing
-        readable binds it: only a ``tl.constexpr`` parameter, only a keyword
-        argument forwarding a caller's local, an unpairable tuple unpacking. Its
-        current value was not checked, which is not the same as gone;
-      * a name absent from the mapping — the source parsed and never mentions
-        it at all, which is a change of premise: whatever was pinned is gone;
-      * ``None`` — the source could not be parsed, so nothing is known about
-        it. A caller must not report that as a name the source dropped.
-
-    A binding is an ``ast.Assign`` target (paired element by element through a
-    tuple unpacking), an ``ast.AnnAssign`` or ``ast.NamedExpr`` value (never the
-    annotation), a string key of a dict literal, which is how a tuning table
-    pins a constant, and a keyword argument whose value is a literal. That last
-    one is where Triton tile sizes and warp counts actually live —
-    ``num_warps=8``, ``BLOCK_N=128``, ``triton.Config({...}, num_warps=8)`` — so
-    excluding it would report a pinned constant as gone. ``BLOCK_N=BLOCK_N``
-    passes a name rather than a literal and is recorded as unread, not as a
-    value.
-    """
+    """What each named constant is bound to in ``source``."""
     wanted = {name for name in names if name}
     try:
         tree = ast.parse(source or "")
@@ -701,8 +377,7 @@ def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[s
         if isinstance(target, ast.Tuple | ast.List):
             pairs = _unpacked_pairs(target, value)
             if pairs is None:
-                # Bound, but to a share of the right-hand side this cannot
-                # read. Recording the whole side would invent a value.
+                # Bound, but to a share of the right-hand side this cannot read.
                 for name in _assigned_names(target):
                     mention(name)
                 return
@@ -741,24 +416,7 @@ def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[s
 def scan_sources_with_coverage(
     sources: Sequence[str | None], names: Iterable[str]
 ) -> tuple[dict[str, tuple[str, ...]] | None, bool]:
-    """``scan_constant_values`` across a source set, plus whether it was whole.
-
-    A ``None`` entry is a declared file that could not be read; a file that
-    could not be parsed is the same fact. Either one makes the coverage flag
-    (the second element) ``False``, and a caller must then not report a name
-    missing from the mapping as one the source set dropped — it may be sitting
-    in the file that was never checked.
-
-    A constant bound in any file that was checked is bound: tile, dispatch and
-    JIT constants move between the anchor kernel and its siblings, and a
-    constant that moved is not a constant that is gone. That union errs on the
-    permissive side — a value matching the pin in dead code, or in an unrelated
-    helper's local, reads as "unchanged" and keeps a negative in scope that a
-    per-file check would re-open. It is the accepted cost of not reporting a
-    moved constant as a deleted one.
-
-    When nothing at all could be checked the mapping is ``None``.
-    """
+    """``scan_constant_values`` across a source set, plus whether it was whole."""
     wanted = list(names)
     combined: dict[str, list[str]] = {}
     checked_any = False
@@ -782,25 +440,14 @@ def scan_sources_with_coverage(
 def scan_sources_for_constants(
     sources: Sequence[str | None], names: Iterable[str]
 ) -> dict[str, tuple[str, ...]] | None:
-    """``scan_sources_with_coverage`` without the coverage flag.
-
-    Only for a caller that does not distinguish a partly-checked source set
-    from a whole one. A caller that renders a premise must use
-    ``scan_sources_with_coverage``: without the flag, a name absent from the
-    mapping cannot be told apart from a name in the one file that failed.
-    """
+    """``scan_sources_with_coverage`` without the coverage flag."""
     return scan_sources_with_coverage(sources, names)[0]
 
 
 def _as_sources(
     kernel_source: str | Sequence[str | None] | None,
 ) -> list[str | None]:
-    """One source text, several of them, or none, as one list.
-
-    A ``None`` INSIDE the sequence is kept, not dropped: that is a declared
-    file the caller could not read, and it has to reach the scan as a source
-    that was not checked rather than vanish into a shorter list.
-    """
+    """One source text, several of them, or none, as one list."""
     if kernel_source is None:
         return []
     if isinstance(kernel_source, str):
@@ -814,28 +461,7 @@ def scope_conflicts(
     current_cases: Sequence[str] = (),
     kernel_source: str | Sequence[str | None] | None = None,
 ) -> tuple[str, ...]:
-    """Why a recorded negative cannot be cited as-is right now.
-
-    Empty means the scope still holds and the negative stands. Every reason is
-    phrased for the prompt, because the reader that has to act on it is the
-    next Implementer session.
-
-    ``kernel_source`` is the text of one source file, or of every declared one
-    with ``None`` in place of any that could not be read, or ``None`` when none
-    could be read at all. A source that could not be read or parsed, and a name
-    the source mentions without binding it to a literal, both yield "was not
-    checked". Only a name absent from a source set checked in full is reported
-    as "is not assigned".
-
-    A document whose scope records no measured negative is never re-opened over
-    an unrecorded premise: there is no negative in it to re-open.
-
-    A claim that a direction cannot be reached AT ALL is deliberately not
-    answered here. It is not re-opened by a case it was not measured on or by a
-    constant that has moved, but by never having been tested, so it is read off
-    ``LessonScope.disproof`` in ``_validity_note`` instead. A caller asking
-    whether a document still closes anything has to ask both.
-    """
+    """Why a recorded negative cannot be cited as-is right now."""
     if scope is None:
         return ()
     reasons: list[str] = []
@@ -847,10 +473,7 @@ def scope_conflicts(
         reasons.append("the cases it was measured on were not recorded")
 
     if not scope.held_fixed:
-        # Only a document that actually carries a negative can be re-opened by
-        # not knowing what was pinned. One that carries none — or was written
-        # before the flag existed, which is not a "no" — is treated the same
-        # way as a recorded negative.
+        # Only a document that actually carries a negative can be re-opened by not knowing what was pinned.
         if scope.carries_negative is not False:
             reasons.append("the constants it was measured under were not recorded")
         return tuple(reasons)
@@ -878,25 +501,14 @@ def scope_conflicts(
         elif not values:
             reasons.append(f"{name} was not checked: the source names it but binds no literal to it {measured}")
         elif not _still_pinned(value, values):
-            # An observation, not an inference: these values were read out of
-            # a source that was checked, whatever happened to the rest.
+            # An observation, not an inference: these values were read out of a source that was checked, whatever
+            # happened to the rest.
             reasons.append(f"{name} is now {'/'.join(values)} {measured}")
     return tuple(reasons)
 
 
 def cases_named_in(text: str, case_ids: Iterable[str]) -> tuple[str, ...]:
-    """The scored case ids ``text`` names as whole identifiers.
-
-    How a restricted lane's scope is recovered: the assignment names the cases
-    it is allowed to move, and that restriction is what must travel with the
-    lane's negative results.
-
-    A raw substring test would let one id swallow another — ``decode-t1`` reads
-    as named by a plan that says ``decode-t16`` — and that is the dangerous
-    direction: it widens a scope, making a negative look valid for a case it
-    was never measured on. An id counts only where it is not part of a longer
-    identifier.
-    """
+    """The scored case ids ``text`` names as whole identifiers."""
     body = text or ""
     return tuple(
         case_id
@@ -905,15 +517,9 @@ def cases_named_in(text: str, case_ids: Iterable[str]) -> tuple[str, ...]:
     )
 
 
-# The four ways a "cannot" has been wrong before, named inline so that a record
-# can be asked about them now rather than when the knowledge card documenting
-# them with worked examples lands; that card's absolute path is appended to the
-# end of this text.
-#
-# The question is deliberately "which of these did you consider and why does
-# each not apply", never "did you try these four". The failure mode being
-# corrected is enumerating a closed list of routes and calling it exhaustive,
-# and a checklist read as a list of routes only makes the closed list longer.
+# The four ways a "cannot" has been wrong before, named inline so that a record can be asked about them now rather
+# than when the knowledge card documenting them with worked examples lands; that card's absolute path is appended to
+# the end of this text.
 REACH_CLASSES = """\
 Wherever you write that something cannot be reached, also say which of the four
 reach classes below you considered for it and why each one does not apply. They
@@ -1093,11 +699,9 @@ def _validity_note(
         )
     stated = format_scope_line(scope)[len(SCOPE_PREFIX) :].strip()
     reasons = scope_conflicts(scope, current_cases=current_cases, kernel_source=kernel_source)
-    # Both feasibility verdicts below are independent of ``reasons``: a document
-    # may have been measured on every current case with every pin still in place
-    # and still be closing an axis on a premise nobody tested — or on one its own
-    # experiment refuted. That combination is precisely the one the earlier "does
-    # it carry a number" reading let through.
+    # Both feasibility verdicts below are independent of ``reasons``: a document may have been measured on every
+    # current case with every pin still in place and still be closing an axis on a premise nobody tested — or on one
+    # its own experiment refuted.
     tail = ", and its negatives also need a fresh measurement here because " + "; ".join(reasons) if reasons else ""
     if is_claim_disproved(scope.disproof):
         return (
@@ -1124,12 +728,7 @@ def _validity_note(
 
 
 class LessonStore:
-    """Per-campaign store of iteration lesson documents.
-
-    Persistence is best-effort in the same sense as the candidate archive and
-    the experience ledger: a lesson that cannot be written must never break the
-    optimization loop.
-    """
+    """Per-campaign store of iteration lesson documents."""
 
     def __init__(
         self,
@@ -1187,11 +786,7 @@ class LessonStore:
         return destination
 
     def append_outcome(self, iteration: int, outcome_line: str) -> bool:
-        """Append the loop's machine-written verdict to an existing document.
-
-        Written by the loop rather than the model so the objective result is
-        present even when the summarizer produced nothing useful.
-        """
+        """Append the loop's machine-written verdict to an existing document."""
         outcome_line = (outcome_line or "").strip()
         if not outcome_line:
             return False
@@ -1204,13 +799,7 @@ class LessonStore:
         return self.write(iteration, merged) is not None
 
     def append_scope(self, iteration: int, scope: LessonScope) -> bool:
-        """Append the loop's machine-written scope line to a document.
-
-        Written by the loop for the same reason as the outcome line: the scope
-        a result was measured under has to be present even when the summarizer
-        produced nothing, because that is what keeps the result from being read
-        as universal.
-        """
+        """Append the loop's machine-written scope line to a document."""
         destination = self.path(iteration)
         try:
             existing = destination.read_text(errors="replace").rstrip("\n")
@@ -1230,22 +819,7 @@ class LessonStore:
         current_cases: Sequence[str] = (),
         kernel_source: str | Sequence[str | None] | None = None,
     ) -> str:
-        """The lesson block injected into the next implementer prompt.
-
-        Inlines the most recent documents verbatim and always points at the
-        directory holding the full history, using an ABSOLUTE path: the implementer
-        session's working directory is not guaranteed to be the loop workspace
-        (a provider may run it from a configured workspace root instead), so a
-        relative pointer can resolve to the wrong place.
-
-        Each inlined document is prefixed with the validity of its own contents,
-        computed against ``current_cases`` and the constants the current source
-        files actually assign (``kernel_source`` is one file's text, every
-        declared file's text with None in place of any that could not be read,
-        or None when none could be read at all). A document whose
-        premise has moved is rendered as re-openable; one recorded before scopes
-        were kept is rendered as history only. Neither is dropped.
-        """
+        """The lesson block injected into the next implementer prompt."""
         iterations = self.existing_iterations()
         if not iterations:
             return ""
@@ -1291,10 +865,8 @@ class LessonStore:
             return "## Implementer session records from recent iterations\n\n" + pointer
 
         rendered = assemble(blocks)
-        # Deterministic ceiling: drop the OLDEST inlined document first, so an
-        # unusually long one shrinks the window rather than the prompt budget.
-        # The directory pointer is never dropped — it is what keeps the rest of
-        # the history reachable.
+        # Deterministic ceiling: drop the OLDEST inlined document first, so an unusually long one shrinks the window
+        # rather than the prompt budget.
         while len(blocks) > 1 and len(rendered) > self.max_prompt_chars:
             blocks.pop(0)
             rendered = assemble(blocks)
@@ -1339,13 +911,7 @@ def format_outcome_line(
 
 @dataclass
 class SummaryOutcome:
-    """One summarizer attempt: the document it produced, or why it produced none.
-
-    ``reason`` is carried out rather than only logged because the caller prints
-    it: when a live campaign starts emitting outcome-only documents, "the
-    summarizer returned nothing" is not enough to diagnose whether the provider
-    refused, the worktree guard rejected the resume, or the model replied empty.
-    """
+    """One summarizer attempt: the document it produced, or why it produced none."""
 
     text: str = ""
     reason: str = ""
@@ -1363,13 +929,7 @@ async def summarize_iteration(
     pr_references: tuple[str, ...] = (),
     pr_reference_context: str = "",
 ) -> SummaryOutcome:
-    """Ask the just-finished implementer session to write its lesson document.
-
-    ``summarizer`` is the async callable the agent layer hands back through the
-    session sink; it resumes that exact session under a read-only policy and
-    returns the reply text. Best-effort: any failure yields an empty outcome
-    carrying the reason, and the loop falls back to a machine-written record.
-    """
+    """Ask the just-finished implementer session to write its lesson document."""
     if summarizer is None:
         return SummaryOutcome(reason="provider cannot resume the session")
     prompt = build_summary_prompt(
@@ -1403,21 +963,7 @@ def build_fallback_document(
     max_findings: int = 6,
     max_progress: int = 8,
 ) -> str:
-    """Compose a lesson document from what the loop itself observed.
-
-    Used when no summarizer session could run. The narrative half of the record
-    is then unavailable, but the in-session gate's block reasons are not: each
-    is a concrete rejection the agent hit this session (a compile error, a
-    "correct but not faster" verdict), and they are otherwise compressed to a
-    single line by the experience ledger and discarded. Recording them keeps a
-    non-resumable provider — or a failed summarizer — from leaving the next
-    iteration with nothing but a verdict. Provider progress is the last-resort
-    source when the session ended before the gate ran and therefore produced no
-    findings (for example, an SDK turn cap before the Stop hook).
-
-    Returns "" when the loop observed nothing to record, so the
-    caller can skip writing a document rather than emit an empty one.
-    """
+    """Compose a lesson document from what the loop itself observed."""
     blocks = [line.strip() for line in (findings or "").split("\n---\n") if line.strip()]
     progress = []
     for entry in progress_log or []:
@@ -1429,8 +975,8 @@ def build_fallback_document(
     if not blocks and not diff_summary and not progress:
         return ""
 
-    # Lead with a machine-authored provenance marker so the record cannot be
-    # mistaken for the resumed Implementer's own account.
+    # Lead with a machine-authored provenance marker so the record cannot be mistaken for the resumed Implementer's
+    # own account.
     if blocks:
         opening = f"(no agent summary) session hit {len(blocks)} gate rejection(s): {blocks[-1].splitlines()[0][:80]}"
     elif diff_summary:

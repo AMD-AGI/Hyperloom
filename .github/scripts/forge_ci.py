@@ -1,35 +1,5 @@
 #!/usr/bin/env python3
-"""Kernel Arena forge-run helper for the ``forge-kernel-bench`` CI workflow.
-
-This is the runtime driver behind the forge regression suite: it triggers a
-long-running (24h) *forge* agent run for one benchmark on the Kernel Arena
-controller and, optionally, polls it to a terminal state and reports the
-resulting speedup / score.
-
-Design notes
-------------
-* **Standard library only** (``urllib``/``json``/``ssl``). The self-hosted
-  project1 runner needs no ``pip install`` to execute this.
-* **Auth**: SaFE API key (``ak-...``) sent as ``Authorization: Bearer <key>``.
-  The key's user must own the benchmark (or be a system-admin), otherwise the
-  controller rejects ``POST /v1/runs`` with 403. Supplied via ``KA_API_KEY``.
-* **Network**: the controller API is only reachable from inside the project1
-  network (higress ingress ``project1.tw325.primus-safe.amd.com``); this is why
-  the workflow job runs on a project1 self-hosted runner. Base URL via
-  ``KA_API_BASE``.
-
-Sub-commands
-------------
-``matrix``
-    Parse the ``KA_BENCHMARK_IDS`` secret into a GitHub Actions ``matrix`` value
-    so the number/identity of kernels is driven entirely by the secret (add or
-    remove a benchmark_id there and the fan-out follows).
-
-``run``
-    Trigger one forge run (``agent_template=forge``) and optionally poll it to
-    completion, emitting ``run_id`` / ``status`` / ``speedup`` / ``total_score``
-    as step outputs and a Markdown row in the job summary.
-"""
+"""Kernel Arena forge-run helper for the ``forge-kernel-bench`` CI workflow."""
 
 from __future__ import annotations
 
@@ -49,8 +19,7 @@ TERMINAL_STATES = {"done", "failed", "timed_out", "stopped"}
 SUCCESS_STATE = "done"
 
 
-# --------------------------------------------------------------------------- #
-# GitHub Actions output helpers
+# --------------------------------------------------------------------------- # GitHub Actions output helpers
 # --------------------------------------------------------------------------- #
 def _gh_output(pairs: Dict[str, str]) -> None:
     """Append ``key=value`` step outputs (no-op when not on a runner)."""
@@ -77,8 +46,7 @@ def _annotate(level: str, message: str) -> None:
     print(f"[{level.upper()}] {message}", file=sys.stderr)
 
 
-# --------------------------------------------------------------------------- #
-# HTTP
+# --------------------------------------------------------------------------- # HTTP
 # --------------------------------------------------------------------------- #
 def _http(
     method: str,
@@ -117,12 +85,10 @@ def _maybe_json(raw: str) -> Any:
         return raw
 
 
-# --------------------------------------------------------------------------- #
-# Response parsing (tolerant of flat vs nested shapes)
-# --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- # Response parsing (tolerant of flat vs
+# nested shapes) --------------------------------------------------------------------------- #
 def _dig(obj: Any, *keys: str) -> Any:
-    """Return the first non-None value found for any of ``keys``, searching the
-    top level and a nested ``run``/``score`` object."""
+    """Return the first non-None value found for any of ``keys``, searching the top level and a nested ``run``/``score`` object."""
     if not isinstance(obj, dict):
         return None
     scopes = [obj]
@@ -156,19 +122,10 @@ def _num(value: Any) -> Optional[float]:
         return None
 
 
-# --------------------------------------------------------------------------- #
-# matrix sub-command
+# --------------------------------------------------------------------------- # matrix sub-command
 # --------------------------------------------------------------------------- #
 def parse_benchmarks(raw: str) -> List[Dict[str, str]]:
-    """Parse ``KA_BENCHMARK_IDS`` into ``[{name, benchmark_id}, ...]``.
-
-    Accepted formats (whichever is most convenient to store as a secret):
-      * JSON array : ``[{"name":"softmax_kernel","benchmark_id":"kb_..."}, ...]``
-      * JSON object: ``{"softmax_kernel":"kb_...", "rmsnorm_kernel":"kb_..."}``
-      * CSV        : ``softmax_kernel=kb_...,rmsnorm_kernel=kb_...`` (name=id pairs,
-                     comma/newline separated). A bare ``kb_...`` with no ``name=``
-                     is kept with its id as the name.
-    """
+    """Parse ``KA_BENCHMARK_IDS`` into ``[{name, benchmark_id}, ...]``."""
     raw = (raw or "").strip()
     if not raw:
         return []
@@ -216,8 +173,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# run sub-command
+# --------------------------------------------------------------------------- # run sub-command
 # --------------------------------------------------------------------------- #
 def trigger_run(args: argparse.Namespace) -> Optional[str]:
     body: Dict[str, Any] = {
@@ -321,8 +277,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# CLI
+# --------------------------------------------------------------------------- # CLI
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Kernel Arena forge-run CI helper")

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The door to the generated tier, and what it takes to get through it.
-
-Five checkpoints in order -- gate, generate, sandbox, contract, referee -- each
-ruling out a different kind of wrong and each ending the attempt without
-touching the tuning run that hosts it. The referee is last and decisive:
-everything before it can be satisfied by a script that reports what it was asked
-to report, and only the referee establishes that a kernel actually got faster.
-"""
+"""The door to the generated tier, and what it takes to get through it."""
 
 from __future__ import annotations
 
@@ -18,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge.gemm_tune import utils
 from kernelforge.gemm_tune.tier3 import gate, ledger, sandbox
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
 from kernelforge.gemm_tune.tier3.runner import attempt_generated_tuner
@@ -44,9 +38,8 @@ def _clean_gate_env(monkeypatch):
 
 class TestGate:
     def test_open_by_default_for_a_table_nothing_owns(self):
-        # The other conditions already restrict this to gaps where no tuner
-        # exists, so the time a generated one spends is not taken from a tuner
-        # that would have covered the table -- there is none.
+        # The other conditions already restrict this to gaps where no tuner exists, so the time a generated one spends
+        # is not taken from a tuner that would have covered the table -- there is none.
         d = gate.should_generate([_gap()])
         assert d.allowed and d.gap.table == "odd.csv"
 
@@ -66,14 +59,21 @@ class TestGate:
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
         assert gate.should_generate([_gap()]).allowed
 
-    def test_a_tuner_that_exists_never_opens_the_gate(self, monkeypatch):
-        # Whatever the whitelist says. Generating a second tuner for a table
-        # that already has one papers over whatever stopped the first.
+    def test_an_unrouted_tuner_never_opens_the_gate(self, monkeypatch):
+        # Whatever the whitelist says. The table has an owner that was simply
+        # not selected, and generating a second one papers over that.
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
-        for kind in ("not_selected", "skipped"):
+        d = gate.should_generate([_gap(kind="not_selected", tuner="a8w8")])
+        assert not d.allowed
+        assert "not_selected" in d.reasons[0]
+
+    def test_an_owner_that_produced_nothing_does_open_it(self, monkeypatch):
+        # The table has an owner and is still untuned. That is the state the
+        # runtime is in, and it is indistinguishable from having no owner.
+        monkeypatch.setenv(gate.ALLOW_ENV, "*")
+        for kind in ("skipped", "empty"):
             d = gate.should_generate([_gap(kind=kind, tuner="a8w8")])
-            assert not d.allowed
-            assert kind in d.reasons[0]
+            assert d.allowed, kind
 
     def test_too_little_demand_stays_closed(self, monkeypatch):
         monkeypatch.setenv(gate.ALLOW_ENV, "*")
@@ -101,8 +101,8 @@ class TestSandbox:
         return p
 
     def test_expected_files_decide_the_outcome_not_the_exit_code(self, tmp_path):
-        # The aiter tuners in this same pipeline exit 1 on complete success, so
-        # a script's return code cannot be the signal here either.
+        # The aiter tuners in this same pipeline exit 1 on complete success, so a script's return code cannot be the
+        # signal here either.
         out = tmp_path / "out.csv"
         script = self._script(
             tmp_path,
@@ -157,6 +157,36 @@ open({str(out)!r}, "w").write(os.environ.get("HIP_VISIBLE_DEVICES", "?"))
         )
         sandbox.run_generated_tuner(script, tmp_path, expect=[out], gpu_id="3", timeout_s=60)
         assert out.read_text(encoding="utf-8") == "3"
+
+    def test_the_build_is_sized_to_the_container(self, tmp_path, monkeypatch):
+        # The generated tuner shells out to aiter like every other tuner, but
+        # unlike them it gets one run: a build killed for memory comes back as
+        # "the script it wrote does not work".
+        monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
+        monkeypatch.setattr(utils, "cgroup_memory_limit", lambda: 128 * 1024**3)
+        out = tmp_path / "jobs.txt"
+        script = self._script(
+            tmp_path,
+            f"""
+import os
+open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
+""",
+        )
+        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        assert out.read_text(encoding="utf-8") == "44"
+
+    def test_a_caller_who_named_a_number_keeps_it(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(utils, "build_job_limit", lambda: 44)
+        out = tmp_path / "jobs.txt"
+        script = self._script(
+            tmp_path,
+            f"""
+import os
+open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
+""",
+        )
+        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60, env_overrides={"MAX_JOBS": "8"})
+        assert out.read_text(encoding="utf-8") == "8"
 
 
 class TestLedger:
@@ -259,10 +289,7 @@ class TestLedger:
 
 
 class TestPlanPreviewsWhatRunDoes:
-    """A preview that answers a different question than the thing it previews
-    is worse than no preview: it is consulted precisely when someone is
-    unsure, and it was showing TunableOp skipped for inputs under which the
-    real run selects it."""
+    """A preview that answers a different question than the thing it previews is worse than no preview: it is consulted precisely when someone is unsure, and it was showing TunableOp skipped for inputs under which the real run selects it."""
 
     def _src(self, name):
         import inspect
@@ -290,12 +317,7 @@ class TestPlanPreviewsWhatRunDoes:
 
 
 class TestTheCliActuallyReachesTier3:
-    """The whole tier was unreachable from production and nothing said so.
-
-    Every stage had tests and they all passed, because they called the stages
-    directly. Nothing asserted that the CLI ever calls any of them, so the
-    tier sat fully built and entirely disconnected.
-    """
+    """The whole tier was unreachable from production and nothing said so."""
 
     def test_the_cli_has_a_call_site(self):
         import inspect
@@ -308,8 +330,8 @@ class TestTheCliActuallyReachesTier3:
         assert source.count("_attempt_tier3(") >= 2
 
     def test_it_runs_after_the_selected_tuners_not_beside_them(self):
-        # This ordering is the guarantee that a generated tuner cannot take
-        # time from one that was going to produce something.
+        # This ordering is the guarantee that a generated tuner cannot take time from one that was going to produce
+        # something.
         import inspect
 
         from kernelforge.gemm_tune import cli
@@ -324,22 +346,138 @@ class TestTheCliActuallyReachesTier3:
         assert adapters_for("a4w4_blockscale_tuned_gemm.csv") is None
         assert adapters_for("bf16_tuned_gemm.csv") is not None
 
+    def test_the_call_site_keeps_what_it_returns(self):
+        # The generated result must reach reporting and deployment, not be dropped.
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
+        source = inspect.getsource(cli.run.callback)
+        assert "generated = _attempt_tier3(" in source
+        assert "results.append(generated)" in source
+
+    def test_the_gaps_it_acts_on_are_recomputed_after_the_tuners_ran(self):
+        # The list built before tuning cannot say which owners came back with
+        # nothing, and that is the only condition tier3 exists for in practice.
+        import inspect
+
+        from kernelforge.gemm_tune import cli
+
+        source = inspect.getsource(cli.run.callback)
+        recompute = source.index("_coverage_gaps(demand_report, tuner_specs, output_path, results)")
+        assert source.index("tuner_instance.execute()") < recompute < source.index("_attempt_tier3(")
+
+
+class TestAVerifiedGeneratedTunerBecomesAnOrdinaryResult:
+    """Only referee-approved output enters the normal result pipeline."""
+
+    @staticmethod
+    def _outcome(**kw):
+        from kernelforge.gemm_tune.tier3.runner import Tier3Outcome
+
+        base = {"attempted": True, "stage": "referee", "ok": True, "table": "bf16_tuned_gemm.csv"}
+        out = Tier3Outcome(**{**base, **kw})
+        out.output_csv = kw.get("output_csv", "/work/tier3/out.csv")
+        return out
+
+    @staticmethod
+    def _judgement(speedup: float):
+        """``improved`` is derived from the timing, so the timing is the input."""
+        from kernelforge.gemm_tune.tier3.referee import Judgement, PairedTiming
+
+        return Judgement(
+            shape="16x1536x7168",
+            best_timing=PairedTiming(baseline_us=10.0, candidate_us=10.0 / speedup, speedup=speedup),
+        )
+
+    def test_an_approved_outcome_maps_onto_a_tune_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        out = self._outcome(judgements=[self._judgement(1.5), self._judgement(0.9)])
+        res = _tier3_result(out, _gap(table="bf16_tuned_gemm.csv"))
+        assert res is not None
+        assert res.tuner_name == "tier3_generated_bf16_tuned_gemm"
+        assert res.artifact_path == "/work/tier3/out.csv"
+        assert res.env_var == "AITER_CONFIG_ODD" and res.env_value == "/work/tier3/out.csv"
+        assert res.total_shapes == 2 and res.improved_shapes == 1
+        assert res.best_micro_speedup == pytest.approx(1.5)
+        assert res.key_source == "runtime_observed"
+
+    def test_it_is_a_candidate_so_e2e_still_has_to_agree(self):
+        from kernelforge.gemm_tune.candidates import is_candidate, per_tuner_candidates
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        res = _tier3_result(self._outcome(judgements=[self._judgement(1.5)]), _gap())
+        assert res.candidate is True
+        assert is_candidate(res)
+        assert [c.tuner for c in per_tuner_candidates([res])] == [res.tuner_name]
+
+    def test_an_outcome_the_referee_did_not_approve_is_not_a_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        assert _tier3_result(self._outcome(ok=False), _gap()) is None
+
+    def test_an_attempt_that_never_reached_a_csv_is_not_a_result(self):
+        from kernelforge.gemm_tune.cli import _tier3_result
+
+        assert _tier3_result(self._outcome(output_csv=""), _gap()) is None
+
+    def test_the_outcome_carries_its_own_artifact_path(self):
+        # Rather than the caller rebuilding it from the work root by
+        # convention, which would deploy the wrong file the day that changes.
+        from kernelforge.gemm_tune.tier3.runner import Tier3Outcome
+
+        assert "output_csv" in Tier3Outcome().to_dict()
+
+
+class TestShapesComeFromTheDemandDocument:
+    def test_the_demand_lookup_matches_what_load_demand_returns(self, tmp_path):
+        # Guard against treating the parsed demand dict as an object with ``tables``.
+        from kernelforge.gemm_tune import cli, evidence
+
+        report = evidence.parse_log(
+            "[aiter] shape is M:512, N:1536, K:7168, "
+            "not found tuned config in /tmp/aiter_configs/a8w8_blockscale_tuned_gemm.csv"
+        )
+        path = evidence.write_demand(report, tmp_path / "demand.json")
+
+        seen = {}
+
+        def fake_attempt(gaps, shapes_for, *a, **kw):
+            seen["shapes"] = shapes_for(gaps[0])
+            raise RuntimeError("stop here; the mandate is not what this asserts")
+
+        # ``_attempt_tier3`` imports it inside the function, so the module
+        # attribute is the patch point.
+        from kernelforge.gemm_tune import tier3
+
+        original = tier3.attempt_generated_tuner
+        tier3.attempt_generated_tuner = fake_attempt
+        try:
+            cli._attempt_tier3(
+                [_gap(table="a8w8_blockscale_tuned_gemm.csv")],
+                str(path),
+                tmp_path,
+                profile=None,
+                gpu_type="MI355X",
+                framework="sglang",
+            )
+        finally:
+            tier3.attempt_generated_tuner = original
+
+        assert seen["shapes"], "the demand document has one key and it did not arrive"
+        assert int(seen["shapes"][0]["N"]) == 1536
+
 
 class TestTheProviderCallMatchesTheProviderAPI:
-    """The authoring call is only exercised with a real provider installed.
-
-    Nothing else here reaches it, so a wrong argument list sits undetected
-    until the one run that tries to generate -- and that run is exactly the
-    one nobody is watching. These pin the call against the real signatures.
-    """
+    """The authoring call is only exercised with a real provider installed."""
 
     def test_the_runtime_call_binds_against_the_real_signature(self):
         import inspect
 
         registry = pytest.importorskip("kernelforge.agent_backends.registry")
 
-        # What generate.call_agent passes. ``provider`` is positional and
-        # required; calling it with keywords only raises TypeError.
+        # What generate.call_agent passes.
         inspect.signature(registry.resolve_agent_runtime).bind(
             "claude",
             model="",
@@ -443,8 +581,15 @@ class TestTheWholeChain:
     def test_without_a_dispatch_nothing_is_emitted(self, tmp_path, monkeypatch, open_gate):
         # An unverified generated tuner is exactly what this tier must not emit.
         out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
-        assert out.stage == "referee" and not out.ok
-        assert "cannot be re-timed" in out.reason
+        assert not out.ok
+        assert "re-timed" in out.reason
+
+    def test_without_a_dispatch_it_stops_before_it_spends_anything(self, tmp_path, monkeypatch, open_gate):
+        # Reject missing dispatch before paying for authoring and sandboxing.
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
+        assert out.stage == "gate"
+        assert not out.attempted
+        assert not out.script, "no script should have been generated"
 
     def test_the_kill_switch_stops_it_before_anything_happens(self, tmp_path, monkeypatch):
         monkeypatch.setenv(gate.DISABLE_ENV, "1")

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run().
-
-Env vars consumed: MODEL_PATH, OPENAI_BASE_URL / ANTHROPIC_BASE_URL +
-OPENAI_API_KEY / ANTHROPIC_API_KEY, ROCR_VISIBLE_DEVICES,
-CLAUDE_MODEL, CODEX_MODEL, USER_DATA_PATH.
-"""
+"""CLI entry — ``optimize`` subcommand wiring Claude+Codex backends, executors, objective, and Coordinator.run()."""
 
 from __future__ import annotations
 
@@ -29,12 +24,8 @@ log = logging.getLogger(__name__)
 _OFFICIAL_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
-# AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks
-# this tuple and takes the first id the gateway actually serves, so the order
-# is the fallback ladder. Enforced as a hard gate only under
-# INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0; by default the gateway catalog
-# probe is the gate, and custom ids outside this tuple fail outright rather
-# than degrade.
+# AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks this tuple and takes the first id the
+# gateway actually serves, so the order is the fallback ladder.
 _CLAUDE_PREFERRED_MODEL = "claude-opus-5"
 
 _CLAUDE_ALLOWED_MODELS = (
@@ -44,11 +35,7 @@ _CLAUDE_ALLOWED_MODELS = (
     "claude-opus-4-6",
 )
 
-# Codex-side counterpart, also ordered best-first. This is a fallback ladder
-# only, never a gate: the Codex smoke test stays WARN-only, so an id outside
-# this tuple is left untouched and merely reported. It exists because the
-# default Codex model is as new as the default Claude one, and without a ladder
-# a gateway that lags behind would only fail on the first Codex turn.
+# Codex-side counterpart, also ordered best-first.
 _CODEX_PREFERRED_MODEL = "gpt-5.6-sol"
 
 _CODEX_FALLBACK_MODELS = (
@@ -57,8 +44,8 @@ _CODEX_FALLBACK_MODELS = (
     "gpt-5.4",
 )
 
-# Catalog probe retry delays: sleep N seconds before attempt i+1; the length is
-# the retry count after the initial attempt.
+# Catalog probe retry delays: sleep N seconds before attempt i+1; the length is the retry count after the initial
+# attempt.
 _CATALOG_RETRY_DELAYS_SEC = (1.0, 3.0, 5.0)
 
 # Critic-agent skill root resolution. Env wins; else the in-tree package.
@@ -66,16 +53,7 @@ _CRITIC_AGENT_ROOT_ENV = "CRITIC_AGENT_ROOT"
 
 
 def _resolve_agent_root(agent: str) -> Path | None:
-    """Return an agent skill root (``$<AGENT>_AGENT_ROOT`` else the in-tree package), or ``None``.
-
-    Args:
-        agent (str): Agent package name under ``hyperloom/agents`` (e.g.
-            ``"critic"``), which also names the ``<AGENT>_AGENT_ROOT`` env.
-
-    Returns:
-        Path | None: The validated agent root, or ``None`` when no candidate
-            contains ``runtime/cli.py``.
-    """
+    """Return an agent skill root (``$<AGENT>_AGENT_ROOT`` else the in-tree package), or ``None``."""
     override = os.environ.get(f"{agent.upper()}_AGENT_ROOT", "").strip()
     if override:
         p = Path(override).expanduser()
@@ -87,27 +65,11 @@ def _resolve_agent_root(agent: str) -> Path | None:
 
 
 def _validate_agent_runtime(root: Path, *, agent: str) -> None:
-    """Fail fast (SystemExit) if ``python -m hyperloom.agents.<agent>.runtime.cli --help`` doesn't work.
-
-    Shared by the critic and robustness preflights: both probe their runtime
-    module's ``--help`` with ``cwd=root`` and abort on any launch failure or
-    non-zero exit, differing only in which agent package and env/flag names
-    appear in the operator-facing message.
-
-    Args:
-        root (Path): The agent skill root to validate.
-        agent (str): Agent package name under ``hyperloom.agents`` (e.g.
-            ``"critic"``), which also names the ``<AGENT>_AGENT_*`` env vars
-            and the ``--<agent>-mock`` bypass flag.
-
-    Raises:
-        SystemExit: With code 2 when the runtime cannot start or exits
-            non-zero.
-    """
+    """Fail fast (SystemExit) if ``python -m hyperloom.agents.<agent>.runtime.cli --help`` doesn't work."""
     module = f"hyperloom.agents.{agent}.runtime.cli"
     cmd = [sys.executable, "-m", module, "--help"]
-    # Probe cost is import-bound and can spike on a loaded pod; allow an env
-    # override so a slow-but-healthy runtime is not misdiagnosed as broken.
+    # Probe cost is import-bound and can spike on a loaded pod; allow an env override so a slow-but-healthy runtime is
+    # not misdiagnosed as broken.
     try:
         _probe_timeout = float(os.environ.get(f"{agent.upper()}_AGENT_PROBE_TIMEOUT_SEC", "90"))
     except (TypeError, ValueError):
@@ -148,24 +110,7 @@ _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 
 
 def _sync_geak_config_base_url(geak_config_path: str, base_url: str) -> bool:
-    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url``.
-
-    Legacy GEAK invocations can pass ``--config $GEAK_CONFIG`` with an endpoint
-    embedded in yaml. When an operator points ``GEAK_BASE_URL`` at a reachable
-    endpoint, sync the yaml in place so that config does not keep dialing a
-    stale gateway.
-
-    Best-effort: returns ``False`` (never raises) when the path is empty, the
-    file is missing/unreadable/unwritable, it has no ``base_url:`` line, or it
-    is already in sync. Returns ``True`` only when a rewrite was applied.
-
-    Args:
-        geak_config_path (str): Path to the GEAK litellm yaml config.
-        base_url (str): The endpoint to write into the ``base_url:`` line.
-
-    Returns:
-        bool: ``True`` when a rewrite was applied, ``False`` otherwise.
-    """
+    """Rewrite ``base_url:`` in the GEAK litellm config to match ``base_url``."""
     if not geak_config_path or not base_url:
         return False
     path = Path(geak_config_path)
@@ -209,12 +154,7 @@ def _has_explicit_openai_key() -> bool:
 
 
 def _is_stale_proxy_url(value: str | None) -> bool:
-    """Return true for the retired local llm-proxy endpoint.
-
-    The old installer wrote ``127.0.0.1:4002`` as a local proxy default. Modern
-    operator tunnels may also be loopback URLs, so only that legacy port is
-    treated as stale and force-rewritten by preflight.
-    """
+    """Return true for the retired local llm-proxy endpoint."""
     if not value:
         return False
     from urllib.parse import urlparse
@@ -229,13 +169,7 @@ def _is_stale_proxy_url(value: str | None) -> bool:
 
 
 def _resolve_llm_endpoints() -> tuple[str, str]:
-    """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints.
-
-    Each side resolves from its own configuration only: its explicit
-    ``*_BASE_URL``, or the official SDK endpoint implied by that side's own key,
-    or empty. An empty side disables the features that speak its protocol; the
-    other provider's endpoint is never substituted.
-    """
+    """Resolve ``(anthropic_base_url, openai_base_url)`` for split entrypoints."""
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
 
@@ -247,40 +181,23 @@ def _resolve_llm_endpoints() -> tuple[str, str]:
 
 
 def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: str) -> None:
-    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway.
-
-    Args:
-        primary_api_key (str): The Claude CLI primary API key to write; blank
-            leaves any existing key untouched. Callers should pass the
-            Anthropic-side key (``ANTHROPIC_API_KEY``) so a split-entrypoint
-            deploy authenticates Claude with its own key rather than the shared
-            gateway key. A subscription OAuth token is rejected here, and with
-            no other key the file is left untouched.
-        anthropic_base_url (str): The upstream gateway URL; blank is a no-op.
-    """
+    """Point ``~/.claude/config.json`` ``customApiUrl`` at the upstream gateway."""
     import json as _json
 
     if not anthropic_base_url:
         return
     oauth_token = os.environ.get(CLAUDE_OAUTH_TOKEN_ENV, "").strip()
     if oauth_token and primary_api_key.strip() == oauth_token:
-        # primaryApiKey is an API-credits credential; persisting the subscription
-        # token here would move the run off the Max/Pro plan onto API billing.
-        # The variable name is spelled out rather than interpolated from
-        # CLAUDE_OAUTH_TOKEN_ENV: a token-named constant reads as a secret to
-        # static analysis even when only its name reaches the message.
+        # primaryApiKey is an API-credits credential; persisting the subscription token here would move the run off
+        # the Max/Pro plan onto API billing.
         print(
             "Preflight: refusing to write CLAUDE_CODE_OAUTH_TOKEN into "
             "~/.claude/config.json primaryApiKey (subscription credential)"
         )
         primary_api_key = ""
     if oauth_token and not anthropic_synthesizable_key():
-        # Subscription mode: the token is only valid against Anthropic itself,
-        # so writing customApiUrl would point the CLI away from the endpoint
-        # that accepts it. The test is "is this run on the subscription", not
-        # "is primary_api_key empty" -- the caller passes ANTHROPIC_API_KEY, so
-        # a host authenticating through ANTHROPIC_AUTH_TOKEN also arrives with
-        # an empty key while genuinely needing the gateway URL written.
+        # Subscription mode: the token is only valid against Anthropic itself, so writing customApiUrl would point the
+        # CLI away from the endpoint that accepts it.
         print("Preflight: subscription token in use; ~/.claude/config.json left alone")
         return
     claude_config_path = Path.home() / ".claude" / "config.json"
@@ -312,23 +229,13 @@ def _reset_claude_config_to_upstream(primary_api_key: str, anthropic_base_url: s
 
 
 def _reject_cross_provider_pairing() -> None:
-    """Fail fast unless the credentials form one of the three legal shapes.
-
-    Legal: the Anthropic side alone, the OpenAI side alone, or both sides. A side
-    is either fully absent or carries both its own base URL and its own key.
-    Rejected: a base URL whose only key belongs to the other provider, and a key
-    whose only endpoint would come from the other provider.
-
-    Reads the *raw* environment, before :func:`_resolve_llm_endpoints` fills in
-    any implied endpoint. A key that implies its own official endpoint may omit
-    its ``*_BASE_URL``, so official-key pairings across both sides are legal.
-    """
+    """Fail fast unless the credentials form one of the three legal shapes."""
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     anthropic_key = has_anthropic_credential()
-    # A subscription OAuth token only validates against Anthropic itself, so it
-    # implies the official endpoint and completes the side without a base URL.
+    # A subscription OAuth token only validates against Anthropic itself, so it implies the official endpoint and
+    # completes the side without a base URL.
     if anthropic_url:
         anthropic_endpoint = anthropic_url
     elif _has_claude_oauth_token():
@@ -346,8 +253,8 @@ def _reject_cross_provider_pairing() -> None:
             "while the OpenAI side points at OPENAI_BASE_URL"
         )
     elif anthropic_url and openai_key and not openai_url:
-        # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy
-        # whose OPENAI_API_KEY is likely a gateway key missing its own URL.
+        # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose OPENAI_API_KEY is likely a gateway
+        # key missing its own URL.
         offender = (
             "OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the "
             "Anthropic side points at ANTHROPIC_BASE_URL"
@@ -374,11 +281,7 @@ def _reject_cross_provider_pairing() -> None:
 
 
 def _warn_on_shadowed_oauth_token() -> None:
-    """Warn when an API key will silently outrank the subscription token.
-
-    The Claude CLI prefers an API key over the OAuth token, so this combination
-    bills API credits even though the operator configured a subscription.
-    """
+    """Warn when an API key will silently outrank the subscription token."""
     if not _has_claude_oauth_token():
         return
     shadowing = [name for name in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS if os.environ.get(name, "").strip()]
@@ -394,14 +297,7 @@ def _warn_on_shadowed_oauth_token() -> None:
 
 
 def _warn_on_oauth_against_a_foreign_endpoint() -> None:
-    """Warn when a subscription token is pointed at a non-Anthropic endpoint.
-
-    The token authenticates against Anthropic itself and nothing else, so this
-    pairing cannot succeed. It is worth its own message because the failure is
-    not the operator's first concern here: reaching a third-party gateway means
-    the subscription credential is put on the wire to a host that was never
-    meant to see it.
-    """
+    """Warn when a subscription token is pointed at a non-Anthropic endpoint."""
     if not _has_claude_oauth_token() or anthropic_synthesizable_key():
         return
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -418,12 +314,7 @@ def _warn_on_oauth_against_a_foreign_endpoint() -> None:
 
 
 def _warn_on_oauth_widened_provider_shape() -> None:
-    """Warn when a subscription token turns an OpenAI-only deploy dual-sided.
-
-    The token is a full Anthropic side, so its mere presence in the shell moves
-    orchestration off the gateway and onto the subscription — surprising for an
-    operator who only configured the OpenAI side.
-    """
+    """Warn when a subscription token turns an OpenAI-only deploy dual-sided."""
     if not _has_claude_oauth_token():
         return
     if anthropic_synthesizable_key() or os.environ.get("DEEPSEEK_API_KEY", "").strip():
@@ -442,15 +333,7 @@ def _warn_on_oauth_widened_provider_shape() -> None:
 
 
 def _validate_credentials() -> None:
-    """Fail fast when no usable LLM endpoint/key is configured.
-
-    Requires a base URL (``OPENAI_BASE_URL`` / ``ANTHROPIC_BASE_URL``, or an
-    official provider credential that implies its default endpoint) plus at
-    least one key (``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` /
-    ``ANTHROPIC_AUTH_TOKEN`` / ``CLAUDE_CODE_OAUTH_TOKEN``). Split
-    Anthropic/OpenAI entrypoints and single gateways (same key under both
-    provider env names) are both accepted.
-    """
+    """Fail fast when no usable LLM endpoint/key is configured."""
     _reject_cross_provider_pairing()
     _warn_on_shadowed_oauth_token()
     _warn_on_oauth_against_a_foreign_endpoint()

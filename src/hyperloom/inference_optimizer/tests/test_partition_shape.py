@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the launch-time check on a session's compute-partition shape.
-
-The module under test never changes the card, so these tests are about what it
-concludes from what it reads. Two behaviours carry the weight: a declared mode
-that cannot be verified must refuse the session rather than assume it holds, and
-a workload that provably will not fit must be refused in milliseconds at launch
-rather than discovered as an out-of-memory crash hours in.
-"""
+"""Tests for the launch-time check on a session's compute-partition shape."""
 
 from __future__ import annotations
 
@@ -171,13 +164,7 @@ class TestFeasibility:
         assert any("reported no usable per-partition memory" in w for w in verdict.warnings)
 
     def test_a_zero_capacity_is_unknown_rather_than_a_limit_that_refuses_everything(self, card):
-        """The guard here and the one in ``fits_in_partition`` must not disagree.
-
-        A ``0.0`` capacity used to pass this side's ``is None`` test and then hit
-        the other side's falsiness test, so the arithmetic was skipped while the
-        warning that explains why was not printed. Both now ask
-        ``capacity_known``.
-        """
+        """The guard here and the one in ``fits_in_partition`` must not disagree."""
         card(_layout("CPX", 32, gib=0.0))
         verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
 
@@ -187,13 +174,7 @@ class TestFeasibility:
 
 
 class TestStreamsAreRefusedNotDefaulted:
-    """``streams=0`` must not become the default, here or at the CLI.
-
-    The CLI already refuses it, and says in a comment why falsiness is the wrong
-    test. This entry point used ``streams or DEFAULT`` anyway, so the same value
-    exited 2 through one door and reported "Streams per partition: 2" through the
-    other.
-    """
+    """``streams=0`` must not become the default, here or at the CLI."""
 
     @pytest.mark.parametrize("streams", [0, -1, -8])
     def test_a_value_below_one_refuses(self, card, streams):
@@ -229,13 +210,7 @@ class TestStreamsAreRefusedNotDefaulted:
 
 
 class TestFitCheckNeedsAFanOut:
-    """A partitioned card met by a session that will not place work on partitions.
-
-    The refusal multiplies a footprint by streams sharing one partition. With no
-    fan-out that premise is false twice over: nothing places a second stream,
-    and nothing pins the benchmark to a partition at all -- whole cards
-    enumerate first, so the run may land on a whole card.
-    """
+    """A partitioned card met by a session that will not place work on partitions."""
 
     def test_a_workload_too_big_for_a_partition_is_not_refused(self, card):
         card(CPX_36)
@@ -351,13 +326,7 @@ class TestRuntimeEnv:
 
 class TestSessionShapeSummary:
     def test_an_unknown_shape_is_absent_rather_than_a_second_schema(self):
-        """No ``layout is None`` branch: an unknown shape is ``{}`` at the caller.
-
-        The branch that used to answer ``None`` returned four keys where the live
-        path returns seven, so ``cu_probed`` and ``fanout_expected`` were missing
-        rather than false -- and a missing provenance key is how the report came
-        to claim a board-table derivation it had not made.
-        """
+        """No ``layout is None`` branch: an unknown shape is ``{}`` at the caller."""
         with pytest.raises(AttributeError):
             ps.session_shape_summary(None, 2)  # type: ignore[arg-type]
         assert ps.session_shape_summary(SPX_288, 2)["mode"] == "SPX"
@@ -390,11 +359,7 @@ class TestSessionShapeSummary:
 
 
 class TestReportedProvenance:
-    """What the report says about where the CU count came from.
-
-    A false provenance line is the one failure this feature exists to prevent,
-    so the rendering gets the same scrutiny as the probe.
-    """
+    """What the report says about where the CU count came from."""
 
     @staticmethod
     def _render(shape):
@@ -412,11 +377,7 @@ class TestReportedProvenance:
         assert "32 (derived from the board table)" in self._render(shape)
 
     def test_an_unknown_provenance_claims_neither(self):
-        """A shape recovered from the published env knows the count, not its origin.
-
-        Truthiness on an absent key read that as the board table, so a fresh
-        launch that probed the device reported a guess it never made.
-        """
+        """A shape recovered from the published env knows the count, not its origin."""
         rendered = self._render({"mode": "CPX", "partitions": 8, "cu_per_partition": 32})
 
         assert "CU per partition  : 32" in rendered
@@ -462,12 +423,7 @@ class TestEnvReaders:
 
     @pytest.mark.parametrize("raw", ["abc", "-1", "0x3", "2.5"])
     def test_an_unusable_gpu_id_is_warned_about_not_swallowed(self, monkeypatch, caplog, raw):
-        """Card 0's topology filed as the session's is the mislabelling this prevents.
-
-        The reader returns 0 so a bad value cannot crash a launch, but it has to
-        say so: the fallback reads a different card, and every number the session
-        files afterwards carries that card's shape.
-        """
+        """Card 0's topology filed as the session's is the mislabelling this prevents."""
         monkeypatch.setenv(ps.PARTITION_GPU_ENV, raw)
         with caplog.at_level("WARNING"):
             assert ps.partition_gpu_id() == 0
@@ -626,12 +582,7 @@ class TestCliExport:
         assert (args.compute_partition_mode, args.streams_per_partition) == ("", None)
 
     def test_a_serving_session_on_a_split_card_is_not_refused_without_flags(self, export, monkeypatch):
-        """The reported bug: a plain sglang run exited 2 on a card someone else left in CPX.
-
-        No flags, so no fan-out was ever asked for, and a serving benchmark
-        cannot do one. Refusing on ``2 x footprint`` was arithmetic about a
-        shape the session was never going to run in.
-        """
+        """The reported bug: a plain sglang run exited 2 on a card someone else left in CPX."""
         monkeypatch.setattr(ps, "per_stream_footprint_gib", lambda *a, **k: (20.7, "weights"))
         shape = export(framework="sglang")
 

@@ -90,11 +90,7 @@ def test_operator_directory_name_encodes_canonical_separators(operator_id: str) 
 
 
 def test_operator_directory_name_is_injective_over_percent_signs() -> None:
-    """Two identities must never share one directory.
-
-    They would share a version store and a public pointer, so the second
-    publication would repoint the first operator's result at its own patch.
-    """
+    """Two identities must never share one directory."""
     encoded_colon = operator_directory_name("kernel:a:b:c:d:e:f")
     literal_escape = operator_directory_name("kernel:a%3Ab:c:d:e:f")
 

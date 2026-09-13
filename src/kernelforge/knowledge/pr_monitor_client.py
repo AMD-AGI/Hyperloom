@@ -1,8 +1,4 @@
-"""REST client for PR Monitor.
-
-404 means absence; contract and transport failures remain distinct. Pagination
-is disabled because the service cursor skips rows sharing its timestamp.
-"""
+"""REST client for PR Monitor."""
 
 from __future__ import annotations
 
@@ -124,11 +120,7 @@ class PRMonitorClient:
         *,
         timeout_sec: float | None = None,
     ) -> Any | None:
-        """GET one endpoint; return None for a normal 404 absence.
-
-        Raises PRContractError on 400/422/non-JSON and PRTransportError on
-        timeouts, connection failures, and 5xx.
-        """
+        """GET one endpoint; return None for a normal 404 absence."""
         if params and "before" in params:
             raise PRMonitorError("pagination is disabled: the server cursor drops same-timestamp rows")
         url = self._url(path, params)
@@ -158,12 +150,7 @@ class PRMonitorClient:
         *,
         budget_sec: float | None = None,
     ) -> list[FetchOutcome]:
-        """Fetch concurrently within one budget and preserve request order.
-
-        Every request that answered inside the budget is kept: waiting on the
-        batch as a whole stops one slow request from discarding the results
-        already sitting next to it.
-        """
+        """Fetch concurrently within one budget and preserve request order."""
         if not requests:
             return []
         budget = self._budget if budget_sec is None else max(0.0, budget_sec)
@@ -239,11 +226,7 @@ class PRMonitorClient:
         return payload
 
     def get_file_patch(self, repo: str, number: int, file_path: str) -> dict | None:
-        """Fetch the diff of one changed file.
-
-        Filters on the PR's current head while ``?file_path=`` reverse lookup
-        does not, so after a force-push a path that matched the PR can 404 here.
-        """
+        """Fetch the diff of one changed file."""
         payload = self.get(f"/repos/{repo}/prs/{number}/files/by-path", {"path": file_path})
         if payload is None:
             return None

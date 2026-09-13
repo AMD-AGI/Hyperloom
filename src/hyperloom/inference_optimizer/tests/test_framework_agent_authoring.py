@@ -19,11 +19,7 @@ from ._optimize_fixtures import FakeCoordinator, optimize_state
 
 
 def _state(*, authoring: bool = True) -> SharedState:
-    """Real ``SharedState`` seeded for the authoring track.
-
-    The local-exploration arm is off: this suite exercises the PR-authoring
-    track, and the arm has dedicated coverage elsewhere.
-    """
+    """Real ``SharedState`` seeded for the authoring track."""
     return optimize_state(
         framework_agent_authoring_enabled=authoring,
         framework_local_explore_enabled=False,
@@ -101,13 +97,7 @@ class _BusStub:
 
 
 class _Stub(FakeCoordinator):
-    """The state a FRAMEWORK pump tick reads; the rest resolves for real.
-
-    Only genuine boundaries are doubled here: the task store, the bus, the
-    Critic backend and the discovery call. Every Coordinator method the pump
-    reaches for is served by its real collaborator, so a helper added to the
-    call chain needs no edit in this file.
-    """
+    """The state a FRAMEWORK pump tick reads; the rest resolves for real."""
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True) -> None:
         super().__init__(
@@ -143,12 +133,7 @@ _CANDIDATE = {
 
 
 def _seed_batch(stub: _Stub, *candidates: dict[str, Any]) -> None:
-    """Put a discovered batch in state.
-
-    Discovery is the candidate-discovery specialist's deliverable, landing in
-    ``framework_agent_batches``; the pump reads that. A test that patched
-    ``fa phase-discover`` would be patching a call the pump no longer makes.
-    """
+    """Put a discovered batch in state."""
     stub.shared_state.framework_agent_batches = [{"batch_id": "b1", "candidates": [dict(c) for c in candidates]}]
 
 
@@ -157,12 +142,7 @@ def _pump(stub: _Stub) -> None:
 
 
 def _pump_then_materialize(stub: _Stub) -> None:
-    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it.
-
-    The pump submits the candidate carrying its resolved ``audit_step``; an
-    approve verdict materialises it via ``_materialize_framework_agent_candidate``,
-    which performs the apply/author dispatch.
-    """
+    """Run the pump (resolves audit route + submits a candidate proposal) then materialise it."""
     asyncio.run(stub._pump_framework_agent_phase())
     pendings = [
         p
@@ -264,7 +244,7 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     assert specialist_task.params["reauthor_attempt"] == 1
     round_entry = stub._build_specialist_round_entry(
         task=specialist_task,
-        done_payload={"proposal_set": [], "empty": True},
+        done_payload={"proposal_set": []},
         source=f"specialist:{task_id}",
     )
     assert round_entry["reauthor_attempt"] == 1
@@ -278,14 +258,13 @@ def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_pa
     [
         ("direct_framework", True, ["integrate_patch"]),
         ("author_via_specialist", True, ["specialist"]),
-        # Author route with the arm off must still land on the raw-diff track:
-        # the alternative is a candidate that is approved and then stranded.
+        # Author route with the arm off must still land on the raw-diff track: the alternative is a candidate that is
+        # approved and then stranded.
         ("author_via_specialist", False, ["integrate_patch"]),
-        # An unlabelled candidate takes the author route: rewriting against
-        # live source is the safe default for one nobody vetted.
+        # An unlabelled candidate takes the author route: rewriting against live source is the safe default for one
+        # nobody vetted.
         ("", True, ["specialist"]),
-        # A route the pump does not recognise runs both tracks rather than
-        # picking one on a guess.
+        # A route the pump does not recognise runs both tracks rather than picking one on a guess.
         ("unrecognised", True, ["integrate_patch", "specialist"]),
     ],
 )
@@ -296,11 +275,7 @@ def test_the_route_the_discovery_specialist_returns_picks_the_track(
     authoring: bool,
     kinds: list[str],
 ):
-    """``candidate["route"]`` is the only input that selects apply-vs-author.
-
-    The pump neither re-audits nor re-ranks -- the route travels from the
-    discovery specialist's batch through the proposal payload to the dispatch.
-    """
+    """``candidate[\"route\"]`` is the only input that selects apply-vs-author."""
     stub = _Stub(tmp_path, authoring=authoring)
     _seed_batch(stub, dict(_CANDIDATE, route=route))
 
@@ -431,11 +406,7 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
 
 
 def test_record_authored_outcome_records_apply_failed_terminal(tmp_path: Path):
-    """A non-keep terminal status (apply_failed) MUST still be recorded.
-
-    Without a terminal row the FRAMEWORK pump re-selects the same candidate
-    every tick. Only empty/in-progress is skipped.
-    """
+    """A non-keep terminal status (apply_failed) MUST still be recorded."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="i-2",
@@ -470,9 +441,7 @@ def test_record_authored_outcome_requires_task_provenance(tmp_path: Path):
 
 
 def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path: Path):
-    """integrate_patch carries only specialist_task_id; the bridge must map it
-    back to the originating PR-URL candidate so the row matches the select key.
-    """
+    """integrate_patch carries only specialist_task_id; the bridge must map it back to the originating PR-URL candidate so the row matches the select key."""
     stub = _Stub(tmp_path, authoring=True)
     stub.shared_state.framework_agent_specialist_candidate_map = {
         "spec-7": "https://github.com/ROCm/aiter/pull/3888",
@@ -641,7 +610,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     stub._record_framework_agent_authored_outcome = lambda *, task, result: recorded.append(
         str(result.result.get("status") or "")
     )
-    stub._maybe_rearm_authored_lane = lambda *_args, **_kwargs: None
+    stub._maybe_rearm_authored_lane = _noop_async
     stub._drain_apply_fail_retry_pending = _noop_async
     stub._is_promotable_result = lambda *_args, **_kwargs: False
     stub._handle_unpromotable_result = _noop_async
@@ -665,10 +634,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
-    """A patch dropped by safety-vetting (empty patches_written) must still stamp
-    a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK
-    pump re-dispatches the candidate forever (livelock).
-    """
+    """A patch dropped by safety-vetting (empty patches_written) must still stamp a terminal row (gate on patches_written, NOT proposal_set), else the FRAMEWORK pump re-dispatches the candidate forever (livelock)."""
     stub = _Stub(tmp_path, authoring=True)
     cand = "https://github.com/sgl-project/sglang/pull/28067"
     task = SimpleNamespace(
@@ -681,7 +647,6 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": False,
         "patches_written": [],
         "proposal_set": [{"name": "serving-gc-off-critical-path"}],
         "summary": "patch target file absent from framework tree",
@@ -723,9 +688,7 @@ def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_patches_written_present(tmp_path: Path):
-    """Non-empty patches_written means autosubmit will create an integrate_patch
-    that owns the terminal row; the empty-outcome bridge must NOT also stamp one.
-    """
+    """Non-empty patches_written means autosubmit will create an integrate_patch that owns the terminal row; the empty-outcome bridge must NOT also stamp one."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-x",
@@ -781,9 +744,7 @@ def test_config_levers_helper_extracts_from_proposal_set():
 
 
 def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
-    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no
-    patch) is routed to integrate_patch, so the
-    empty-outcome bridge must NOT stamp an authored_empty row for it."""
+    """A config-lever deliverable (proposal_set with extra_args/extra_envs and no patch) is routed to integrate_patch, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-cfg",
@@ -820,9 +781,7 @@ def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
 
 
 def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
-    """A non-diff tuned artifact (``artifacts_written`` with a real source file)
-    is a FULL result: autosubmit routes it to ``integrate_patch``, so the
-    empty-outcome bridge must NOT stamp an authored_empty row for it."""
+    """A non-diff tuned artifact (``artifacts_written`` with a real source file) is a FULL result: autosubmit routes it to ``integrate_patch``, so the empty-outcome bridge must NOT stamp an authored_empty row for it."""
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
     stub = _Stub(tmp_path, authoring=True)
@@ -842,7 +801,6 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -863,9 +821,10 @@ def test_empty_outcome_skips_when_artifacts_written_routable(tmp_path: Path):
 
 
 def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
-    """``artifacts_written`` present but the source file does NOT exist:
-    autosubmit cannot route it to ``integrate_patch``, so the empty-outcome
-    bridge MUST still stamp a terminal row (else the FRAMEWORK pump livelocks)."""
+    """``artifacts_written`` present but the source file does NOT exist: autosubmit cannot route it to
+    ``integrate_patch``, so the empty-outcome bridge MUST still stamp a terminal row (else the FRAMEWORK pump
+    livelocks).
+    """
     stub = _Stub(tmp_path, authoring=True)
     task = SimpleNamespace(
         task_id="spec-art-missing",
@@ -877,7 +836,6 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [
@@ -901,9 +859,7 @@ def test_empty_outcome_stamps_when_artifacts_source_missing(tmp_path: Path):
 
 
 def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Path):
-    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file
-    OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge
-    MUST stamp a terminal row."""
+    """A RELATIVE artifact ``source`` that resolves (via ``..``) to a real file OUTSIDE the specialist sandbox is NOT routable, so the empty-outcome bridge MUST stamp a terminal row."""
     import os
 
     from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -925,7 +881,6 @@ def test_empty_outcome_stamps_when_artifacts_source_outside_sandbox(tmp_path: Pa
         },
     )
     done_payload = {
-        "empty": True,
         "patches_written": [],
         "proposal_set": [],
         "artifacts_written": [

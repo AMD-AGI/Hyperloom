@@ -48,9 +48,8 @@ suggestion:
   on; a different tag is a **failure**, even if it also pulls successfully.
 - The skill lists a **different `sglang` image per GPU architecture**, so first detect the
   architecture on this host, then read the **exact** tag for the matching row **from the
-  skill file itself** rather than typing it out (the demo skill's path is in
-  `HYPERLOOM_SKILL_PATH` in `.env`; otherwise it is the `SKILL.md` of the demo skill you
-  are running):
+  skill file itself** rather than typing it out. Use `E2E_DEMO_SKILL_PATH` from `.env` —
+  not `HYPERLOOM_SKILL_PATH`, which the setup backend rewrites to the optimizer skill:
 
   ```bash
   gfx="$(/opt/rocm/bin/rocminfo 2>/dev/null | grep -oiE 'gfx9[0-9a-f]+' | head -1)"
@@ -59,7 +58,7 @@ suggestion:
     gfx942) row='MI300X' ;;   # MI300X
     *) echo "ERROR: could not detect GPU arch (gfx='$gfx')"; exit 1 ;;
   esac
-  HYPERLOOM_IMAGE="$(grep -E "^- \`sglang\` $row" "$HYPERLOOM_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
+  HYPERLOOM_IMAGE="$(grep -E "^- \`sglang\` $row" "$E2E_DEMO_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
   echo "arch=$gfx row=$row using image: $HYPERLOOM_IMAGE"
   ```
 

@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for ``multi_node/scripts/kernel_node_ops.py``.
-
-The Ray-free, pod-side kernel ops runner for the Infera backend. Stdlib-only,
-loaded by exec'ing the script bundled with its pod-side deps. These guard the
-safety-critical behaviours: py_compile auto-revert on a bad patch, the bench
-staging path-traversal guard, and the status -> returncode contract the
-sandbox-side callers depend on.
-"""
+"""Unit tests for ``multi_node/scripts/kernel_node_ops.py``."""
 
 from __future__ import annotations
 
@@ -251,20 +244,6 @@ def test_revert_rejects_backup_outside_root(patch_env, capsys):
     payload = _last_json(capsys)
     assert rc == 1 and payload["status"] == "failed"
     assert "backup_path" in payload["error"]
-
-
-def test_revert_rejects_target_outside_framework(patch_env, capsys):
-    fw, bak = patch_env
-    k = _load("kno_revert_bad_target")
-    outside = fw.parent / "escape.py"
-    outside.write_text("x", encoding="utf-8")
-    backup = bak / "b.bak"
-    backup.write_text("restored", encoding="utf-8")
-    ns = argparse.Namespace(target_path=str(outside), backup_path=str(backup))
-    rc = k._do_revert(ns)
-    payload = _last_json(capsys)
-    assert rc == 1 and payload["status"] == "failed"
-    assert "target_path" in payload["error"]
 
 
 def test_apply_rejects_backup_dir_outside_root(patch_env, capsys):

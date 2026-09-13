@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SWEEP phase auto-dispatch tests.
-
-SWEEP entry dispatches ``conc_sweep`` directly; the full-workload ``sweep``
-helper is covered as a manual compatibility path.
-"""
+"""SWEEP phase auto-dispatch tests."""
 
 from __future__ import annotations
 
@@ -15,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -287,12 +284,7 @@ async def test_stack_validation_reverts_when_no_gain_over_current_best(
     tmp_path: Path,
     monkeypatch,
 ):
-    """Stack worse than current_best (110) but above baseline (100) must REVERT.
-
-    The KEEP decision is incremental over current_best, not total over baseline:
-    new_tput=109 is +9% vs baseline yet -0.9% vs current_best, so the stack adds
-    no value and must be reverted.
-    """
+    """Stack worse than current_best (110) but above baseline (100) must REVERT."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0)
@@ -310,13 +302,7 @@ async def test_stack_validation_partial_revert_becomes_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A partial inner revert means the patch may still be on a remote pod.
-
-    Under the new patch lifecycle contract, partial non-KEEP reverts are not
-    treated as successful: the top-level status becomes "failed" and
-    patch_cleanup_status becomes "recovery_required" so the coordinator knows
-    the tree may be in an unknown state.
-    """
+    """A partial inner revert means the patch may still be on a remote pod."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="partial")
@@ -347,6 +333,253 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
     assert result["gain_pct"] == pytest.approx(12.0)
     assert result["stack_incremental_gain_pct"] == pytest.approx(1.8181818, rel=1e-3)
     assert result["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "grading_mode",
+        "output",
+        "total",
+        "intvty",
+        "missing",
+        "submission_valid",
+        "decision",
+        "objective",
+        "increment",
+        "verdict",
+    ),
+    [
+        pytest.param(
+            "agentx", 130.0, 18000.0, 410.0, None, True, "REVERT", GRADED_INTVTY, 2.5, "RECORDED", id="total-regresses"
+        ),
+        pytest.param(
+            "agentx",
+            105.0,
+            22000.0,
+            410.0,
+            None,
+            True,
+            "KEEP",
+            GRADED_INTVTY,
+            2.5,
+            "KEEP",
+            id="intvty-wins-output-dips",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            22000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "RECORDED",
+            id="interactivity-regresses",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            18000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "REVERT",
+            id="both-axes-regress",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            22000.0,
+            404.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            1.0,
+            "RECORDED",
+            id="intvty-below-keep-floor",
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, False, "REVERT", None, -100.0, "REVERT", id="invalid-submission"
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, None, "REVERT", None, -100.0, "REVERT", id="unverified-submission"
+        ),
+        pytest.param(
+            "synthetic",
+            130.0,
+            18000.0,
+            300.0,
+            None,
+            True,
+            "KEEP",
+            "output_throughput",
+            200.0 / 11.0,
+            "KEEP",
+            id="synthetic-output",
+        ),
+        *[
+            pytest.param(
+                "agentx",
+                output,
+                22000.0,
+                410.0,
+                (side, axis),
+                True,
+                "NEEDS_REVIEW",
+                "output_throughput",
+                (output - 110.0) / 110.0 * 100.0,
+                "KEEP" if direction == "up" else "REVERT",
+                id=f"missing-{side}-{axis}-output-{direction}",
+            )
+            for side in ("candidate", "reference")
+            for axis in ("total", "intvty")
+            for direction, output in (("up", 130.0), ("down", 90.0))
+        ],
+        *[
+            pytest.param(
+                mode,
+                130.0,
+                None,
+                None,
+                ("reference", "total"),
+                True,
+                "KEEP",
+                "output_throughput",
+                200.0 / 11.0,
+                "KEEP",
+                id=f"{mode}-missing-axes",
+            )
+            for mode in ("synthetic", "explicit-output")
+        ],
+    ],
+)
+async def test_stack_validation_preserves_actual_measurement(
+    tmp_path: Path,
+    monkeypatch,
+    grading_mode,
+    output,
+    total,
+    intvty,
+    missing,
+    submission_valid,
+    decision,
+    objective,
+    increment,
+    verdict,
+):
+    """The real stack verdict and its writeback envelope share one E2E measurement."""
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    agentx = grading_mode != "synthetic"
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    if grading_mode == "explicit-output":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    c = _stack_validation_coordinator(tmp_path)
+    c.shared_state.framework = "vllm"
+    c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
+    c.shared_state.baseline_accuracy = 0.9
+    c.shared_state.current_best.update(
+        total_throughput=20000.0,
+        e2e_norm_intvty_p90=400.0,
+        extra_server_args="--max-model-len 8192",
+    )
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    original_source = "def kernel():\n    return 1\n"
+    optimized_source = "def kernel():\n    return 2\n"
+    for entry in stack:
+        target = tmp_path / f"{entry['kernel_id']}.py"
+        patch = tmp_path / f"{entry['kernel_id']}_opt.py"
+        target.write_text(original_source, encoding="utf-8")
+        patch.write_text(optimized_source, encoding="utf-8")
+        entry.update(target_file=str(target), patch_path=str(patch))
+
+    bench_result = {
+        "status": "succeeded",
+        "output_throughput": output,
+        "input_throughput": total - output if total is not None else None,
+        "total_token_throughput": total,
+        GRADED_INTVTY: intvty,
+        "completed_requests": 64,
+        "submission_valid": submission_valid,
+        "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
+        "accuracy": 0.9,
+        "ttft_mean_ms": 20.0,
+        "e2el_mean_ms": 1000.0,
+        "tpot_mean_ms": 2.0,
+        "launch_evidence": {
+            "observed_server_launch_flags": "--max-model-len 8192",
+            "observed_server_identity": {"model_path": "/models/test-model", "tp_size": 1},
+        },
+        "launch_evidence_path": str(tmp_path / "measured" / "launch_evidence.json"),
+        "server_log_path": str(tmp_path / "measured" / "server.log"),
+        "report_path": str(tmp_path / "measured" / "benchmark_report.json"),
+        "workspace": str(tmp_path / "measured"),
+    }
+    if missing:
+        side, axis = missing
+        incomplete = bench_result if side == "candidate" else c.shared_state.current_best
+        missing_keys = (
+            ("total_token_throughput", "total_throughput", "input_throughput") if axis == "total" else (GRADED_INTVTY,)
+        )
+        for key in missing_keys:
+            incomplete.pop(key, None)
+    original_measurement = dict(bench_result)
+    original_best = dict(c.shared_state.current_best)
+    calls = []
+
+    async def _benchmark(self, ctx):
+        calls.append(ctx)
+        assert ctx.extra["shared_state"] is c.shared_state
+        assert ctx.task.params["extra_server_args"] == "--max-model-len 8192"
+        assert ctx.task.params["quality_ref_exempt"] is True
+        assert ctx.task.params[baseline_mod.SBD_INNER_STEP_PARAM] is True
+        assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == optimized_source for entry in stack)
+        return bench_result
+
+    monkeypatch.setattr(baseline_mod.BaselineExecutor, "__call__", _benchmark)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert len(calls) == 1
+    assert result["status"] == "ok", result
+    assert result["decision"] == decision
+    assert result["graded_verdict"] == verdict
+    assert result["stack_incremental_gain_pct"] == pytest.approx(increment)
+    assert result["base_tput"] == 100.0
+    valid = not agentx or submission_valid is True
+    assert result["new_tput"] == (output if valid else 0.0)
+    assert result["gain_pct"] == pytest.approx(output - 100.0 if valid else -100.0)
+    assert result["stack_kernel_ids"] == ["k001", "k004"]
+    assert result["patch_cleanup_status"] == "complete"
+    expected_source = optimized_source if decision == "KEEP" else original_source
+    assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == expected_source for entry in stack)
+    assert result["bench_result"] == original_measurement
+    assert bench_result == original_measurement
+    assert c.shared_state.current_best == original_best
+    assert result.get("graded_objective") == objective
+    if missing and grading_mode == "agentx":
+        reason = "candidate_axes_missing" if missing[0] == "candidate" else "current_best_axes_missing"
+        assert reason in result["reason"]
+        assert result["revert_result"]["status"] == "ok"
+        assert result["finalize_results"] == []
+    assert result["workspace"] == bench_result["workspace"]
+    assert result["report_path"] == bench_result["report_path"]
+    assert result["ttft_mean_ms"] == bench_result["ttft_mean_ms"]
+    assert result["e2el_mean_ms"] == bench_result["e2el_mean_ms"]
+    assert result["tpot_mean_ms"] == bench_result["tpot_mean_ms"]
 
 
 @pytest.mark.asyncio
@@ -675,12 +908,7 @@ async def test_on_enter_sweep_ignores_full_sweep_recipe_for_auto_path(coord):
 
 @pytest.mark.asyncio
 async def test_a_state_with_no_ladder_lets_the_workload_pick(coord):
-    """An unseeded ladder must reach the engine as "unset", not as "none wanted".
-
-    The executor reads an empty list as a deliberate choice and skips the whole
-    sweep, so collapsing None into [] here would silently drop it for any state
-    the CLI did not seed.
-    """
+    """An unseeded ladder must reach the engine as \"unset\", not as \"none wanted\"."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -765,12 +993,7 @@ async def test_enqueue_conc_sweep_declines_when_clamp_leaves_no_time(coord):
 
 @pytest.mark.asyncio
 async def test_conc_sweep_lease_follows_the_clamped_budget(coord):
-    """The lease must bound the task that runs, not the configured value.
-
-    With no configured budget and a long session the clamp produces a budget
-    larger than the old 9000 s default, and the watchdog would have failed a
-    sweep that was still making progress.
-    """
+    """The lease must bound the task that runs, not the configured value."""
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -1038,15 +1261,23 @@ def _sweep_phase_row(*, auto_sweep_task_id: str = "") -> dict:
 
 
 def _make_policy_gate(*, shared_state):
-    """Plain PolicyGate wired to the role registry + the test's SharedState double."""
+    """PolicyGate wired to the role registry, with a projection of the state double.
+
+    The resource rules read the projection, never the state, so the snapshot is
+    taken here -- which is where a coordinator tick would take it.
+    """
     from hyperloom.orchestrator.roles.agent_role import (
         default_role_registry,
     )
     from hyperloom.orchestrator.policy.gate import PolicyGate
+    from hyperloom.orchestrator.policy.projection import ResourceFacts
 
+    facts = ResourceFacts()
+    facts.update(shared_state)
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=shared_state,
+        resources=facts,
     )
 
 
@@ -1068,21 +1299,12 @@ def test_the_retired_action_is_off_every_surface_it_was_on():
     assert "conc_sweep" in PHASE_ALLOWED_ACTIONS["SWEEP"]
 
 
-# 7. conc_sweep is Coordinator-internal — dispatch re-validation must not
-# collide the sole auto-enqueued conc_sweep with its own singleton evidence.
+# 7. conc_sweep is Coordinator-internal — dispatch re-validation must not collide the sole auto-enqueued conc_sweep
+# with its own singleton evidence.
 
 
 def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
-    """Regression: the SWEEP-entry auto-enqueued conc_sweep must pass dispatch re-validation.
-
-    Before the fix, ``validate_dispatched_task`` fell through to the
-    delegate-body sweep-family singleton guard, which keys on
-    ``auto_conc_sweep_task_id`` — the auto-enqueued task's OWN id — and denied
-    the sole conc_sweep against itself, surfacing as a spurious
-    ``sweep_failed`` that closed the session at 0% gain. Now conc_sweep is
-    a Coordinator-internal action, so it receives path checks only and is not
-    re-validated against the singleton guard.
-    """
+    """Regression: the SWEEP-entry auto-enqueued conc_sweep must pass dispatch re-validation."""
     state = _SweepPhaseState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="conc-sweep-self-id")],
     )
@@ -1094,9 +1316,8 @@ def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
     )
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Patch lifecycle convergence — new tests (P1-19 fix verification)
-# ──────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────── Patch lifecycle convergence — new
+# tests (P1-19 fix verification) ──────────────────────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
@@ -1104,12 +1325,7 @@ async def test_stack_validation_failed_revert_sets_status_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A completely failed stack revert must set top-level status='failed'.
-
-    Previously _stack_revert_status mapped {"status": "failed"} -> "ok",
-    causing a silent false success. The new contract surfaces it as top-level
-    failure so the coordinator does not promote a patch that may still be live.
-    """
+    """A completely failed stack revert must set top-level status='failed'."""
     c = _stack_validation_coordinator(tmp_path)
     stack = c._stack_entries_for_validation(["k001", "k004"])
     _patch_stack_validation_internals(monkeypatch, new_tput=109.0, revert_status="failed")
@@ -1129,12 +1345,7 @@ async def test_stack_validation_keep_calls_finalize(
     tmp_path: Path,
     monkeypatch,
 ):
-    """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch.
-
-    Previously the KEEP path never called finalize because the synthetic
-    apply_result had no manifest_path. The new contract calls it explicitly and
-    records patch_cleanup_status.
-    """
+    """A KEEP result must call _maybe_finalize_kernel_patch for each applied patch."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     finalize_calls: list[dict] = []
@@ -1172,12 +1383,7 @@ async def test_stack_validation_keep_partial_finalize_requires_recovery(
     tmp_path: Path,
     monkeypatch,
 ):
-    """KEEP + partial finalize must ask for recovery, not report cleanup complete.
-
-    finalize returns "partial" when a backup could not be deleted, a backup path
-    failed containment, or a remote pod's finalize failed. The patch itself is
-    correctly on tree, so the top status stays "ok".
-    """
+    """KEEP + partial finalize must ask for recovery, not report cleanup complete."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     monkeypatch.setattr(
@@ -1212,18 +1418,14 @@ async def test_stack_validation_accuracy_regression_downgrades_to_needs_review(
     tmp_path: Path,
     monkeypatch,
 ):
-    """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW.
-
-    The eval already runs (RUN_EVAL=true by default, no defer_accuracy set for
-    this lane), so calling the gate is zero extra GPU cost.
-    """
+    """An accuracy regression on a stack KEEP must drop decision to NEEDS_REVIEW."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
 
     seen: dict[str, object] = {}
 
     def _fake_accuracy_gate(bench_result, *, session_dir, workspace, server_args=""):
-        # The lane must hand the gate the args the bench server ran under, or a
-        # context too small to host an eval reads as a broken eval.
+        # The lane must hand the gate the args the bench server ran under, or a context too small to host an eval
+        # reads as a broken eval.
         seen["server_args"] = server_args
         return {
             "blocked": True,
@@ -1256,11 +1458,7 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     tmp_path: Path,
     monkeypatch,
 ):
-    """Non-KEEP + partial revert must set top-level status='failed'.
-
-    A partial revert hides a multinode failure where the patch stayed live on a
-    remote pod, so it is not a completed lifecycle.
-    """
+    """Non-KEEP + partial revert must set top-level status='failed'."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
     import hyperloom.orchestrator.actions.executors.benchmark_result as br
@@ -1283,8 +1481,9 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     class _FakeBaseline:
         default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
 
-        def __init__(self, *, session_dir):
+        def __init__(self, *, session_dir, shared_state=None):
             self.session_dir = session_dir
+            self.shared_state = shared_state
 
         async def __call__(self, ctx):
             return {"output_throughput": 98.0}  # below base_tput -> REVERT

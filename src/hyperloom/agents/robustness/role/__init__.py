@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Robustness reactor role layer.
-
-Only the wire-format primitives (envelope + prompt_inputs) are re-exported here;
-the reactor lives in ``role.reactor`` to keep this module import-light for hosts
-that just need the JSON-IO surface.
-"""
+"""Robustness reactor role layer."""
 
 from .envelope import (
     Intent,
@@ -14,12 +9,10 @@ from .envelope import (
     build_alert,
     build_envelope_dict,
     build_escalate,
-    build_heartbeat,
     build_send_message,
     build_update_state,
 )
 from .prompt_inputs import (
-    ConversationProgress,
     InboxItem,
     PhaseBudgetRow,
     ReactorContext,
@@ -28,7 +21,6 @@ from .prompt_inputs import (
 )
 
 __all__ = [
-    "ConversationProgress",
     "InboxItem",
     "Intent",
     "IntentType",
@@ -38,7 +30,6 @@ __all__ = [
     "build_alert",
     "build_envelope_dict",
     "build_escalate",
-    "build_heartbeat",
     "build_send_message",
     "build_update_state",
     "from_coordinator_prompt",

@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""State-integrity signals (I1-I4).
-
-Four detectors guard the session files Coordinator relies on and the
-process it runs as:
-
-* **I1 ``state_json_corrupt``** — ``state.json`` failed to parse or
-  shrank below known-good size (partial write); resume would lose
-  baseline / current_best / explore_search ledgers.
-* **I2 ``coordinator_wal_bloat``** — ``coordinator.db-wal`` past the
-  size threshold (default 1 GiB); un-checkpointed WAL tanks SQLite I/O.
-* **I3 ``inbox_bloat``** — a role's ``inbox/outbox.jsonl`` past the
-  threshold; per-tick JSONL parsing slows then agent backends time out.
-* **I4 ``coordinator_zombie``** — recorded PID dead but ``state.json``
-  has no ``stop_reason``; HIGH, operator must restart manually.
-"""
+"""State-integrity signals (I1-I4)."""
 
 from __future__ import annotations
 
@@ -45,20 +31,7 @@ def evaluate_state_integrity_signals(
     *,
     config: StateIntegrityConfig | None = None,
 ) -> list[Symptom]:
-    """Run the I1-I4 state-integrity rules and aggregate their symptoms.
-
-    Args:
-        ctx (ReactorContext): Unused; required by the classifier's evaluator
-            signature.
-        data (SourceData): Collected source data including
-            ``local_state_integrity``.
-        config (StateIntegrityConfig | None): Tunables; defaults to
-            :class:`StateIntegrityConfig` when ``None``.
-
-    Returns:
-        list[Symptom]: All state-integrity symptoms found this tick, possibly
-            empty.
-    """
+    """Run the I1-I4 state-integrity rules and aggregate their symptoms."""
     cfg = config or StateIntegrityConfig()
     si = data.local_state_integrity
     if not isinstance(si, dict) or not si:
@@ -71,32 +44,18 @@ def evaluate_state_integrity_signals(
     return out
 
 
-# ---------------------------------------------------------------------------
 # I1 — state.json corruption
-# ---------------------------------------------------------------------------
 
 
 def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
-    """I1: fire ``state_json_corrupt`` when ``state.json`` is unreadable.
-
-    Stays silent for a merely-absent file (normal on tick 0); I4 covers the
-    "should exist but the run died" case.
-
-    Args:
-        si (dict[str, Any]): The state-integrity probe sample.
-
-    Returns:
-        list[Symptom]: A one-element list with the ``state_json_corrupt``
-            symptom on corruption, otherwise an empty list.
-    """
+    """I1: fire ``state_json_corrupt`` when ``state.json`` is unreadable."""
     state = si.get("state_json")
     if not isinstance(state, dict) or not state:
         return []
     if state.get("valid"):
         return []
     error = str(state.get("error") or "unknown")
-    # "missing" is normal pre-first-persist; stay silent (I4 covers the
-    # should-exist-but-died case).
+    # "missing" is normal pre-first-persist; stay silent (I4 covers the should-exist-but-died case).
     if error == "missing":
         return []
     return [
@@ -124,26 +83,14 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
     ]
 
 
-# ---------------------------------------------------------------------------
 # I2 — coordinator.db-wal bloat
-# ---------------------------------------------------------------------------
 
 
 def _wal_bloat_symptoms(
     si: dict[str, Any],
     cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
-    """I2: fire ``coordinator_wal_bloat`` when the SQLite WAL grows too large.
-
-    Args:
-        si (dict[str, Any]): The state-integrity probe sample.
-        cfg (StateIntegrityConfig): Tunables (provides WAL warn/crit
-            thresholds).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``coordinator_wal_bloat``
-            symptom when the WAL crosses a threshold, otherwise an empty list.
-    """
+    """I2: fire ``coordinator_wal_bloat`` when the SQLite WAL grows too large."""
     wal = si.get("wal")
     if not isinstance(wal, dict):
         return []
@@ -183,25 +130,14 @@ def _wal_bloat_symptoms(
     ]
 
 
-# ---------------------------------------------------------------------------
 # I3 — inbox / outbox bloat
-# ---------------------------------------------------------------------------
 
 
 def _inbox_bloat_symptoms(
     si: dict[str, Any],
     cfg: StateIntegrityConfig,
 ) -> list[Symptom]:
-    """I3: fire ``inbox_bloat`` for agent inbox/outbox files over threshold.
-
-    Args:
-        si (dict[str, Any]): The state-integrity probe sample.
-        cfg (StateIntegrityConfig): Tunables (provides the bloat thresholds).
-
-    Returns:
-        list[Symptom]: One ``inbox_bloat`` symptom per oversized agent file,
-            possibly empty.
-    """
+    """I3: fire ``inbox_bloat`` for agent inbox/outbox files over threshold."""
     agents = si.get("agents")
     if not isinstance(agents, dict) or not agents:
         return []
@@ -248,22 +184,11 @@ def _inbox_bloat_symptoms(
     return out
 
 
-# ---------------------------------------------------------------------------
 # I4 — coordinator zombie (PID dead but state.json says running)
-# ---------------------------------------------------------------------------
 
 
 def _coordinator_zombie_symptoms(si: dict[str, Any]) -> list[Symptom]:
-    """I4: fire ``coordinator_zombie`` when the PID is dead but no stop reason.
-
-    Args:
-        si (dict[str, Any]): The state-integrity probe sample.
-
-    Returns:
-        list[Symptom]: A one-element list with the ``coordinator_zombie``
-            symptom when the Coordinator died ungracefully, otherwise an empty
-            list.
-    """
+    """I4: fire ``coordinator_zombie`` when the PID is dead but no stop reason."""
     coord = si.get("coordinator")
     state = si.get("state_json")
     if not isinstance(coord, dict) or not coord:

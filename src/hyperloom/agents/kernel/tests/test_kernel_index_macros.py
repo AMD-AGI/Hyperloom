@@ -5,17 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Unit tests for attribute-aware ``__global__`` kernel definition scanning.
-
-Pure text / no GPU / no docker. These cover the tokeniser that recovers kernel
-names when an attribute carrying parentheses (notably
-``__launch_bounds__(NUM_THREADS)``, present on ~40% of aiter kernels, and
-``__attribute__((...))``) sits between ``__global__`` and the name. The prior
-regex captured the *attribute* as the kernel name; these tests lock the fix in.
-
-The environment has no pytest, so every check is also runnable via a plain
-``python3 path/to/test.py`` ``__main__`` block that prints PASS/FAIL.
-"""
+"""Unit tests for attribute-aware ``__global__`` kernel definition scanning."""
 
 from __future__ import annotations
 

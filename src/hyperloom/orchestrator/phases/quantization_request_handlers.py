@@ -1,19 +1,4 @@
-"""Adapter: drive the quantization-agent from hyperloom.inference_optimizer.
-
-Thin shim between ``cli._run_quantization_prelude`` and the
-``hyperloom.agents.quantization`` package. It builds an effective prompt
-(source model path + export dir + the user's ``--quantize`` text), runs
-``quantize_via_prompt`` once, and maps its ``QuantSkillRunResult.status`` to a
-concrete decision:
-
-  * ``success``                    -> return ``quantized_model_dir``
-  * ``partial`` (model usable)     -> warn, then return ``quantized_model_dir``
-  * ``partial`` (no usable model)  -> ``SystemExit(3)``
-  * ``failed``                     -> ``SystemExit(3)``
-
-A quantization failure is a hard stop for the whole run: this adapter never
-silently falls through to optimize the un-quantized source model.
-"""
+"""Adapter: drive the quantization-agent from hyperloom.inference_optimizer."""
 
 from __future__ import annotations
 
@@ -27,31 +12,14 @@ async def run_quantization_prelude_async(
     source_model: str,
     workspace: Path,
 ) -> str:
-    """Quantize ``source_model`` per ``prompt``; return the exported dir.
-
-    Awaits the async ``quantize_via_prompt`` directly (the caller already
-    runs inside ``asyncio.run``). Raises ``SystemExit(3)`` when no usable
-    quantized model was produced.
-
-    Args:
-        prompt: User-provided quantization instructions (e.g. scheme text).
-        source_model: Path to the model to quantize.
-        workspace: Working directory; the quantized model is exported under it.
-
-    Returns:
-        The path to the exported quantized model directory.
-
-    Raises:
-        SystemExit: If quantization failed or produced no usable model.
-    """
+    """Quantize ``source_model`` per ``prompt``; return the exported dir."""
     # Import lazily so this module loads without the quantization runtime deps.
     from hyperloom.agents.quantization import quantize_via_prompt
 
     workspace = Path(workspace)
     export_dir = workspace / "quantized"
 
-    # Fold the source model + export dir into the prompt so the user's
-    # --quantize text can be just the scheme.
+    # Fold the source model + export dir into the prompt so the user's --quantize text can be just the scheme.
     effective_prompt = (
         f"Quantize the model at {source_model}. "
         f"Export the HuggingFace-format quantized model to {export_dir}. "

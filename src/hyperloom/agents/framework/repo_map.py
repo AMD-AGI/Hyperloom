@@ -1,14 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Canonical mapping from serving framework name to upstream git repo URL.
-
-Lives in ``hyperloom.agents.framework`` so the ``fa`` CLI need not
-reverse-import the orchestrator. ``hyperloom.orchestrator.framework.client``
-imports and re-exports :func:`repo_url_for_framework` from here. Note
-``hyperloom.inference_optimizer.framework_registry`` carries the same URLs in
-``FrameworkSpec.repo_url``; the two tables must stay in sync.
-"""
+"""Canonical mapping from serving framework name to upstream git repo URL."""
 
 from __future__ import annotations
 
@@ -36,35 +29,12 @@ _BRIDGE_LAYER_TO_REPO_URLS: dict[str, tuple[str, ...]] = {
 
 
 def bridge_repo_urls(bridge_layer: str) -> tuple[str, ...]:
-    """Return the bridging repo URLs to scout for a failure's ``bridge_layer``.
-
-    The lookup is case-insensitive and whitespace-tolerant.
-
-    Args:
-        bridge_layer (str): The ``bridge_layer`` tag (e.g. ``"rocm_hip"``,
-            ``"build"``). ``"framework"`` returns ``()``.
-
-    Returns:
-        tuple[str, ...]: Bridge repo URLs (empty for ``"framework"`` /
-            unknown layers).
-    """
+    """Return the bridging repo URLs to scout for a failure's ``bridge_layer``."""
     return _BRIDGE_LAYER_TO_REPO_URLS.get((bridge_layer or "").strip().lower(), ())
 
 
 def repo_url_for_framework(framework: str) -> str:
-    """Return the canonical GitHub repo URL for ``framework``.
-
-    The lookup is case-insensitive and tolerant of surrounding whitespace.
-
-    Args:
-        framework (str): Framework name (e.g. ``"sglang"``, ``"vllm"``,
-            ``"atom"``). Compared case-insensitively after stripping.
-
-    Returns:
-        str: The canonical git repo URL, or an empty string for unknown
-            frameworks; the caller is expected to bail out / log when this
-            happens.
-    """
+    """Return the canonical GitHub repo URL for ``framework``."""
     return _FRAMEWORK_TO_REPO_URL.get((framework or "").strip().lower(), "")
 
 

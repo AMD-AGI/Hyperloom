@@ -12,8 +12,7 @@ from hyperloom.agents.quantization.driver import result_collector as rc
 from hyperloom.agents.quantization.driver import runner
 
 
-# --------------------------------------------------------------------------- #
-# runner._iter_message_text                                                   #
+# --------------------------------------------------------------------------- # runner._iter_message_text #
 # --------------------------------------------------------------------------- #
 def test_iter_message_text_shapes() -> None:
     obj_block = SimpleNamespace(text="from-object")
@@ -98,8 +97,7 @@ def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
         )
 
 
-# --------------------------------------------------------------------------- #
-# result_collector branches                                                   #
+# --------------------------------------------------------------------------- # result_collector branches #
 # --------------------------------------------------------------------------- #
 def test_read_text_oserror_on_directory(tmp_path: Path) -> None:
     # Reading a directory raises an OSError that is swallowed.

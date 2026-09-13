@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Mocked targeted-build recipe tests: AITER, sgl-kernel, and vLLM-from-source.
-
-All subprocess, git, and disk/toolchain calls are mocked. No GPU, compiler, or
-network connection is required. Each test exercises one branch of the
-recipe -> verify -> result.json flow.
-"""
+"""Mocked targeted-build recipe tests: AITER, sgl-kernel, and vLLM-from-source."""
 
 from __future__ import annotations
 
@@ -27,9 +22,7 @@ from hyperloom.orchestrator.framework.targeted_build import (
 )
 
 
-# ---------------------------------------------------------------------------
 # Shared mock helpers
-# ---------------------------------------------------------------------------
 
 
 def _completed(stdout="", stderr="", returncode=0):
@@ -38,18 +31,7 @@ def _completed(stdout="", stderr="", returncode=0):
 
 @pytest.fixture(autouse=True)
 def _host_independent_toolchain(monkeypatch):
-    """Keep these tests independent of the host's ROCm install.
-
-    ``check_rocm_toolchain_alignment`` reads the real
-    ``<hipcc_root>/include/hip/hip_runtime_api.h``, and the mocked ``run``
-    resolves hipcc_root to ``/opt/rocm`` -- a real path on a ROCm host. So on a
-    host whose headers predate ``hipDeviceAttributePciChipId`` the check turns
-    fatal, every recipe short-circuits with
-    ``failure_class == "preflight_toolchain"``, and the branch each test means to
-    exercise is never reached. That filesystem read cannot be mocked through the
-    injected runner, so the check is stubbed here; it has its own coverage in
-    test_build_utils.py.
-    """
+    """Keep these tests independent of the host's ROCm install."""
     from hyperloom.orchestrator.framework import build_utils
 
     monkeypatch.setattr(
@@ -92,9 +74,7 @@ def _make_git(*, aiter_tags="v0.1.0\nv0.0.9", git_sha="abc1234"):
     return _git
 
 
-# ---------------------------------------------------------------------------
 # AITER recipe helpers
-# ---------------------------------------------------------------------------
 
 
 def _aiter_action(**kw):
@@ -178,9 +158,7 @@ def _make_aiter_run(
     return _run
 
 
-# ---------------------------------------------------------------------------
 # sgl-kernel / vLLM recipe helpers
-# ---------------------------------------------------------------------------
 
 
 def _sgl_action(**kw):
@@ -271,9 +249,7 @@ def _make_rocm_run(
     return _run
 
 
-# ---------------------------------------------------------------------------
 # AITER: success
-# ---------------------------------------------------------------------------
 
 
 def test_run_aiter_build_success_pinned_ref(monkeypatch, tmp_path):
@@ -310,9 +286,7 @@ def test_run_aiter_build_success_runtime_paths_valid(monkeypatch, tmp_path):
     assert ".aiter" not in jit or "attempt" in jit
 
 
-# ---------------------------------------------------------------------------
 # AITER: failure branches
-# ---------------------------------------------------------------------------
 
 
 def test_run_aiter_build_compile_error(monkeypatch, tmp_path):
@@ -355,9 +329,7 @@ def test_run_aiter_pinned_ref_import_probe_gate(monkeypatch, tmp_path):
     assert result.failure_class == "boot_failed"
 
 
-# ---------------------------------------------------------------------------
 # AITER: tag autoselect
-# ---------------------------------------------------------------------------
 
 
 def test_run_aiter_build_autoselect_hit(monkeypatch, tmp_path):
@@ -463,9 +435,7 @@ def test_run_aiter_build_no_source_pr_url_when_empty(monkeypatch, tmp_path):
     assert "source_pr_url" not in result.installed_versions
 
 
-# ---------------------------------------------------------------------------
 # AITER: result.json round-trip + driver
-# ---------------------------------------------------------------------------
 
 
 def test_result_json_round_trip_through_classify_build_exit(tmp_path):
@@ -540,9 +510,7 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
     assert "plan.json" in data.get("failure_summary", "")
 
 
-# ---------------------------------------------------------------------------
 # sgl-kernel
-# ---------------------------------------------------------------------------
 
 
 def test_sgl_kernel_build_success(monkeypatch, tmp_path):
@@ -710,9 +678,7 @@ def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     assert result.installed_versions.get("source_pr_url") == "https://github.com/sgl-project/sglang/pull/5"
 
 
-# ---------------------------------------------------------------------------
 # vLLM-from-source
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_source_build_success(monkeypatch, tmp_path):
@@ -936,9 +902,7 @@ def test_recipe_no_source_pr_url_when_empty(monkeypatch, tmp_path):
     assert "source_pr_url" not in result.installed_versions
 
 
-# ---------------------------------------------------------------------------
 # Driver dispatch for sgl-kernel / vLLM
-# ---------------------------------------------------------------------------
 
 
 def test_driver_main_routes_sgl_kernel(monkeypatch, tmp_path):
@@ -1020,9 +984,7 @@ def test_driver_main_unknown_component_returns_failure(monkeypatch, tmp_path):
     assert data["ok"] is False
 
 
-# ---------------------------------------------------------------------------
 # Opt-in real ROCm compile (excluded from CI via -m 'not targeted_build_e2e')
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.targeted_build_e2e

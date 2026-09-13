@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""External-dependency signals.
-
-Failure modes originating outside Hyperloom but manifesting as opaque
-hangs / 401 storms:
-
-* **``gateway_auth_outage``** — gateway ``/models`` returns 401/403
-  (key lost/revoked); every claude/codex CLI will fail at the gateway.
-* **``wekafs_degraded``** — ``stat`` on a source mount errored or
-  exceeded the latency budget; ``trace_analyze`` / external CLI hang silently.
-* **``tracelens_cli_missing``** — neither TraceLens perf-report CLI
-  is on ``PATH``. Boot-time-only, so the detector latches after first fire.
-"""
+"""External-dependency signals."""
 
 from __future__ import annotations
 
@@ -44,32 +33,19 @@ class TraceLensCliFiredOnce:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the latch, restoring the fired flag from state if present.
-
-        Args:
-            state_view (DetectorStateView | None): Disk-backed state view used to
-                persist the latch across subprocess restarts.
-        """
+        """Initialise the latch, restoring the fired flag from state if present."""
         self._state_view = state_view
         loaded = state_view.load() if state_view is not None else {}
         self._value: bool = bool(loaded.get("fired", False))
 
     @property
     def value(self) -> bool:
-        """Whether the ``tracelens_cli_missing`` symptom has already fired this session.
-
-        Returns:
-            bool: ``True`` once the latch has tripped, otherwise ``False``.
-        """
+        """Whether the ``tracelens_cli_missing`` symptom has already fired this session."""
         return self._value
 
     @value.setter
     def value(self, new_value: bool) -> None:
-        """Set the latch flag and persist it to the state view, if any.
-
-        Args:
-            new_value (bool): The new latch state.
-        """
+        """Set the latch flag and persist it to the state view, if any."""
         self._value = bool(new_value)
         if self._state_view is not None:
             self._state_view.save({"fired": self._value})
@@ -82,21 +58,7 @@ def evaluate_external_deps_signals(
     config: ExternalDepsConfig | None = None,
     tracelens_latch: TraceLensCliFiredOnce | None = None,
 ) -> list[Symptom]:
-    """Run the external-dependency rules and aggregate symptoms.
-
-    Args:
-        ctx (ReactorContext): Reactor context for the current tick.
-        data (SourceData): Collected source data including
-            ``local_external_deps``.
-        config (ExternalDepsConfig | None): Tunables; defaults to
-            :class:`ExternalDepsConfig` when ``None``.
-        tracelens_latch (TraceLensCliFiredOnce | None): One-shot latch for the
-            TraceLens rule; when ``None`` that check is skipped.
-
-    Returns:
-        list[Symptom]: All external-dependency symptoms found this tick,
-            possibly empty.
-    """
+    """Run the external-dependency rules and aggregate symptoms."""
     cfg = config or ExternalDepsConfig()
     deps = data.local_external_deps
     if not isinstance(deps, dict) or not deps:
@@ -114,23 +76,13 @@ def evaluate_external_deps_signals(
     return out
 
 
-# ---------------------------------------------------------------------------
 # Upstream gateway 401 / forbidden
-# ---------------------------------------------------------------------------
 
 
 def _gateway_symptoms(
     gateway: dict[str, Any],
 ) -> list[Symptom]:
-    """Fire ``gateway_auth_outage`` when the LLM gateway returns 401/403.
-
-    Args:
-        gateway (dict[str, Any]): Gateway probe result (status/status_code/url).
-
-    Returns:
-        list[Symptom]: A one-element list with the ``gateway_auth_outage``
-            symptom on an auth failure, otherwise an empty list.
-    """
+    """Fire ``gateway_auth_outage`` when the LLM gateway returns 401/403."""
     if not isinstance(gateway, dict) or not gateway:
         return []
     status = str(gateway.get("status") or "")
@@ -162,28 +114,14 @@ def _gateway_symptoms(
     return []
 
 
-# ---------------------------------------------------------------------------
 # WekaFS / external mount degraded
-# ---------------------------------------------------------------------------
 
 
 def _mount_symptoms(
     mounts: list[Any],
     cfg: ExternalDepsConfig,
 ) -> list[Symptom]:
-    """Fire ``wekafs_degraded`` for unreachable or slow external mounts.
-
-    Unreachable mounts (``ok`` falsey) fire HIGH; reachable-but-slow mounts
-    fire HIGH/MEDIUM based on the configured latency thresholds.
-
-    Args:
-        mounts (list[Any]): Per-mount probe results.
-        cfg (ExternalDepsConfig): Tunables (provides latency thresholds).
-
-    Returns:
-        list[Symptom]: One ``wekafs_degraded`` symptom per degraded mount,
-            possibly empty.
-    """
+    """Fire ``wekafs_degraded`` for unreachable or slow external mounts."""
     if not isinstance(mounts, list) or not mounts:
         return []
     out: list[Symptom] = []
@@ -253,27 +191,14 @@ def _mount_symptoms(
     return out
 
 
-# ---------------------------------------------------------------------------
 # TraceLens CLI missing
-# ---------------------------------------------------------------------------
 
 
 def _tracelens_symptoms(
     cli_info: dict[str, Any],
     latch: TraceLensCliFiredOnce,
 ) -> list[Symptom]:
-    """Fire ``tracelens_cli_missing`` once when no TraceLens CLI is on PATH.
-
-    Latches via ``latch`` so the symptom is emitted at most once per session.
-
-    Args:
-        cli_info (dict[str, Any]): TraceLens CLI probe result.
-        latch (TraceLensCliFiredOnce): One-shot latch tracking prior fires.
-
-    Returns:
-        list[Symptom]: A one-element list with the ``tracelens_cli_missing``
-            symptom on the first detection, otherwise an empty list.
-    """
+    """Fire ``tracelens_cli_missing`` once when no TraceLens CLI is on PATH."""
     if not isinstance(cli_info, dict) or not cli_info:
         return []
     if latch.value:

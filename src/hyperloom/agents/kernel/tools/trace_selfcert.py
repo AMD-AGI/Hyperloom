@@ -1,30 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Profile self-certification: can this trace be analysed, and would the answer be true?
-
-``certify_trace_dir`` is the entry point; the caller supplies ``chunk_files`` and
-the workload parameters. The profile executor calls it once the capture lands,
-which is why there is no driver here: the executor already holds the session
-identity and the attempt context a standalone driver would have had to rebuild.
-
-Implements ``trace-selfcert-checklist.md``. The two questions are answered
-independently and never merged into one verdict, because a trace that analyses
-cleanly can still yield a false decode conclusion -- an under-recorded CUDA-graph
-capture produces hot kernels drawn entirely from prefill and nothing complains.
-
-Groups 1-5 reuse ``_bypass_trace_reader.analyze_trace()`` so the certificate and
-the shipping consumer see identical numbers from identical code. Groups 6-8 --
-step structure, split forecast and the idle gate -- are new, and are the reason
-this exists: they answer "which ``--steady-state-mode`` will work" at capture
-time instead of after an analysis has already failed.
-
-Two streaming passes per source file. The first is ``analyze_trace`` itself; the
-second collects step annotations and per-step subtree attribution, which
-``analyze_trace`` does not retain. Scopes are deliberately different between the
-two and must not be merged: graph coverage is a whole-trace property, idle is a
-within-window one.
-"""
+"""Profile self-certification: can this trace be analysed, and would the answer be true?"""
 
 from __future__ import annotations
 
@@ -133,12 +110,7 @@ _CONFIG_KEYS = {
 
 
 def read_workload_params(trace_dir: str | Path) -> dict[str, Any]:
-    """Read CONC / OSL / R / num_steps / framework from the benchmark config.
-
-    These are capture-time workload parameters, not analysis results, so reading
-    them keeps the certificate independent of any analysis having been run --
-    which is the point of certifying at capture time.
-    """
+    """Read CONC / OSL / R / num_steps / framework from the benchmark config."""
     out: dict[str, Any] = {"source": None}
     config = Path(trace_dir).parent / "config.yaml"
     if not config.is_file():
@@ -185,9 +157,7 @@ def effective_thresholds() -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------
 # group 2: candidate inventory and selection
-# --------------------------------------------------------------------------
 
 
 def _role_of(path: Path, root: Path) -> str:
@@ -199,21 +169,7 @@ def _role_of(path: Path, root: Path) -> str:
 
 
 def inventory(trace_dir: Path) -> dict[str, Any]:
-    """List every trace-shaped candidate, and pick the file to certify.
-
-    Reports two selections, because they can differ and the difference is itself a
-    finding. ``production_selected_path`` is what ``resolve_trace_file`` would hand
-    the analyzer. ``selected_path`` is what gets certified: the best *source*
-    trace, chosen with production's own ranking but restricted to source-role
-    candidates.
-
-    They diverge when a capture directory also holds the splitter's output --
-    xdit writes ``trace_split/`` inside ``torch_trace/`` -- because the live
-    resolver filters capture shards but not split chunks, and a chunk can win the
-    name tie-break. Certifying that chunk would be meaningless: splitting consumes
-    the annotations, so the chunk shows none and the directory would be recorded
-    as unable to support a steady window when the source supports one fine.
-    """
+    """List every trace-shaped candidate, and pick the file to certify."""
     candidates = []
     for p in sorted(_trace_candidates(trace_dir)):
         try:
@@ -246,21 +202,11 @@ def inventory(trace_dir: Path) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------
 # groups 6/7/8: the second pass
-# --------------------------------------------------------------------------
 
 
 class StepPass:
-    """Second-pass state: step annotations and per-step subtree attribution.
-
-    A chunk is an annotation subtree, so a step's GPU work is found by taking the
-    ``cuda_runtime`` launches whose host-side timestamp falls inside the step and
-    then following their correlation ids to device kernels. Selecting kernels by
-    timestamp instead would sweep in work launched from sibling annotations --
-    the scheduler and result-copy spans that run in the same interval -- which is
-    exactly the mistake that makes an empty chunk look like splitter data loss.
-    """
+    """Second-pass state: step annotations and per-step subtree attribution."""
 
     def __init__(self) -> None:
         self.steps: list[dict[str, Any]] = []
@@ -366,14 +312,7 @@ class StepPass:
             )
 
     def window_stats(self, lo_idx: int, hi_idx: int) -> dict[str, Any]:
-        """Aggregate a half-open step range the way the splitter's chunk would.
-
-        ``busy_ratio`` divides by the GPU-side extent of the attributed kernels
-        rather than the steps' wall span, matching the live quality gate, which
-        reads ``gpu_busy_duration / gpu_duration`` from the splitter's CSV. Using
-        the host-side span instead yields ratios above 1, because a step's kernels
-        keep running after its host annotation has closed.
-        """
+        """Aggregate a half-open step range the way the splitter's chunk would."""
         window = self.steps[lo_idx:hi_idx]
         empty = {
             "num_gpu_events_pred": 0,
@@ -408,15 +347,7 @@ class StepPass:
 
 
 def iter_details_from_name(name: str) -> dict[str, Any]:
-    """Map an iteration-root annotation to the request counts the splitter derives.
-
-    Transcribed from ``get_iter_details_from_name``. SGLang's DECODE contributes
-    generation requests only, while EXTEND and MIXED are both treated as
-    prefill-bearing with ``toks`` standing in for the batch size. vLLM's
-    ``execute_..._context_...`` names are decoded by collapsing the sq/sk shape
-    letters to separators and picking counts positionally, which is fragile but is
-    exactly what the splitter does.
-    """
+    """Map an iteration-root annotation to the request counts the splitter derives."""
     m = _SGLANG_STEP_RE.match(name)
     if m:
         kind, bs = m.group(1), int(m.group(2))
@@ -456,14 +387,7 @@ def _details(kind: str, batch: int, ctx_req: int, ctx_sum: int, gen_req: int, ge
 
 
 def identify_steady_state_regions(details: Sequence[dict[str, Any]], num_steps: int) -> list[tuple[int, int]]:
-    """Reproduce the splitter's steady-state region detection.
-
-    Transcribed from ``identify_steady_state_regions``, including its quirks: the
-    running counter is decremented rather than reset, and the trailing region is
-    closed at the last index rather than at ``len(details)``, so the final step is
-    excluded. That off-by-one is load-bearing -- it is why a trace whose only
-    prefill step sits at the end can still forecast as decode-only.
-    """
+    """Reproduce the splitter's steady-state region detection."""
     n = len(details)
     if not n:
         return []
@@ -520,15 +444,7 @@ def _longest_run(details: Sequence[dict[str, Any]], lo: int, hi: int, predicate)
 
 
 def forecast_split(sp: StepPass, *, num_steps: int, conc: int | None, osl: float | None, r: float) -> dict[str, Any]:
-    """Predict, without running the splitter, what each mode's chunk would hold.
-
-    A faithful transcription of ``find_steady_state_window`` for the three modes
-    the analysis driver can request. Fidelity matters more than elegance here: the
-    candidate windows are strided, not sliding, so a lone prefill step near the
-    end of the region falls into no candidate at all and ``mixed`` degrades to a
-    pure-decode window. Under an under-recorded graph capture that window is
-    empty, which is the whole failure mode this forecast exists to predict.
-    """
+    """Predict, without running the splitter, what each mode's chunk would hold."""
     steps = sp.steps
     total = len(steps)
     if not total:
@@ -711,9 +627,8 @@ def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict
         "annotation_window_count": len(sp.gpu_annotations),
         "groups": rows,
         "selected_group": selected,
-        # Two different requirements, deliberately not merged. bypass windows over
-        # gpu_user_annotation groups and falls back to the whole trace when none
-        # repeats enough, so this is soft. tracelens cuts on the splitter's
+        # Two different requirements, deliberately not merged. bypass windows over gpu_user_annotation groups and
+        # falls back to the whole trace when none repeats enough, so this is soft. tracelens cuts on the splitter's
         # user_annotation step roots and has no fallback, so that one is hard.
         "min_repeats_met_bypass_window": bool(qualified),
         "step_root_count": len(sp.steps),
@@ -740,12 +655,7 @@ def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict
 
 
 def _idle_in_span(sp: StepPass, lo: float, hi: float, threshold: float, scope: str) -> dict[str, Any]:
-    """Idle percentage over one time span, measured the way the live gate does.
-
-    Total is the span's wall clock rather than the kernel-activity envelope, so
-    idle reflects gaps inside the step. Occupancy intervals are clipped to the
-    span; kernel durations themselves are not shortened.
-    """
+    """Idle percentage over one time span, measured the way the live gate does."""
     clipped = [(max(lo, a), min(hi, b)) for a, b in sp.gpu_intervals if b > lo and a < hi]
     clipped = [iv for iv in clipped if iv[1] > iv[0]]
     span = hi - lo
@@ -768,14 +678,7 @@ def idle_gate(
     threshold: float,
     default_mode: str = "mixed",
 ) -> dict[str, Any]:
-    """Group 8: would the idle gate fire, for each mode's forecast chunk.
-
-    Reported per mode rather than once, because the gate runs against whichever
-    chunk the analysis was asked for -- and the modes differ enormously on an
-    under-recorded capture, where a pure-decode chunk is close to 100% idle while
-    the prefill chunk is busy. Must be read alongside group 4: low busy on its own
-    is ambiguous, since a genuinely idle or host-bound workload looks identical.
-    """
+    """Group 8: would the idle gate fire, for each mode's forecast chunk."""
     per_mode: dict[str, Any] = {}
     for entry in forecast.get("per_mode", ()):
         rng = entry.get("window_step_range")
@@ -814,18 +717,11 @@ def idle_gate(
     return out
 
 
-# --------------------------------------------------------------------------
 # chunk level
-# --------------------------------------------------------------------------
 
 
 def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -> list[dict[str, Any]]:
-    """Check each existing chunk for kernels it should have carried but did not.
-
-    ``lost_by_correlation`` is the only sound test: it asks whether the chunk kept
-    a host-side launch whose device kernel exists in the source. Comparing time
-    spans instead charges the splitter for sibling annotations' kernels.
-    """
+    """Check each existing chunk for kernels it should have carried but did not."""
     out: list[dict[str, Any]] = []
     for path in sorted(chunk_files):
         mode_match = _SPLIT_NAME_RE.match(path.name)
@@ -869,9 +765,7 @@ def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -
     return out
 
 
-# --------------------------------------------------------------------------
 # verdict
-# --------------------------------------------------------------------------
 
 
 def build_verdict(
@@ -892,14 +786,7 @@ def build_verdict(
     blocking: list[str] = []
     bypass_ok = True
 
-    # Checked before the file's own health, because it decides which file the
-    # question is even about. The live resolver filters CUDA-graph capture shards
-    # but not the splitter's own output, so a capture directory that also holds
-    # trace_split/ can hand the analyzer a chunk instead of the source. Splitting
-    # consumes the annotations and leaves the kernels behind, so such a chunk
-    # carries a few events and no GPU work while the source beside it is intact.
-    # Both consumers resolve the file the same way, so neither can use the
-    # directory however healthy the capture is.
+    # Checked before the file's own health, because it decides which file the question is even about.
     if production_pick and (production_pick.get("kernel_count") or 0) <= 0:
         blocking.append(
             f"the live resolver selects {production_pick.get('role') or 'another file'} "
@@ -926,12 +813,7 @@ def build_verdict(
         if not attributed_pct:
             blocking.append("correlation chain resolves no kernel to an op")
             tracelens_ok = False
-        # The split forecast only models the two annotation families the splitter
-        # matches by pattern. When neither is present it falls back to generic
-        # call-tree traversal, which is not modelled here, so tracelens usability
-        # is unknown rather than false -- typical of diffusion captures, which
-        # have no prefill/decode steps to begin with. Withholding the claim says
-        # that; a blocking reason would instead assert a failure never observed.
+        # The split forecast only models the two annotation families the splitter matches by pattern.
         if not forecast_modelled:
             tracelens_ok = False
             warnings.append(
@@ -946,9 +828,8 @@ def build_verdict(
             blocking.append("every steady-state mode would produce an empty chunk")
             tracelens_ok = False
 
-    # Only worth saying when the divergence did not already block above: the
-    # resolver opens a different file, but one with GPU work in it, so the
-    # measurements here describe a different object than production would see.
+    # Only worth saying when the divergence did not already block above: the resolver opens a different file, but one
+    # with GPU work in it, so the measurements here describe a different object than production would see.
     if production_pick and (production_pick.get("kernel_count") or 0) > 0:
         warnings.append(
             f"the live resolver would select "
@@ -957,10 +838,8 @@ def build_verdict(
             f"({Path(production_pick['certified_path']).name})"
         )
 
-    # The idle gate is a warning, not a blocker: the live gate suppresses the
-    # hot-kernel list and routes the session to parameter tuning, but the analysis
-    # still completes. Treating it as blocking mislabels five runs in this cohort
-    # that finished fine at 82-91% predicted idle.
+    # The idle gate is a warning, not a blocker: the live gate suppresses the hot-kernel list and routes the session
+    # to parameter tuning, but the analysis still completes.
     rec_idle = (idle.get("per_mode") or {}).get(recommended) if recommended else None
     suppressed = bool(rec_idle and rec_idle.get("would_trip_idle_gate"))
     if suppressed:
@@ -976,22 +855,8 @@ def build_verdict(
     if tracelens_ok:
         usable.append("tracelens")
 
-    # Taken from the reader rather than recomputed from the raw ratio, because the
-    # ratio alone cannot tell an under-recorded graph capture from a trace that
-    # never used graphs. An eager-mode capture has no graph launches, so the
-    # coverage denominator is zero and any threshold test on it reads as a
-    # failure -- which would report a healthy trace as silently wrong. The
-    # reader's own preconditions (graph_mode, launch_count >= 2, graph_kernels)
-    # already draw that distinction, and deferring to them is also what keeps the
-    # certificate and the live gate from disagreeing.
-    #
-    # ``is False`` reads an unmeasured trace as invalid rather than unknown, and
-    # that is deliberate rather than a collapsed tri-state. The reader returns a
-    # bool on every path it reaches, so ``None`` means it produced no coverage
-    # block at all -- and that same absence leaves ``attribution`` empty, which
-    # blocks on zero kernels above and keeps ``tracelens`` out of ``usable``. So
-    # the case where an unknown could be mistaken for a proven-wrong answer
-    # cannot arise: ``silently_wrong`` requires a usable trace.
+    # Taken from the reader rather than recomputed from the raw ratio, because the ratio alone cannot tell an
+    # under-recorded graph capture from a trace that never used graphs.
     valid = graph_under_recorded is False
     if tracelens_ok and graph_under_recorded:
         warnings.append(
@@ -999,11 +864,7 @@ def build_verdict(
             "trace would be wrong even though the analysis runs clean"
         )
 
-    # ``usable_by`` means usable *via the recommended mode*. Naming the modes that
-    # would fail keeps that from being read as "any mode works" -- three runs in
-    # this cohort failed by asking for mixed on a trace whose only viable mode was
-    # prefilldecode. Left null when the forecast could not run, so an unmodelled
-    # annotation shape is not reported as three modes proven to fail.
+    # ``usable_by`` means usable *via the recommended mode*.
     failing = (
         [_CONSUMER_MODE.get(m, m) for m in ("mixed", "decode_only", "max_prefilldecode") if m not in viable_modes]
         if forecast_modelled and tracelens_ok
@@ -1023,9 +884,7 @@ def build_verdict(
     }
 
 
-# --------------------------------------------------------------------------
 # entry point
-# --------------------------------------------------------------------------
 
 
 def certify_trace_dir(
@@ -1061,12 +920,9 @@ def certify_trace_dir(
 
     selected = inv["selected_path"]
     if not selected:
-        # An empty capture directory still deserves a full record rather than a
-        # hole: the profiler created the directory and wrote nothing, which is a
-        # finding in its own right and distinct from a trace that parsed badly.
-        # The counts are stated as zero -- nothing was read, so nothing was seen --
-        # and the blocking reason carries why, so a reader cannot mistake this for
-        # a trace that was measured and found empty.
+        # An empty capture directory still deserves a full record rather than a hole: the profiler created the
+        # directory and wrote nothing, which is a finding in its own right and distinct from a trace that parsed
+        # badly.
         record["rank_level"].append(
             {
                 "rank": None,
@@ -1105,17 +961,11 @@ def certify_trace_dir(
     sel = Path(selected)
 
     # When the live resolver would open a different file, measure that file too.
-    # It is cheap -- a split chunk is orders of magnitude smaller than the source
-    # -- and it turns "production picks something else" from an observation into
-    # evidence about whether production can actually read GPU work here.
     production_pick = None
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
         probe = analyze_trace(inv["production_selected_path"], top_k=1, steady_state=False)
-        # ``analyze_trace`` reports the kernel count inside ``attribution`` and has
-        # no ``parse_ok`` key at all -- parse health is the emptiness of
-        # ``stream_errors``. Reading either name off the top level yields None,
-        # which the blocking test below would read as "no GPU kernels" for every
-        # directory where the resolver diverges.
+        # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
+        # parse health is the emptiness of ``stream_errors``.
         probe_errors = probe.get("stream_errors") or []
         production_pick = {
             "path": inv["production_selected_path"],

@@ -57,8 +57,8 @@ def test_payload_required_matches_upstream():
         local = PAYLOAD_REQUIRED[it]
         upstream = upstream_table[upstream_ip.IntentType(it.value)]
         assert local == upstream, f"{it} drift: local={local} upstream={upstream}"
-        # INTENT_SPEC is the single source; PAYLOAD_REQUIRED must be a faithful
-        # projection of it for every intent the role can emit.
+        # INTENT_SPEC is the single source; PAYLOAD_REQUIRED must be a faithful projection of it for every intent the
+        # role can emit.
         if it in INTENT_SPEC:
             assert INTENT_SPEC[it].required == local, f"{it} spec/table drift"
 

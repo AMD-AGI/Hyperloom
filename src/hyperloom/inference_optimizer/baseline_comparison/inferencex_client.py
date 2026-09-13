@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""HTTP client for the InferenceX public benchmarks API.
-
-Endpoint shape:
-``https://inferencex.semianalysis.com/api/v1/benchmarks?model=<name>``.
-
-Two design rules driven by the call-site (target_analysis executor):
-
-* **Never raise on network / parsing problems.** Returns ``None`` (or
-  an empty list, depending on the call); failure detail is logged, and the
-  caller composes its own ``BaselineSummary.warning``.
-* **Bounded timeout + small retry budget.**
-
-Optional environment overrides:
-
-* ``INFERENCEX_BASE_URL``     — defaults to upstream public URL.
-* ``INFERENCEX_TIMEOUT_SEC``  — per-request timeout (default 5).
-* ``INFERENCEX_MAX_ATTEMPTS`` — default 2.
-"""
+"""HTTP client for the InferenceX public benchmarks API."""
 
 from __future__ import annotations
 
@@ -43,8 +26,7 @@ DEFAULT_MAX_ATTEMPTS = 2
 
 
 class InferenceXFetchError(Exception):
-    """Raised on any InferenceX fetch failure (unsupported URL scheme,
-    non-200 status, network or transport error)."""
+    """Raised on any InferenceX fetch failure (unsupported URL scheme, non-200 status, network or transport error)."""
 
     pass
 
@@ -54,22 +36,12 @@ def _require_http_url(url: str) -> None:
 
 
 def _base_url() -> str:
-    """Resolve the API base URL from the environment.
-
-    Returns:
-        str: ``INFERENCEX_BASE_URL`` when set and non-empty, otherwise
-            :data:`DEFAULT_BASE_URL`.
-    """
+    """Resolve the API base URL from the environment."""
     return os.environ.get("INFERENCEX_BASE_URL", "").strip() or DEFAULT_BASE_URL
 
 
 def _timeout_sec() -> float:
-    """Resolve the per-request timeout from the environment.
-
-    Returns:
-        float: ``INFERENCEX_TIMEOUT_SEC`` clamped to a 0.5s floor, or
-            :data:`DEFAULT_TIMEOUT_SEC` when unset or unparseable.
-    """
+    """Resolve the per-request timeout from the environment."""
     raw = os.environ.get("INFERENCEX_TIMEOUT_SEC", "").strip()
     if not raw:
         return DEFAULT_TIMEOUT_SEC
@@ -80,12 +52,7 @@ def _timeout_sec() -> float:
 
 
 def _max_attempts() -> int:
-    """Resolve the retry attempt budget from the environment.
-
-    Returns:
-        int: ``INFERENCEX_MAX_ATTEMPTS`` clamped to a minimum of 1, or
-            :data:`DEFAULT_MAX_ATTEMPTS` when unset or unparseable.
-    """
+    """Resolve the retry attempt budget from the environment."""
     raw = os.environ.get("INFERENCEX_MAX_ATTEMPTS", "").strip()
     if not raw:
         return DEFAULT_MAX_ATTEMPTS
@@ -96,18 +63,7 @@ def _max_attempts() -> int:
 
 
 def _fetch_raw(url: str) -> bytes:
-    """Single HTTP GET with gzip support.
-
-    Args:
-        url (str): The fully-formed request URL to fetch.
-
-    Returns:
-        bytes: The (gzip-decoded if needed) response body.
-
-    Raises:
-        InferenceXFetchError: On any non-200 status, network failure, or
-            transport-level decode error.
-    """
+    """Single HTTP GET with gzip support."""
     _require_http_url(url)
     req = urllib.request.Request(
         url,
@@ -136,24 +92,12 @@ def _fetch_raw(url: str) -> bytes:
 
 
 def base_url() -> str:
-    """Public accessor for the resolved API base URL (honours env override).
-
-    Returns:
-        str: The base URL used for benchmark queries, suitable for recording
-            as the provenance ``source`` on a persisted comparison artefact.
-    """
+    """Public accessor for the resolved API base URL (honours env override)."""
     return _base_url()
 
 
 def _to_int(value: object) -> int | None:
-    """Best-effort integer coercion used by dimension filtering.
-
-    Args:
-        value: Arbitrary value to coerce.
-
-    Returns:
-        int | None: The integer value, or ``None`` when it cannot be parsed.
-    """
+    """Best-effort integer coercion used by dimension filtering."""
     try:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -161,21 +105,7 @@ def _to_int(value: object) -> int | None:
 
 
 def fetch_rows(model_api_name: str) -> list[dict] | None:
-    """Fetch InferenceX benchmark rows for a model. Never raises.
-
-    Builds ``<base>/benchmarks?model=<name>``, performs a bounded-retry GET via
-    :func:`_fetch_raw`, transparently gunzips, and JSON-parses the response.
-
-    Args:
-        model_api_name (str): InferenceX API model identifier (e.g.
-            ``DeepSeek-R1-0528``) — the value returned by
-            ``target_analyzer.to_inferencex_name``.
-
-    Returns:
-        list[dict] | None: A list of benchmark record dicts on success, an
-            empty list when the model has no rows or the API reports a
-            structured error, or ``None`` on any network / parse failure.
-    """
+    """Fetch InferenceX benchmark rows for a model. Never raises."""
     name = str(model_api_name or "").strip()
     if not name:
         return None
@@ -223,30 +153,7 @@ def find_reference_rows(
     osl: int,
     precision: str = "",
 ) -> list[dict]:
-    """Filter InferenceX rows down to those aligned with our run. Never raises.
-
-    Alignment is **strict** on ``hardware``, ``isl`` and ``osl`` — the whole
-    point of the comparison is that the shapes match. Disaggregated and
-    multinode rows are dropped as well: their per-GPU throughput is not
-    comparable to a single-node aggregated run (they use a different serving
-    topology). ``precision`` is **also strict when supplied**: rows of a
-    different precision are dropped rather than substituted, so an fp4 run is
-    never compared against fp8 numbers. When ``precision`` is empty the filter
-    is skipped (precision unconstrained).
-
-    Args:
-        rows (list[dict]): Raw benchmark records from :func:`fetch_rows`.
-        hardware (str): Target GPU id to match against each row's
-            ``hardware`` field (case-insensitive).
-        isl (int): Required input sequence length.
-        osl (int): Required output sequence length.
-        precision (str): Optional precision label (e.g. ``fp8`` / ``fp4``);
-            a hard filter when supplied.
-
-    Returns:
-        list[dict]: The subset of ``rows`` matching the required dimensions
-            (possibly empty).
-    """
+    """Filter InferenceX rows down to those aligned with our run. Never raises."""
     hw = str(hardware or "").strip().casefold()
     matched = [
         r

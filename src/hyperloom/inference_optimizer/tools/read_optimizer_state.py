@@ -29,16 +29,7 @@ SUMMARY_KEYS = (
 
 
 def _format_lifecycle_event(event: dict[str, Any]) -> str:
-    """Render a single lifecycle event as a one-line human-readable summary.
-
-    Args:
-        event: A lifecycle event dict (seq, label, phase, status, optional
-            duration_s, detail, and artifacts).
-
-    Returns:
-        A formatted single-line string describing the event, including any
-        artifacts when present.
-    """
+    """Render a single lifecycle event as a one-line human-readable summary."""
     duration = f" {event['duration_s']}s" if event.get("duration_s") is not None else ""
     detail = f" [{event['detail']}]" if event.get("detail") else ""
     artifacts = " ".join(f"{key}={value}" for key, value in (event.get("artifacts") or {}).items())
@@ -49,15 +40,7 @@ def _format_lifecycle_event(event: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    """Print a concise optimizer state and recent lifecycle summary.
-
-    Reads ``state.json`` (and optional ``manifest.json``) from the session
-    directory and prints the summary keys, phase, and the most recent
-    lifecycle events.
-
-    Returns:
-        ``0`` on success, or ``2`` when ``state.json`` is missing.
-    """
+    """Print a concise optimizer state and recent lifecycle summary."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("session_dir", help="Optimizer session directory.")
     parser.add_argument(

@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for framework-agent pure helpers in ``kb`` and ``models``.
-
-Covers the KB ledger reader, the SDK-message text extractor, the LLM prompt
-builder, and the request/field parsers + validation branches in ``models`` --
-all pure over dicts / tmp files with no KB backend or network.
-"""
+"""Unit tests for framework-agent pure helpers in ``kb`` and ``models``."""
 
 from __future__ import annotations
 
@@ -31,9 +26,7 @@ from hyperloom.agents.framework.models import (
 )
 
 
-# --------------------------------------------------------------------------
 # kb.py
-# --------------------------------------------------------------------------
 def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path) -> None:
     part = tmp_path / "framework_optimization"
     part.mkdir()
@@ -63,13 +56,7 @@ def test_lessons_writer_and_reader_resolve_the_same_file(
     monkeypatch: pytest.MonkeyPatch,
     env: dict[str, str],
 ) -> None:
-    """The PR ledger must be one file, whatever the deployment sets.
-
-    The writer and the reader used to resolve the root independently, so an
-    orchestrator run appended lessons under the workspace while ``fa`` read a
-    packaged path that does not exist. Nothing raised: the ledger just came
-    back empty, and every session re-proposed PRs it had already tried.
-    """
+    """The PR ledger must be one file, whatever the deployment sets."""
     from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.orchestrator.knowledge import kb_writeback
 
@@ -82,8 +69,7 @@ def test_lessons_writer_and_reader_resolve_the_same_file(
     reader = fa_kb.path_for_framework("") / kb_writeback.LESSONS_FILE
 
     assert writer == reader
-    # The packaged seed is a different, read-only tree and must not be the
-    # place a live session writes to.
+    # The packaged seed is a different, read-only tree and must not be the place a live session writes to.
     assert fa_kb.packaged_kb_root() not in writer.parents
 
 
@@ -91,20 +77,7 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """The framework KB must not land on a directory a recipe store owns.
-
-    ``list_domains`` reports every directory under the framework KB root as a
-    framework domain, so sharing a root with a recipe store surfaces recipe
-    trees as domains and puts two unrelated writers in one namespace.
-
-    The root that actually matters here is the *legacy* recipe root
-    ``<workspace>/kb``: it is where the framework ledger used to be written, it
-    still holds recipe data on deployments that predate the split, and the
-    one-time recipe migration still reads it. The current recipe root
-    (``<workspace>/knowledge``) is checked too, but it never collided — asserting
-    against it alone is what let an earlier version of this test pass with the
-    framework root set back to ``kb``.
-    """
+    """The framework KB must not land on a directory a recipe store owns."""
     from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.inference_optimizer.cli.kb import _legacy_recipe_root, _resolve_local_kb_root
 
@@ -130,13 +103,7 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
 
 
 def test_legacy_kb_dirname_agrees_with_the_recipe_side(monkeypatch, tmp_path: Path) -> None:
-    """The framework package hardcodes the legacy root's leaf; it must stay in sync.
-
-    ``agents.framework`` cannot import ``inference_optimizer`` (the ``fa`` CLI
-    runs standalone), so the one-time partition migration names ``kb`` itself. If
-    the recipe side ever renames it, the migration would silently stop finding
-    anything to carry over.
-    """
+    """The framework package hardcodes the legacy root's leaf; it must stay in sync."""
     from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.inference_optimizer.cli.kb import _legacy_recipe_root
 
@@ -165,9 +132,7 @@ def test_build_llm_prompt_embeds_domain_and_findings() -> None:
     assert "Speedup" in prompt
 
 
-# --------------------------------------------------------------------------
 # models.py
-# --------------------------------------------------------------------------
 def test_parse_pr_states() -> None:
     assert _parse_pr_states(None) == ("open",)
     assert _parse_pr_states("open") == ("open",)

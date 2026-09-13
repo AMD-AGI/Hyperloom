@@ -352,9 +352,9 @@ def test_main_text_and_json_and_failure(tmp_path, monkeypatch, capsys):
     assert "could not resolve" in capsys.readouterr().out
 
 
-# ---- FLUX.2 --------------------------------------------------------------
-# Verbatim from the shipped black-forest-labs/FLUX.2-dev transformer config, so
-# the test protects the production path (notably mlp_ratio=3.0, not the 4.0 default).
+# ---- FLUX.2 -------------------------------------------------------------- Verbatim from the shipped
+# black-forest-labs/FLUX.2-dev transformer config, so the test protects the production path (notably mlp_ratio=3.0,
+# not the 4.0 default).
 _FLUX2_CFG = {
     "_class_name": "Flux2Transformer2DModel",
     "num_layers": 8,
@@ -387,8 +387,7 @@ def test_flux2_geometry_and_defaults(tmp_path):
 
     # mlp_ratio 3.0 from the config, not the 4*hidden default.
     assert g.intermediate == 18432
-    # FLUX.2 uses SwiGLU but exposes no gating flag; counting it as a 2-matrix
-    # FFN understates the forward by 20.7%.
+    # FLUX.2 uses SwiGLU but exposes no gating flag; counting it as a 2-matrix FFN understates the forward by 20.7%.
     assert g.gated_ffn is True
 
     est = df.estimate_image_flops(_write_denoiser(tmp_path / "flux2b", _FLUX2_CFG))
@@ -406,8 +405,7 @@ def test_flux2_swiglu_is_counted(tmp_path):
     forward_gated = df.forward_flops(g, 1024, 1024)["forward_flops"]
     forward_ungated = df.forward_flops(ungated, 1024, 1024)["forward_flops"]
     assert forward_ungated / 1e12 == pytest.approx(224.0, abs=0.5)
-    # Counting SwiGLU raises the forward 1.261x; equivalently the 2-matrix
-    # count was 20.7% below the correct value.
+    # Counting SwiGLU raises the forward 1.261x; equivalently the 2-matrix count was 20.7% below the correct value.
     assert forward_gated / forward_ungated == pytest.approx(1.261, abs=0.005)
     assert (forward_gated - forward_ungated) / forward_gated == pytest.approx(0.207, abs=0.005)
 
@@ -457,11 +455,7 @@ def _cross_geom(**kw):
 
 
 def test_cross_attention_counts_q_and_o_projections():
-    """All four projections, not just K and V.
-
-    The query stream needs its own Q and O matmuls, charged to the query token
-    count. They were previously omitted, understating a cross-attending block.
-    """
+    """All four projections, not just K and V."""
     g = _cross_geom()
     q_tokens, tt = 75_600, 512
     total = df._cross_attention_block_flops(g, q_tokens, tt)
@@ -480,8 +474,8 @@ def test_cross_attention_qo_scales_with_query_tokens():
     small = df._cross_attention_block_flops(g, 1_000, tt)
     large = df._cross_attention_block_flops(g, 2_000, tt)
 
-    # The K/V projection is charged to the text length and is invariant in q,
-    # so the delta is exactly the q-proportional attention + Q/O terms.
+    # The K/V projection is charged to the text length and is invariant in q, so the delta is exactly the
+    # q-proportional attention + Q/O terms.
     attn_delta = df._cross_attention_flops(2_000, tt, g.hidden) - df._cross_attention_flops(1_000, tt, g.hidden)
     qo_delta = 1_000 * df._linear_flops(1.0, g.hidden, g.hidden) * 2
     assert large - small == pytest.approx(attn_delta + qo_delta)

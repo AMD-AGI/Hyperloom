@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bypass benchmark orchestration engine.
-
-Pure, injectable helpers that let the bypass runner drive a benchmark in
-Python instead of shelling out to Magpie's scripts:
-
-* resolve the InferenceX checkout (still required — bypass reuses InferenceX's
-  benchmark client and lm-eval, the same runtime Magpie uses),
-* build the per-framework server launch command,
-* build the InferenceX benchmark client command,
-* build the lm-eval command,
-* poll an HTTP endpoint for server readiness.
-
-The command builders are pure. ``wait_for_server_ready`` and
-``server_health_ok`` take an injectable HTTP probe; ``resolve_inferencex_root``
-reads env vars; ``lifecycle_files_present`` / ``write_lifecycle_files`` touch
-the filesystem under a caller-supplied ``pid_dir``. All of it is therefore
-unit-testable without a GPU, a real server, or the Magpie repository.
-"""
+"""Bypass benchmark orchestration engine."""
 
 from __future__ import annotations
 
@@ -28,26 +11,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
-# Frameworks whose server this engine can launch. xdit/scriptable and remote
-# (BENCHMARK_BASE_URL) flows are handled elsewhere / deferred.
+# Frameworks whose server this engine can launch. xdit/scriptable and remote (BENCHMARK_BASE_URL) flows are handled
+# elsewhere / deferred.
 SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
 
 DEFAULT_PORT = 8888
 
 
 def resolve_inferencex_root(bench: dict[str, Any]) -> str:
-    """Resolve the InferenceX checkout root.
-
-    Precedence: explicit YAML ``inferencex_path`` -> ``MAGPIE_INFERENCEX_PATH``
-    -> ``INFERENCEX_PATH``. bypass depends on InferenceX (not Magpie) for the
-    benchmark client and lm-eval.
-
-    Args:
-        bench: The ``benchmark`` section of the config.
-
-    Returns:
-        The resolved path string (possibly empty if unresolved).
-    """
+    """Resolve the InferenceX checkout root."""
     return (
         str(bench.get("inferencex_path") or "").strip()
         or os.environ.get("MAGPIE_INFERENCEX_PATH", "").strip()
@@ -67,34 +39,7 @@ def build_server_command(
     python_exe: str = "python3",
     framework_python: str = "",
 ) -> list[str]:
-    """Build the per-framework server launch argv.
-
-    Args:
-        framework: One of sglang/vllm/atom.
-        model: Model path/id.
-        tp: Tensor-parallel size.
-        port: HTTP serving port.
-        max_model_len: Optional max model length (vllm/atom).
-        extra_args: Already-tokenized extra server args.
-        profile_dir: Torch profiler dir when profiling, else None.
-        python_exe: Interpreter used to launch python-module servers
-            (sglang/atom); defaults to a PATH ``python3``. Callers should pass
-            the interpreter running the bypass runner so the server loads the
-            SAME venv (avoids a PATH ``python3`` that cannot import the
-            framework). vllm uses its own ``vllm`` console script and ignores
-            this unless ``framework_python`` is set.
-        framework_python: When non-empty, the explicit interpreter that built
-            the from-source vLLM/sglang.  For vLLM this switches from the
-            bare ``vllm serve`` console script to ``python -m
-            vllm.entrypoints.openai.api_server`` so the interpreter is
-            honored. For sglang/atom it replaces ``python_exe``.
-
-    Returns:
-        The server launch argv list.
-
-    Raises:
-        ValueError: When the framework has no known server launcher.
-    """
+    """Build the per-framework server launch argv."""
     fw = framework.lower()
     interp = framework_python or python_exe
     if fw == "sglang":
@@ -141,9 +86,8 @@ def build_server_command(
         if max_model_len:
             cmd += ["--max-model-len", str(max_model_len)]
         if profile_dir:
-            # vLLM enables the torch profiler via --profiler-config
-            # (the legacy VLLM_TORCH_PROFILER_DIR env is ignored), without
-            # which /start_profile returns 404 and no trace is written.
+            # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
+            # ignored), without which /start_profile returns 404 and no trace is written.
             cmd += [
                 "--profiler-config.profiler",
                 "torch",
@@ -188,30 +132,7 @@ def build_client_command(
     profile: bool = False,
     trust_remote_code: bool = False,
 ) -> list[str]:
-    """Build the InferenceX benchmark client argv.
-
-    Mirrors the remote-direct path Magpie uses so the same InferenceX
-    ``benchmark_serving.py`` produces the same ``inferencex_result.json``.
-
-    Args:
-        inferencex_root: InferenceX checkout root.
-        python_exe: Interpreter to run the client with.
-        model: Model path/id.
-        base_url: OpenAI-compatible server base URL.
-        isl: Random input length.
-        osl: Random output length.
-        conc: Max concurrency.
-        random_range_ratio: Random range ratio.
-        result_dir: Directory the result JSON is written to.
-        result_filename: Result basename (without .json).
-        num_prompts: Prompt count; defaults to conc*10 (or conc when profiling).
-        num_warmups: Warmup count; defaults to 2*conc.
-        profile: Whether to pass --profile.
-        trust_remote_code: Whether to pass --trust-remote-code.
-
-    Returns:
-        The benchmark client argv list.
-    """
+    """Build the InferenceX benchmark client argv."""
     bench_py = str(Path(inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py")
     prompts = num_prompts if num_prompts is not None else (conc if profile else conc * 10)
     warmups = num_warmups if num_warmups is not None else 2 * conc
@@ -269,24 +190,7 @@ def build_eval_command(
     batch_size: str = "auto",
     limit: str | None = None,
 ) -> list[str]:
-    """Build the lm-eval argv targeting an OpenAI-compatible endpoint.
-
-    Writes results under ``out_dir`` so ``parse_eval_results`` finds the
-    standard lm-eval ``results*.json`` schema.
-
-    Args:
-        python_exe: Interpreter to run lm-eval with.
-        model: Model id for lm-eval + tokenizer.
-        base_url: Server base URL (``/v1/completions`` is appended).
-        conc: Concurrency cap.
-        out_dir: Output directory for lm-eval results.
-        tasks: Comma-separated lm-eval tasks.
-        batch_size: lm-eval batch size.
-        limit: Optional sample cap for smoke runs.
-
-    Returns:
-        The lm-eval argv list.
-    """
+    """Build the lm-eval argv targeting an OpenAI-compatible endpoint."""
     completions_url = f"{base_url.rstrip('/')}/v1/completions"
     model_args = (
         f"model={model},base_url={completions_url},num_concurrent={conc},"
@@ -316,25 +220,13 @@ def wait_for_server_ready(
     base_url: str,
     *,
     timeout_s: float,
+    server_exited: Callable[[], bool],
     poll_s: float = 2.0,
     probe: Callable[[str], int] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
 ) -> bool:
-    """Poll ``<base_url>/health`` until ready or timeout.
-
-    Args:
-        base_url: Server base URL.
-        timeout_s: Max seconds to wait.
-        poll_s: Seconds between probes.
-        probe: Injectable probe returning an HTTP status code; defaults to a
-            real GET. Any exception/non-200 is treated as not-ready.
-        sleep: Injectable sleep (tests pass a no-op).
-        now: Injectable monotonic clock.
-
-    Returns:
-        True when the server became ready within the timeout, else False.
-    """
+    """Poll ``<base_url>/health`` until ready or timeout."""
     health_url = f"{base_url.rstrip('/')}/health"
 
     def _default_probe(url: str) -> int:
@@ -349,13 +241,16 @@ def wait_for_server_ready(
                 return True
         except Exception:  # noqa: BLE001 - not-ready yet; keep polling
             pass
+        # Checked after the probe, so a server that answered and exited in the
+        # same breath is still credited with having come up.
+        if server_exited():
+            return False
         sleep(poll_s)
     return False
 
 
-# --- server_lifecycle pid/meta helpers -------------------------------------
-# Filenames match Hyperloom's teardown_lifecycle_server convention so a
-# persistent bypass server can be reused across processes and torn down by
+# --- server_lifecycle pid/meta helpers ------------------------------------- Filenames match Hyperloom's
+# teardown_lifecycle_server convention so a persistent bypass server can be reused across processes and torn down by
 # either side: <pid_dir>/<framework>_<port>.pid ("<pid> <pgid>") + .json meta.
 
 
@@ -370,13 +265,7 @@ def lifecycle_meta_file(pid_dir: str, framework: str, port: int) -> Path:
 
 
 def lifecycle_files_present(pid_dir: str, framework: str, port: int) -> bool:
-    """Whether both pid and meta files exist for a persistent server.
-
-    A healthy ``/health`` port WITHOUT these files means the port is held by a
-    server this bypass run did not launch (foreign/zombie), so its reuse-key
-    would not match. Callers use this to distinguish a genuine reuse target
-    from an unrelated listener.
-    """
+    """Whether both pid and meta files exist for a persistent server."""
     return (
         lifecycle_pid_file(pid_dir, framework, port).exists() and lifecycle_meta_file(pid_dir, framework, port).exists()
     )
@@ -424,3 +313,25 @@ def server_health_ok(base_url: str, *, probe: Callable[[str], int] | None = None
         return do_probe(health_url) == 200
     except Exception:  # noqa: BLE001
         return False
+
+
+def _json_post(url: str, payload: dict[str, Any], timeout_s: float) -> Any:
+    """POST ``payload`` as JSON and return the decoded body."""
+    import json as _json
+
+    request = urllib.request.Request(  # noqa: S310  # nosec B310 - fixed local serving endpoint
+        url,
+        data=_json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))
+
+
+def _json_get(url: str, timeout_s: float) -> Any:
+    """GET ``url`` and return the decoded JSON body."""
+    import json as _json
+
+    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310  # nosec B310
+        return _json.loads(resp.read().decode("utf-8", "replace"))

@@ -156,12 +156,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # The internal extension is used ONLY when $TRACELENS_INTERNAL_ROOT is set
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
-# TraceLens v1.0 integration: head of
-# release/hyperloom_integration_v1.0. The optional internal extension tracks
-# the matching release/hyperloom_integration_v1.0 branch of
-# AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
-# operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="a59a9c165bb64c7c416fd7cf79149803d552e43c"
+TRACELENS_REF="210fb5c8aebb386e4e90bc9422dcf1b6821c6809"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -1332,9 +1327,8 @@ ensure_geak() {
   fi
 }
 
-# The forge backend drives the `claude` CLI inside its autonomous loop
-# (see forge_submit._apply_kernel_backend_env), so it needs Node/npm, the claude npm
-# CLI, and ~/.claude auth.
+# The forge backend drives the `claude` CLI inside its autonomous loop, so it
+# needs Node/npm, the claude npm CLI, and ~/.claude auth.
 ensure_forge_claude_cli() {
   log "ensuring claude CLI for the forge backend"
   if [ "$CHECK_ONLY" -eq 1 ]; then

@@ -1,21 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for the sglang dense BF16 tuner.
-
-Three production failures are covered here, all observed on MI355X (gfx950)
-against aiter at /sgl-workspace/aiter:
-
-1. forge pointed at ``gradlib/gradlib/gemm_tuner.py`` and passed ``--libtype``,
-   which that script does not accept -- every call died with
-   ``unrecognized arguments: --libtype hipblaslt`` and produced nothing.
-2. Moving to ``csrc/gemm_a16w16/`` fixed the argument error but still tuned 0
-   shapes, because ``hipblaslt`` is additionally gated on ``--with-hipblaslt``.
-   With the flag, 11 of 11 real shapes tuned; without it, 0 of 2.
-3. Success was judged by exit code. The tuner returns 1 even when every shape
-   tuned, and its shim rewrites that same 1 into a 0, so both directions
-   misjudge. Row count is the only reliable signal.
-"""
+"""Tests for the sglang dense BF16 tuner."""
 
 from __future__ import annotations
 
@@ -29,8 +15,8 @@ from kernelforge.gemm_tune.script_probe import ScriptSurface
 from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
 from kernelforge.gemm_tune.tuners.base import TuneContext
 
-# Real header written by csrc/gemm_a16w16/gemm_a16w16_tune.py for both the
-# tuned (-o) and the full-candidate profile (-o2) CSV.
+# Real header written by csrc/gemm_a16w16/gemm_a16w16_tune.py for both the tuned (-o) and the full-candidate profile
+# (-o2) CSV.
 _HDR = (
     "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
 )
@@ -99,11 +85,7 @@ def _permissive_surface(script):
 
 
 def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None, stderr="", surface=None):
-    """Wire the tuner so run() executes without aiter, and capture its argv.
-
-    ``tuned_rows=None`` means the tuner wrote no CSV at all, as happens when the
-    invocation is rejected outright.
-    """
+    """Wire the tuner so run() executes without aiter, and capture its argv."""
     monkeypatch.setattr(sd, "probe_script", surface or _permissive_surface)
     monkeypatch.setattr(sd, "resolve_aiter_root", lambda: root or _aiter_root(tmp_path))
     monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(_NK))
@@ -138,9 +120,8 @@ class TestScriptResolution:
         assert sd._resolve_tuner_script(root).name == "gemm_tuner.py"
 
     def test_gradlib_is_not_a_fallback(self, tmp_path):
-        # gradlib cannot parse the CSV schema this tuner writes (it reads the
-        # `dtype` column value "torch.bfloat16" as an --indtype key), so falling
-        # back to it would guarantee a KeyError rather than a tuned artifact.
+        # gradlib cannot parse the CSV schema this tuner writes (it reads the `dtype` column value "torch.bfloat16" as
+        # an --indtype key), so falling back to it would guarantee a KeyError rather than a tuned artifact.
         root = _aiter_root(tmp_path, direct=False, shim=False, gradlib=True)
         assert sd._resolve_tuner_script(root) is None
 
@@ -156,22 +137,10 @@ class TestScriptResolution:
 
 
 class TestValidateAsksWhetherRunCanDeriveShapes:
-    """``validate`` refuses only when ``run`` would derive nothing.
-
-    Keying the refusal on ``intermediate_size`` was wrong in both directions. A
-    MoE-only config still yields the attention projections, because
-    ``compute_dense_nk_shapes`` skips only the FFN pair -- refusing it threw away
-    GEMMs that were derivable and correctly keyed. Meanwhile a config that
-    yields nothing at all was waved through whenever an input ``run`` never
-    reads happened to be supplied. Putting the question to the derivation itself
-    is the only judgement that matches what ``run`` does, and it needs no
-    special case for sparse MLA.
-    """
+    """``validate`` refuses only when ``run`` would derive nothing."""
 
     def _no_ffn_profile(self):
-        # MoE-only checkout: FFN width lives in moe_intermediate_size. Not the
-        # sparse-MLA shape either, so no exemption applies -- only the plain
-        # attention projections are derivable.
+        # MoE-only checkout: FFN width lives in moe_intermediate_size.
         return ModelProfile(
             model_path="/fake",
             hidden_size=4096,
@@ -200,9 +169,7 @@ class TestValidateAsksWhetherRunCanDeriveShapes:
         assert err and "shape" in err.lower()
 
     def test_an_input_run_never_reads_cannot_waive_the_check(self, tmp_path, monkeypatch):
-        """``untuned_csv`` is not a shape source here, so it cannot rescue a
-        config that derives nothing -- crediting it is what silently dropped the
-        caller's shapes in the first place."""
+        """``untuned_csv`` is not a shape source here, so it cannot rescue a config that derives nothing -- crediting it is what silently dropped the caller's shapes in the first place."""
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
         csv = tmp_path / "untuned.csv"
         csv.write_text("M,N,K\n64,4096,4096\n", encoding="utf-8")
@@ -222,8 +189,7 @@ class TestValidateAsksWhetherRunCanDeriveShapes:
         assert sd.SglangDenseBf16Tuner(ctx).validate() is None
 
     def test_sparse_mla_needs_no_exemption(self, tmp_path, monkeypatch):
-        """DeepSeek-V4 sparse MLA: ``q_lora_rank`` without ``kv_lora_rank``.
-        It passes because its shapes derive, not because it is named."""
+        """DeepSeek-V4 sparse MLA: ``q_lora_rank`` without ``kv_lora_rank``."""
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
         profile = ModelProfile(
             model_path="/fake",
@@ -240,11 +206,7 @@ class TestValidateAsksWhetherRunCanDeriveShapes:
 
 
 class TestValidateCannotEscapeExecute:
-    """``execute`` must convert any validate failure into a TuneResult.
-
-    ``validate`` now asks the shape derivation, which puts ``raw_config`` values
-    through ``int()``; a raise there would leave the CLI with no sentinel JSON.
-    """
+    """``execute`` must convert any validate failure into a TuneResult."""
 
     def _tuner(self, tmp_path, monkeypatch, raw_config: dict):
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
@@ -279,9 +241,7 @@ class TestValidateCannotEscapeExecute:
 
 
 class TestRunNamesTheInputsItIgnores:
-    """Dropping a caller's shapes without a word is the failure this line exists
-    to remove. ``run`` reads demand or the config; anything else that arrives
-    has to be reported as unused rather than silently discarded."""
+    """Dropping a caller's shapes without a word is the failure this line exists to remove."""
 
     def test_untuned_csv_is_reported_as_ignored(self, tmp_path, monkeypatch, caplog):
         csv = tmp_path / "untuned.csv"
@@ -314,18 +274,16 @@ class TestWithHipblasltFlag:
         assert cmd[cmd.index("--libtype") + 1] == "hipblaslt,torch"
 
     def test_fast_mode_asks_for_torch_so_the_run_has_a_baseline(self, tmp_path, monkeypatch):
-        # torch is not a serious contender against hipblaslt; it is the kernel
-        # aiter falls back to when a shape is untuned, so its profile row is the
-        # only baseline _parse_profile_defaults can read. Dropping it made every
-        # fast run report improved_shapes=0 for want of a comparison.
+        # torch is not a serious contender against hipblaslt; it is the kernel aiter falls back to when a shape is
+        # untuned, so its profile row is the only baseline _parse_profile_defaults can read.
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
         _run(tmp_path)
         libtypes = cap["cmd"][cap["cmd"].index("--libtype") + 1].split(",")
         assert "torch" in libtypes and "hipblaslt" in libtypes
 
     def test_thorough_mode_also_enables_hipblaslt(self, tmp_path, monkeypatch):
-        # --libtype all is gated on --with-hipblaslt too: the `all` variants
-        # measured on MI355X left the large-M shapes untuned without it.
+        # --libtype all is gated on --with-hipblaslt too: the `all` variants measured on MI355X left the large-M
+        # shapes untuned without it.
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "flydsl", 9.5)])
         _run(tmp_path, thorough=True)
         cmd = cap["cmd"]
@@ -353,9 +311,8 @@ class TestBatchTimeout:
         assert tuner._batch_timeout_s(100) == 1_000 - sd._TIMEOUT_RESERVE_S
 
     def test_never_exceeds_the_outer_kill_timeout(self, tmp_path):
-        # The floor used to be raised back to per_shape, handing aiter a
-        # deadline past the point the outer watchdog kills it -- so it never
-        # reached its own timeout and never flushed what it had.
+        # The floor used to be raised back to per_shape, handing aiter a deadline past the point the outer watchdog
+        # kills it -- so it never reached its own timeout and never flushed what it had.
         for timeout_s in (1, 30, 60, 120, 180, 240):
             for thorough in (False, True):
                 tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=timeout_s, thorough=thorough))
@@ -363,13 +320,7 @@ class TestBatchTimeout:
 
 
 class TestStaleArtifactsAreCleared:
-    """Row count only means "this run" if last run's rows are gone.
-
-    Judging by output instead of exit code is the point of this tuner, and a
-    tuned CSV left in the work dir by an earlier attempt would be read as this
-    run's output -- turning an invocation that wrote nothing into a full,
-    successful-looking result.
-    """
+    """Row count only means \"this run\" if last run's rows are gone."""
 
     def test_previous_output_is_removed_before_launching(self, tmp_path, monkeypatch):
         work = tmp_path / "tuners" / "sglang_dense_bf16"
@@ -412,15 +363,7 @@ class TestStaleArtifactsAreCleared:
 
 
 class TestShapeBudgetIsModeAware:
-    """A thorough shape costs ~5.5x a fast one, so it cannot be counted the same.
-
-    Measured per-backend on an 8-GPU MI355X box over four shapes: 169s for
-    hipblaslt+asm+triton+skinny+opus+torch together, 1458s for flydsl alone.
-    Sizing a `--libtype all` run with the fast figure claims 5.5x the shapes the
-    batch can finish, and `--shape_grouped` then spends the whole allowance on
-    the first few while the rest are written as nothing -- which the report
-    cannot tell apart from a tuner that found no improvement.
-    """
+    """A thorough shape costs ~5.5x a fast one, so it cannot be counted the same."""
 
     def test_fast_and_thorough_use_their_own_cost(self, tmp_path):
         fast = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=3_600))
@@ -428,8 +371,8 @@ class TestShapeBudgetIsModeAware:
 
         assert fast._shape_budget() == (3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_S
         assert thorough._shape_budget() == ((3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S)
-        # The whole point: an hour buys far fewer shapes when every backend is
-        # searched, and claiming otherwise is what produced empty results.
+        # The whole point: an hour buys far fewer shapes when every backend is searched, and claiming otherwise is
+        # what produced empty results.
         assert thorough._shape_budget() < fast._shape_budget()
 
     def test_thorough_budget_is_finishable(self, tmp_path):
@@ -477,13 +420,7 @@ class TestShapeBudgetIsModeAware:
 
 
 class TestDerivedShapesRespectTheBudget:
-    """The derived cross product used to ignore the budget the demand list honours.
-
-    A 1800s thorough run generated 4 NK pairs x 22 M = 88 shapes at ~407s each:
-    ~35000s of work in a 1680s window. The grouped batch spends the allowance on
-    the first shapes and writes the rest as nothing, which is how a thorough run
-    came back after 3606s having tuned zero.
-    """
+    """The derived cross product used to ignore the budget the demand list honours."""
 
     def test_untouched_when_the_product_already_fits(self):
         m = [1, 8, 64, 512]
@@ -493,8 +430,8 @@ class TestDerivedShapesRespectTheBudget:
     def test_trims_m_not_nk(self):
         m = list(range(1, 23))
         out = sd._fit_m_values_to_budget(m, 4, 8)
-        # 8 shapes across 4 NK pairs leaves 2 M values -- every matmul keeps an
-        # entry, which dropping NK pairs instead would not give.
+        # 8 shapes across 4 NK pairs leaves 2 M values -- every matmul keeps an entry, which dropping NK pairs instead
+        # would not give.
         assert len(out) == 2
         assert 4 * len(out) <= 8
 
@@ -513,8 +450,7 @@ class TestDerivedShapesRespectTheBudget:
         assert out[:2] != m[:2]
 
     def test_one_m_per_nk_keeps_the_largest(self):
-        # With room for a single M per matmul, prefill is the one that cannot be
-        # served by a padded lookup from below.
+        # With room for a single M per matmul, prefill is the one that cannot be served by a padded lookup from below.
         assert sd._fit_m_values_to_budget([1, 16, 128, 1024], 8, 8) == [1024]
 
     def test_degenerate_inputs_are_passed_through(self):
@@ -538,8 +474,8 @@ class TestDerivedShapesRespectTheBudget:
         budget = (1_800 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S
         # Untrimmed this is 4 x 14 = 56 shapes, ~23000s of work in a 1680s window.
         assert len(nk) * len(ms) == 56
-        # At most one M per NK pair may overshoot: keeping every matmul beats
-        # covering more token counts on fewer of them.
+        # At most one M per NK pair may overshoot: keeping every matmul beats covering more token counts on fewer of
+        # them.
         assert len(rows) <= max(budget, len(nk))
         # Every matmul still has an entry.
         assert len({(r.split(",")[1], r.split(",")[2]) for r in rows}) == len(nk)
@@ -555,9 +491,8 @@ class TestDerivedShapesRespectTheBudget:
 
         untuned = Path(cap["cmd"][cap["cmd"].index("-i") + 1])
         rows = untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
-        # 56 shapes at the fast cost is 5208s of work; the 1680s window pays for
-        # 18, so fast mode trims too -- just far less aggressively than thorough.
-        # (18, not 22: carrying torch for the baseline costs ~19s a shape, and
+        # 56 shapes at the fast cost is 5208s of work; the 1680s window pays for 18, so fast mode trims too -- just
+        # far less aggressively than thorough. (18, not 22: carrying torch for the baseline costs ~19s a shape, and
         # the budget has to charge for it or the batch is cut off part-way.)
         assert len(rows) == 4 * 4
         assert len(rows) > 4 * 1
@@ -568,8 +503,7 @@ class TestDerivedShapesRespectTheBudget:
 
 class TestRowCountCriterion:
     def test_nonzero_rc_with_all_rows_is_ok(self, tmp_path, monkeypatch):
-        # gemm_a16w16_tune.py exits 1 even when every shape tuned. Failing on
-        # rc != 0 threw away complete, usable results.
+        # gemm_a16w16_tune.py exits 1 even when every shape tuned.
         _prep(
             tmp_path,
             monkeypatch,
@@ -584,8 +518,7 @@ class TestRowCountCriterion:
         assert res.total_shapes == 2 and res.expected_shapes == 2
 
     def test_zero_rc_with_no_rows_is_empty_output(self, tmp_path, monkeypatch):
-        # The shim rewrites the tuner's 1 into a 0, so rc==0 says nothing about
-        # whether anything was written. This must not read as no_improvement.
+        # The shim rewrites the tuner's 1 into a 0, so rc==0 says nothing about whether anything was written.
         _prep(tmp_path, monkeypatch, rc=0, tuned_rows=[])
         res = _run(tmp_path)
         assert res.status == "empty_output"
@@ -622,12 +555,7 @@ class TestRowCountCriterion:
 
 
 class TestOuterTimeoutKeepsWhatWasWritten:
-    """A kill by the outer timeout must not discard rows already on disk.
-
-    The tuner writes as it goes. Returning "failed" without looking at the CSV
-    throws away completed shapes and reports nothing about how far it got --
-    the same mistake as judging by exit code, one level up.
-    """
+    """A kill by the outer timeout must not discard rows already on disk."""
 
     def test_partial_rows_survive_a_timeout(self, tmp_path, monkeypatch):
         _prep(
@@ -655,8 +583,7 @@ class TestOuterTimeoutKeepsWhatWasWritten:
 
 
 class TestHelpProbeGate:
-    """The probe must refuse the run *before* it costs minutes, and must never
-    veto a run just because it could not read --help."""
+    """The probe must refuse the run *before* it costs minutes, and must never veto a run just because it could not read --help."""
 
     def test_missing_with_hipblaslt_fails_before_running(self, tmp_path, monkeypatch):
         ran: list = []
@@ -675,8 +602,7 @@ class TestHelpProbeGate:
         assert "cmd" not in cap
 
     def test_droppable_flag_is_removed_not_fatal(self, tmp_path, monkeypatch):
-        # -v only affects log verbosity, so a script that does not take it should
-        # still be run -- without it.
+        # -v only affects log verbosity, so a script that does not take it should still be run -- without it.
         accepted = {
             "-i",
             "-o",
@@ -721,14 +647,7 @@ class TestHelpProbeGate:
 
 
 class TestRejectedArgument:
-    """A rejected flag is a failure, not an empty run.
-
-    The original breakage was 14 calls dying on
-    ``unrecognized arguments: --libtype hipblaslt``. Anything that lets a
-    rejected argument surface as "ran, nothing to report" recreates the exact
-    illusion the row-count criterion exists to remove: the run looks complete
-    and gainless when in fact the search space was never what was requested.
-    """
+    """A rejected flag is a failure, not an empty run."""
 
     _STDERR = (
         "usage: gemm_a16w16_tune.py [-h] ...\ngemm_a16w16_tune.py: error: unrecognized arguments: --with-hipblaslt\n"
@@ -747,8 +666,8 @@ class TestRejectedArgument:
         assert "gemm_a16w16_tune.py" in res.error
 
     def test_rejection_outranks_the_row_count(self, tmp_path, monkeypatch):
-        # Even if a stale CSV from an earlier run is lying around, a rejected
-        # argument means this invocation searched the wrong space.
+        # Even if a stale CSV from an earlier run is lying around, a rejected argument means this invocation searched
+        # the wrong space.
         _prep(
             tmp_path,
             monkeypatch,
@@ -765,11 +684,7 @@ class TestRejectedArgument:
 
 class TestUnverifiedShapes:
     def test_a_profile_without_torch_rows_has_no_baseline(self, tmp_path, monkeypatch):
-        # What a torch-less profile CSV does downstream. Fast mode no longer
-        # produces one -- it asks for `hipblaslt,torch` -- but the parser still
-        # has to say "unverified" rather than "no gain" if torch is missing for
-        # any other reason (an aiter build without it, a candidate that never
-        # ran inside the batch budget).
+        # What a torch-less profile CSV does downstream.
         _prep(
             tmp_path,
             monkeypatch,
@@ -791,8 +706,8 @@ class TestUnverifiedShapes:
         assert all(r["tuned_unverified"] for r in res.shape_results)
 
     def test_torch_candidate_gives_a_real_speedup(self, tmp_path, monkeypatch):
-        # --libtype all does time torch, which is exactly the kernel serving
-        # falls back to, so the comparison is meaningful.
+        # --libtype all does time torch, which is exactly the kernel serving falls back to, so the comparison is
+        # meaningful.
         _prep(
             tmp_path,
             monkeypatch,
@@ -813,10 +728,7 @@ class TestUnverifiedShapes:
         assert res.best_micro_speedup == 1.25
 
     def test_fast_mode_reports_a_measured_speedup_not_unverified(self, tmp_path, monkeypatch):
-        # The whole point of carrying torch in fast mode. Kimi-K3 on vLLM lands
-        # here: 38600 misses in bf16_tuned_gemm.csv, every one of them falling
-        # back to torch, and the run still reported best_micro_speedup=1.0
-        # because nothing timed the kernel it was falling back to.
+        # The whole point of carrying torch in fast mode.
         _prep(
             tmp_path,
             monkeypatch,

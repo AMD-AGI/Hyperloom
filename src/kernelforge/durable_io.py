@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Crash-safe publication of a single file.
-
-Every artifact a run is resumed, scored or audited from is published through
-here, so a crash between the write and the rename leaves the prior version
-intact rather than a truncated one. Serialization stays with the caller: the
-exact bytes of a published payload are that caller's contract with its readers.
-"""
+"""Crash-safe publication of a single file."""
 
 from __future__ import annotations
 
@@ -29,12 +23,7 @@ def fsync_directory(path: str | Path) -> None:
 
 
 def atomic_write_bytes(path: str | Path, data: bytes) -> None:
-    """Publish bytes at ``path``, replacing any prior content in one step.
-
-    A replaced file keeps the permissions it had. The temp file this publishes
-    through is created owner-only, so without carrying them over a file would
-    come back more restricted than the one it replaced.
-    """
+    """Publish bytes at ``path``, replacing any prior content in one step."""
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -61,17 +50,7 @@ def atomic_write_text(path: str | Path, content: str) -> None:
 
 
 def fsync_tree(root: Path) -> None:
-    """Flush every file and directory under ``root`` before it is renamed.
-
-    For a caller that stages a whole directory and then publishes it with one
-    ``os.replace``: the rename is only crash-safe if the contents reached disk
-    first, and a directory built from several writes has no single point to flush.
-
-    Files published through :func:`atomic_write_bytes` are already durable, so
-    this exists for the ones that are not -- a ``shutil.copy2`` of an agent's
-    file, for instance -- and re-flushing the rest costs a no-op syscall rather
-    than a second write.
-    """
+    """Flush every file and directory under ``root`` before it is renamed."""
     for directory, _subdirectories, filenames in os.walk(root):
         current = Path(directory)
         for filename in filenames:

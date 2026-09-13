@@ -20,8 +20,11 @@ imported from the runner, the Critic backend, and tests without cycles.
 
 from __future__ import annotations
 
+import io
 import re
 import subprocess
+import tempfile
+import tokenize
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -652,23 +655,16 @@ class PatchGroundingResult:
 
     @property
     def is_garbage(self) -> bool:
-        """True for verdicts that should drop the patch (clear hallucination).
+        """True when the file is not a usable patch at all.
 
-        ``missing_target`` joins the structural failures: a patch modifying or
-        deleting a file absent from *every* candidate source tree can never
-        apply, so it is dropped before it wastes an ``integrate_patch``
-        benchmark slot (unlike ``stale``, which is kept because integrate's
-        ``-p`` auto-detect / 3-way merge may still salvage it).
+        Only structural verdicts drop: a file with no hunk header is not a diff,
+        and one whose paths escape the tree applies nowhere. An unresolved or
+        ambiguous root is a verdict about the root set, not the patch.
 
         Returns:
             True for structural-failure verdicts that should drop the patch.
         """
-        return self.verdict in (
-            GROUND_NOT_DIFF,
-            GROUND_PATH_ESCAPE,
-            GROUND_MISSING_TARGET,
-            GROUND_AMBIGUOUS_ROOT,
-        )
+        return self.verdict in (GROUND_NOT_DIFF, GROUND_PATH_ESCAPE)
 
 
 def ground_patch_text(
@@ -748,10 +744,14 @@ def ground_patch_text(
 
 @dataclass
 class PatchSafetyReport:
-    """Aggregate patch-safety findings for one specialist_done payload."""
+    """Aggregate patch-safety findings for one specialist_done payload.
+
+    ``ungrounded`` holds every patch that failed vetting; a structural reject is
+    also absent from ``kept_patches``, an unresolved root appears in both.
+    """
 
     kept_patches: list[str] = field(default_factory=list)
-    dropped: list[dict[str, str]] = field(default_factory=list)
+    ungrounded: list[dict[str, str]] = field(default_factory=list)
     grounding: dict[str, str] = field(default_factory=dict)
     numeric_warnings: list[str] = field(default_factory=list)
     forbidden_fields: list[str] = field(default_factory=list)
@@ -763,18 +763,20 @@ class PatchSafetyReport:
             Human-readable audit note strings for the recorded findings.
         """
         out: list[str] = []
-        if self.dropped:
-            out.append("patch_safety_dropped:" + ",".join(f"{d['path']}({d['verdict']})" for d in self.dropped[:8]))
-        missing = [d for d in self.dropped if d.get("verdict") == GROUND_MISSING_TARGET]
+        if self.ungrounded:
+            out.append(
+                "patch_safety_ungrounded:" + ",".join(f"{d['path']}({d['verdict']})" for d in self.ungrounded[:8])
+            )
+        missing = [d for d in self.ungrounded if d.get("verdict") == GROUND_MISSING_TARGET]
         if missing:
             out.append(
                 "patch_safety_missing_target:"
                 + ",".join(d.get("detail", d["path"]) for d in missing[:4])
                 + " — the patch names a file that does not exist in any"
-                " allowlisted framework source tree; verify the target path"
+                " framework source tree on this host; verify the target path"
                 " with Glob/Grep before authoring the diff."
             )
-        ambiguous = [d for d in self.dropped if d.get("verdict") == GROUND_AMBIGUOUS_ROOT]
+        ambiguous = [d for d in self.ungrounded if d.get("verdict") == GROUND_AMBIGUOUS_ROOT]
         if ambiguous:
             out.append(
                 "patch_safety_ambiguous_root:"
@@ -858,6 +860,106 @@ def strip_forbidden_proposal_fields(payload: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(removed))
 
 
+_SPECIALIST_WORK_ARTIFACT_ROOTS = (
+    "patches",
+    "specialist_done.json",
+    "specialist_done.partial.json",
+    "scratch/rebench",
+)
+SPECIALIST_WORK_ARTIFACT_PATHSPECS = tuple(f":(top,exclude){root}" for root in _SPECIALIST_WORK_ARTIFACT_ROOTS) + (
+    ":(top,glob,exclude)**/__pycache__/**",
+)
+
+
+def patch_work_artifact_targets(patch_text: str) -> tuple[str, ...]:
+    """Find task-owned targets, including binary sections in mixed diffs."""
+    targets: list[str] = []
+    for section in re.split(r"(?m)(?=^diff --git )", patch_text):
+        if not section.strip():
+            continue
+        try:
+            parsed = parse_patch_targets(section)
+        except ValueError:
+            continue  # Structural/root validation reports invalid targets separately.
+        for path in parsed.all:
+            if "__pycache__" in PurePosixPath(path).parts or any(
+                path == root or path.startswith(root + "/") for root in _SPECIALIST_WORK_ARTIFACT_ROOTS
+            ):
+                targets.append(path)
+    return tuple(dict.fromkeys(targets))
+
+
+def _python_runtime_tokens(source: bytes) -> list[tuple[int, str]]:
+    tokens: list[tuple[int, str]] = []
+    for token in tokenize.tokenize(io.BytesIO(source).readline):
+        if token.type == tokenize.COMMENT:
+            # Directive placement matters: a shebang only executes on the first line.
+            if token.string.startswith("#!") or re.match(r"#\s*(?:type:|noqa\b|fmt:|pragma:|cython:)", token.string):
+                tokens.append((token.type, f"{token.start}:{token.string}"))
+            continue
+        if token.type != tokenize.NL:
+            tokens.append((token.type, token.string))
+    return tokens
+
+
+def patch_is_annotation_only(patch_text: str, source_root: Path, *, reverse: bool = False) -> bool:
+    """Prove a patch changes only Python comments using complete source files.
+
+    ``source_root`` holds the pre-image, or the post-image when ``reverse`` is
+    true (a specialist's edited worktree). Git reconstructs the other version
+    in a disposable directory; the real checkout and its index stay untouched.
+    Creations, metadata changes, non-Python files and unavailable context are
+    not classified as annotations.
+    """
+    pairs = patch_file_targets(patch_text)
+    if not pairs or not is_unified_diff(patch_text):
+        return False
+    if re.search(
+        r"^(?:new file mode |deleted file mode |old mode |new mode |rename |copy |Binary files |GIT binary patch)",
+        patch_text,
+        re.M,
+    ):
+        return False
+    try:
+        paths: list[str] = []
+        for raw_old, raw_new in pairs:
+            old, new = _safe_patch_path(raw_old), _safe_patch_path(raw_new)
+            if old != new or not old.endswith(".py"):
+                return False
+            paths.append(old)
+        root = source_root.resolve()
+        originals: dict[str, bytes] = {}
+        for rel in paths:
+            source = (root / rel).resolve()
+            if not source.is_relative_to(root):
+                return False
+            originals[rel] = source.read_bytes()
+        with tempfile.TemporaryDirectory(prefix="hyperloom-annotation-") as directory:
+            mirror = Path(directory)
+            for rel, content in originals.items():
+                target = mirror / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+            subprocess.run(["git", "init", "-q", str(mirror)], capture_output=True, timeout=30.0, check=True)
+            proc = subprocess.run(
+                ["git", "apply", *(["--reverse"] if reverse else []), "-"],
+                cwd=mirror,
+                input=patch_text if patch_text.endswith("\n") else patch_text + "\n",
+                capture_output=True,
+                text=True,
+                timeout=30.0,
+                check=False,
+            )
+            if proc.returncode != 0:
+                return False
+            return all(
+                _python_runtime_tokens(content) == _python_runtime_tokens((mirror / rel).read_bytes())
+                for rel, content in originals.items()
+            )
+    except (OSError, ValueError, SyntaxError, tokenize.TokenError, subprocess.SubprocessError):
+        return False
+
+
 def vet_patches(
     patch_paths: list[str],
     *,
@@ -867,11 +969,10 @@ def vet_patches(
 ) -> tuple[list[str], list[dict[str, str]], dict[str, str], bool]:
     """Ground each patch against the candidate checkouts, one root per patch.
 
-    Structural rejects (unreadable / non-diff / path escape) are dropped first.
-    Each survivor then resolves its own root, so a cross-repo set survives even
-    though no single root holds every target. Only a patch absent from every
-    candidate is dropped. Stale-but-valid patches are kept for integrate_patch
-    and the Critic to adjudicate.
+    Structural rejects, task-owned work artifacts and grounded Python
+    comment-only patches are dropped. Each survivor resolves its own root.
+    Unresolved or ambiguous roots and stale-but-valid patches are kept with
+    their verdict recorded for integrate_patch and the Critic to adjudicate.
 
     Args:
         patch_paths: File paths of the candidate patches to vet.
@@ -882,22 +983,22 @@ def vet_patches(
         explicit_root: Authoritative target checkout, when declared.
 
     Returns:
-        A ``(kept_paths, dropped_records, grounding_by_path, spans_multiple_roots)``
+        A ``(kept_paths, ungrounded_records, grounding_by_path, spans_multiple_roots)``
         tuple. ``spans_multiple_roots`` is ``True`` when the kept patches
         resolved to more than one distinct checkout.
     """
     kept: list[str] = []
-    dropped: list[dict[str, str]] = []
+    ungrounded: list[dict[str, str]] = []
     grounding: dict[str, str] = {}
     readable: list[tuple[str, str]] = []
     for path in patch_paths:
         try:
             text = Path(path).read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            dropped.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
+            ungrounded.append({"path": path, "verdict": "unreadable", "detail": repr(exc)})
             continue
         if not is_unified_diff(text):
-            dropped.append(
+            ungrounded.append(
                 {
                     "path": path,
                     "verdict": GROUND_NOT_DIFF,
@@ -908,7 +1009,7 @@ def vet_patches(
             continue
         escape = patch_escapes_tree(text)
         if escape is not None:
-            dropped.append(
+            ungrounded.append(
                 {
                     "path": path,
                     "verdict": GROUND_PATH_ESCAPE,
@@ -917,10 +1018,14 @@ def vet_patches(
             )
             grounding[path] = GROUND_PATH_ESCAPE
             continue
+        work_artifacts = patch_work_artifact_targets(text)
+        if work_artifacts:
+            ungrounded.append({"path": path, "verdict": "work_artifact", "detail": ", ".join(work_artifacts)})
+            continue
         readable.append((path, text))
 
     if not readable:
-        return kept, dropped, grounding, False
+        return kept, ungrounded, grounding, False
 
     candidates = tuple(
         root
@@ -946,16 +1051,20 @@ def vet_patches(
                 detail += ": " + ", ".join(str(r) for r in resolution.matches)
             verdict = GROUND_AMBIGUOUS_ROOT if resolution.reason == "ambiguous_root" else GROUND_MISSING_TARGET
             grounding[path] = verdict
-            dropped.append({"path": path, "verdict": verdict, "detail": detail})
+            ungrounded.append({"path": path, "verdict": verdict, "detail": detail})
+            kept.append(path)
             continue
         res = ground_patch_text(text, base_checkout=None, explicit_root=resolution.root)
         grounding[path] = res.verdict
         if res.is_garbage:
-            dropped.append({"path": path, "verdict": res.verdict, "detail": res.detail})
+            ungrounded.append({"path": path, "verdict": res.verdict, "detail": res.detail})
+            continue
+        if res.verdict == GROUND_APPLIES and patch_is_annotation_only(text, resolution.root):
+            ungrounded.append({"path": path, "verdict": "annotation_only", "detail": "only Python comments changed"})
             continue
         resolved_roots.add(resolution.root)
         kept.append(path)
-    return kept, dropped, grounding, len(resolved_roots) > 1
+    return kept, ungrounded, grounding, len(resolved_roots) > 1
 
 
 __all__ = [
@@ -978,6 +1087,7 @@ __all__ = [
     "PatchSafetyReport",
     "QUANTITATIVE_CLAIM_REASON_CODE",
     "SCOPE_DOMAINS_LITERAL",
+    "SPECIALIST_WORK_ARTIFACT_PATHSPECS",
     "advisory_only_reason_codes",
     "advisory_rules_govern",
     "cross_domain_rule_descriptors",
@@ -986,7 +1096,9 @@ __all__ = [
     "numeric_claims",
     "patch_escapes_tree",
     "patch_file_targets",
+    "patch_is_annotation_only",
     "patch_targets_missing",
+    "patch_work_artifact_targets",
     "quantitative_claim_rule_descriptor",
     "resolve_patch_apply_root",
     "scan_numeric_claims",

@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import logging
+import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,9 +30,19 @@ from kernelforge.kernel_rewrite_controller.recovery import recover_task_result
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
 from kernelforge.kernel_rewrite_controller.task import load_task
 from kernelforge.kernel_rewrite_controller.worktree import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
     create_operator_worktree,
+    operator_workspace,
+    release_operator_worktree,
+    stage_operator_driver,
 )
+
+log = logging.getLogger(__name__)
+
+#: Where forge-loop's task preparer writes its per-attempt record, relative to
+#: the workspace it prepares.
+_PREPARATION_AUDIT_DIRNAME = "task_preparation"
 
 
 @dataclass(frozen=True)
@@ -54,6 +68,86 @@ def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     if not outcome.best_commit:
         return "forge-loop produced no best commit"
     return "forge-loop produced no validated improvement"
+
+
+#: What ``_visible_gpu_count`` returns when nothing could answer. Distinct from
+#: zero, which is itself an answer: an empty device mask says this dispatch has
+#: no GPU, and refusing a task for that is right, while refusing one because
+#: the count could not be read would ground every task on such a host.
+GPU_COUNT_UNKNOWN = -1
+
+
+def _visible_gpu_count() -> int:
+    """How many GPUs this dispatch can give a task, or ``GPU_COUNT_UNKNOWN``.
+
+    The masking variables come first because they are what really bounds the
+    child, and reading them costs nothing. ``torch`` is the fallback rather than
+    the first answer: importing it here is seconds of work the single-rank path
+    should not pay.
+    """
+    for variable in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        raw = os.environ.get(variable)
+        if raw is None:
+            continue
+        # An empty mask is an answer -- no GPU at all -- so it is returned as
+        # zero rather than folded into "could not tell".
+        return len([item for item in raw.split(",") if item.strip()])
+    try:
+        import torch
+
+        return int(torch.cuda.device_count())
+    except Exception:  # noqa: BLE001 - no torch, no driver, no answer
+        return GPU_COUNT_UNKNOWN
+
+
+def _insufficient_gpus(task: KernelRewriteTask) -> str:
+    """Why this machine cannot run the task's ranks, or "" when it can.
+
+    Silence when the count cannot be established: refusing on an answer nobody
+    gave would ground every task on a host this cannot read.
+
+    ``dist_harness`` refuses the same shortage at launch, and this check is kept
+    anyway because the two say different things. A task whose ranks exceed the
+    machine is sound; the machine is wrong. Asked here, before a campaign opens,
+    the answer is a skip that leaves the task for a host that can run it. Left to
+    the harness, it is a driver that exits non-zero, which is a failed campaign
+    against a task that deserved none -- after preparation has already spent
+    most of its budget.
+    """
+    if task.world_size <= 1:
+        return ""
+    visible = _visible_gpu_count()
+    if visible == GPU_COUNT_UNKNOWN or visible >= task.world_size:
+        return ""
+    return f"task declares {task.world_size} ranks but only {visible} GPU(s) are visible to this dispatch"
+
+
+def _keep_preparation_audit(
+    layout: ControllerLayout,
+    task: KernelRewriteTask,
+    worktree: OperatorWorktree | None,
+) -> None:
+    """Save the driver-preparation record before the workspace goes away.
+
+    Preparation is where a task whose driver does not yet conform either
+    becomes runnable or stops. Its record is the only account of which of those
+    happened and why, and it is written inside the workspace, which the release
+    below deletes. Best-effort: losing the copy must not turn a dispatch that
+    otherwise succeeded into a failure.
+    """
+    if worktree is None:
+        return
+    source = worktree.workspace / FORGE_LOOP_OUTPUT_DIRNAME / _PREPARATION_AUDIT_DIRNAME
+    if not source.is_dir():
+        return
+    destination = layout.preparation_audit_dir(task.operator_id)
+    try:
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, destination)
+    except OSError as error:
+        log.warning("could not keep the preparation audit for %s: %s", task.operator_id, error)
 
 
 def dispatch_single_task(
@@ -82,9 +176,22 @@ def dispatch_single_task(
 
     task = parsed.task
     state_store = TaskStateStore(task_path)
+    # Before the worktree, so a task this host cannot run never takes the lock
+    # on a repository another one could have borrowed.
+    starved = _insufficient_gpus(task)
+    if starved:
+        state_store.transition(TASK_STATUS_SKIPPED, reason=starved)
+        return SingleTaskResult(
+            task=task,
+            worktree=None,
+            forge_outcome=None,
+            patch_path=None,
+            status=TASK_STATUS_SKIPPED,
+            reason=starved,
+        )
     state_store.transition(
         TASK_STATUS_RUNNING,
-        workspace_dir=str(layout.workspace_dir(task.operator_id)),
+        workspace_dir=str(operator_workspace(task, layout)),
     )
     worktree: OperatorWorktree | None = None
     outcome: ForgeLoopOutcome | None = None
@@ -95,6 +202,7 @@ def dispatch_single_task(
             task_dir=task_path,
             worktree=worktree,
             deadline_unix=deadline_unix,
+            driver=stage_operator_driver(task, task_path, worktree),
         )
         outcome = run_forge_loop(
             invocation,
@@ -153,6 +261,21 @@ def dispatch_single_task(
             status=TASK_STATUS_FAILED,
             reason=reason,
         )
+    finally:
+        # The controller's closing sweep cannot stand in for this one. It runs
+        # after every task's release, and a borrowed repository has by then given
+        # its campaign branch back -- so the best commit a patch would be
+        # exported from is already unreachable. This is the last moment the tree
+        # and the branch still exist, so a recovery that failed for a passing
+        # reason gets one more attempt here. Publication is idempotent.
+        if worktree is not None and worktree.inplace:
+            with contextlib.suppress(Exception):
+                recover_task_result(layout, task_path, update_state=False)
+        # After that, never before: the patch is what the campaign was for, and
+        # this returns the tree the patch was built in. A private checkout is
+        # left standing instead, because the closing sweep does read those.
+        _keep_preparation_audit(layout, task, worktree)
+        release_operator_worktree(worktree)
 
 
 __all__ = [

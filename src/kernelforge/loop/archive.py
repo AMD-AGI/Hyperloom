@@ -1,35 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Candidate archive for the forge-loop — persist every iteration's full solution.
-
-The forge-loop keeps only the current *best* kernel on disk, so losing attempts
-are ``git revert``-ed away. Without an archive, a later iteration cannot inspect
-the actual code of a prior attempt.
-
-This module fixes that by archiving, per iteration, the WHOLE solution and its
-measurements into a self-contained directory, so a later iteration (or a human)
-can read back the complete kernel, its full profile, and its outcome:
-
-    <workspace>/forge_experiments/candidates/
-        index.jsonl              # one compact JSON line per iteration (global view)
-        iter_001/
-            <kernel>.py          # full kernel snapshot (self-contained)
-            change.diff          # full git diff of this iteration's commit
-            meta.json            # structured measurement + decision + agent info (incl. profile{})
-            profile.txt          # full profiling summary (rocprof-compute SoL or PMC; see meta.profile.backend)
-            validation.txt       # full-suite validation report / failure tail
-        iter_002/
-            ...
-
-Storage is deliberately full-fidelity: kernels are small on disk, and only the
-*prompt* (a separate concern) needs to be token-frugal. What we inject into the
-next iteration's prompt is decided elsewhere; this module's job is only to make
-sure nothing is lost.
-
-Pre-publication failures return ``None``; post-publication index failures raise
-so durability-sensitive callers can retain their recovery journal.
-"""
+"""Candidate archive for the forge-loop — persist every iteration's full solution."""
 
 from __future__ import annotations
 
@@ -64,8 +36,8 @@ class CandidateRecord:
     snr_db: float | None = None
     vgpr: int | None = None
     pmc_diagnosis: str = ""
-    # Structured profile metadata (profile_backend, bottleneck, target_kernels,
-    # roofline dtype/AI, HBM/compute pct, SoL metrics) — consumed from meta.json.
+    # Structured profile metadata (profile_backend, bottleneck, target_kernels, roofline dtype/AI, HBM/compute pct,
+    # SoL metrics) — consumed from meta.json.
     profile_meta: dict | None = None
 
     # Comparison anchors
@@ -93,31 +65,23 @@ class CandidateRecord:
 
 
 class CandidateArchive:
-    """Per-run store of full iteration solutions + measurements.
-
-    One instance per campaign; ``record`` is called once per iteration that
-    produced a commit.
-    """
+    """Per-run store of full iteration solutions + measurements."""
 
     def __init__(self, workspace_dir: str, kernel_file: str = ""):
         self.root = Path(workspace_dir) / "forge_experiments" / "candidates"
         self.index_path = self.root / "index.jsonl"
-        # Snapshot file basename — use the real kernel filename so the archived
-        # copy is instantly recognizable (e.g. flash_attn_kernel.py).
+        # Snapshot file basename — use the real kernel filename so the archived copy is instantly recognizable (e.g.
+        # flash_attn_kernel.py).
         self.kernel_basename = Path(kernel_file).name if kernel_file else "kernel.py"
         self.degraded = False
         self.persistence_errors: list[str] = []
-        # In-memory index cache. meta.json stays the on-disk authority; this
-        # memoizes the last reconciled view so hot readers (render_digest,
-        # load_index, max_iteration) avoid re-scanning + re-parsing every
-        # iter_NNN/meta.json on each call. Valid only while THIS process is the
-        # sole writer and root's mtime matches what we saw after our last own
-        # write; any degradation or unexpected external change drops it back to
-        # a full _reconcile_storage(). None means "cold — full reconcile next".
+        # In-memory index cache. meta.json stays the on-disk authority; this memoizes the last reconciled view so hot
+        # readers (render_digest, load_index, max_iteration) avoid re-scanning + re-parsing every iter_NNN/meta.json
+        # on each call.
         self._index_cache: list[dict] | None = None
         self._cache_sig: tuple | None = None
-        # Bumped on every _mark_degraded; lets a reconcile tell whether it hit
-        # any transient trouble mid-scan (→ don't cache that best-effort view).
+        # Bumped on every _mark_degraded; lets a reconcile tell whether it hit any transient trouble mid-scan (→ don't
+        # cache that best-effort view).
         self._degrade_seq: int = 0
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -132,8 +96,8 @@ class CandidateArchive:
         self._degrade_seq += 1
         self.persistence_errors.append(f"{operation}: {error}")
         self.persistence_errors = self.persistence_errors[-10:]
-        # Any degraded op may have left the on-disk archive inconsistent with the
-        # cache; force the next read through a full reconcile so it self-heals.
+        # Any degraded op may have left the on-disk archive inconsistent with the cache; force the next read through a
+        # full reconcile so it self-heals.
         self._invalidate_cache()
         log.warning("archive: %s failed: %s", operation, error)
 
@@ -142,13 +106,7 @@ class CandidateArchive:
         self._cache_sig = None
 
     def _fs_signature(self) -> tuple:
-        """Cheap change signal for the archive.
-
-        Combines root's mtime (catches dir-entry add/remove/rename — i.e. a new
-        iter_NNN/) with index.jsonl's (mtime, size) (catches in-place rewrites of
-        the index, which do NOT bump the parent dir's mtime). Any external change
-        moves at least one component, so a stale cache is never served.
-        """
+        """Cheap change signal for the archive."""
         try:
             root_mtime = self.root.stat().st_mtime_ns
         except OSError:
@@ -357,18 +315,10 @@ class CandidateArchive:
         return round((mean_case_speedup / best - 1.0) * 100.0, 3)
 
     def record(self, rec: CandidateRecord) -> Path | None:
-        """Atomically persist one iteration's full solution + measurements.
-
-        Returns the iteration directory path, or None on a pre-publication
-        failure. An index append failure is raised after the complete directory
-        is published so the caller sees the degraded write and reconciliation can
-        recover the missing line later.
-        """
+        """Atomically persist one iteration's full solution + measurements."""
         temp_dir: Path | None = None
         try:
-            # Warm-up + crash-residue quarantine on the first call; a cheap
-            # cache hit afterwards. The target-dir collision check below stats
-            # the specific dir directly, so it does not depend on this.
+            # Warm-up + crash-residue quarantine on the first call; a cheap cache hit afterwards.
             self.load_index()
             d = self._iter_dir(rec.iteration)
             try:
@@ -406,8 +356,8 @@ class CandidateArchive:
             # 2) Full diff of the commit (captures sibling-file edits too).
             if rec.change_diff:
                 self._write_text(temp_dir / "change.diff", rec.change_diff)
-            # 3) Full profiling summary (backend-aware name; may be rocprof-compute
-            #    SoL or the legacy PMC summary — profile_meta.backend says which).
+            # 3) Full profiling summary (backend-aware name; may be rocprof-compute SoL or the legacy PMC summary —
+            # profile_meta.backend says which).
             if rec.pmc_full:
                 self._write_text(temp_dir / "profile.txt", rec.pmc_full)
             # 4) Validation report / failure tail.
@@ -464,16 +414,15 @@ class CandidateArchive:
             if temp_dir is not None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-        # The complete directory is now durable and authoritative. Do not hide an
-        # index failure: load_index() can reconstruct this line from meta.json.
+        # The complete directory is now durable and authoritative.
         entry = self._index_entry_from_meta(meta, d)
         try:
             self._append_index(entry)
         except OSError as error:
             self._mark_degraded(f"append index for iteration {rec.iteration}", error)
             raise
-        # Disk and cache are now in sync; fold the new line in so the next reader
-        # keeps hitting the cache instead of triggering a full rescan.
+        # Disk and cache are now in sync; fold the new line in so the next reader keeps hitting the cache instead of
+        # triggering a full rescan.
         self._cache_add_entry(entry)
         return d
 
@@ -485,21 +434,14 @@ class CandidateArchive:
 
     # ── reading / prompt digest ──────────────────────────────────────────────
     def load_index(self) -> list[dict]:
-        """All archived iteration records (compact index lines), oldest first.
-
-        Memoized: the first call (and any call after the archive changed on disk
-        or a degraded op) runs the full _reconcile_storage() that re-parses every
-        iter_NNN/meta.json; subsequent calls with an unchanged root return the
-        cached view in O(1). Returns a fresh list each call so a caller mutating
-        the list cannot corrupt the cache (entries themselves are read-only).
-        """
+        """All archived iteration records (compact index lines), oldest first."""
         cached = self._cached_index()
         if cached is not None:
             return list(cached)
         seq_before = self._degrade_seq
         reconciled = self._reconcile_storage()
-        # Only cache a clean scan; a reconcile that hit transient I/O returns a
-        # best-effort view we must re-check next time.
+        # Only cache a clean scan; a reconcile that hit transient I/O returns a best-effort view we must re-check next
+        # time.
         if self._degrade_seq == seq_before:
             self._store_cache(reconciled)
         else:
@@ -515,19 +457,13 @@ class CandidateArchive:
         return self._index_cache
 
     def _store_cache(self, entries: list[dict]) -> None:
-        # Capture the signature AFTER reconcile (which may have rewritten
-        # index.jsonl) so only a later change moves it.
+        # Capture the signature AFTER reconcile (which may have rewritten index.jsonl) so only a later change moves
+        # it.
         self._index_cache = entries
         self._cache_sig = self._fs_signature()
 
     def _cache_add_entry(self, entry: dict) -> None:
-        """Fold one freshly-recorded entry into the cache without a rescan.
-
-        Called after record() has published the dir and appended the index line,
-        so the cache stays coherent with disk. If the cache is cold (never built,
-        or dropped by a degraded op), leave it cold — the next load_index() will
-        reconcile from disk, which now includes this entry.
-        """
+        """Fold one freshly-recorded entry into the cache without a rescan."""
         if self._index_cache is None:
             return
         by_iter = {
@@ -603,12 +539,7 @@ class CandidateArchive:
         near_miss_count: int,
         recent_count: int,
     ) -> list[dict]:
-        """Pick which iterations get a full diff in the prompt (AVO-style Sample).
-
-        Priority: KEPT versions (the winning "lineage" jumps) > closest correct-
-        but-not-faster near-misses (promising directions) > most recent attempts
-        (what just happened). De-duplicated by iteration, capped, sorted by iter.
-        """
+        """Pick which iterations get a full diff in the prompt (AVO-style Sample)."""
         keeps = [e for e in index if e.get("decision") == "KEEP"]
         near = sorted(
             [e for e in index if e.get("decision") == "REVERT_PERF" and e.get("mean_case_speedup") is not None],
@@ -654,14 +585,7 @@ class CandidateArchive:
         recent_count: int = 2,
         max_table_rows: int = 60,
     ) -> str:
-        """Build the prompt digest of the solution lineage (Layers 1-3).
-
-        Layer 1: a compact trajectory table of every attempt + its score.
-        Layer 2: full change diffs for a curated few (KEPT + near-misses + recent).
-        Layer 3: a pointer to the on-disk archive so the agent can Read/compare
-                 any prior kernel's FULL source on demand.
-        Returns "" when nothing has been archived yet (e.g. iteration 1).
-        """
+        """Build the prompt digest of the solution lineage (Layers 1-3)."""
         index = self.load_index()
         if not index:
             return ""

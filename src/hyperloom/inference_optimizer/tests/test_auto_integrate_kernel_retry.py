@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KERNEL-phase auto-integrate retry for un-exhausted integration faults.
-
-Covers ``Coordinator._auto_enqueue_pending_integrations`` re-dispatching a
-retryable integration fault inside the KERNEL_AGENT phase (rather than deferring to
-the SWEEP-entry drain), the recorded-attempt-count in-flight guard, and the
-``SharedState.integrate_attempt_count_for_kernel`` helper that powers it.
-"""
+"""KERNEL-phase auto-integrate retry for un-exhausted integration faults."""
 
 from __future__ import annotations
 
@@ -52,11 +46,7 @@ def _integrate_result(
     target_file: str = "",
     gain_pct: float | None = None,
 ) -> dict:
-    """Integrate E2E result envelope (kernel integrate path).
-
-    ``integration_id`` is what binds the result to its queued record; the
-    handler echoes back whatever the dispatcher sent.
-    """
+    """Integrate E2E result envelope (kernel integrate path)."""
     return {
         "status": status,
         "decision": decision,

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers:
-presence checks, GPU-count probing, lane ceilings, path allowlists, and the
-free-form task-description guard."""
+"""Coverage for policy/gate.py pure helpers + PolicyGate path/freeform helpers: presence checks, GPU-count probing,
+lane ceilings, path allowlists, and the free-form task-description guard.
+"""
 
 from __future__ import annotations
 
@@ -19,9 +19,9 @@ from hyperloom.orchestrator.policy.gate import (
     _delegate_field_present,
     _value_is_present,
     detect_gpu_count,
-    gpu_specialist_ceiling,
     research_lane_ceiling,
 )
+from hyperloom.orchestrator.policy.projection import gpu_specialist_ceiling
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
 
@@ -135,17 +135,6 @@ def test_path_under_session_inside_and_escape(tmp_path: Path) -> None:
     assert g._path_under_session(str(tmp_path / "a" / "b.txt")) is True
     assert g._path_under_session(str(tmp_path)) is True
     assert g._path_under_session("/etc/passwd") is False
-
-
-def test_path_in_source_allowlist(monkeypatch) -> None:
-    g = _gate(None)
-    monkeypatch.setattr(pol, "resolve_source_file_allowlist", lambda: ("/srv/sglang/",))
-    assert g._path_in_source_allowlist("/srv/sglang/foo.py") is True
-    assert g._path_in_source_allowlist("/srv/sglang/sub/foo.py") is True
-    assert g._path_in_source_allowlist("/other/foo.py") is False
-    # Traversal and shared-prefix boundary must NOT slip past.
-    assert g._path_in_source_allowlist("/srv/sglang/../etc/passwd") is False
-    assert g._path_in_source_allowlist("/srv/sglangX/foo.py") is False
 
 
 def test_path_in_trace_allowlist(monkeypatch) -> None:

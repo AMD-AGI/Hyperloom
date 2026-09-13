@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Author or repair a rewrite-specific dual-path measurement driver.
-
-This module deliberately does not depend on ``loop.task_preparer``.  A rewrite
-driver has a different contract and lifecycle: it owns a source reference path,
-a not-yet-implemented FlyDSL candidate path, and two independently timed modes.
-Keeping the preparation engine here prevents either contract from silently
-changing the other.
-
-The agent works in an isolated temporary git repository containing read-only
-copies of the task evidence.  Only one self-contained driver file can be
-published.  The caller's source tree and candidate are therefore never writable
-during preparation, and the destination driver is replaced only while the
-deterministic rewrite contract is being checked.
-"""
+"""Author or repair a rewrite-specific dual-path measurement driver."""
 
 from __future__ import annotations
 
@@ -42,6 +29,7 @@ from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_bytes
+from kernelforge.tracker import UsageAccumulator
 
 
 DRIVER_PREPARATION_FAILED = "driver_preparation_failed"
@@ -328,6 +316,7 @@ async def _run_agent(
     prompt: str,
     timeout_sec: int,
     progress_log: list[str],
+    usage: UsageAccumulator | None = None,
 ) -> str:
     runtime = with_writable_sandbox(config.agent_runtime())
     backend = create_registered_backend(runtime)
@@ -338,15 +327,8 @@ async def _run_agent(
         writable=True,
         timeout_sec=timeout_sec,
         target_files=[str(stage_driver)],
-        # Deliberately no driver_script, for the reason task_preparer records at
-        # its own AgentRunSpec: that field declares the measurement surface the
-        # guard must defend, so it snapshots the driver as protected. Here the
-        # driver is the artifact being authored, and naming it both target and
-        # protected made every attempt end in
-        #   "protected tracked files changed: <driver>"
-        # followed by a rollback to the placeholder -- the agent wrote a working
-        # driver, verified it in --ref-bench-mode, and had the file reverted out
-        # from under it three times in a row. target_files already carries it.
+        # Deliberately no driver_script, for the reason task_preparer records at its own AgentRunSpec: that field
+        # declares the measurement surface the guard must defend, so it snapshots the driver as protected.
         protected_globs=[path.name for path in evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,
@@ -362,7 +344,7 @@ async def _run_agent(
         progress_log=progress_log,
     )
     result = await asyncio.wait_for(
-        backend.run(run_spec),
+        backend.run(run_spec, usage=usage),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
@@ -520,6 +502,7 @@ async def prepare_rewrite_driver(
     invocation_spec_file: str = "",
     initial_preflight: DriverPreflight | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    usage: UsageAccumulator | None = None,
 ) -> DriverPreparationResult:
     """Author or repair one driver without exposing the caller's tree to writes."""
 
@@ -614,6 +597,7 @@ async def prepare_rewrite_driver(
                         prompt=prompt,
                         timeout_sec=timeout_sec,
                         progress_log=progress_log,
+                        usage=usage,
                     )
                     _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
                 except asyncio.TimeoutError:

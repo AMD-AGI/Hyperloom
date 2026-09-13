@@ -30,10 +30,8 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...framework.paths import (
-    is_rocm_hip_writable_path,
+    resolve_kernel_search_roots,
     resolve_session_framework_root,
-    resolve_source_file_allowlist,
-    resolved_within,
 )
 from ...specialists.patch_safety import (
     is_unified_diff,
@@ -49,6 +47,9 @@ from ...state.shared_state import (
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTREAM_PR
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.perf_metric import VERDICT_KEEP
+from ...bringup import load_boot_observation, observation_summary, verdict_of, write_boot_observation
+from ...delivery import file_digest, load_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
@@ -190,7 +191,6 @@ def resolve_patch_source(params: Mapping[str, Any]) -> str:
 
 _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "patches",
-    "enablement_base_patches",
     "localization_candidate",
     "runtime_candidate",
     "artifacts",
@@ -548,7 +548,7 @@ def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str,
     does not otherwise name it until the stash, by which point setup has run.
     """
     explicit = str(params.get("framework_source_root") or "").strip() or None
-    # No patch input, so this returns the declared root when one is admitted and
+    # No patch input, so this returns the declared root when one resolves and
     # the session root otherwise -- the pair the apply itself chooses between.
     effective = _resolve_framework_root(explicit, patch_paths=[])
     roots: list[str] = [str(resolve_session_framework_root() or ""), str(effective or "")]
@@ -578,6 +578,56 @@ def _note_pre_mutation_head(ctx: Any, root: str | Path | None) -> None:
     ctx._ip_base_sha_by_root = heads
 
 
+def _accepted_patch_roots(
+    enablement: Any,
+    *,
+    done_payload: dict[str, Any] | None,
+    applied: list[Path],
+    framework_root: str,
+) -> dict[str, str]:
+    """Map every patch in the accepted stack to the tree it applies against.
+
+    The stack is cumulative and the recipe emits one patch step per entry in
+    ``kept_patches``, so an entry an earlier round bound has to keep its root
+    here: a step whose root resolves to no record is refused as
+    ``root_unidentified``, and one silently re-pointed at this round's root
+    would be captured against a tree that never held it.
+    """
+    roots: dict[str, str] = {}
+    prior = getattr(enablement, "patch_roots", None)
+    if isinstance(prior, Mapping):
+        roots.update({str(k): str(v) for k, v in prior.items() if str(k) and str(v)})
+    roots.update(
+        {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(k) and str(v)}
+    )
+    # The same fallback the projection uses, so the captured set and the
+    # replayed set cannot disagree about which tree a patch belongs to.
+    for patch in (*(getattr(enablement, "kept_patches", None) or []), *applied):
+        key = str(patch)
+        if key and not roots.get(key) and framework_root:
+            roots[key] = framework_root
+    return roots
+
+
+def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
+    """Return the base sha an earlier accepted round already named, per root.
+
+    Each KEEP is committed, so this round's pre-mutation HEAD already contains
+    its predecessors: recording it would name a tree the recipe's own earlier
+    patch steps have already been applied to, and a replay would apply them
+    again on top of their own result. The first accepted round's reading is the
+    one that names the tree the whole stack applies to.
+    """
+    inherited: dict[str, str] = {}
+    for record in getattr(enablement, "roots", None) or []:
+        if not isinstance(record, Mapping):
+            continue
+        path, sha = str(record.get("path") or ""), str(record.get("base_sha") or "")
+        if path and sha:
+            inherited[path] = sha
+    return inherited
+
+
 def _durable_execution_seq(shared_state: Any) -> int:
     """Return the highest ``seq`` already in the durable setup ledger."""
     ledger = getattr(getattr(shared_state, "enablement", None), "setup_executions", None) or []
@@ -599,25 +649,14 @@ def _append_setup_executions(shared_state: Any, setup_result: dict[str, Any], *,
         log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
 
 
-def allowlisted_explicit_root(
-    explicit: str,
-    allowlist: tuple[str, ...] | None = None,
-) -> Path | None:
-    """Resolve a declared framework root, or ``None`` when it is not allowlisted.
-
-    A root outside the allowlisted source scope is refused whatever its tree
-    holds, so callers must ask this before blaming the patches for not
-    matching it.
+def resolved_explicit_root(explicit: str) -> Path | None:
+    """Resolve a declared framework root, or ``None`` when it is not a directory.
 
     Args:
         explicit: The declared ``framework_source_root``.
-        allowlist: Pre-resolved allowlist, computed once by the caller when
-            available, to avoid a redundant ``resolve_source_file_allowlist()``
-            call.
 
     Returns:
-        The resolved directory, or ``None`` when it is unreadable, absent, or
-        outside the allowlisted source scope.
+        The resolved directory, or ``None`` when it is unreadable or absent.
     """
     try:
         resolved = Path(explicit).resolve()
@@ -633,14 +672,7 @@ def allowlisted_explicit_root(
             explicit,
         )
         return None
-    effective_allowlist = allowlist if allowlist is not None else resolve_source_file_allowlist()
-    if any(resolved_within(explicit, root) for root in effective_allowlist):
-        return resolved
-    log.warning(
-        "integrate_patch: framework_source_root override %r rejected (outside trusted source scope)",
-        explicit,
-    )
-    return None
+    return resolved
 
 
 def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
@@ -691,16 +723,14 @@ def _resolve_framework_root(
 
     A ``recorded_root`` — carried from the authoring stage through
     ``done_payload["patch_roots"]`` — is authoritative and skips probing
-    entirely. It is rejected outright when it falls outside the allowlist,
-    exactly as a declared ``explicit`` root is.
+    entirely.
 
     Without a recorded root, the decision falls through to
     :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
     patches to place, the session's declared root wins.
 
     Args:
-        explicit: Declared framework root. Rejected when it resolves outside
-            the trusted source scope.
+        explicit: Declared framework root.
         patch_paths: Patch files to place; unreadable ones are skipped.
         patch_texts: Patch diffs already in memory, placed alongside
             ``patch_paths``.
@@ -709,15 +739,14 @@ def _resolve_framework_root(
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
-    allowlist = resolve_source_file_allowlist()
-    roots = [Path(root) for root in allowlist]
+    roots = [Path(root) for root in resolve_kernel_search_roots()]
 
     if recorded_root:
-        return allowlisted_explicit_root(recorded_root, allowlist=allowlist)
+        return resolved_explicit_root(recorded_root)
 
     explicit_path: Path | None = None
     if explicit:
-        explicit_path = allowlisted_explicit_root(explicit, allowlist=allowlist)
+        explicit_path = resolved_explicit_root(explicit)
         if explicit_path is None:
             return None
 
@@ -726,11 +755,12 @@ def _resolve_framework_root(
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
-        # The allowlist does not necessarily hold it: it discovers the unprefixed
-        # env var, while the session root also answers to <FRAMEWORK>_REPO_PATH
-        # and <FRAMEWORK>_DIR. Leaving it out turns the tree under optimisation
-        # into a non-candidate, and default_root cannot stand in -- that is
-        # consulted only for a create-only set, which has no pre-image to match.
+        # The search roots do not necessarily hold it: they discover the
+        # unprefixed env var, while the session root also answers to
+        # <FRAMEWORK>_REPO_PATH and <FRAMEWORK>_DIR. Leaving it out turns the
+        # tree under optimisation into a non-candidate, and default_root cannot
+        # stand in -- that is consulted only for a create-only set, which has no
+        # pre-image to match.
         candidates = [Path(session_root), *roots] if session_root else list(roots)
         resolution = resolve_patch_apply_root(
             texts,
@@ -858,36 +888,6 @@ def _preflight_missing_targets(
         if missing:
             records.append({"patch": str(patch), "missing_targets": missing})
     return records
-
-
-def _localization_paths_outside_allowlist(
-    touched_paths: list[str],
-    framework_root: Path | None,
-    allow_roots: list[str],
-) -> list[str]:
-    """Return the touched paths that resolve outside the allowed source roots.
-
-    A localization diff may only write under the source-file allowlist or the
-    attempt-local root. Paths are resolved against ``framework_root`` when
-    relative. Returns the offending paths (empty when all are in-bounds).
-    Fail closed: with no trusted write root, every non-empty touched path is
-    treated as out of bounds.
-    """
-    roots = [Path(r).resolve() for r in allow_roots if str(r).strip()]
-    if framework_root is not None:
-        roots.append(Path(framework_root).resolve())
-    if not roots:
-        return [str(rel or "").strip() for rel in touched_paths if str(rel or "").strip()]
-    outside: list[str] = []
-    for rel in touched_paths:
-        rel_s = str(rel or "").strip()
-        if not rel_s:
-            continue
-        base = framework_root if framework_root is not None else Path("/")
-        cand = (base / rel_s).resolve() if not Path(rel_s).is_absolute() else Path(rel_s).resolve()
-        if not any(_is_within(cand, root) for root in roots) or not is_rocm_hip_writable_path(str(cand)):
-            outside.append(rel_s)
-    return outside
 
 
 def _detect_p_level(
@@ -1486,14 +1486,12 @@ class _ArtifactSpec:
     Attributes:
         source: Absolute path to the artifact file inside the specialist
             workspace / worktree (sandbox-validated).
-        target: Absolute install path inside an allowlisted framework root
-            (sandbox-validated; no escape).
+        target: Absolute install path inside a framework root (no escape).
         rel_target: The framework-relative target, normalized to the matched
-            allowlisted root via ``_resolve_artifact_target`` (an author's
-            absolute target is converted to this relative form). Used for
-            reporting AND as the framework-relative key for the durable KEEP
-            source snapshot.
-        root: The allowlisted root ``rel_target`` is relative to. The KEEP
+            root via ``_resolve_artifact_target`` (an author's absolute target
+            is converted to this relative form). Used for reporting AND as the
+            framework-relative key for the durable KEEP source snapshot.
+        root: The root ``rel_target`` is relative to. The KEEP
             source snapshot is keyed on one root, so an artifact installed into
             a different tree than the patches must be recognisable as such.
         kind: Free-form artifact kind label (e.g. ``config_json``).
@@ -1508,18 +1506,41 @@ class _ArtifactSpec:
     description: str = ""
 
 
+def _artifact_candidates(root: Path, rel: str) -> list[Path]:
+    """The joins a root admits for a framework-relative artifact target.
+
+    A pip-installed root is the package directory itself, so a target that
+    repeats the package name (``vllm/model_executor/...``) belongs under the
+    root's parent; a checkout holds the package one level down and joins
+    directly. Both are offered and the caller picks by which parent exists,
+    the same rule ``_resolve_focus_dir`` applies to prompt focus directories.
+
+    Args:
+        root: A framework search root.
+        rel: The framework-relative target.
+
+    Returns:
+        Candidate absolute paths, direct join first.
+    """
+    candidates = [(root / rel).resolve()]
+    if (root / "__init__.py").is_file():
+        candidates.append((root.parent / rel).resolve())
+    return candidates
+
+
 def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
-    A relative target picks the allowlisted framework root whose tree already
-    contains the target's parent directory (so a ``vllm/...`` config lands under
-    the vllm root); else the first existing root. An absolute target is accepted
-    ONLY when it resolves strictly inside an allowlisted root. Either way the
-    resolved path must stay within the chosen root (no ``..`` escape).
+    A relative target picks the framework root whose tree already contains the
+    target's parent directory; else the first existing root. On a pip-installed
+    root both joins in :func:`_artifact_candidates` are tried, so a ``vllm/...``
+    config lands beside the package rather than under a doubled ``vllm/vllm/``.
+    Either way the resolved path must stay within the chosen root, so a ``..``
+    cannot walk out of the tree it names.
 
     Args:
         rel_target: The install path authored by the specialist (framework-
-            relative, or an absolute path inside an allowlisted root).
+            relative, or absolute).
 
     Returns:
         A ``(absolute_target, framework_relative_target, root)`` tuple, or
@@ -1530,30 +1551,25 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     rel = (rel_target or "").strip()
     if not rel or ".." in Path(rel).parts:
         return None
-    roots = [Path(r).resolve() for r in resolve_source_file_allowlist()]
+    roots = [Path(r).resolve() for r in resolve_kernel_search_roots()]
     roots = [r for r in roots if r.is_dir()]
     if not roots:
         return None
-    # An absolute target is accepted only when it resolves strictly inside an
-    # allowlisted framework root.
     if Path(rel).is_absolute():
         cand = Path(rel).resolve()
         for root in roots:
-            if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
+            if _is_within(cand, root):
                 return cand, cand.relative_to(root).as_posix(), root
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
-        cand = (root / rel).resolve()
-        if not _is_within(cand, root) or not is_rocm_hip_writable_path(str(cand)):
-            continue
-        if cand.parent.is_dir():
-            return cand, cand.relative_to(root).as_posix(), root
-    # Fall back to the first root that keeps the path contained.
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root) and cand.parent.is_dir():
+                return cand, cand.relative_to(root).as_posix(), root
     for root in roots:
-        cand = (root / rel).resolve()
-        if _is_within(cand, root) and is_rocm_hip_writable_path(str(cand)):
-            return cand, cand.relative_to(root).as_posix(), root
+        for cand in _artifact_candidates(root, rel):
+            if _is_within(cand, root):
+                return cand, cand.relative_to(root).as_posix(), root
     return None
 
 
@@ -1568,8 +1584,8 @@ def _resolve_artifact_specs(
     Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
-    resolved inside an allowlisted framework root. Malformed / out-of-sandbox
-    entries are dropped and reported.
+    resolved inside a framework root. Malformed / out-of-sandbox entries are
+    dropped and reported.
 
     Args:
         specialist_workspace: The specialist task workspace.
@@ -1823,7 +1839,6 @@ def _enforce_critic_gate(
             "specialist_task_id": subject,
             "patches_applied": [],
             "patches_reverted": [],
-            "config_changes_applied": {},
             "reason": (
                 f"integrate_patch requires a permissive Critic verdict "
                 f"(approve/advise) for {subject!r}; {_detail}. Refusing to run."
@@ -1859,13 +1874,16 @@ class IntegratePatchExecutor:
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-        # Both are set per round by _stage_apply and tell the revert the tree was
-        # written even when no patch landed in ``applied``.
         self._apply_attempted: bool = False
-        self._ip_base_artifact_replayed = False
+        # Re-derived per round by _stage_apply so the revert reads this round's
+        # backup ledger and never a prior round's.
+        self._nogit_backup_root: Path | None = None
+        # Blocked env names this round was granted, each bound to one value.
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
+        # The executor outlives a single task; an early return must not leave
+        # the previous round's authorisation standing.
         params = dict(ctx.task.params or {})
         extra = getattr(ctx, "extra", None) or {}
 
@@ -1911,9 +1929,8 @@ class IntegratePatchExecutor:
             stash_note: str = ctx._ip_stash_note  # type: ignore[attr-defined]
             applied: list[Path] = ctx._ip_applied  # type: ignore[attr-defined]
             applied_artifacts: list[dict[str, Any]] = ctx._ip_applied_artifacts  # type: ignore[attr-defined]
-            config_changes_applied: dict[str, str] = ctx._ip_config_changes_applied  # type: ignore[attr-defined]
-            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             extra_envs_applied: dict[str, str] = ctx._ip_extra_envs_applied  # type: ignore[attr-defined]
+            extra_server_args_applied: str = ctx._ip_extra_server_args_applied  # type: ignore[attr-defined]
             dropped_env_overrides: list[str] = ctx._ip_dropped_env_overrides  # type: ignore[attr-defined]
             setup_result: dict[str, Any] = ctx._ip_setup_result  # type: ignore[attr-defined]
 
@@ -1930,9 +1947,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 dropped_env_overrides=dropped_env_overrides,
                 setup_result=setup_result,
             )
@@ -1964,7 +1980,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": str(params.get("specialist_task_id") or "").strip(),
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "reason": (
                     "specialist integrate_patch is not supported in "
                     "multi-node mode (no git-diff pod fan-out); skipped "
@@ -1994,7 +2009,6 @@ class IntegratePatchExecutor:
                     ),
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "config_changes_applied": {},
                 }
             task_id = ctx.task.task_id
             scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
@@ -2090,7 +2104,6 @@ class IntegratePatchExecutor:
                 "error": "patch_source=upstream_pr requires params.candidate (the discovered PR row)",
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
         if shared_state is not None:
             # Same rebind the specialist lane does: a task queued before a KEEP
@@ -2117,7 +2130,6 @@ class IntegratePatchExecutor:
                 "error": "cannot resolve a framework source root to apply the candidate to",
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
 
         materialized = materialize_candidate_patches(
@@ -2134,7 +2146,6 @@ class IntegratePatchExecutor:
                 "candidate": candidate,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "patch_source_mode": materialized.mode,
                 "workspace": str(scratch),
             }
@@ -2199,7 +2210,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
@@ -2223,7 +2233,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision raised: {exc!r}",
             }
@@ -2237,7 +2246,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": f"attempt-runtime provision failed: {result.error}",
                 "provision_result": result.to_state(),
@@ -2276,10 +2284,9 @@ class IntegratePatchExecutor:
 
         No-op when no ``localization_candidate`` is present or in multi-node
         mode. Fetches the merged-PR / vendored diff (post-Critic), rejects a
-        compiled / build-backend closure to a clean revert, enforces the
-        source-file allowlist (+ the attempt-local root only), and
-        writes the diff to a patch file recorded on ``ctx._ip_localization_patches``
-        which ``_stage_apply`` prepends to the patch set. Returns an early-exit
+        compiled / build-backend closure to a clean revert, and writes the diff
+        to a patch file recorded on ``ctx._ip_localization_patches`` which
+        ``_stage_apply`` prepends to the patch set. Returns an early-exit
         ``reverted`` dict on any gate/fetch failure (no tree mutation yet), or
         ``None`` to continue.
         """
@@ -2309,7 +2316,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "enablement": True,
                 "reason": reason,
             }
@@ -2331,22 +2337,6 @@ class IntegratePatchExecutor:
             return _base_reverted(error_class, f"localization not applicable: {verdict.reason}")
         if not diff_text.strip():
             return _base_reverted("localization_fetch_failed", "localization produced an empty diff")
-
-        # Allowlist gate: touched paths must resolve under the source-file
-        # allowlist or the attempt-local root only (no global env mutation).
-        framework_root: Path | None = _resolve_framework_root(
-            params.get("framework_source_root") or None, patch_paths=[]
-        )
-        allow_roots = list(resolve_source_file_allowlist())
-        attempt_root = str(getattr(ctx, "_ip_attempt_venv_root", "") or "")
-        if attempt_root:
-            allow_roots.append(str(Path(attempt_root).parent))
-        outside = _localization_paths_outside_allowlist(touched_paths, framework_root, allow_roots)
-        if outside:
-            return _base_reverted(
-                "localization_outside_allowlist",
-                f"localization touches path(s) outside the allowlist: {outside[:8]}",
-            )
 
         loc_dir = runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id)
         loc_dir = loc_dir / "localization"
@@ -2371,9 +2361,8 @@ class IntegratePatchExecutor:
         ctx: Any,
         *,
         output_root: Path,
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> None:
@@ -2384,9 +2373,8 @@ class IntegratePatchExecutor:
         separately, as the tree takes it.
         """
         ctx._ip_output_root = output_root  # type: ignore[attr-defined]
-        ctx._ip_config_changes_applied = config_changes_applied  # type: ignore[attr-defined]
-        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_extra_envs_applied = extra_envs_applied  # type: ignore[attr-defined]
+        ctx._ip_extra_server_args_applied = extra_server_args_applied  # type: ignore[attr-defined]
         ctx._ip_dropped_env_overrides = dropped_env_overrides  # type: ignore[attr-defined]
         ctx._ip_setup_result = setup_result  # type: ignore[attr-defined]
 
@@ -2404,7 +2392,6 @@ class IntegratePatchExecutor:
         Returns an early-exit result dict on failure/no-patches/apply_only,
         or None to continue to bench+gate. Stores output values as ``ctx._ip_*``.
         """
-        self._ip_base_artifact_replayed = False
         # Before the setup commands, which are the round's first mutation: an
         # install writes into the same trees the patches and artifacts land in.
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
@@ -2443,22 +2430,6 @@ class IntegratePatchExecutor:
             if prefix_loc:
                 log.info("integrate_patch: prepending %d localization patch(es)", len(prefix_loc))
                 patch_paths = prefix_loc + list(patch_paths)
-        base_patches = params.get("enablement_base_patches")
-        if bool(params.get("enablement")) and isinstance(base_patches, list) and base_patches:
-            seen = {str(p) for p in patch_paths}
-            prefix: list[Path] = []
-            for bp in base_patches:
-                bp_path = Path(str(bp))
-                if bp_path.is_file() and str(bp_path) not in seen:
-                    prefix.append(bp_path)
-                    seen.add(str(bp_path))
-            if prefix:
-                log.info(
-                    "integrate_patch: enablement stacking %d base patch(es) before this round's patch",
-                    len(prefix),
-                )
-                patch_paths = prefix + list(patch_paths)
-
         config_changes = dict(params.get("config_changes") or {})
         if not config_changes and done_payload:
             cc = done_payload.get("config_changes")
@@ -2484,7 +2455,6 @@ class IntegratePatchExecutor:
                 "integrate_patch: dropping unsafe env override keys: %s",
                 ", ".join(dropped_env_overrides),
             )
-
         # Framework-rewrite switches. Every rewrite in such a patch sits behind
         # a switch that defaults OFF, so the applied patch is inert and benching
         # it as-is would measure the baseline. Turn the switches on for the
@@ -2494,43 +2464,6 @@ class IntegratePatchExecutor:
             params=params,
             done_payload=done_payload,
         )
-        undeclared_gates = _switch_manifest.undeclared_switch_gates(patch_paths, switch_manifest)
-        if undeclared_gates:
-            reason = (
-                f"patch gates on undeclared environment switch(es) "
-                f"{', '.join(undeclared_gates)}: every gate a framework rewrite "
-                f"introduces must be declared in the '{_switch_manifest.MANIFEST_KEY}' "
-                f"manifest, otherwise the switch-off parity leg and per-lever "
-                f"attribution silently do not run"
-            )
-            # Only the manifest feeds switch_env, so an enablement round may instead
-            # arm its gate through the proposal. One that is armed nowhere would
-            # bench inert and reproduce the same failure, so it is still refused.
-            is_enablement = bool(params.get("enablement"))
-            unarmed_gates = [g for g in undeclared_gates if g not in proposal_extra_envs]
-            if not is_enablement or unarmed_gates:
-                if is_enablement:
-                    reason = (
-                        f"patch gates on environment switch(es) "
-                        f"{', '.join(unarmed_gates)} that nothing turns on: declare "
-                        f"them in the '{_switch_manifest.MANIFEST_KEY}' manifest or "
-                        f"set them in the proposal, otherwise the patch benches inert"
-                    )
-                log.warning("integrate_patch: %s", reason)
-                return {
-                    "status": "reverted",
-                    "error_class": "framework_switch_gates_undeclared",
-                    "error": reason,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "config_changes_applied": {},
-                    "reason": reason,
-                    "framework_switch_problems": switch_problems + [reason],
-                    "undeclared_switch_gates": undeclared_gates,
-                }
-            log.info("integrate_patch(enablement): %s — armed by the proposal, benching", reason)
-            switch_problems.append(reason)
         if switch_manifest and not patch_paths:
             # A manifest without a patch describes switches that gate code which
             # was never delivered. Setting them would be a no-op, and registering
@@ -2585,7 +2518,6 @@ class IntegratePatchExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "artifacts_applied": [],
-                "config_changes_applied": {},
                 "reason": (
                     "AITER GEMM model-config artifacts must contain measured, "
                     "non-placeholder rows for the target GPU architecture and CU count"
@@ -2602,7 +2534,6 @@ class IntegratePatchExecutor:
         ):
             # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
-                self._replay_base_artifacts(params)
                 output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
                 ctx._ip_framework_root = None  # type: ignore[attr-defined]
@@ -2613,9 +2544,8 @@ class IntegratePatchExecutor:
                 self._publish_gate_state(
                     ctx,
                     output_root=output_root,
-                    config_changes_applied={},
-                    extra_server_args_applied="",
                     extra_envs_applied={},
+                    extra_server_args_applied="",
                     dropped_env_overrides=[],
                     setup_result=setup_result,
                 )
@@ -2625,7 +2555,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
                 "setup_commands_applied": list(setup_result.get("applied") or []),
@@ -2639,13 +2568,14 @@ class IntegratePatchExecutor:
             }
             if params.get("enablement"):
                 _no_patches["enablement"] = True
-            # Forward grounding-drop details so framework.py can surface them in
-            # the next round's mandate.  The field lives on done_payload (written
-            # by runner.py) and must be forwarded here because _no_patches is the
-            # concrete dict framework.py reads via _maybe_rearm_enablement.
-            grounding_drops = (done_payload or {}).get("patches_dropped_by_grounding")
-            if isinstance(grounding_drops, list) and grounding_drops:
-                _no_patches["patches_dropped_by_grounding"] = grounding_drops
+            # Forward the ungrounded-patch details so framework.py can surface
+            # them in the next round's mandate.  The field lives on done_payload
+            # (written by runner.py) and must be forwarded here because
+            # _no_patches is the concrete dict framework.py reads via
+            # _maybe_rearm_enablement.
+            ungrounded = (done_payload or {}).get("patches_ungrounded")
+            if isinstance(ungrounded, list) and ungrounded:
+                _no_patches["patches_ungrounded"] = ungrounded
             return _no_patches
 
         explicit_framework_root = str(params.get("framework_source_root") or "").strip() or None
@@ -2657,30 +2587,24 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                # A non-allowlisted root is refused on that ground alone; only
-                # an allowlisted one that simply lacks the files is the patches' fault.
-                allowed_root = allowlisted_explicit_root(explicit_framework_root)
-                if allowed_root is not None:
-                    if not _read_patch_texts(patch_paths):
-                        _error_class = "patch_unreadable"
-                        _error = "no patch file could be read; verify paths and permissions"
-                    else:
-                        missing_records = _preflight_missing_targets(allowed_root, patch_paths)
-                        if missing_records:
-                            _error_class = "patch_target_missing"
-                            _error = missing_records
-                        else:
-                            _error_class = "framework_source_root_rejected"
-                            _error = (
-                                f"framework_source_root {explicit_framework_root!r} could not "
-                                "be unambiguously matched to the patch targets"
-                            )
+                declared_root = resolved_explicit_root(explicit_framework_root)
+                if declared_root is None:
+                    _error_class = "framework_root_unresolved"
+                    _error = f"framework_source_root {explicit_framework_root!r} is not a readable directory"
+                elif not _read_patch_texts(patch_paths):
+                    _error_class = "patch_unreadable"
+                    _error = "no patch file could be read; verify paths and permissions"
                 else:
-                    _error_class = "framework_source_root_rejected"
-                    _error = (
-                        f"framework_source_root {explicit_framework_root!r} is not "
-                        "under the configured trusted source scope"
-                    )
+                    missing_records = _preflight_missing_targets(declared_root, patch_paths)
+                    if missing_records:
+                        _error_class = "patch_target_missing"
+                        _error = missing_records
+                    else:
+                        _error_class = "patch_root_ambiguous"
+                        _error = (
+                            f"framework_source_root {explicit_framework_root!r} could not "
+                            "be unambiguously matched to the patch targets"
+                        )
             else:
                 _error_class = "no_framework_agent_root"
                 _error = (
@@ -2695,7 +2619,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
                 "lane": _lane_early,
                 "retry_feedback": [],
                 "prior_patches": [str(p) for p in patch_paths],
@@ -2738,7 +2661,6 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [],
-                    "config_changes_applied": {},
                     "lane": _lane_missing,
                     "retry_feedback": [],
                     "prior_patches": [str(p) for p in patch_paths],
@@ -2795,7 +2717,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [],
-                "config_changes_applied": {},
             }
 
         # The stash is on the stack and the tree is about to be mutated, so
@@ -2804,10 +2725,9 @@ class IntegratePatchExecutor:
         ctx._ip_stash_state = stash_state  # type: ignore[attr-defined]
         ctx._ip_stash_note = stash_note  # type: ignore[attr-defined]
 
-        self._replay_base_artifacts(params)
-
         git_tree = _is_git_tree(framework_root) if framework_root is not None else False
         self._nogit_patch_backups: list[dict[str, Any]] = []
+        self._nogit_backup_root = output_root / "patch_backups" if not git_tree else None
 
         applied: list[Path] = []
         applied_artifacts: list[dict[str, Any]] = []
@@ -2841,11 +2761,10 @@ class IntegratePatchExecutor:
                         apply_feedbacks.append(fb)
                     break
             else:
-                nogit_backup_root = output_root / "patch_backups"
                 ok, err, backups, fb = _apply_patch_no_git(
                     framework_root,
                     patch,
-                    nogit_backup_root,
+                    self._nogit_backup_root,
                     seq_offset=len(self._nogit_patch_backups),
                 )
                 self._nogit_patch_backups.extend(backups)
@@ -2873,7 +2792,6 @@ class IntegratePatchExecutor:
                 "specialist_task_id": specialist_task_id,
                 "patches_applied": [],
                 "patches_reverted": [str(p) for p in reverted],
-                "config_changes_applied": {},
                 "workspace": str(output_root),
                 "lane": lane,
                 "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
@@ -2911,14 +2829,12 @@ class IntegratePatchExecutor:
                         "patches_applied": [],
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_applied": [],
-                        "config_changes_applied": {},
                         "workspace": str(output_root),
                     },
                 )
 
         extra_server_args_applied = proposal_extra_args
         extra_envs_applied = dict(proposal_extra_envs)
-        config_changes_applied = dict(extra_envs_applied)
 
         if params.get("apply_only"):
             return _with_stash_restore(
@@ -2931,7 +2847,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [str(p) for p in applied],
                     "patches_reverted": [],
                     "artifacts_applied": applied_artifacts,
-                    "config_changes_applied": config_changes_applied,
                     "extra_server_args_applied": extra_server_args_applied,
                     "extra_envs_applied": extra_envs_applied,
                     "dropped_env_overrides": dropped_env_overrides,
@@ -2945,9 +2860,8 @@ class IntegratePatchExecutor:
         self._publish_gate_state(
             ctx,
             output_root=output_root,
-            config_changes_applied=config_changes_applied,
-            extra_server_args_applied=extra_server_args_applied,
             extra_envs_applied=extra_envs_applied,
+            extra_server_args_applied=extra_server_args_applied,
             dropped_env_overrides=dropped_env_overrides,
             setup_result=setup_result,
         )
@@ -2968,9 +2882,8 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         dropped_env_overrides: list[str],
         setup_result: dict[str, Any],
     ) -> dict[str, Any]:
@@ -3019,7 +2932,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "reason": str(exc),
                     "workspace": str(output_root),
                 },
@@ -3038,7 +2950,6 @@ class IntegratePatchExecutor:
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
-                    "config_changes_applied": {},
                     "reason": f"bench raised: {exc!r}",
                     "workspace": str(output_root),
                 },
@@ -3056,9 +2967,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 setup_result=setup_result,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
@@ -3077,9 +2987,8 @@ class IntegratePatchExecutor:
                 stash_note=stash_note,
                 applied=applied,
                 applied_artifacts=applied_artifacts,
-                config_changes_applied=config_changes_applied,
-                extra_server_args_applied=extra_server_args_applied,
                 extra_envs_applied=extra_envs_applied,
+                extra_server_args_applied=extra_server_args_applied,
                 bench_result=bench_result,
                 gate_evidence=gate_evidence,
                 ctx=ctx,
@@ -3150,15 +3059,19 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         setup_result: dict[str, Any],
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
         ctx: Any = None,
     ) -> dict[str, Any]:
         """Enablement gate: runnability + minimal-correctness.
+
+        A round is accepted when the boot runs or reaches a deeper wall, and its
+        writes then stay in the tree for the next round to build on; ``kept`` and
+        ``advanced`` differ only in whether the lane is finished. Anything short
+        of that reverts to the state the previous round left.
 
         The verdict depends on the trigger origin, because the two origins have
         different evidence available:
@@ -3182,13 +3095,11 @@ class IntegratePatchExecutor:
         the result (``enablement_kept_stack_action``) so it survives rearm. On
         REVERT / non-KEEP, the attempt runtime dir is GC'd.
 
-        Every verdict carries ``framework_switch_problems`` (auditable switch-gate
-        demotion record) and ``framework_root`` (the source tree patches were applied
+        Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
         """
         stack_action = getattr(ctx, "_ip_stack_action", None) if ctx is not None else None
         provision_result = getattr(ctx, "_ip_provision_result", None) if ctx is not None else None
-        switch_problems: list[str] = list(getattr(ctx, "_ip_switch_problems", None) or [])
 
         def _gc_on_revert() -> None:
             """GC the attempt runtime dir on a non-KEEP enablement outcome."""
@@ -3197,85 +3108,46 @@ class IntegratePatchExecutor:
                 # venv_root is ``<attempt_dir>/venv``; GC the whole attempt dir.
                 self._gc_attempt_dir(Path(root).parent)
 
-        from hyperloom.agents.framework.enablement import (
-            FailureSignature,
-            classify_failure,
-            enablement_made_progress,
-            runnable_decision,
-        )
+        from hyperloom.agents.framework.enablement import runnable_decision
+
+        from ...bringup import round_advanced
 
         new_tput = bench_result.get("output_throughput")
-        booted = isinstance(new_tput, (int, float)) and new_tput > 0
-        probe_timed_out = bool(gate_evidence.get("timed_out"))
+        boot_timed_out = bool(gate_evidence.get("timed_out"))
 
         correctness_ok, eval_provenance = self._enablement_correctness(params, gate_evidence)
 
-        after_signature = classify_failure(str(bench_result.get("error") or ""))
-        before_signature: FailureSignature | None = None
-        raw_before = params.get("enablement_before_signature")
-        if isinstance(raw_before, dict):
-            try:
-                before_signature = FailureSignature(**raw_before)
-            except (TypeError, ValueError):
-                before_signature = None
+        # Both halves of the gate are the persisted observations of the two
+        # boots, read back by path; neither side re-classifies a log. A half
+        # that cannot be loaded is named on the verdict rather than re-read.
+        after_loaded = load_boot_observation(bench_result.get("boot_observation_path"))
+        before_loaded = load_boot_observation(params.get("enablement_before_observation_path"))
+        after_verdict = verdict_of(after_loaded.observation) if after_loaded.observation is not None else None
+        after_signature = after_verdict.signature if after_verdict is not None else None
+        bringup_evidence = {
+            "before_observation": (
+                observation_summary(before_loaded.observation) if before_loaded.observation is not None else None
+            ),
+            "before_observation_path": before_loaded.path,
+            "before_observation_degraded": before_loaded.degraded,
+            "after_observation": (
+                observation_summary(after_loaded.observation) if after_loaded.observation is not None else None
+            ),
+            "after_observation_path": after_loaded.path,
+            "after_observation_degraded": after_loaded.degraded,
+        }
+
+        # The boot verdict is the ladder observation's, never the benchmark's
+        # throughput, which cannot separate a slow server from a dead one.
+        booted = after_loaded.observation.booted if after_loaded.observation is not None else None
 
         runs, run_reason = runnable_decision(
-            probe_returncode=0 if booted else 1,
+            booted=booted,
             correctness_ok=correctness_ok,
-            probe_timed_out=probe_timed_out,
-            before_signature=before_signature,
-            after_signature=after_signature,
+            boot_timed_out=boot_timed_out,
         )
-        if not runs:
-            advanced = (not booted) and enablement_made_progress(before_signature, after_signature)
-            if advanced:
-                stacked_patches = [str(p) for p in applied]
-                new_log = str(bench_result.get("error") or "")
-                artifacts_reverted = self._revert_artifacts(applied_artifacts)
-                reverted = self._revert_patches(framework_root, applied)
-                await self._maybe_write_framework_kb_record(
-                    params=params,
-                    done_payload=done_payload,
-                    outcome="integrated",
-                    tps_delta_pct=0.0,
-                    extra=extra,
-                )
-                return _with_stash_restore(
-                    framework_root,
-                    stash_state,
-                    stash_note,
-                    {
-                        "status": "advanced",
-                        "specialist_task_id": specialist_task_id,
-                        "patches_applied": stacked_patches,
-                        "patches_reverted": [str(p) for p in reverted],
-                        "artifacts_applied": applied_artifacts,
-                        "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": config_changes_applied,
-                        "extra_envs_applied": extra_envs_applied,
-                        "extra_server_args_applied": extra_server_args_applied,
-                        "framework_switch_problems": switch_problems,
-                        "framework_root": str(framework_root or ""),
-                        "output_throughput": new_tput,
-                        "enablement": True,
-                        "advanced": True,
-                        "runnable": False,
-                        "correctness_verified": False,
-                        "reason": _with_skipped_setup_reason(
-                            f"enablement progressed: {run_reason}; boot advanced "
-                            f"to a new gap ({after_signature.kind}) — patch recorded "
-                            f"as a base for the next round",
-                            setup_result,
-                        ),
-                        "after_signature": after_signature.to_dict(),
-                        "enablement_launch_log": new_log,
-                        "setup_commands_applied": list(setup_result.get("applied") or []),
-                        "setup_commands_skipped": list(setup_result.get("skipped") or []),
-                        "bench_result": bench_result,
-                        "workspace": str(output_root),
-                        **eval_provenance,
-                    },
-                )
+        advanced = not runs and not booted and round_advanced(before_loaded.observation, after_loaded.observation)
+        if not runs and not advanced:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             _gc_on_revert()
@@ -3296,8 +3168,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
-                    "framework_switch_problems": switch_problems,
                     "framework_root": str(framework_root or ""),
                     "output_throughput": new_tput,
                     "enablement": True,
@@ -3308,6 +3178,89 @@ class IntegratePatchExecutor:
                     # that is the likeliest reason -- and the one the next round
                     # needs, since re-authoring the same proposal cannot help.
                     "reason": _with_skipped_setup_reason(f"enablement not runnable: {run_reason}", setup_result),
+                    "setup_commands_applied": list(setup_result.get("applied") or []),
+                    "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                    "bench_result": bench_result,
+                    "workspace": str(output_root),
+                    **bringup_evidence,
+                    **eval_provenance,
+                },
+            )
+
+        # Accepted: the boot either runs or reached a deeper wall. Both keep the
+        # work in the tree and differ only in whether the lane is finished.
+        commit_failure, _ = self._commit_accepted_work(
+            framework_root=framework_root,
+            applied=applied,
+            applied_artifacts=applied_artifacts,
+            message=f"hyperloom enablement {'advanced' if advanced else 'kept'} {specialist_task_id}",
+        )
+        if commit_failure:
+            log.error(
+                "integrate_patch: commit-on-accept failed (%s); reverting rather than "
+                "reporting progress the next round would erase",
+                commit_failure,
+            )
+            artifacts_reverted = self._revert_artifacts(applied_artifacts)
+            reverted = self._revert_patches(framework_root, applied)
+            _gc_on_revert()
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "reverted",
+                    "error_class": "keep_commit_failed",
+                    "error": commit_failure,
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [],
+                    "patches_reverted": [str(p) for p in reverted],
+                    "artifacts_reverted": artifacts_reverted,
+                    "enablement": True,
+                    "framework_root": str(framework_root or ""),
+                    "reason": f"enablement progress could not be committed: {commit_failure}",
+                    "workspace": str(output_root),
+                },
+            )
+
+        if advanced:
+            wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
+            await self._maybe_write_framework_kb_record(
+                params=params,
+                done_payload=done_payload,
+                outcome="integrated",
+                tps_delta_pct=0.0,
+                extra=extra,
+            )
+            return _with_stash_restore(
+                framework_root,
+                stash_state,
+                stash_note,
+                {
+                    "status": "advanced",
+                    "specialist_task_id": specialist_task_id,
+                    "patches_applied": [str(p) for p in applied],
+                    "patches_reverted": [],
+                    "artifacts_applied": applied_artifacts,
+                    "extra_envs_applied": extra_envs_applied,
+                    "extra_server_args_applied": extra_server_args_applied,
+                    "framework_root": str(framework_root or ""),
+                    "output_throughput": new_tput,
+                    "enablement": True,
+                    "advanced": True,
+                    "runnable": False,
+                    "correctness_verified": False,
+                    "reason": _with_skipped_setup_reason(
+                        f"enablement progressed: {run_reason}; boot advanced "
+                        f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})",
+                        setup_result,
+                    ),
+                    "after_signature": after_signature.to_dict() if after_signature is not None else {},
+                    "enablement_launch_log": str(bench_result.get("error") or ""),
+                    # The wall this round advanced to, for the next round's
+                    # before half.
+                    "enablement_observation_path": after_loaded.path,
+                    **bringup_evidence,
                     "setup_commands_applied": list(setup_result.get("applied") or []),
                     "setup_commands_skipped": list(setup_result.get("skipped") or []),
                     "bench_result": bench_result,
@@ -3333,10 +3286,8 @@ class IntegratePatchExecutor:
             "patches_applied": [str(p) for p in applied],
             "patches_reverted": [],
             "artifacts_applied": applied_artifacts,
-            "config_changes_applied": config_changes_applied,
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
-            "framework_switch_problems": switch_problems,
             "framework_root": str(framework_root or ""),
             "output_throughput": new_tput,
             "enablement": True,
@@ -3348,6 +3299,7 @@ class IntegratePatchExecutor:
             "setup_commands_skipped": list(setup_result.get("skipped") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
+            **bringup_evidence,
             # Base YAML only; the env/arg layers live in enablement_effective_config.
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
             # Captured from the variant this leg launched, so a revalidation
@@ -3423,10 +3375,17 @@ class IntegratePatchExecutor:
         Every value here is read at the KEEP: the roots the resolvers bound, the
         pre-mutation ``base_sha`` captured before the apply, the byte-exact
         content of each declared target, and the versions observed through the
-        interpreter the accepted bench launched. The declared set is the whole
-        accepted stack, inherited artifacts included: the lane replaces these
-        records with the latest KEEP's, so a round capturing only its own
-        installs would drop an earlier round's payload from the recipe.
+        interpreter the accepted bench launched.
+
+        The declared set is the whole accepted stack, every earlier round's
+        patches and artifacts included, and not this round's diff. A KEEP is
+        committed and never re-applied, so the round that captures only what it
+        wrote snapshots the last round's files while the recipe still carries a
+        patch step per earlier round -- a consumer replaying that rebuilds a tree
+        missing every round but the last, and the decision certified it.
+        Inherited identity wins over this round's reading of it for the same
+        reason: ``base_sha`` has to keep naming the tree the first accepted round
+        applied to, because this round's HEAD already contains its predecessors.
         """
         from ...enablement.recipe.keep_records import (
             accepted_stack_artifacts,
@@ -3439,10 +3398,19 @@ class IntegratePatchExecutor:
         from ._patch_snapshot import _patch_touched_paths_split
 
         root = str(framework_root or "")
-        patch_roots = {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(v)}
-        base_artifacts = params.get("enablement_base_artifacts")
+        enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+        patch_roots = _accepted_patch_roots(
+            enablement,
+            done_payload=done_payload,
+            applied=applied,
+            framework_root=root,
+        )
+        # The durable stack, not a dispatch parameter: the base set used to
+        # arrive beside the round and be re-installed before its boot, and the
+        # round lifecycle no longer sends or replays it.
+        inherited_artifacts = [a for a in (getattr(enablement, "kept_artifacts", None) or []) if isinstance(a, Mapping)]
         stack_artifacts = accepted_stack_artifacts(
-            inherited=base_artifacts if isinstance(base_artifacts, list) else [],
+            inherited=inherited_artifacts,
             applied=applied_artifacts,
         )
         contributions = collect_contributions(
@@ -3450,27 +3418,44 @@ class IntegratePatchExecutor:
             patch_roots=patch_roots,
             artifacts=stack_artifacts,
         )
-        upserted, deleted = (
-            _patch_touched_paths_split(framework_root, applied) if framework_root is not None else ([], [])
-        )
         git_roots = [r for r in contributions if r and _is_git_tree(Path(r))]
-        # Only what was captured before this round touched each tree. A root with
-        # no capture keeps no sha, which the decision refuses rather than
-        # answering with a HEAD that has moved since.
+        # Only what was captured before this round touched each tree, and only
+        # where no earlier round already named the tree the stack applies to. A
+        # root left with no sha either way keeps none, which the decision refuses
+        # rather than answering with a HEAD that has moved since.
         captured: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
-        base_sha_by_root = {r: captured.get(r, "") for r in git_roots}
+        inherited_sha = _inherited_base_sha_by_root(enablement)
+        base_sha_by_root = {r: inherited_sha.get(r, "") or captured.get(r, "") for r in git_roots}
         records = build_root_records(
             contributions=contributions,
             base_sha_by_root=base_sha_by_root,
             git_roots=git_roots,
             session_framework_root=resolve_session_framework_root(),
         )
-        targets = declared_targets(
+        # One split per root: a rel path is only meaningful against the tree its
+        # patch was bound to, and reading them all against this round's root
+        # would name files that root does not have.
+        patches_by_root: dict[str, list[Path]] = {}
+        for patch_path, patch_root in patch_roots.items():
+            patches_by_root.setdefault(str(patch_root), []).append(Path(patch_path))
+        targets: dict[str, dict[str, str]] = {}
+        for patch_root, patches in patches_by_root.items():
+            upserted, deleted = _patch_touched_paths_split(Path(patch_root), patches)
+            declared = declared_targets(
+                framework_root=patch_root,
+                upserted=upserted,
+                deleted=deleted,
+                artifacts=(),
+            )
+            for declared_root, ops in declared.items():
+                targets.setdefault(declared_root, {}).update(ops)
+        for declared_root, ops in declared_targets(
             framework_root=root,
-            upserted=upserted,
-            deleted=deleted,
+            upserted=(),
+            deleted=(),
             artifacts=stack_artifacts,
-        )
+        ).items():
+            targets.setdefault(declared_root, {}).update(ops)
         snapshots = capture_root_snapshots(
             records=records,
             targets=targets,
@@ -3487,7 +3472,7 @@ class IntegratePatchExecutor:
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
-            "enablement_base_sha": captured.get(root, ""),
+            "enablement_base_sha": str(getattr(enablement, "base_sha", "") or "") or captured.get(root, ""),
             "enablement_source_snapshots": snapshots,
             "enablement_accepted_stack_targets": {
                 str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
@@ -3547,6 +3532,43 @@ class IntegratePatchExecutor:
             specialist_task_id=specialist_task_id,
         )
         return probe_environment_closure(interpreter, override=override, packages=packages)
+
+    def _commit_accepted_work(
+        self,
+        *,
+        framework_root: Path | None,
+        applied: list[Path],
+        applied_artifacts: list[dict[str, Any]],
+        message: str,
+    ) -> tuple[str, bool]:
+        """Commit this round's patch and artifact writes so they survive a later revert.
+
+        A non-git root needs no commit: nothing there resets the tree between
+        rounds, so the writes are already durable.
+
+        Returns:
+            ``(failure_note, head_advanced)``. ``failure_note`` is empty on
+            success. ``head_advanced`` is ``True`` only when a real commit
+            landed, which is what makes ``HEAD^..HEAD`` this round's diff.
+        """
+        if framework_root is None or not _is_git_tree(framework_root):
+            return "", False
+        root_resolved = framework_root.resolve()
+        try:
+            touched = _patch_touched_paths(framework_root, applied)
+            # An artifact installed into a sibling root is not addressable by a
+            # rel path under this one, so it belongs to no commit here.
+            artifact_rels = [
+                str(a["rel_target"])
+                for a in applied_artifacts
+                if a.get("rel_target") and Path(str(a["root"])).resolve() == root_resolved
+            ]
+            ok, note = _git_commit_kept(framework_root, message, list(dict.fromkeys(touched + artifact_rels)))
+        except (OSError, RuntimeError) as exc:
+            return f"commit raised: {exc!r}", False
+        if not ok:
+            return note or "git commit failed", False
+        return "", note == ""
 
     def _finalize_localization_keep(
         self,
@@ -3623,9 +3645,8 @@ class IntegratePatchExecutor:
         stash_note: str,
         applied: list[Path],
         applied_artifacts: list[dict[str, Any]],
-        config_changes_applied: dict[str, str],
-        extra_server_args_applied: str,
         extra_envs_applied: dict[str, str],
+        extra_server_args_applied: str,
         bench_result: dict[str, Any],
         gate_evidence: dict[str, Any],
         ctx: Any,
@@ -3660,7 +3681,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "bench_result": bench_result,
                     "workspace": str(output_root),
                 },
@@ -3671,16 +3691,25 @@ class IntegratePatchExecutor:
         # resolver. On the output axis the drift-resolved ``base_tput`` is the
         # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
-        graded = resolve_graded_comparison(shared_state, bench_result)
-        if graded.degrade_reason:
-            log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
-        if not graded.graded_on_total:
+        graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
+        if not graded.comparable:
+            log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
+        if not graded.graded_on_intvty:
             delta_pct = gain_pct(new_tput, base_tput)
-        elif graded.vetoed:
-            log.info("integrate_patch: candidate failed the interactivity constraint")
-            delta_pct = None
-        else:
+        elif graded.verdict == VERDICT_KEEP:
             delta_pct = gain_pct(graded.candidate, graded.reference)
+        else:
+            # A REVERT or RECORDED verdict has no promotable delta; the reason
+            # travels to the ledger so the agent can tell it from a failed run.
+            log.info(
+                "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
+                graded.verdict,
+                graded.reference,
+                graded.candidate,
+                graded.tput_reference,
+                graded.tput_candidate,
+            )
+            delta_pct = None
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -3701,7 +3730,7 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        gate_pass = graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3786,7 +3815,6 @@ class IntegratePatchExecutor:
                         "patches_applied": [],
                         "patches_reverted": [str(p) for p in reverted],
                         "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": {},
                         "output_throughput": new_tput,
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
@@ -3794,7 +3822,6 @@ class IntegratePatchExecutor:
                         "keep_threshold_pct": keep_threshold_pct,
                         "reason": str(parity.get("reason") or "switch-off parity failed"),
                         "switch_off_parity": parity,
-                        "framework_switch_problems": switch_problems,
                         "bench_result": bench_result,
                         "workspace": str(output_root),
                     },
@@ -3845,7 +3872,9 @@ class IntegratePatchExecutor:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
-            if delta_pct is None:
+            if not graded.comparable:
+                reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+            elif delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
@@ -3877,7 +3906,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
@@ -3898,38 +3926,12 @@ class IntegratePatchExecutor:
             accuracy_delta_pct=acc_delta_pct,
             config_fingerprint=cfg_fingerprint,
         )
-        # The commit is what makes a KEEP survive the next candidate's
-        # ``checkout --force HEAD -- . && clean -fd``; nothing replays the
-        # source snapshot in-session. A failure is therefore terminal, or the
-        # stack would claim a win the tree no longer carries. Non-git roots have
-        # no checkout revert to survive, so the commit is skipped there.
-        commit_failure: str = ""
-        keep_committed = False
-        if framework_root is None or not _is_git_tree(framework_root):
-            log.info(
-                "integrate_patch: non-git framework root %s; skipping commit-on-KEEP",
-                framework_root,
-            )
-        else:
-            try:
-                touched = _patch_touched_paths(framework_root, applied)
-                ok, note = _git_commit_kept(
-                    framework_root,
-                    f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
-                    touched,
-                )
-                if not ok:
-                    commit_failure = note or "git commit failed"
-                else:
-                    # Only a real commit advances HEAD, and ``_git_commit_kept``
-                    # signals that with an empty note. Either no-op ("nothing to
-                    # commit" or "no patch-touched paths to commit") leaves HEAD on
-                    # the previous KEEP, so a later ``HEAD^..HEAD`` would be that
-                    # KEEP's diff, not this one -- the harvest must not run then.
-                    keep_committed = note == ""
-            except Exception as exc:  # noqa: BLE001 — surfaced as a verdict below
-                log.exception("integrate_patch: commit-on-KEEP raised")
-                commit_failure = f"commit raised: {exc!r}"
+        commit_failure, keep_committed = self._commit_accepted_work(
+            framework_root=framework_root,
+            applied=applied,
+            applied_artifacts=applied_artifacts,
+            message=f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)",
+        )
         if commit_failure:
             log.error(
                 "integrate_patch: commit-on-KEEP failed (%s); reverting rather than "
@@ -3943,10 +3945,6 @@ class IntegratePatchExecutor:
                 stash_state,
                 stash_note,
                 {
-                    # Applied, benched, then rolled back: the same terminal
-                    # shape every other post-apply rollback reports. Calling it
-                    # an apply failure sent the re-author loop after a diff
-                    # that had already passed the bench.
                     "status": "reverted",
                     "error_class": "keep_commit_failed",
                     "error": commit_failure,
@@ -3954,7 +3952,6 @@ class IntegratePatchExecutor:
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "artifacts_reverted": artifacts_reverted,
-                    "config_changes_applied": {},
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
                     "bench_result": bench_result,
@@ -4067,7 +4064,6 @@ class IntegratePatchExecutor:
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
-                "config_changes_applied": config_changes_applied,
                 "extra_server_args_applied": extra_server_args_applied,
                 "extra_envs_applied": extra_envs_applied,
                 "output_throughput": new_tput,
@@ -4092,7 +4088,6 @@ class IntegratePatchExecutor:
                 # Attribution from here is leave-one-out.
                 "framework_levers": switch_manifest,
                 "framework_lever_outcome": ("default_on" if switch_manifest else ""),
-                "framework_switch_problems": switch_problems,
                 "switch_off_parity": parity,
             },
         )
@@ -4347,7 +4342,6 @@ class IntegratePatchExecutor:
                 # Empty on purpose: the code is present but dormant, so nothing
                 # may enter current_best. The levers below are how it gets turned
                 # on, one measured bundle at a time.
-                "config_changes_applied": {},
                 "extra_server_args_applied": "",
                 "extra_envs_applied": {},
                 "output_throughput": new_tput,
@@ -4361,7 +4355,6 @@ class IntegratePatchExecutor:
                 "framework_root": str(framework_root or ""),
                 "framework_levers": switch_manifest,
                 "framework_lever_outcome": "registered_off",
-                "framework_switch_problems": switch_problems,
                 "switch_off_parity": parity,
             },
         )
@@ -4599,8 +4592,7 @@ class IntegratePatchExecutor:
 
         ``applied`` does not decide whether a restore is owed. On non-git trees
         the backup ledger does; on git trees a patch set that fails part-way
-        through its first patch, or a round whose only write was the
-        base-artifact replay, has mutated the tree while ``applied`` is empty.
+        through its first patch has mutated the tree while ``applied`` is empty.
 
         Args:
             framework_root: The source root to revert in, or ``None`` (no-op).
@@ -4615,13 +4607,15 @@ class IntegratePatchExecutor:
             return reverted
         nogit_backups = getattr(self, "_nogit_patch_backups", None)
         if nogit_backups is not None and not _is_git_tree(framework_root):
-            if nogit_backups:
-                ok, errors = _revert_patches_no_git(nogit_backups)
+            nogit_backup_root = self._nogit_backup_root
+            if nogit_backups or nogit_backup_root is not None:
+                ok, errors = _revert_patches_no_git(nogit_backups, backup_root=nogit_backup_root)
                 if not ok:
                     log.error("integrate_patch: non-git revert incomplete in %s: %s", framework_root, errors)
                     return []
+            self._log_residual_drift(framework_root)
             return list(applied)
-        if not self._apply_attempted and not applied and not self._ip_base_artifact_replayed:
+        if not self._apply_attempted and not applied:
             return reverted
         # Restoring to HEAD is the revert, not a fallback for one. Every KEEP is
         # committed, so HEAD is exactly the accepted stack: kept work is in
@@ -4655,65 +4649,33 @@ class IntegratePatchExecutor:
                 break
         return reverted
 
-    def _replay_base_artifacts(self, params: dict[str, Any]) -> None:
-        """Re-install artifacts that prior enablement rounds accepted.
+    def _log_residual_drift(self, framework_root: Path) -> None:
+        """Report anything the revert failed to put back.
 
-        Called twice per round: in launch-only mode (before the early return, so
-        the probe boots against the accepted stack) and after the framework stash
-        (so the re-install is not immediately swept up by ``_git_stash_if_dirty``).
-        The replay does not feed ``applied_artifacts``; base artifacts are the
-        stable base and must not be reverted when this round's candidate is rolled back.
+        Read from the apply's backup ledger, which records each target's
+        pre-image at the strip level the apply detected.
 
-        Each entry is validated before installation:
-        - ``target`` must resolve inside an allowlisted framework root
-          (via :func:`_resolve_artifact_target`).
-        - ``source`` must resolve inside the session directory.
-
-        An entry failing either check is skipped with a warning. The install
-        itself is unguarded on purpose: a base artifact belongs to the accepted
-        stack, so a round that cannot restore it would benchmark a tree no round
-        asked for. The ``OSError`` propagates and ``__call__`` unwinds it.
+        Args:
+            framework_root: The tree that was just reverted.
         """
-        if not bool(params.get("enablement")):
-            return
-        base_artifacts = params.get("enablement_base_artifacts")
-        if not isinstance(base_artifacts, list):
-            return
-        for art in base_artifacts:
-            if not isinstance(art, dict):
-                continue
-            source_str = str(art.get("source") or "").strip()
-            target_str = str(art.get("target") or "").strip()
-            if not source_str or not target_str:
-                continue
-            source = Path(source_str)
-            if not source.is_file():
-                log.warning("integrate_patch: base artifact source not found: %s", source)
-                continue
-            try:
-                source_resolved = source.resolve()
-            except (OSError, RuntimeError):
-                log.warning("integrate_patch: base artifact source unresolvable: %s", source)
-                continue
-            if not _is_within(source_resolved, self.session_dir.resolve()):
-                log.warning(
-                    "integrate_patch: base artifact source %s escapes session dir; skipping",
-                    source,
-                )
-                continue
-            resolved = _resolve_artifact_target(target_str)
-            if resolved is None:
-                log.warning(
-                    "integrate_patch: base artifact target %r not in allowlisted root; skipping",
-                    target_str,
-                )
-                continue
-            target = resolved[0]
-            # Set before the write so a copy that raises still counts as dirtying.
-            self._ip_base_artifact_replayed = True
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            log.info("integrate_patch: re-installed base artifact %s", target)
+        residual: set[str] = set()
+        backup_root = self._nogit_backup_root
+        for record in load_records(backup_root) if backup_root is not None else ():
+            target = Path(str(record["target"]))
+            pre_image = str(record.get("pre_image_sha256", ""))
+            if pre_image:
+                if file_digest(target) != pre_image:
+                    residual.add(str(target))
+            elif not record.get("existed") and target.exists():
+                # The apply created this file; a revert leaves nothing behind.
+                residual.add(str(target))
+
+        if residual:
+            log.error(
+                "integrate_patch: %s still differs from its pre-round state after revert: %s",
+                framework_root,
+                ", ".join(sorted(residual)),
+            )
 
     def _apply_artifacts(
         self,
@@ -4748,6 +4710,8 @@ class IntegratePatchExecutor:
                     backup_path = str(backup_root / f"{idx:03d}_{spec.target.name}.bak")
                     shutil.copy2(spec.target, backup_path)
                 shutil.copy2(spec.source, spec.target)
+                # Recorded before the verify, so a target clobbered by a copy
+                # the check rejects still has a revert record.
                 applied.append(
                     {
                         "target": str(spec.target),
@@ -4864,32 +4828,26 @@ class IntegratePatchExecutor:
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        _base_envs = dict(params.get("base_extra_envs") or {})
-        _variant_envs = dict(_base_envs)
-        _variant_envs.update(extra_envs_applied)
+        base_envs = dict(params.get("base_extra_envs") or {})
+        base_remove = to_str_list(params.get("base_remove_args"))
+        base_unset = to_str_list(params.get("base_unset_envs"))
+        args_mode = str(params.get("base_args_mode") or "append")
+        # The variant carries this round's own levers; run_grid composes the
+        # stack under them.
+        variant_envs = dict(extra_envs_applied)
         # Eval-origin enablement needs a raw accuracy for its runnable gate, so
         # RUN_EVAL=true must survive any variant overlay.
         if bool(params.get("enablement")) and _is_eval_origin(params):
-            _variant_envs["RUN_EVAL"] = "true"
-        _unset = to_str_list(params.get("base_unset_envs"))
-        for name in unset_envs or []:
-            key = str(name).strip()
-            if not key:
-                continue
-            # Removing it from the variant env too: ``unset_envs`` drops inherited
-            # values, but a key present in both would otherwise be re-added here.
-            _variant_envs.pop(key, None)
-            if key not in _unset:
-                _unset.append(key)
+            variant_envs["RUN_EVAL"] = "true"
         variant = GridVariant(
             name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
             extra_server_args=extra_server_args_applied,
-            extra_envs=_variant_envs,
-            remove_args=to_str_list(params.get("base_remove_args")),
-            unset_envs=_unset,
-            args_mode=str(params.get("base_args_mode") or "append"),
+            extra_envs=variant_envs,
+            unset_envs=to_str_list(unset_envs),
+            args_mode=args_mode,
             note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
+        effective_unset = list(dict.fromkeys(base_unset + list(variant.unset_envs)))
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:
             # Preserve list/dict values; apply_runtime_override expects them.
@@ -4920,7 +4878,10 @@ class IntegratePatchExecutor:
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
                 result_dir=override_result_dir,
-                base_args_mode=str(params.get("base_args_mode") or "append"),
+                base_args_mode=args_mode,
+                base_extra_envs=base_envs,
+                base_remove_args=base_remove,
+                base_unset_envs=base_unset,
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
@@ -4932,43 +4893,55 @@ class IntegratePatchExecutor:
         bench: dict[str, Any] = {}
         if results:
             r = results[0]
-            bench = {
-                "name": r.name,
-                "status": r.status,
-                "output_throughput": getattr(r, "output_throughput", None),
-                # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
-                # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
-                "ttft_ms": r.ttft_mean_ms,
-                "itl_ms": r.tpot_mean_ms,
-                # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
-                "workspace": str(getattr(r, "workspace", "") or ""),
-                "error": getattr(r, "error", "") or "",
-                "error_class": getattr(r, "error_class", "") or "",
-                "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
-                # Launch evidence is the immutable proof of the server that
-                # produced this measurement. It must survive the patch result
-                # and current-best promotion so GEAK can verify the handoff.
-                "launch_evidence": dict(getattr(r, "launch_evidence", {}) or {}),
-                "launch_evidence_path": str(getattr(r, "launch_evidence_path", "") or ""),
-                "server_log_path": str(getattr(r, "server_log_path", "") or ""),
-                # Materialized config used for this bench; needed by revalidation.
-                "materialized_config": str(config_path),
-                # Read off the variant so a replay cannot drift from the graded run.
-                # RUN_EVAL is dropped: the replay owns its own eval contract.
-                "effective_config": {
-                    "extra_envs": {k: v for k, v in variant.extra_envs.items() if k != "RUN_EVAL"},
-                    "extra_server_args": compose_server_args(
-                        inherited_args="",
-                        base_extra_args=str(params.get("base_extra_args") or "").strip(),
-                        variant_extra_args=variant.extra_server_args,
-                        remove_args=variant.remove_args,
-                        args_mode=variant.args_mode,
-                    ),
-                    "remove_args": list(variant.remove_args),
-                    "unset_envs": list(variant.unset_envs),
-                    "args_mode": variant.args_mode,
-                },
-            }
+            bench.update(
+                {
+                    **r.to_dict(),
+                    "status": r.status,
+                    "output_throughput": r.output_throughput,
+                    # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+                    # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+                    "ttft_ms": r.ttft_mean_ms,
+                    "itl_ms": r.tpot_mean_ms,
+                    # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
+                    "workspace": r.workspace or "",
+                    "error": r.error or "",
+                    "error_class": r.error_class,
+                    "nonfatal_warnings": list(r.nonfatal_warnings),
+                    # Launch evidence is the immutable proof of the server that
+                    # produced this measurement. It must survive the patch result
+                    # and current-best promotion so GEAK can verify the handoff.
+                    "launch_evidence": dict(r.launch_evidence),
+                    "launch_evidence_path": r.launch_evidence_path or "",
+                    "server_log_path": r.server_log_path or "",
+                    # Materialized config used for this bench; needed by revalidation.
+                    "materialized_config": str(config_path),
+                    # The composed stack, not the variant alone: revalidation
+                    # replays this and would otherwise boot without the base
+                    # layer. RUN_EVAL is dropped -- the replay owns its own
+                    # eval contract.
+                    "effective_config": {
+                        "extra_envs": {
+                            k: v
+                            for k, v in {**base_envs, **variant.extra_envs}.items()
+                            if k != "RUN_EVAL" and k not in effective_unset
+                        },
+                        "extra_server_args": compose_server_args(
+                            inherited_args="",
+                            base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                            variant_extra_args=variant.extra_server_args,
+                            remove_args=base_remove,
+                            args_mode=args_mode,
+                        ),
+                        "remove_args": list(base_remove),
+                        "unset_envs": list(effective_unset),
+                        "args_mode": args_mode,
+                    },
+                }
+            )
+
+        # Classified here so the gate compares two observations produced by
+        # the same reader.
+        bench["boot_observation_path"] = self._record_bench_bringup(bench, output_root)
 
         accuracy_pass: bool | None = None
         # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
@@ -5027,6 +5000,39 @@ class IntegratePatchExecutor:
             "enablement_accuracy_metric": enablement_accuracy_metric,
             "eval_probe": eval_probe,
         }
+
+    def _record_bench_bringup(self, bench: dict[str, Any], output_root: Path) -> str:
+        """Classify the server this bench ran against and persist the observation.
+
+        Args:
+            bench: The variant result, naming the server log it produced.
+            output_root: The task workspace, used to key the artifact when the
+                variant reports no slot of its own.
+
+        Returns:
+            str: The observation artifact's path, empty when there was no server
+            log to classify or no session to write under.
+        """
+        from ...bringup import observe_bringup
+        from .baseline import open_bringup_attempt, read_bringup_log, server_child_elapsed_sec
+
+        server_log = str(bench.get("server_log_path") or "").strip()
+        if not server_log or self.session_dir is None:
+            return ""
+        slot = Path(bench["workspace"]) if bench.get("workspace") else output_root
+        read = read_bringup_log(Path(server_log))
+        verdict = observe_bringup(
+            server_log=read.text,
+            server_elapsed_sec=server_child_elapsed_sec(read.text),
+            wrapper_stderr=str(bench.get("error") or ""),
+            session_dir=Path(self.session_dir),
+        )
+        return write_boot_observation(
+            verdict.observation,
+            session_dir=Path(self.session_dir),
+            output_dir=slot,
+            attempt=open_bringup_attempt(slot),
+        )
 
     @staticmethod
     def _framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:

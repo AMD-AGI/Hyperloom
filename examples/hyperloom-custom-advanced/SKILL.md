@@ -229,7 +229,6 @@ elif repo_id:
     snapshot_download(
         repo_id=repo_id,
         local_dir=str(target),
-        local_dir_use_symlinks=False,
     )
     print(target.resolve())
 else:
@@ -363,6 +362,11 @@ If adding quantization, critic, robustness, or research-lane flags, append only
 real flags accepted by
 `python3 -m hyperloom.inference_optimizer.cli optimize --help`; do not invent
 aliases.
+
+Append subcommand flags to `OPT_FLAGS` only. Global flags are defined on the
+top-level parser and must come *before* the `optimize` subcommand — `--verbose`
+is the one used above. Placing a global flag after `optimize` fails the run with
+`error: unrecognized arguments`.
 
 ## User-visible Progress
 

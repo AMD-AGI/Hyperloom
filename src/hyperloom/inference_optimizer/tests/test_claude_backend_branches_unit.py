@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring,
-option building (resume / context tools / raw mode), timeout handling, the
-conversational session capture, and SDK-stream error tolerance."""
+"""Branch coverage for ClaudeBackend: SDK import, __post_init__ wiring, option building (resume / context tools / raw
+mode), timeout handling, the conversational session capture, and SDK-stream error tolerance.
+"""
 
 from __future__ import annotations
 
@@ -112,13 +112,6 @@ def test_post_init_emit_intent_setup_failure(monkeypatch):
     assert any("emit_intent MCP setup failed" in c.get("warn", "") for c in b.calls)
 
 
-def test_post_init_conversational_floors(monkeypatch):
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", raising=False)
-    b = _backend(conversational=True, max_turns_default=2)
-    assert b.max_turns_default >= cl._CONVERSATIONAL_MIN_MAX_TURNS
-    assert b.call_timeout_s >= cl._CONVERSATIONAL_DEFAULT_TIMEOUT_SEC
-
-
 # ---- set_context_provider -------------------------------------------------
 def test_set_context_provider_success(monkeypatch):
     monkeypatch.setattr(cl, "build_context_tools_server", lambda provider, **k: SimpleNamespace(name="ctx"))
@@ -136,12 +129,12 @@ def test_set_context_provider_failure(monkeypatch):
 
 
 # ---- _build_options -------------------------------------------------------
-def test_build_options_model_and_resume():
+def test_build_options_model_and_system_prompt():
     b = _backend(model="claude-x")
-    opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys", resume_session_id="sess-1")
+    opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys")
     assert opts.kwargs["model"] == "claude-x"
     assert opts.kwargs["system_prompt"] == "sys"
-    assert opts.kwargs["resume"] == "sess-1"
+    assert "resume" not in opts.kwargs
 
 
 def test_build_options_raw_completion():
@@ -206,13 +199,14 @@ async def test_run_timeout():
 
 # ---- run(): idle timeout tolerates a slow-but-live stream -----
 async def test_run_idle_timeout_allows_slow_but_live_stream():
-    """A model that keeps streaming (gaps < idle budget) must NOT be killed,
-    even when the TOTAL turn wall-clock exceeds ``call_timeout_s``."""
+    """A model that keeps streaming (gaps < idle budget) must NOT be killed, even when the TOTAL turn wall-clock
+    exceeds ``call_timeout_s``.
+    """
 
     async def _slow_live(*, prompt, options):
         for _ in range(4):
-            # Per-message gap stays under the idle budget while cumulative time exceeds it,
-            # proving the guard is idle-based, not a total wall-clock cap.
+            # Per-message gap stays under the idle budget while cumulative time exceeds it, proving the guard is
+            # idle-based, not a total wall-clock cap.
             await asyncio.sleep(0.03)
             yield _Msg(content=[_emit_tool_block()])
 
@@ -221,26 +215,6 @@ async def test_run_idle_timeout_allows_slow_but_live_stream():
     b.call_timeout_s = 0.05
     res = await b.run("hi")
     assert len(res.intents) == 4
-
-
-# ---- run(): conversational session capture --------------------------------
-async def test_run_conversational_session_capture(monkeypatch):
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC", "60")
-    msg = _Msg(
-        content=[_emit_tool_block()],
-        result="done",
-        usage={"input_tokens": 5, "output_tokens": 2, "cache_read_input_tokens": 1, "cache_creation_input_tokens": 0},
-        session_id="sess-9",
-    )
-    b = _backend(messages=[msg], conversational=True)
-    b.sdk_query_factory = _query([msg])
-    res = await b.run("hi")
-    assert b._session_id == "sess-9"
-    assert res.metadata["input_tokens"] == 5
-    assert len(res.intents) == 1
-    # reset clears it
-    b.reset_conversation()
-    assert b._session_id is None
 
 
 # ---- run(): no-intent raises ----------------------------------------------
@@ -266,8 +240,7 @@ async def test_run_skips_diagnostics_when_not_requested():
 
 # ---- gateway endpoint identifier -----------------------------------------
 def test_gateway_endpoint_drops_url_userinfo(monkeypatch):
-    """The diagnostic is appended to an on-disk trace, and a base URL of the
-    form ``https://user:key@gw/...`` puts the key in netloc."""
+    """The diagnostic is appended to an on-disk trace, and a base URL of the form ``https://user:key@gw/...`` puts the key in netloc."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://user:s3cret@gw.example.com:8443/api/v1")
     assert _backend()._gateway_endpoint_identifier() == "gw.example.com"
 
@@ -370,8 +343,7 @@ class _StopMsg(_Msg):
 
 
 async def test_stop_reason_reaches_metadata():
-    """Without it a truncated reply is indistinguishable from a badly formatted
-    one, so the SDK's own stop reason must survive to the caller."""
+    """Without it a truncated reply is indistinguishable from a badly formatted one, so the SDK's own stop reason must survive to the caller."""
     stream = [_StopMsg(content=[TextBlock("half a rep")], result="half a rep", stop_reason="max_tokens")]
     b = _backend()
     b.sdk_query_factory = _query(stream)

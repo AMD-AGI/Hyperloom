@@ -1,23 +1,4 @@
-"""A turn that must write files may not downgrade the configured sandbox.
-
-Observed in a real OpenAI-only forge-loop run, three prep attempts in a row:
-
-    bwrap: Failed to make / slave: Permission denied
-
-    Unable to prepare the driver because every filesystem tool failed during
-    sandbox initialization. This blocked both reading the required invocation
-    specification and writing driver.py; the placeholder remains unchanged.
-
-The deployment had already resolved ``bypass`` -- the operator's statement that
-this process is isolated externally and that no OS-level sandbox is to be built,
-which is the only workable answer on a host with no bubblewrap. Each driver
-authoring site then pinned the mode to ``workspace-write`` to make sure the turn
-could write, and in doing so demanded the very confinement the operator had
-opted out of. The turn kept its write permission and lost every file tool.
-
-These tests pin the distinction the pinning lost: raising a read-only policy to a
-writable one is required, lowering an already-writable one is not.
-"""
+"""A turn that must write files may not downgrade the configured sandbox."""
 
 from __future__ import annotations
 

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The bootstrap shell and ``dual_protocol_endpoint_pair`` must derive the same pair.
-
-``install_baremetal.sh`` runs before any Python is importable, so it carries its
-own copy of the derivation. A divergence between the two only shows up once a
-gateway is configured through the installer rather than the library, so the two
-are pinned here against one corpus.
-"""
+"""The bootstrap shell and ``dual_protocol_endpoint_pair`` must derive the same pair."""
 
 from __future__ import annotations
 

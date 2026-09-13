@@ -28,97 +28,42 @@ def _load_patch_path_safety(unique_name: str):
 
 
 @pytest.fixture
-def patch_env(tmp_path, monkeypatch):
-    fw = tmp_path / "lib" / "python3.12" / "site-packages" / "vllm"
-    fw.mkdir(parents=True)
+def backup_root(tmp_path, monkeypatch) -> Path:
+    """Point the pod-side backup root at a writable temporary directory."""
     bak = tmp_path / "bak"
     bak.mkdir()
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", f"{fw}/")
     monkeypatch.setenv("HYPERLOOM_MN_KERNEL_BACKUP_DIR", str(bak))
-    return fw, bak
+    return bak
 
 
-@pytest.mark.parametrize("unsafe_root", ("/", "relative/path", "/tmp"))
-def test_discovery_env_cannot_expand_patch_roots(
-    monkeypatch,
-    unsafe_root,
-    capsys,
-):
-    pps = _load_patch_path_safety(f"pps_unsafe_{unsafe_root!r}")
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        unsafe_root,
-    )
+def test_non_aiter_jit_build_shape_is_rejected(tmp_path):
+    """The shape check is the only guard before a recursive move of the tree."""
+    pps = _load_patch_path_safety("pps_jit_shape")
+    bare = tmp_path / "random" / "jit" / "build"
+    bare.mkdir(parents=True)
 
-    roots = pps.resolve_patch_target_roots()
-
-    assert unsafe_root not in roots
-    assert "ignoring unsafe framework source root" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="invalid AITER jit/build path"):
+        pps.assert_aiter_jit_build_allowed(bare)
 
 
-def test_custom_installed_framework_root_is_allowed(tmp_path, monkeypatch):
-    pps = _load_patch_path_safety("pps_custom_package")
-    root = tmp_path / "venv" / "lib" / "python3.12" / "site-packages" / "aiter"
-    root.mkdir(parents=True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        str(root),
-    )
-
-    assert f"{root}/" in pps.resolve_patch_target_roots()
-
-
-def test_fake_aiter_shape_outside_framework_root_is_rejected(
-    tmp_path,
-    monkeypatch,
-):
-    pps = _load_patch_path_safety("pps_fake_aiter")
-    fake = tmp_path / "random" / "aiter"
-    (fake / "jit" / "build").mkdir(parents=True)
-    (fake / "__init__.py").write_text("", encoding="utf-8")
-    (fake / "jit" / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.delenv(
-        "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS",
-        raising=False,
-    )
-
-    with pytest.raises(ValueError, match="framework patch roots"):
-        pps.assert_aiter_jit_build_allowed(fake / "jit" / "build")
-
-
-def test_assert_revert_paths_allowed_happy_path(patch_env):
-    fw, bak = patch_env
+def test_assert_backup_path_allowed_under_root(backup_root):
+    bak = backup_root
     pps = _load_patch_path_safety("pps_happy")
-    target = fw / "mod.py"
-    target.write_text("x", encoding="utf-8")
     backup = bak / "mod.bak"
     backup.write_text("y", encoding="utf-8")
-    pps.assert_revert_paths_allowed(target, backup)
+    pps.assert_backup_path_allowed(backup)
 
 
-def test_assert_revert_rejects_backup_outside_root(patch_env):
-    fw, bak = patch_env
+def test_assert_backup_path_rejects_backup_outside_root(backup_root):
+    bak = backup_root
     pps = _load_patch_path_safety("pps_bad_backup")
-    target = fw / "mod.py"
-    target.write_text("x", encoding="utf-8")
     outside = bak.parent / "escape.bak"
     outside.write_text("evil", encoding="utf-8")
     with pytest.raises(ValueError, match="backup_path"):
-        pps.assert_revert_paths_allowed(target, outside)
+        pps.assert_backup_path_allowed(outside)
 
 
-def test_assert_revert_rejects_target_outside_framework(patch_env):
-    fw, bak = patch_env
-    pps = _load_patch_path_safety("pps_bad_target")
-    outside = fw.parent / "escape.py"
-    outside.write_text("x", encoding="utf-8")
-    backup = bak / "mod.bak"
-    backup.write_text("y", encoding="utf-8")
-    with pytest.raises(ValueError, match="target_path"):
-        pps.assert_revert_paths_allowed(outside, backup)
-
-
-def test_assert_backup_dir_allowed_under_root(patch_env):
+def test_assert_backup_dir_allowed_under_root(backup_root):
     pps = _load_patch_path_safety("pps_bdir")
-    _, bak = patch_env
+    bak = backup_root
     pps.assert_backup_dir_allowed(bak / "nested")

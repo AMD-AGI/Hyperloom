@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Who owns a unit of work, decided the same way on both sides of the record.
-
-The write side stamps an owner when work settles; the read side has to name
-one for sessions recorded before it did. Both were answering the same question
-about patch application with their own copy of the same rule, and a copy that
-drifts moves gain between agents on a leaderboard without anything failing.
-
-Kept free of recorder and collector imports so both can depend on it.
-"""
+"""Who owns a unit of work, decided the same way on both sides of the record."""
 
 from __future__ import annotations
 
@@ -71,44 +63,29 @@ _PHASE_BY_LEVER = {
 
 
 def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
-    """Name the lever a unit of work moved, or ``""`` when nothing recorded one.
-
-    Reads the stamp the dispatcher left. Falls back to deriving one from the
-    markers that predate the stamp so a session recorded before it, or a task
-    a caller forgot to stamp, still attributes rather than silently landing in
-    :data:`UNATTRIBUTED`.
-
-    Args:
-        evidence: Task params, an executor result, or a recorded operation's
-            outputs. The same keys either way.
-
-    Returns:
-        One of :data:`LEVER_KINDS`, or ``""``.
-    """
+    """Name the lever a unit of work moved, or ``\"\"`` when nothing recorded one."""
     evidence = evidence or {}
     explicit = str(evidence.get("lever_kind") or "").strip().lower()
     if explicit in LEVER_KINDS:
         return explicit
-    # Derivation order mirrors how the gates differ: enablement grades on
-    # runnability, an upstream PR carries a fetched diff, an authored patch
-    # carries a written one, and anything left changed only configuration.
+    # Derivation order mirrors how the gates differ: enablement grades on runnability, an upstream PR carries a
+    # fetched diff, an authored patch carries a written one, and anything left changed only configuration.
     if evidence.get("enablement"):
         return LEVER_ENABLEMENT
     if evidence.get("pr_url") or evidence.get("pr_lead"):
         return LEVER_UPSTREAM_PR
-    # A candidate id names a PR unless it is the candidate-free local arm, which
-    # authors against the live source with no upstream lead to attribute to.
+    # A candidate id names a PR unless it is the candidate-free local arm, which authors against the live source with
+    # no upstream lead to attribute to.
     candidate_id = str(evidence.get("framework_agent_candidate_id") or "")
     if candidate_id:
         if not candidate_id.startswith("local_explore:"):
             return LEVER_UPSTREAM_PR
-        # That arm is told which gap to close, not which lever to move, so it
-        # returns server args about as often as a diff.
+        # That arm is told which gap to close, not which lever to move, so it returns server args about as often as a
+        # diff.
         wrote_a_patch = evidence.get("patch_name") or evidence.get("patches_applied") or evidence.get("patch_path")
         return LEVER_SOURCE_PATCH if wrote_a_patch else LEVER_CONFIG
-    # A task id says a specialist ran, not that it wrote anything; the arm
-    # returns server args about as often as a diff, and the Coordinator names
-    # the diff it resolved before the patch reaches an applier.
+    # A task id says a specialist ran, not that it wrote anything; the arm returns server args about as often as a
+    # diff, and the Coordinator names the diff it resolved before the patch reaches an applier.
     if evidence.get("patch_name") or evidence.get("patches_applied"):
         return LEVER_SOURCE_PATCH
     return ""
@@ -142,21 +119,7 @@ def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
 
 
 def patch_author(evidence: Mapping[str, Any] | None) -> str:
-    """Name who wrote a patch, from the markers its applier left behind.
-
-    Patch application is the one action whose owner cannot be read off the
-    active phase: by the time a patch lands the run has usually moved on, so
-    the phase names whoever happens to be running, not whoever wrote it. The
-    executor records its own markers, and this is the order they are trusted
-    in.
-
-    Args:
-        evidence: The applier's result on the write side, or the recorded
-            operation's ``outputs`` on the read side. Same keys either way.
-
-    Returns:
-        The owning agent, or :data:`UNATTRIBUTED`.
-    """
+    """Name who wrote a patch, from the markers its applier left behind."""
     return agent_from_phase(patch_owner_phase(evidence)) or UNATTRIBUTED
 
 

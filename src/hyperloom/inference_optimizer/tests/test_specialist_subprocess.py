@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""SpecialistRunner subprocess + worktree tests.
-
-Pins the production specialist dispatch: per-task git worktree, the
-``claude --print --add-dir ...`` spawn, done.json + patch harvesting, and the
-tool whitelist. Uses a hermetic fake ``claude`` shell script.
-"""
+"""SpecialistRunner subprocess + worktree tests."""
 
 from __future__ import annotations
 
@@ -21,7 +16,11 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.deadline import Deadline
+
 from .conftest import init_git_repo
+
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 from hyperloom.orchestrator.specialists.runner import (
     SPECIALIST_TOOL_DENYLIST,
@@ -61,11 +60,7 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
 
 
 def test_build_specialist_env_forwards_oauth_token_without_mirroring_it(monkeypatch):
-    """A subscription-only parent must hand the token down untouched.
-
-    Mirroring it into either API-key var would drop the child out of
-    subscription mode and 401 it.
-    """
+    """A subscription-only parent must hand the token down untouched."""
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -117,7 +112,6 @@ def _make_fake_claude(
                 }
             ],
             "patches_written": [],
-            "empty": False,
             "summary": "fake claude subprocess output",
             "confidence": 0.5,
         }
@@ -160,7 +154,6 @@ exit 0
                     }
                 ],
                 "patches_written": ["patches/001_test.patch"],
-                "empty": False,
                 "summary": "fake patch-authoring specialist",
                 "confidence": 0.7,
             }
@@ -188,7 +181,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "env echo",
   "confidence": 0.0,
   "hip_visible": "$HIP_VISIBLE_DEVICES",
@@ -207,7 +199,6 @@ cat > "$WORKSPACE/specialist_done.json" <<EOF
   "domain": "serving_specialist",
   "proposal_set": [],
   "patches_written": [],
-  "empty": true,
   "summary": "llm env echo",
   "confidence": 0.0,
   "api_timeout_ms": "$API_TIMEOUT_MS",
@@ -291,8 +282,7 @@ def test_runner_accepts_subprocess_config_only():
 
 
 def test_denylist_blocks_dangerous_process_tools():
-    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule
-    against global process cleanup that could kill the serving / benchmark process."""
+    """KillShell and SlashCommand are in the denylist to enforce the prompt-rule against global process cleanup that could kill the serving / benchmark process."""
     assert "KillShell" in SPECIALIST_TOOL_DENYLIST
     assert "SlashCommand" in SPECIALIST_TOOL_DENYLIST
 
@@ -358,7 +348,6 @@ async def test_subprocess_path_harvests_done_file(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -371,7 +360,7 @@ async def test_subprocess_path_harvests_done_file(
     result = await runner.run(ctx)
 
     assert result.status == "succeeded"
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done["domain"] == "serving_specialist"
     workspace = session_dir / "runs" / "specialist" / "t-spec-done"
     assert (workspace / "specialist_done.json").exists()
@@ -404,7 +393,6 @@ async def test_local_specialist_spawn_uses_file_stdin(
             claude_executable=str(fake_claude),
             model="",
             framework_source_roots=(str(fake_framework_repo),),
-            per_turn_max_seconds=30.0,
             poll_interval_seconds=0.2,
         ),
         session_dir=session_dir,
@@ -432,7 +420,6 @@ async def test_subprocess_path_injects_allocated_gpu_env(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -458,9 +445,7 @@ async def test_subprocess_path_injects_llm_stability_env(
     fake_framework_repo: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The dispatcher injects low-risk claude-code stability flags but does not
-    set API_TIMEOUT_MS by default; liveness is governed by the process.log /
-    heartbeat stale reaper."""
+    """The dispatcher injects low-risk claude-code stability flags but does not set API_TIMEOUT_MS by default; liveness is governed by the process.log / heartbeat stale reaper."""
     # Ensure no inherited values mask the setdefault under test.
     for var in (
         "API_TIMEOUT_MS",
@@ -478,7 +463,6 @@ async def test_subprocess_path_injects_llm_stability_env(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -510,7 +494,6 @@ async def test_readonly_research_scout_skips_worktree(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -550,7 +533,6 @@ async def test_subprocess_path_collects_patches(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -585,7 +567,6 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -597,7 +578,7 @@ async def test_subprocess_crash_falls_back_to_empty_synthesised(
 
     result = await runner.run(ctx)
     assert result.status in ("empty_synthesised", "stale")
-    assert result.specialist_done["empty"] is True
+    assert result.specialist_done["proposal_set"] == []
     assert "subprocess" in (result.error or "")
 
 
@@ -616,7 +597,6 @@ async def test_subprocess_path_isolates_writes_to_worktree(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=30.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -640,8 +620,7 @@ async def test_subprocess_recovers_partial_when_no_final(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A specialist that wrote only the partial (then died before the final
-    done.json) surfaces the partial as a non-empty result."""
+    """A specialist that wrote only the partial (then died before the final done.json) surfaces the partial as a non-empty result."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="partial_then_crash")
     session_dir = tmp_path / "session"
@@ -651,7 +630,6 @@ async def test_subprocess_recovers_partial_when_no_final(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -665,19 +643,17 @@ async def test_subprocess_recovers_partial_when_no_final(
     # Salvaged work keeps the findings but must not read as a clean run.
     assert result.status == "partial"
     assert "recovered_from_partial" in result.notes
-    assert result.specialist_done["empty"] is False
+    assert result.specialist_done["proposal_set"]
     assert result.specialist_done.get("_recovered_from_partial") is True
     assert result.specialist_done["proposal_set"]
 
 
 @pytest.mark.asyncio
-async def test_wall_budget_overrides_legacy_max_seconds(
+async def test_the_dispatch_deadline_kills_a_hung_specialist(
     tmp_path: Path,
     fake_framework_repo: Path,
 ):
-    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung
-    specialist well before the legacy ``max_turns × per_turn`` ceiling (here
-    2 × 15 = 30s)."""
+    """A small Coordinator-injected ``wall_budget_sec`` must kill a hung specialist well before the legacy ``max_turns × per_turn`` ceiling (here 2 × 15 = 30s)."""
     bin_dir = tmp_path / "bin"
     fake_claude = _make_fake_claude(bin_dir, behavior="hang")
     session_dir = tmp_path / "session"
@@ -687,7 +663,6 @@ async def test_wall_budget_overrides_legacy_max_seconds(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(
@@ -696,7 +671,7 @@ async def test_wall_budget_overrides_legacy_max_seconds(
         default_max_turns=2,
     )
     ctx = _make_runner_ctx("t-spec-budget")
-    ctx.extra["wall_budget_sec"] = 1.0
+    ctx.extra["specialist_deadline"] = Deadline.after(1.0)
 
     started = time.monotonic()
     result = await runner.run(ctx)
@@ -726,8 +701,7 @@ class _FakeProc:
 async def test_reap_loop_process_log_activity_prevents_stale_kill(
     tmp_path: Path,
 ):
-    """A specialist that streams to process.log but never self-writes
-    heartbeat.json must NOT be reaped as stale."""
+    """A specialist that streams to process.log but never self-writes heartbeat.json must NOT be reaped as stale."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     process_log = workspace / "process.log"
@@ -754,7 +728,7 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
         workspace=workspace,
         done_files=(),
         heartbeat_file=heartbeat_file,
-        max_seconds=60.0,
+        deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
     _ = await writer
@@ -769,8 +743,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With neither heartbeat.json nor process.log activity, the reaper
-    still reaps a silent/hung subprocess as stale."""
+    """With neither heartbeat.json nor process.log activity, the reaper still reaps a silent/hung subprocess as stale."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     # No process.log, no heartbeat.json — total silence.
@@ -801,7 +774,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
         workspace=workspace,
         done_files=(),
         heartbeat_file=heartbeat_file,
-        max_seconds=60.0,
+        deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
     assert outcome["stale_heartbeat"] is True, outcome
@@ -811,12 +784,7 @@ async def test_reap_loop_kills_when_no_activity_at_all(
 # ── extend_lease moves the live wall-clock deadline ──────────────────────────
 @pytest.fixture
 def _live_reaper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """A reaper whose only stop condition is the hard wall-clock cap.
-
-    Keeps process.log fresh so the staleness path never fires, and stubs
-    ``_kill`` so the timeout never signals a real process group (the fake
-    proc reuses this pytest process's pid).
-    """
+    """A reaper whose only stop condition is the hard wall-clock cap."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "process.log").write_text("alive\n", encoding="utf-8")
@@ -848,27 +816,20 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
         workspace=workspace,
         done_files=(),
         heartbeat_file=workspace / "heartbeat.json",
-        max_seconds=0.3,
+        deadline=Deadline.after(0.3),
         started=time.monotonic(),
         task_id="task-base",
     )
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # Killed at ~0.3s. The bound is loose because only the direction matters:
-    # a loaded CI box can stretch this, but it can never finish early.
+    # Killed at ~0.3s.
     assert elapsed < 5.0, elapsed
 
 
 @pytest.mark.asyncio
 async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_reaper):
-    """The regression this fix exists for.
-
-    ``extend_lease`` used to push the task / lane / GPU leases out while the
-    subprocess kept the ``max_seconds`` deadline computed once at spawn, so the
-    specialist still died on schedule. The reaper must re-read the extension
-    every poll.
-    """
+    """The regression this fix exists for."""
     disp, proc, workspace = _live_reaper
     subprocess_.clear_wall_budget_extension("task-live")
 
@@ -879,24 +840,23 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
             workspace=workspace,
             done_files=(),
             heartbeat_file=workspace / "heartbeat.json",
-            max_seconds=0.3,
+            deadline=Deadline.after(0.3),
             started=time.monotonic(),
             task_id="task-live",
         )
     )
-    # Grant the extension while the run is still in flight, before the
-    # original 0.3s cap would have fired.
+    # Grant the extension while the run is still in flight, before the original 0.3s cap would have fired.
     await asyncio.sleep(0.15)
     subprocess_.grant_wall_budget_extension("task-live", 0.6)
-    # The reaper recomputes `max_seconds + wall_budget_extension(task_id)`
-    # every poll, so this is the deadline it now enforces.
+    # The reaper recomputes `max_seconds + wall_budget_extension(task_id)` every poll, so this is the deadline it now
+    # enforces.
     assert subprocess_.wall_budget_extension("task-live") == 0.6
     outcome = await loop
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # Survived past the base cap — the load-independent half of the proof
-    # (a slow box only ever pushes this later, never earlier).
+    # Survived past the base cap — the load-independent half of the proof (a slow box only ever pushes this later,
+    # never earlier).
     assert elapsed > 0.7, elapsed
     subprocess_.clear_wall_budget_extension("task-live")
 
@@ -914,15 +874,15 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
         workspace=workspace,
         done_files=(),
         heartbeat_file=workspace / "heartbeat.json",
-        max_seconds=0.3,
+        deadline=Deadline.after(0.3),
         started=time.monotonic(),
         task_id="task-mine",
     )
     elapsed = time.monotonic() - started
 
     assert outcome["timed_out"] is True, outcome
-    # The other task's 600s grant would have kept this alive far past any
-    # plausible scheduling delay, so a bound this loose still proves isolation.
+    # The other task's 600s grant would have kept this alive far past any plausible scheduling delay, so a bound this
+    # loose still proves isolation.
     assert elapsed < 30.0, elapsed
     subprocess_.clear_wall_budget_extension("task-other")
 
@@ -968,8 +928,8 @@ class _FakeGpuSpecialistLease:
         env_mode="merge",
         stdin_path=None,
     ) -> None:
-        # §3.3 non-blocking start: record + stage the done file, mark the pid
-        # ready so poll_started() returns immediately on the next tick.
+        # §3.3 non-blocking start: record + stage the done file, mark the pid ready so poll_started() returns
+        # immediately on the next tick.
         self.started = {
             "cmd": cmd,
             "cwd": cwd,
@@ -1006,8 +966,7 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """With a gpu_lease, run() launches inside the actor (no local Popen) and
-    strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
+    """With a gpu_lease, run() launches inside the actor (no local Popen) and strips *_VISIBLE_DEVICES so Ray owns the card assignment (P2/T4)."""
     workspace = tmp_path / "ws"
     lease = _FakeGpuSpecialistLease(workspace)
 
@@ -1019,7 +978,12 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
 
     monkeypatch.setattr(sp.subprocess, "Popen", _boom)
     # Pretend the parent has serving GPU visibility that must NOT leak through.
+    # The env allowlist already blocks every mask name; the pop below is the
+    # second barrier, and it is asserted over the whole mask set so widening
+    # the allowlist cannot quietly re-open a spelling it does not cover.
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "6,7")
+    monkeypatch.setenv("HSA_VISIBLE_DEVICES", "6,7")
+    monkeypatch.setenv("GPU_DEVICE_ORDINAL", "6,7")
 
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
@@ -1033,16 +997,14 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
         disallowed_tools=frozenset(),
         max_turns=1,
         gpu_ids=(0, 1),
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
         gpu_lease=lease,
     )
 
     assert lease.started is not None, "the subprocess must run inside the lease actor"
     assert str(lease.started["log_path"]).endswith("process.log")
     # Ray owns the visible devices — the caller env must not pin them.
-    assert "ROCR_VISIBLE_DEVICES" not in lease.env
-    assert "HIP_VISIBLE_DEVICES" not in lease.env
-    assert "CUDA_VISIBLE_DEVICES" not in lease.env
+    assert not (GPU_MASK_ENV_NAMES & lease.env.keys())
     # The logical count is still advertised for specialist tooling.
     assert lease.env.get("INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS") == "0,1"
     assert result.done_payload is not None
@@ -1054,11 +1016,7 @@ async def test_run_clears_stale_wall_budget_extension(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """A reused task_id must not inherit a previous run's granted extension.
-
-    The registry is keyed by task_id and lives for the process, so a grant left
-    behind by an earlier dispatch would silently widen the next run's deadline.
-    """
+    """A reused task_id must not inherit a previous run's granted extension."""
     workspace = tmp_path / "ws"
     lease = _FakeGpuSpecialistLease(workspace)
     monkeypatch.setattr(
@@ -1082,7 +1040,7 @@ async def test_run_clears_stale_wall_budget_extension(
         user_prompt="usr",
         disallowed_tools=frozenset(),
         max_turns=1,
-        wall_budget_sec=60.0,
+        deadline=Deadline.after(60.0),
         gpu_lease=lease,
     )
 
@@ -1172,7 +1130,8 @@ def test_build_claude_cmd_includes_optional_flags_and_filters_emit_intent(tmp_pa
     assert cmd[-1] == "--debug"
     add_dirs = [cmd[i + 1] for i, value in enumerate(cmd[:-1]) if value == "--add-dir"]
     # Worktree first, workspace second, then each distinct framework root.
-    assert add_dirs == [str(worktree), str(workspace), str(framework)]
+    # integrate_patch is the only writer of source; the specialist gets neither.
+    assert add_dirs == [str(worktree), str(workspace)]
 
 
 @pytest.mark.asyncio
@@ -1225,7 +1184,6 @@ async def test_partial_checkpoint_published_while_alive(
         claude_executable=str(fake_claude),
         model="",
         framework_source_roots=(str(fake_framework_repo),),
-        per_turn_max_seconds=15.0,
         poll_interval_seconds=0.2,
     )
     runner = SpecialistRunner(

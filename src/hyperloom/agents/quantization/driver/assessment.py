@@ -1,28 +1,4 @@
-"""Assessment dataclass + ``classify_attempt`` — turn one attempt's
-workspace state into a single ``OutcomeId``.
-
-``classify_attempt`` is a pure function (workspace snapshot + sdk_error +
-phase hint → OutcomeId | None). The retry loop accumulates per-attempt
-outcomes into a multi-attempt ``Assessment``.
-
-Classification precedence (first match wins):
-
-  1. Hard SDK-level signatures in ``sdk_error`` mapping to bootstrap-class
-     outcomes, decisive even if some artifacts exist.
-  2. Explicit ``blocked.md`` outcome marker (``outcome_id: <id>``) when it is
-     a known failure/ask ``OutcomeId`` (success tags such as
-     ``eval_gap_accepted`` are ignored so they cannot skip MUST-have checks).
-  3. Phase-aware artifact gaps under the recorded ``last_phase``.
-  4. MUST-have model files on the quantized directory.
-  5. Validator step results (FAIL > SKIPPED > absent step heading).
-  6. Eval phase — ``eval_skipped.txt`` first, then ``eval_report.json`` gap
-     vs. threshold.
-  7. sdk_error pattern match, which can fire even when artifacts look
-     partially intact.
-  8. Fallback: ``unclassified_failure`` if any failure signal is present,
-     otherwise ``None`` for clean success (with the ``eval_gap_accepted`` tag
-     when the gap is non-zero and within budget).
-"""
+"""Assessment dataclass + ``classify_attempt`` — turn one attempt's workspace state into a single ``OutcomeId``."""
 
 from __future__ import annotations
 
@@ -50,20 +26,7 @@ _GAP_NARRATIVE_EPSILON = 1e-4  # gaps smaller than this are clean success
 
 @dataclass(frozen=True)
 class Assessment:
-    """Public summary of a (possibly multi-attempt) quantize call.
-
-    Fields:
-
-    * ``final`` — primary verdict. ``None`` = clean success; otherwise an
-      ``OutcomeId``.
-    * ``attempts`` — per-attempt outcomes in chronological order; len == 1
-      for single-shot runs.
-    * ``recovered`` — ``True`` iff len(attempts) > 1 AND final is in
-      ``SUCCESS_TAGS`` (i.e. an earlier attempt failed and a later one
-      cleaned up).
-    * ``eval_gap`` — the ``relative_gap`` from the final attempt's
-      ``eval_report.json`` when present (regardless of accept/reject).
-    """
+    """Public summary of a (possibly multi-attempt) quantize call."""
 
     final: OutcomeId | None
     attempts: tuple[OutcomeId | None, ...]
@@ -72,12 +35,7 @@ class Assessment:
     notes: tuple[str, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict:
-        """Serialize the assessment to a JSON-friendly dictionary.
-
-        Returns:
-            A dict with the final outcome, per-attempt outcomes, recovery flag,
-            evaluation gap, and notes, using enum *values* for outcome ids.
-        """
+        """Serialize the assessment to a JSON-friendly dictionary."""
         return {
             "final": self.final.value if self.final is not None else None,
             "attempts": [a.value if a is not None else None for a in self.attempts],
@@ -137,15 +95,7 @@ _QUANTIZED_LOAD_PATTERNS = (
 
 
 def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
-    """Return whether any needle substring appears in ``haystack``.
-
-    Args:
-        haystack: String to search within.
-        needles: Candidate substrings to look for.
-
-    Returns:
-        ``True`` if at least one needle is found, otherwise ``False``.
-    """
+    """Return whether any needle substring appears in ``haystack``."""
     for n in needles:
         if n in haystack:
             return True
@@ -153,15 +103,7 @@ def _contains_any(haystack: str, needles: tuple[str, ...]) -> bool:
 
 
 def _parse_blocked_outcome(text: str | None) -> OutcomeId | None:
-    """Extract an explicit ``BLOCKED`` outcome id from agent output text.
-
-    Args:
-        text: Free-form text that may contain a ``BLOCKED`` outcome marker.
-
-    Returns:
-        The matching :class:`OutcomeId`, or ``None`` when no valid marker is
-        present.
-    """
+    """Extract an explicit ``BLOCKED`` outcome id from agent output text."""
     if not text:
         return None
     m = _BLOCKED_OUTCOME_RE.search(text)
@@ -182,17 +124,7 @@ def _classify_eval_outcome(
     *,
     acceptable_eval_gap: float | None,
 ) -> OutcomeId | None:
-    """Map eval-phase artifacts to an outcome.
-
-    Args:
-        art: Collected artifacts for the attempt.
-        acceptable_eval_gap: Maximum tolerated relative accuracy gap, if
-            configured.
-
-    Returns:
-        The matching eval :class:`OutcomeId`, or ``None`` when eval was
-        not exercised this attempt.
-    """
+    """Map eval-phase artifacts to an outcome."""
 
     if art.eval_skipped_reason:
         reason = art.eval_skipped_reason.lower()
@@ -225,17 +157,7 @@ def _classify_sdk_phase_error(
     sdk_error: str,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Map an SDK error under a known phase to a phase-specific outcome.
-
-    Args:
-        sdk_error: Raw SDK error text.
-        phase: The phase that was executing when the error occurred.
-
-    Returns:
-        The matching :class:`OutcomeId`, or ``None`` if the message is not
-        phase-specific (the caller then falls through to bootstrap-level
-        patterns).
-    """
+    """Map an SDK error under a known phase to a phase-specific outcome."""
 
     msg = sdk_error.lower()
     if phase == "exec":
@@ -267,17 +189,7 @@ def _classify_phase_artifact_gap(
     art: CollectedArtifacts,
     phase: str | None,
 ) -> OutcomeId | None:
-    """Detect disk-evidence gaps relative to the last-written phase.
-
-    Args:
-        art: Collected artifacts for the attempt.
-        phase: The phase that last wrote ``last_phase.txt``.
-
-    Returns:
-        The matching :class:`OutcomeId`, or ``None`` if nothing is amiss
-        at this phase boundary (the caller then continues to MUST-have /
-        validator / eval checks).
-    """
+    """Detect disk-evidence gaps relative to the last-written phase."""
 
     if phase == "intake" and not art.model_analysis_present:
         return OutcomeId.analysis_artifact_invalid_or_missing
@@ -293,15 +205,7 @@ def _classify_phase_artifact_gap(
 
 
 def _classify_bootstrap_sdk_error(sdk_error: str) -> OutcomeId | None:
-    """Classify a bootstrap-phase SDK error message into an outcome.
-
-    Args:
-        sdk_error: Raw error text raised before the skill chain started.
-
-    Returns:
-        The matching bootstrap :class:`OutcomeId` (e.g. missing Quark root,
-        unwritable workspace, runtime error), or ``None`` if unrecognized.
-    """
+    """Classify a bootstrap-phase SDK error message into an outcome."""
     msg = sdk_error.lower()
     if "quark_root" in msg or ("quark root" in msg and ("missing" in msg or "not found" in msg)):
         return OutcomeId.quark_root_missing
@@ -325,23 +229,7 @@ def classify_attempt(
     acceptable_eval_gap: float | None = None,
     artifacts: CollectedArtifacts | None = None,
 ) -> OutcomeId | None:
-    """Classify a single attempt's workspace state.
-
-    The retry loop assembles per-attempt outcomes and derives the final
-    ``Assessment``.
-
-    Args:
-        workspace: Attempt workspace directory to inspect.
-        sdk_error: Raw SDK error text, if the attempt raised one.
-        last_phase: Phase that last executed (overrides the on-disk marker).
-        acceptable_eval_gap: Maximum tolerated relative accuracy gap.
-        artifacts: Pre-scanned artifacts; supply to avoid a duplicate disk
-            pass.
-
-    Returns:
-        ``None`` for a clean success, otherwise the classified
-        :class:`OutcomeId`.
-    """
+    """Classify a single attempt's workspace state."""
 
     art = artifacts if artifacts is not None else collect_artifacts(Path(workspace))
     phase = last_phase or art.last_phase
@@ -362,8 +250,8 @@ def classify_attempt(
     if phase_gap is not None:
         return phase_gap
 
-    # (3b) Phase-tagged sdk_error before generic artifact checks — can fire
-    # even when partial artifacts remain on disk from a prior run.
+    # (3b) Phase-tagged sdk_error before generic artifact checks — can fire even when partial artifacts remain on disk
+    # from a prior run.
     if sdk_error:
         phase_outcome = _classify_sdk_phase_error(sdk_error, phase)
         if phase_outcome is not None:
@@ -418,21 +306,7 @@ def build_assessment(
     artifacts: CollectedArtifacts | None = None,
     notes: tuple[str, ...] = (),
 ) -> Assessment:
-    """Assemble an ``Assessment`` from a chronological attempts list.
-
-    * ``final`` = last attempt's outcome.
-    * ``recovered`` = True iff len(attempts) > 1 AND final ∈ SUCCESS_TAGS.
-    * ``eval_gap`` = ``relative_gap`` from the latest ``eval_report.json``.
-
-    Args:
-        attempts: Per-attempt outcomes in chronological order.
-        workspace: Workspace directory used to collect artifacts.
-        artifacts: Pre-scanned artifacts; supply to avoid a disk pass.
-        notes: Extra human-readable notes to attach to the assessment.
-
-    Returns:
-        The assembled :class:`Assessment`.
-    """
+    """Assemble an ``Assessment`` from a chronological attempts list."""
 
     if not attempts:
         raise ValueError("attempts must be non-empty")
@@ -459,20 +333,7 @@ def build_assessment(
 
 
 def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
-    """Map an ``Assessment`` to a public status string.
-
-    The mapping keys off the ``AUTO_RECOVER`` / ``AUTO_FAIL`` / ``ASK``
-    category sets in :mod:`.outcomes`; see the "Return shape" section of the
-    agent's ``README.md``. Consumed by
-    :class:`hyperloom.agents.quantization.driver.retry.QuantSkillRunResult`.
-
-    Args:
-        assessment: The assembled assessment to map.
-        artifacts: Collected artifacts used for status demotion checks.
-
-    Returns:
-        One of ``"success"``, ``"partial"``, or ``"failed"``.
-    """
+    """Map an ``Assessment`` to a public status string."""
 
     final = assessment.final
     # Clean / accepted success.
@@ -491,8 +352,8 @@ def derive_status(assessment: Assessment, artifacts: CollectedArtifacts) -> str:
     if final == OutcomeId.must_validate_skipped:
         return "failed" if artifacts.strict_validation else "partial"
 
-    # Auto-recover outcomes reaching the final attempt are partial (model
-    # usable, audit/eval chain incomplete) unless a MUST-have file is missing.
+    # Auto-recover outcomes reaching the final attempt are partial (model usable, audit/eval chain incomplete) unless
+    # a MUST-have file is missing.
     if final in AUTO_RECOVER:
         if final in MUST_HAVE_RECOVERS_THAT_FAIL_WITHOUT_ARTIFACT and not (
             artifacts.has_config_json and artifacts.has_tokenizer

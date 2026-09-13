@@ -1,41 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Local knowledge loader for the forge-loop.
-
-Assembles the layered knowledge block injected into the agent system prompt for
-one kernel-optimization task. The block is built from the curated
-``local_knowledge/`` tree in reading order:
-
-  1. ``hardware/`` and ``common_methodology/`` — always (mandatory background).
-  2. ``framework/aiter/`` — only when the target is an AITER-framework operator.
-  3. ``languages/<language>/`` — the kernel's implementation language.
-
-Each level is loaded per the KernelForge INDEX convention: a folder that has an
-``INDEX.md`` is navigated through it and that map is loaded WHOLE; a folder
-without one falls back to a flat ``<relative path> — <one-line descriptor>``
-listing. Full card content stays on disk and is fetched with the ``Read`` tool
-on demand (progressive disclosure).
-
-Design goals:
-  * The block is generated LIVE from the directory tree at prompt-build time, so
-    adding, removing, or retitling a file needs NO code change.
-  * The per-file descriptor (flat-listing fallback) is auto-extracted from the
-    file itself (a fallback chain), never a hand-maintained table — so
-    descriptions stay in sync.
-
-Descriptor fallback chain (first hit wins) — every source is mined from the file
-itself, so descriptions stay in sync with no hand-maintained table:
-  * .py : first non-empty line of the module docstring
-  1. first sentence of a ``## TL;DR`` section
-  2. YAML front-matter ``description:`` (folded ``>`` scalars supported)
-  3. YAML front-matter ``title:``
-  4. the intro blockquote (``> ...`` right under the H1 — the guide pattern)
-  5. first ``# H1`` heading
-  6. first ``## H2`` heading
-  7. first prose line
-  8. the file stem
-"""
+"""Local knowledge loader for the forge-loop."""
 
 from __future__ import annotations
 
@@ -45,8 +11,7 @@ from pathlib import Path
 
 from kernelforge.resources import resource_path
 
-# local_knowledge/ lives at the repo root in source checkouts and under
-# kernelforge/data in built wheels.
+# local_knowledge/ lives at the repo root in source checkouts and under kernelforge/data in built wheels.
 _DEFAULT_ROOT = resource_path("local_knowledge")
 
 # Only these extensions are indexed (docs + runnable skeletons/scripts).
@@ -61,11 +26,7 @@ _PY_SKIP_COMMENT = re.compile(r"^#\s*(spdx-|copyright|!|-\*-|type:|noqa)", re.IG
 
 
 def _clip(s: str, limit: int = 220) -> str:
-    """Collapse whitespace to one line; end on a full sentence when possible.
-
-    Prefers a complete first sentence; only appends '…' when a single sentence
-    genuinely exceeds ``limit`` (so descriptions are not cut mid-thought).
-    """
+    """Collapse whitespace to one line; end on a full sentence when possible."""
     s = re.sub(r"\s+", " ", s).strip().strip("*`").strip()
     # A complete first sentence, if it fits, reads best.
     dot = s.find(". ")
@@ -204,13 +165,7 @@ def _flat_listing(folder: Path) -> str:
 
 
 def _render_level(root: Path, rel: str) -> str:
-    """Render one knowledge level as a titled section.
-
-    Per the KernelForge convention: if the folder has an ``INDEX.md`` it is the
-    navigation map and is loaded WHOLE; otherwise fall back to a flat
-    ``<path> — <descriptor>`` listing of the folder's files. Returns "" when the
-    folder is missing or empty.
-    """
+    """Render one knowledge level as a titled section."""
     folder = root / rel
     if not folder.is_dir():
         return ""
@@ -236,24 +191,7 @@ def build_forge_knowledge(
     include_aiter: bool = False,
     include_mori: bool = False,
 ) -> str:
-    """Assemble the layered knowledge block for one forge-loop kernel task.
-
-    Layers, in reading order (see module docstring):
-      1. ``hardware/`` + ``common_methodology/`` — always.
-      2. ``framework/aiter/`` — only when ``include_aiter`` (an AITER operator).
-      3. ``framework/mori/`` — only when ``include_mori`` (experimental,
-         ablation-only knob; off by default — see ``config.include_mori_kb``).
-      4. ``languages/<language>/`` — when ``language`` is given and its folder
-         exists.
-
-    ``language`` accepts a sequence, rendered in the order given, for a backend
-    served by more than one language folder (triton/gluon are one toolchain and
-    carry each other; see ``kernel_backends.constants.resolve_language_dirs``).
-    Duplicates collapse so the same folder is never rendered twice.
-
-    Each level is loaded per the INDEX.md convention (whole INDEX.md if present,
-    else a flat file listing). Returns "" if the root or all levels are missing.
-    """
+    """Assemble the layered knowledge block for one forge-loop kernel task."""
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():
         return ""

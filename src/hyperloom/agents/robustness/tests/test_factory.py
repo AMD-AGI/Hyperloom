@@ -39,9 +39,7 @@ async def test_build_reactor_components_local_only_mode_runs_a_tick(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
-    """The factory-built classifier must resolve a config for every registry
-    slot: entries the factory omits fall back to the registry default, so
-    nothing is left unconfigured."""
+    """The factory-built classifier must resolve a config for every registry slot: entries the factory omits fall back to the registry default, so nothing is left unconfigured."""
     from hyperloom.agents.robustness.signals.classifier import _SIGNAL_REGISTRY
 
     expected_slots = {spec.config_attr for spec in _SIGNAL_REGISTRY if spec.config_attr}
@@ -59,11 +57,7 @@ async def test_factory_config_map_covers_all_registry_entries(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_the_stall_escalation_threshold_reaches_the_signal_from_the_config(tmp_path: Path):
-    """Deployments whose work units differ need the escalation point to move.
-
-    In code: like every other threshold on ``Config`` it is set by whoever
-    constructs it, not by an environment variable ``discover`` reads.
-    """
+    """Deployments whose work units differ need the escalation point to move."""
     config = Config(session_dir=tmp_path, agent_stall_high_after_s=7200.0)
     bundle = build_reactor_components(config)
     try:
@@ -89,11 +83,7 @@ async def test_factory_uses_noop_engine_when_credentials_missing(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_path: Path):
-    """Standalone robustness runs never reach CLI preflight, so it normalizes too.
-
-    Without this the legacy sandbox would resolve no credentials and RCA would
-    silently degrade to a no-op engine.
-    """
+    """Standalone robustness runs never reach CLI preflight, so it normalizes too."""
     monkeypatch.setenv("SESSION_DIR", str(tmp_path))
     monkeypatch.setenv("_".join(("DEEPSEEK", "API", "KEY")), "deepseek-token")
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
@@ -136,11 +126,7 @@ async def test_config_discover_uses_dual_protocol_gateway_anthropic_side(monkeyp
 
 @pytest.mark.asyncio
 async def test_config_discover_selects_anthropic_for_a_subscription_token(monkeypatch, tmp_path: Path):
-    """A subscription token selects the Anthropic side without becoming a key.
-
-    Copying it into llm_api_key would hand an API-credits slot a credential the
-    CLI must resolve itself, so discovery reports the provider and nothing else.
-    """
+    """A subscription token selects the Anthropic side without becoming a key."""
     monkeypatch.setenv("SESSION_DIR", str(tmp_path))
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-token")
     monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
@@ -248,11 +234,7 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkey
 
 @pytest.mark.asyncio
 async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_path: Path, monkeypatch):
-    """An oauth-only host resolves no key in-process, and must still get RCA.
-
-    Driven through Config.discover so the empty base_url/api_key pair is the
-    one the token actually produces, rather than a hand-written stand-in.
-    """
+    """An oauth-only host resolves no key in-process, and must still get RCA."""
     from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
 
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL"):
@@ -281,8 +263,7 @@ async def test_factory_uses_anthropic_engine_for_a_subscription_token_host(tmp_p
 
 @pytest.mark.asyncio
 async def test_factory_falls_back_to_noop_when_the_anthropic_transport_is_unusable(tmp_path: Path, monkeypatch):
-    """A subscription token with no claude CLI, or no Anthropic credential at
-    all, must degrade at build time instead of failing on every tick."""
+    """A subscription token with no claude CLI, or no Anthropic credential at all, must degrade at build time instead of failing on every tick."""
     from hyperloom.agents.robustness.decision.rca_engine import NoopRcaEngine
 
     monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
@@ -399,13 +380,7 @@ async def test_factory_uses_blind_source_when_local_probe_disabled(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_the_quiet_fallback_does_not_pass_its_empty_process_list_off_as_evidence(tmp_path: Path):
-    """Nothing looked, so "no processes" is ignorance and must not read as "no server".
-
-    The stub probes no health targets of its own, so today the flag only matters
-    if its snapshot is ever merged with one that did probe — which is exactly the
-    consumer asserted here, the guard that suppresses
-    ``local_server_unreachable`` when the process probe saw no server.
-    """
+    """Nothing looked, so \"no processes\" is ignorance and must not read as \"no server\"."""
     from dataclasses import replace
 
     from hyperloom.agents.robustness.role.prompt_inputs import ReactorContext, SharedStateSnapshot
@@ -467,8 +442,7 @@ async def test_factory_default_auto_probes_inference_server(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
-    """``auto_probe_inference_server=False`` (scriptable/server-less workloads)
-    drops the 8888/health target while keeping the LocalProbe (gpu/disk/fd)."""
+    """``auto_probe_inference_server=False`` (scriptable/server-less workloads) drops the 8888/health target while keeping the LocalProbe (gpu/disk/fd)."""
     from hyperloom.agents.robustness.sources.local_probe import LocalProbeSource
 
     config = Config(session_dir=tmp_path, auto_probe_inference_server=False)
@@ -484,12 +458,7 @@ async def test_factory_scriptable_skips_inference_server_probe(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_a_framework_added_to_the_config_knob_is_recognised_as_a_server(tmp_path: Path, monkeypatch):
-    """The documented knob decides ``is_server``, not a second copy of the list.
-
-    A framework named only in ``server_process_patterns`` used to be matched as
-    a process yet flagged ``is_server=False``, which silently disabled
-    ``local_server_unreachable`` for the very deployment that configured it.
-    """
+    """The documented knob decides ``is_server``, not a second copy of the list."""
     import subprocess
 
     from hyperloom.agents.robustness.sources import local_probe

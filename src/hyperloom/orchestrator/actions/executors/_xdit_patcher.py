@@ -1,24 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Verifier for xDiT's baked diffusion-profiling adaptations.
-
-The two adaptations live as source in the ``hyperloom-xdit-adaptation`` overlay
-repo and are baked into the sandbox image at build time; this module only
-VERIFIES that the running xfuser carries them (it no longer mutates any file).
-
-The two adaptations (their sentinels are asserted here):
-
-* ``repeat=1`` in ``torch.profiler.schedule`` — retains the ACTIVE profiler window
-  (upstream default ``repeat=0`` discards it, exporting an empty trace). Sentinel:
-  ``# hyperloom: retain active window``.
-* per-denoise-step ``record_function("denoise_step_<i>")`` markers around the
-  diffusers ``scheduler.step`` — deterministic per-step roofline split anchors.
-  Sentinel: ``# hyperloom: per-denoise-step annotation``.
-
-Verification is fail-soft: a missing/stale bake logs a remediation warning and
-returns ``False`` (callers proceed; the roofline just degrades).
-"""
+"""Verifier for xDiT's baked diffusion-profiling adaptations."""
 
 from __future__ import annotations
 
@@ -43,18 +26,7 @@ _REQUIRED_IMAGE = "pytorch-xdit:v26.6-hyperloom15"
 
 
 def _discover_xfuser_base_models() -> list[Path]:
-    """Return every existing xfuser ``base_model.py`` to verify.
-
-    Discovery order (deduped by resolved path):
-
-    * ``$XDIT_PATH/xfuser/<rel>`` when ``XDIT_PATH`` points at an xDiT checkout.
-    * The importable ``xfuser`` package location (``importlib`` find-spec, which
-      does not import the module), i.e. the copy the ``xdit`` subprocess runs.
-
-    Returns:
-        A deduped list of existing ``base_model.py`` files, or ``[]`` when none
-        resolve (callers fail-soft; fine for tests / non-xDiT runs).
-    """
+    """Return every existing xfuser ``base_model.py`` to verify."""
     out: list[Path] = []
     seen: set[Path] = set()
 
@@ -93,13 +65,7 @@ def _is_baked(src: Path) -> bool:
 
 
 def verify_xdit_profiler_baked() -> bool:
-    """Verify the running xfuser carries the baked diffusion-profiling adaptations.
-
-    Returns ``True`` when at least one discovered ``base_model.py`` carries both
-    sentinels. When none do (or none are discovered), logs a fail-soft remediation
-    warning and returns ``False`` — the run proceeds but the diffusion roofline
-    trace will be empty / lack per-step split boundaries.
-    """
+    """Verify the running xfuser carries the baked diffusion-profiling adaptations."""
     files = _discover_xfuser_base_models()
     if not files:
         log.warning(

@@ -1,22 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""RCA engines, all exposing ``async def summarize(symptom) -> str``.
-
-* :class:`NoopRcaEngine` — default; returns "" (ladder skips ``rca_text``).
-* :class:`LlmRcaEngine` — OpenAI-compatible chat endpoint, cost-bounded by
-  :class:`RcaThrottle`: severity gate (default high), per-dedup-key cooldown
-  (default 60s), per-tick cap (default 1 call).
-* :class:`AnthropicRcaEngine` — :class:`LlmRcaEngine` subclass issuing a single
-  tool-free Anthropic completion; the factory selects it when the discovered
-  provider is ``anthropic``.
-
-Both LLM engines reach their provider through ``hyperloom.common.llm_config``,
-which owns credential resolution and, on the Anthropic side, the choice between
-the Messages API and the Claude CLI — the latter being the only channel that
-accepts a Max/Pro subscription token. This module therefore holds only the
-prompt, the throttle, and the usage ledger.
-"""
+"""RCA engines, all exposing ``async def summarize(symptom) -> str``."""
 
 from __future__ import annotations
 
@@ -44,14 +29,7 @@ class RcaEngine(Protocol):
     """Minimal contract the ActionLadder consumes."""
 
     async def summarize(self, symptom: Symptom) -> str:
-        """Produce root-cause text for a symptom.
-
-        Args:
-            symptom (Symptom): The symptom to summarize.
-
-        Returns:
-            str: Root-cause summary text, or an empty string when none.
-        """
+        """Produce root-cause text for a symptom."""
 
     async def aclose(self) -> None:
         """Release any provider client the engine owns."""
@@ -64,14 +42,7 @@ class NoopRcaEngine:
     label: str = "noop"
 
     async def summarize(self, symptom: Symptom) -> str:
-        """Return empty RCA text; this engine never contacts an LLM.
-
-        Args:
-            symptom (Symptom): The symptom (ignored by this engine).
-
-        Returns:
-            str: Always an empty string.
-        """
+        """Return empty RCA text; this engine never contacts an LLM."""
         return ""
 
     def drain_usage(self) -> dict[str, Any] | None:
@@ -84,14 +55,7 @@ class NoopRcaEngine:
 
 @dataclass
 class RcaThrottleConfig:
-    """Tunables that bound LLM RCA cost.
-
-    Attributes:
-        severity_min (SymptomSeverity): Minimum symptom severity allowed to
-            trigger an LLM call.
-        cooldown_seconds (float): Per-dedup-key cooldown between LLM calls.
-        max_calls_per_tick (int): Maximum number of LLM calls per tick.
-    """
+    """Tunables that bound LLM RCA cost."""
 
     severity_min: SymptomSeverity = SymptomSeverity.HIGH
     cooldown_seconds: float = 60.0
@@ -99,13 +63,7 @@ class RcaThrottleConfig:
 
 
 class RcaThrottle:
-    """Tick-aware cost guard for LLM RCA calls.
-
-    The ActionLadder/Reactor calls :meth:`begin_tick` once per tick (the
-    LlmRcaEngine does it lazily on the first ``summarize`` of a tick).
-    :meth:`should_call` then both checks the budget and returns whether
-    the engine should actually contact the LLM.
-    """
+    """Tick-aware cost guard for LLM RCA calls."""
 
     def __init__(
         self,
@@ -113,14 +71,7 @@ class RcaThrottle:
         *,
         state_view: "DetectorStateView | None" = None,
     ) -> None:
-        """Initialise the throttle and load any persisted cooldown state.
-
-        Args:
-            config (RcaThrottleConfig | None): Cost-guard tunables; a default
-                config is used when ``None``.
-            state_view (DetectorStateView | None): Optional disk-backed store
-                used to persist per-key cooldown timestamps across ticks.
-        """
+        """Initialise the throttle and load any persisted cooldown state."""
         self._config = config or RcaThrottleConfig()
         self._state_view = state_view
         # Disk-backed per-key cooldown timestamps; per-tick counters stay in-memory.
@@ -131,11 +82,7 @@ class RcaThrottle:
 
     @property
     def config(self) -> RcaThrottleConfig:
-        """Return the active throttle configuration.
-
-        Returns:
-            RcaThrottleConfig: The configuration in effect.
-        """
+        """Return the active throttle configuration."""
         return self._config
 
     def _persist(self) -> None:
@@ -149,30 +96,13 @@ class RcaThrottle:
         )
 
     def begin_tick(self, tick_id: int) -> None:
-        """Reset the per-tick call counter when a new tick begins.
-
-        Args:
-            tick_id (int): Identifier of the current tick.
-        """
+        """Reset the per-tick call counter when a new tick begins."""
         if self._tick_id != tick_id:
             self._tick_id = tick_id
             self._tick_calls = 0
 
     def should_call(self, sym: Symptom, *, now_unix: float, tick_id: int) -> bool:
-        """Decide whether an LLM call is permitted for this symptom now.
-
-        Applies the severity gate, the per-tick budget, and the per-key
-        cooldown in that order.
-
-        Args:
-            sym (Symptom): The symptom under consideration.
-            now_unix (float): Current wall-clock time in Unix seconds.
-            tick_id (int): Identifier of the current tick.
-
-        Returns:
-            bool: ``True`` if the engine may contact the LLM; ``False`` if any
-            guard rejects the call.
-        """
+        """Decide whether an LLM call is permitted for this symptom now."""
         self.begin_tick(tick_id)
         if sym.severity.rank < self._config.severity_min.rank:
             return False
@@ -184,12 +114,7 @@ class RcaThrottle:
         return True
 
     def record(self, sym: Symptom, *, now_unix: float) -> None:
-        """Record that an LLM call was made for a symptom and persist it.
-
-        Args:
-            sym (Symptom): The symptom that was just summarized.
-            now_unix (float): Wall-clock time of the call, in Unix seconds.
-        """
+        """Record that an LLM call was made for a symptom and persist it."""
         self._last_called_unix[sym.dedup_key()] = now_unix
         self._tick_calls += 1
         self._persist()
@@ -200,17 +125,11 @@ _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[1] / "prompts" / "rca.md"
 
 @lru_cache(maxsize=1)
 def load_rca_system_prompt() -> str:
-    """Read the RCA system prompt shipped as package data.
-
-    Returns:
-        str: The prompt text.
-    """
+    """Read the RCA system prompt shipped as package data."""
     return _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-# Floor for the Claude CLI transport's wall-clock budget. The RCA timeout is
-# sized for an HTTP round trip; the CLI spends part of its budget spawning a
-# process, so the HTTP figure would expire before the model is even reached.
+# Floor for the Claude CLI transport's wall-clock budget.
 _CLI_MIN_TIMEOUT_SEC = 60.0
 
 
@@ -220,25 +139,13 @@ def _client_timeout(timeout_s: float) -> Any:
 
 
 def _provider_env(*, api_key_env: str, api_key: str, base_url_env: str, base_url: str) -> dict[str, str]:
-    """Overlay the discovered RCA credentials onto the process env.
-
-    ``Config.discover`` may have resolved them from provider-specific variables
-    (eg. ``DEEPSEEK_*``), so the client factory cannot re-derive them from the
-    canonical names. Everything else the factory needs — gateway custom headers
-    above all — still comes from the process env.
-    """
+    """Overlay the discovered RCA credentials onto the process env."""
     return {**os.environ, api_key_env: api_key, base_url_env: base_url}
 
 
 @dataclass
 class LlmRcaEngine:
-    """Async OpenAI-compatible RCA engine (chat-server proxy).
-
-    ``hyperloom.common.llm_config`` owns the transport: it builds the provider
-    client and issues the chat completion, so this class carries only the
-    prompt, the throttle, and the token-usage ledger. ``base_url`` should
-    already include any version prefix (eg. ``/v1``).
-    """
+    """Async OpenAI-compatible RCA engine (chat-server proxy)."""
 
     base_url: str
     api_key: str
@@ -250,12 +157,12 @@ class LlmRcaEngine:
     client: Any = None
     _owns_client: bool = field(default=False, init=False, repr=False)
     _config_warned: bool = field(default=False, init=False, repr=False)
-    # Set once a failure proves further calls cannot succeed, so a permanent
-    # misconfiguration costs one ERROR rather than a warning every tick.
+    # Set once a failure proves further calls cannot succeed, so a permanent misconfiguration costs one ERROR rather
+    # than a warning every tick.
     _disabled: bool = field(default=False, init=False, repr=False)
     _current_tick_id: int = field(default=-1, init=False, repr=False)
-    # Token-usage accumulator across the calls made since the last drain, so
-    # the host (Coordinator) can fold the RCA LLM spend into its trace ledger.
+    # Token-usage accumulator across the calls made since the last drain, so the host (Coordinator) can fold the RCA
+    # LLM spend into its trace ledger.
     _usage_in: int = field(default=0, init=False, repr=False)
     _usage_out: int = field(default=0, init=False, repr=False)
     _usage_calls: int = field(default=0, init=False, repr=False)
@@ -269,11 +176,7 @@ class LlmRcaEngine:
             self.throttle = RcaThrottle()
 
     def _is_configured(self) -> bool:
-        """Whether this engine holds everything a call needs.
-
-        Returns:
-            bool: True when an RCA call can be issued.
-        """
+        """Whether this engine holds everything a call needs."""
         return bool(self.base_url and self.api_key)
 
     def _new_client(self) -> Any:
@@ -289,11 +192,7 @@ class LlmRcaEngine:
         )
 
     def _ensure_client(self) -> Any:
-        """Return the provider client, building it on first use.
-
-        Deferred so the connection pool binds to the event loop that issues the
-        request rather than whichever loop happened to construct the engine.
-        """
+        """Return the provider client, building it on first use."""
         if self.client is None:
             self.client = self._new_client()
             self._owns_client = True
@@ -309,13 +208,7 @@ class LlmRcaEngine:
             await self._aclose_client()
 
     def drain_usage(self) -> dict[str, Any] | None:
-        """Return + reset the token usage accumulated since the last drain.
-
-        Returns ``{"input_tokens", "output_tokens", "calls", "latency_ms",
-        "model"}`` aggregated over every chat call made this tick, or ``None``
-        when no call was made (so a no-LLM tick stays out of the trace). The
-        host folds this into its LLM ledger as ``component=robustness``.
-        """
+        """Return + reset the token usage accumulated since the last drain."""
         if self._usage_calls <= 0:
             return None
         out: dict[str, Any] = {
@@ -332,22 +225,12 @@ class LlmRcaEngine:
         return out
 
     async def summarize(self, symptom: Symptom) -> str:
-        """Summarize a symptom via the chat-server, subject to throttling.
-
-        Returns an empty string when the engine is unconfigured or when the
-        throttle rejects the call for this tick.
-
-        Args:
-            symptom (Symptom): The symptom to summarize.
-
-        Returns:
-            str: The (truncated) root-cause summary, or an empty string.
-        """
+        """Summarize a symptom via the chat-server, subject to throttling."""
         if self._disabled or not self._is_configured():
             return ""
         now_unix = time.time()
-        # tick_id = -1 = single shared bucket when no caller sets one;
-        # ActionLadder scopes per-tick buckets via set_tick (see decide()).
+        # tick_id = -1 = single shared bucket when no caller sets one; ActionLadder scopes per-tick buckets via
+        # set_tick (see decide()).
         tick_id = self._current_tick_id
         assert self.throttle is not None
         if not self.throttle.should_call(symptom, now_unix=now_unix, tick_id=tick_id):
@@ -358,13 +241,7 @@ class LlmRcaEngine:
         return _truncate(text, self.max_chars)
 
     def _note_call_failure(self, exc: BaseException) -> None:
-        """Record a failed call, disabling the engine when it can only recur.
-
-        A missing credential or an unusable transport is not a transient
-        provider error: every later tick would fail identically and log
-        identically. Those are reported once at ERROR and stop the engine;
-        everything else stays a warning and is retried.
-        """
+        """Record a failed call, disabling the engine when it can only recur."""
         permanent = isinstance(exc, llm_config.LLMConfigError) or not self._is_configured()
         if permanent:
             self._disabled = True
@@ -373,13 +250,7 @@ class LlmRcaEngine:
         log.warning("%s: completion failed: %r", type(self).__name__, exc)
 
     def _accumulate_usage(self, usage: Any, *, latency_ms: int) -> None:
-        """Fold one chat response's ``usage`` object into the accumulator.
-
-        Counts the call (and its latency) even when the provider omitted a
-        ``usage`` block, so the trace still reflects that an RCA call happened.
-        OpenAI-shape ``prompt_tokens`` / ``completion_tokens`` map onto the
-        canonical in/out counters; bad values contribute 0.
-        """
+        """Fold one chat response's ``usage`` object into the accumulator."""
         self._usage_calls += 1
         self._usage_latency_ms += max(0, int(latency_ms))
         if usage is None:
@@ -394,29 +265,13 @@ class LlmRcaEngine:
             pass
 
     def set_tick(self, tick_id: int) -> None:
-        """Hook used by ActionLadder to scope per-tick budgets.
-
-        Args:
-            tick_id (int): Identifier of the current tick; routes the per-tick
-                LLM budget to a single bucket.
-        """
+        """Hook used by ActionLadder to scope per-tick budgets."""
         self._current_tick_id = tick_id
         if self.throttle is not None:
             self.throttle.begin_tick(tick_id)
 
     async def _call(self, symptom: Symptom) -> str:
-        """Issue the chat-completion request and extract the reply text.
-
-        Every provider-side failure (transport, HTTP status, decoding) is
-        logged and degraded to an empty string: RCA text is advisory, so a
-        provider outage must not abort the reactor tick that asked for it.
-
-        Args:
-            symptom (Symptom): The symptom whose evidence is sent to the LLM.
-
-        Returns:
-            str: The model's reply content, or an empty string on any failure.
-        """
+        """Issue the chat-completion request and extract the reply text."""
         params: dict[str, Any] = {
             "model": self.model,
             "messages": [
@@ -446,31 +301,14 @@ class LlmRcaEngine:
 
 @dataclass
 class AnthropicRcaEngine(LlmRcaEngine):
-    """Anthropic-side RCA engine, issuing one single-shot completion.
-
-    Only the transport differs from :class:`LlmRcaEngine`; the throttle, the
-    usage ledger, and the prompt are inherited unchanged. It holds no client of
-    its own because :func:`llm_config.aanthropic_completion` owns transport
-    selection, which can resolve to a per-call Claude CLI session.
-    """
+    """Anthropic-side RCA engine, issuing one single-shot completion."""
 
     def _is_configured(self) -> bool:
-        """Whether a completion could actually be issued.
-
-        Defers to the transport probe rather than the inherited
-        ``base_url and api_key`` test: a subscription token reaches this
-        process as neither, and answering an unconditional ``True`` would let a
-        host with no Anthropic credential at all — or with a token but no
-        Claude CLI — retry a doomed call on every tick.
-        """
+        """Whether a completion could actually be issued."""
         return llm_config.anthropic_transport_ready(self._resolved_env())
 
     def _resolved_env(self) -> dict[str, str]:
-        """Environment carrying whatever ``Config.discover`` resolved.
-
-        The discovered pair may come from provider-specific variables, so the
-        canonical names have to be overlaid before the transport reads them.
-        """
+        """Environment carrying whatever ``Config.discover`` resolved."""
         return _provider_env(
             api_key_env="ANTHROPIC_API_KEY",
             api_key=self.api_key,
@@ -479,23 +317,7 @@ class AnthropicRcaEngine(LlmRcaEngine):
         )
 
     async def _call(self, symptom: Symptom) -> str:
-        """Issue one tool-free Anthropic completion and extract text content.
-
-        Degrades to an empty string on failure for the same reason as
-        :meth:`LlmRcaEngine._call`. ``temperature`` matches the OpenAI engine's
-        0.2 and reaches the model on the HTTP path; the CLI path drops it,
-        having no such knob, and relies on the prompt to pin the output shape.
-
-        The CLI transport gets its own budget instead of ``timeout_s``: that
-        knob is sized for an HTTP round trip, while the CLI spawns a process
-        first, so reusing it would time out during startup on every call.
-
-        Args:
-            symptom (Symptom): The symptom whose evidence is sent to the LLM.
-
-        Returns:
-            str: The model's reply content, or an empty string on any failure.
-        """
+        """Issue one tool-free Anthropic completion and extract text content."""
         _t0 = time.perf_counter()
         try:
             result = await llm_config.aanthropic_completion(
@@ -533,14 +355,7 @@ class AnthropicRcaEngine(LlmRcaEngine):
 
 
 def _build_user_prompt(sym: Symptom) -> str:
-    """Render a symptom into a prompt string.
-
-    Args:
-        sym (Symptom): The symptom to describe.
-
-    Returns:
-        str: The newline-joined user prompt.
-    """
+    """Render a symptom into a prompt string."""
     lines = [
         f"symptom: {sym.name}",
         f"severity: {sym.severity.value}",
@@ -564,18 +379,7 @@ def _uses_max_completion_tokens(model: str) -> bool:
 
 
 def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:
-    """Flatten arbitrary evidence into indented, human-readable lines.
-
-    Mappings are recursed (sorted by key), sequences are truncated to the
-    first ten items, and scalars are rendered directly.
-
-    Args:
-        payload (Any): The evidence value to format.
-        prefix (str): Indentation prefix applied to each emitted line.
-
-    Returns:
-        list[str]: The formatted lines.
-    """
+    """Flatten arbitrary evidence into indented, human-readable lines."""
     if isinstance(payload, Mapping):
         out: list[str] = []
         for k in sorted(payload.keys()):
@@ -592,16 +396,7 @@ def _format_evidence(payload: Any, prefix: str = "  ") -> list[str]:
 
 
 def _truncate(text: str, max_chars: int) -> str:
-    """Trim text to a maximum length, appending an ellipsis when cut.
-
-    Args:
-        text (str): The text to truncate.
-        max_chars (int): Maximum allowed length of the result.
-
-    Returns:
-        str: The stripped text, shortened with a trailing ``...`` if it
-        exceeded ``max_chars``.
-    """
+    """Trim text to a maximum length, appending an ellipsis when cut."""
     text = (text or "").strip()
     if len(text) <= max_chars:
         return text
@@ -615,17 +410,7 @@ _THROTTLE_KEY_SEP: str = "\x1f"
 def _encode_throttle_keys(
     last_called: dict[tuple[str, ...], float],
 ) -> dict[str, float]:
-    """Serialise tuple-keyed cooldown timestamps to a JSON-safe dict.
-
-    Tuple key parts are joined with the unit-separator so they round-trip
-    through JSON object keys; malformed entries are skipped.
-
-    Args:
-        last_called (dict[tuple[str, ...], float]): Per-key last-call times.
-
-    Returns:
-        dict[str, float]: A dict with string keys safe for JSON storage.
-    """
+    """Serialise tuple-keyed cooldown timestamps to a JSON-safe dict."""
     out: dict[str, float] = {}
     for key, ts in last_called.items():
         try:
@@ -640,15 +425,7 @@ def _encode_throttle_keys(
 
 
 def _decode_throttle_keys(payload: Any) -> dict[tuple[str, ...], float]:
-    """Inverse of :func:`_encode_throttle_keys`; tolerant of bad input.
-
-    Args:
-        payload (Any): The persisted mapping of encoded keys to timestamps.
-
-    Returns:
-        dict[tuple[str, ...], float]: The decoded tuple-keyed cooldown dict;
-        empty when ``payload`` is not a dict.
-    """
+    """Inverse of :func:`_encode_throttle_keys`; tolerant of bad input."""
     if not isinstance(payload, dict):
         return {}
     out: dict[tuple[str, ...], float] = {}

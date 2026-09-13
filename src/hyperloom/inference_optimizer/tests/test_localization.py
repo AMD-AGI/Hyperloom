@@ -26,9 +26,7 @@ def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
     return CapabilityGap.from_signature(FailureSignature(kind=kind, confidence=0.9))
 
 
-# ---------------------------------------------------------------------------
 # classify_closure — compiled-closure gate
-# ---------------------------------------------------------------------------
 
 
 def test_closure_empty():
@@ -54,9 +52,7 @@ def test_closure_file_cap_defers_rung5():
     assert v.kind == loc.NEEDS_RUNG5
 
 
-# ---------------------------------------------------------------------------
 # synthesize_vendor_diff + parse_diff_paths
-# ---------------------------------------------------------------------------
 
 
 def test_synthesize_vendor_add():
@@ -77,9 +73,7 @@ def test_synthesize_vendor_skips_identical():
     assert loc.synthesize_vendor_diff([("a.py", "same\n", "same\n")]) == ""
 
 
-# ---------------------------------------------------------------------------
 # build_localization_diff (injected shims)
-# ---------------------------------------------------------------------------
 
 
 def _pr_action() -> EnablementStackAction:
@@ -140,9 +134,7 @@ def test_build_vendor_files_synthesizes():
     assert "diff --git a/vllm/new.py b/vllm/new.py" in dt
 
 
-# ---------------------------------------------------------------------------
 # Applies to a temp git tree (end-to-end diff validity)
-# ---------------------------------------------------------------------------
 
 
 def test_synthesized_add_applies_to_git_tree(tmp_path):
@@ -158,9 +150,7 @@ def test_synthesized_add_applies_to_git_tree(tmp_path):
     assert (repo / "pkg" / "new_model.py").read_text().strip().endswith("return 42")
 
 
-# ---------------------------------------------------------------------------
 # adapter localization hooks
-# ---------------------------------------------------------------------------
 
 
 def test_vllm_localization_action_and_refresh(monkeypatch):

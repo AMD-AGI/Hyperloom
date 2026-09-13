@@ -10,9 +10,7 @@ import sys
 from collections.abc import Iterable
 
 
-# This smoke exercises ``kernelforge forge-loop``. Keep shared package surfaces
-# in scope because the loop imports them, but do not spend a GPU run on changes
-# confined to the independent fusion or GEMM-tuning products.
+# This smoke exercises ``kernelforge forge-loop``.
 FORGE_E2E_PATHS = (
     "src/kernelforge/**",
     "pyproject.toml",
@@ -45,8 +43,8 @@ def requires_forge_e2e(paths: Iterable[str]) -> bool:
 
 
 def main() -> int:
-    # Consume all input before exiting: this runs after jq with pipefail enabled,
-    # and an early exit could SIGPIPE jq and turn a positive match into failure.
+    # Consume all input before exiting: this runs after jq with pipefail enabled, and an early exit could SIGPIPE jq
+    # and turn a positive match into failure.
     return 0 if requires_forge_e2e(sys.stdin.read().splitlines()) else 1
 
 

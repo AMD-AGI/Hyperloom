@@ -1,10 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for orchestrator/supervisor.py pure logic (no LLM/subprocess).
-
-Covers the prompt builder's three file-access modes and interaction persistence.
-Provider dispatch is covered through the shared registry in
-``test_supervisor_backend.py``."""
+"""Unit tests for orchestrator/supervisor.py pure logic (no LLM/subprocess)."""
 
 from __future__ import annotations
 

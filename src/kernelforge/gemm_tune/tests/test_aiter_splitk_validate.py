@@ -2,14 +2,25 @@
 # SPDX-License-Identifier: MIT
 """Pure-logic tests for per-shape production split-K trial (no GPU).
 
-``_supports`` is the only GPU-touching call; monkeypatching it exercises the
-scan / control-gate / memoization logic on any host.
+The registered per-op probe is the only GPU-touching call; substituting it in
+``_TRIAL_OPS`` exercises the scan / control-gate / memoization logic anywhere.
 """
 
 from __future__ import annotations
 
 import kernelforge.gemm_tune.aiter_splitk_validate as mod
-from kernelforge.gemm_tune.aiter_splitk_validate import make_support_fn, max_supported_splitk
+from kernelforge.gemm_tune.aiter_splitk_validate import (
+    make_support_fn,
+    max_supported_splitk,
+    supported_ops,
+)
+
+OP = "a8w8_blockscale"
+
+
+def _probe(monkeypatch, fn, op: str = OP) -> None:
+    """Register ``fn`` as ``op``'s production probe for one test."""
+    monkeypatch.setitem(mod._TRIAL_OPS, op, fn)
 
 
 def test_none_when_control_fails(monkeypatch):
@@ -17,25 +28,25 @@ def test_none_when_control_fails(monkeypatch):
     def boom(m, n, k, sk, device="cuda"):
         raise RuntimeError("no gpu")
 
-    monkeypatch.setattr(mod, "_supports", boom)
+    _probe(monkeypatch, boom)
     assert max_supported_splitk(64, 5120, 5120) is None
 
 
 def test_none_when_control_unsupported(monkeypatch):
     # Control returns False (not an exception) -> still None.
-    monkeypatch.setattr(mod, "_supports", lambda m, n, k, sk, device="cuda": False)
+    _probe(monkeypatch, lambda m, n, k, sk, device="cuda": False)
     assert max_supported_splitk(64, 5120, 5120) is None
 
 
 def test_scans_to_first_gap(monkeypatch):
     # Supports 0,1,2 then fails at 3 -> max is 2.
-    monkeypatch.setattr(mod, "_supports", lambda m, n, k, sk, device="cuda": sk <= 2)
+    _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 2)
     assert max_supported_splitk(64, 5120, 5120, ceiling=6) == 2
 
 
 def test_higher_max_when_supported(monkeypatch):
     # A shape that supports up to 3 keeps the extra gain cap=2 would drop.
-    monkeypatch.setattr(mod, "_supports", lambda m, n, k, sk, device="cuda": sk <= 3)
+    _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 3)
     assert max_supported_splitk(16, 5120, 5120, ceiling=6) == 3
 
 
@@ -46,7 +57,7 @@ def test_exception_mid_scan_treated_as_unsupported(monkeypatch):
             raise RuntimeError("dispatch blew up")
         return True
 
-    monkeypatch.setattr(mod, "_supports", flaky)
+    _probe(monkeypatch, flaky)
     assert max_supported_splitk(64, 5120, 5120, ceiling=6) == 1
 
 
@@ -57,19 +68,49 @@ def test_make_support_fn_memoizes_per_shape(monkeypatch):
         calls.append((m, n, k, sk))
         return sk <= 2
 
-    monkeypatch.setattr(mod, "_supports", fake)
-    fn = make_support_fn()
+    _probe(monkeypatch, fake)
+    fn = make_support_fn(op=OP)
     a = fn(64, 5120, 5120)
-    b = fn(64, 5120, 5120)  # cached -> no new _supports calls
+    b = fn(64, 5120, 5120)  # cached -> no new probe calls
     assert a == b == 2
     assert {(m, n, k) for (m, n, k, _sk) in calls} == {(64, 5120, 5120)}
     # control + scan 1,2,3 == 4 trials, once (not doubled by the second fn call)
     assert len(calls) == 4
 
 
+class TestOpAwareness:
+    """A limit measured on one op's kernel must never be handed to another.
+
+    Answering with the wrong kernel would either license a splitK the real
+    kernel rejects (engine-init crash) or tighten one it accepts (silent loss),
+    so an op without a registered probe has to answer "unknown".
+    """
+
+    def test_only_verified_ops_are_registered(self):
+        # bpreshuffle's ck/cktile wrappers take no splitK argument at all, so
+        # there is no production limit to measure for them.
+        assert supported_ops() == {"a8w8_blockscale"}
+        assert "a8w8_blockscale_bpreshuffle" not in supported_ops()
+
+    def test_unregistered_op_never_trials(self, monkeypatch):
+        calls = []
+
+        def fake(m, n, k, sk, device="cuda"):
+            calls.append(sk)
+            return True
+
+        _probe(monkeypatch, fake)
+        assert max_supported_splitk(64, 5120, 17408, op="a8w8_blockscale_bpreshuffle") is None
+        assert not calls, "an unregistered op must not dispatch another op's kernel"
+
+    def test_unregistered_op_support_fn_answers_unknown(self, monkeypatch):
+        _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 3)
+        fn = make_support_fn(op="a4w4_blockscale")
+        assert fn(64, 5120, 5120) is None
+
+
 class TestResolveDevice:
-    """`_resolve_device` pins the in-process trial to the tuner's assigned card
-    instead of always using device 0 (review: multi-tenant wrong-GPU)."""
+    """`_resolve_device` pins the in-process trial to the tuner's assigned card instead of always using device 0 (review: multi-tenant wrong-GPU)."""
 
     def test_empty_gpu_ids_defaults_to_cuda(self, monkeypatch):
         for k in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
@@ -93,8 +134,7 @@ class TestResolveDevice:
         assert mod._resolve_device("7") == "cuda"
 
     def test_make_support_fn_accepts_gpu_ids(self, monkeypatch):
-        # gpu_ids is threaded through without touching the GPU (control fails
-        # -> None) and does not raise.
-        monkeypatch.setattr(mod, "_supports", lambda m, n, k, sk, device="cuda": False)
-        fn = make_support_fn(gpu_ids="1")
+        # gpu_ids is threaded through without touching the GPU (control fails -> None) and does not raise.
+        _probe(monkeypatch, lambda m, n, k, sk, device="cuda": False)
+        fn = make_support_fn(gpu_ids="1", op=OP)
         assert fn(64, 5120, 5120) is None

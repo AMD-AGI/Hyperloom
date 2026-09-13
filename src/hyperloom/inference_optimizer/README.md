@@ -22,7 +22,7 @@ GitHub Releases (see `examples/README.md`), not from PyPI.
 * **[../../../README.md](../../../README.md)** — repository-level overview,
   quickstart links, and the documentation index.
 * **[../../../docs/conceptual/optimization-loop.md](../../../docs/conceptual/optimization-loop.md)**
-  — the conversational orchestration loop, the phase chain and per-phase
+  — the stateless orchestration loop, the phase chain and per-phase
   contracts, RecipeKB feedback loops, and the retired-names list.
 * **[../../../docs/reference/authentication.md](../../../docs/reference/authentication.md)** — credential
   and environment configuration.

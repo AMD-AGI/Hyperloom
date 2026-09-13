@@ -50,8 +50,6 @@ AITER_FUSED_MOE_BF16_FP4 = (
 )
 
 # Verbatim lines from a production server.log, one per wording aiter emits.
-# Kept literal because the previous hand-written fixtures dropped the leading
-# gfx field, which let a regex that could never match a real log pass its tests.
 REAL_2STAGE_DEFAULT = (
     "[aiter] [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, 512, 256, 6, "
     "'ActivationType.Silu', 'torch.bfloat16', 'torch.float8_e4m3fn', "
@@ -128,13 +126,7 @@ class TestCkMoeTunerSupport:
         assert krh._aiter_ck_moe_tuner_supports(log)
 
     def test_a_mixed_log_stays_tunable_because_rows_are_filtered(self, tmp_path):
-        """One checkpoint dispatches several pairs; the tunable ones still count.
-
-        Measured in production: the same model logs both a BF16-activation and an
-        FP8-activation problem. Blocking the whole model on the unsupported one
-        would forfeit the tunable half, so the untunable rows are dropped when the
-        tuning input is written instead.
-        """
+        """One checkpoint dispatches several pairs; the tunable ones still count."""
         log = _log(
             tmp_path,
             _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
@@ -158,12 +150,7 @@ class TestCkMoeTunerSupport:
 
 
 class TestDispatchKeyExtraction:
-    """The regex must match every wording aiter actually emits.
-
-    A hand-written fixture previously omitted the leading gfx field, so a regex
-    that could not match a single real log line passed its tests while silently
-    disabling the dtype gate in production.
-    """
+    """The regex must match every wording aiter actually emits."""
 
     def test_matches_the_plain_default_wording(self, tmp_path):
         keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_DEFAULT))

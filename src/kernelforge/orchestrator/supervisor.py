@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read-only Supervisor for the forge-loop (AVO self-supervision).
-
-When the Implementer stalls, the loop calls this Supervisor to review the whole
-evolution trajectory, correct subjective conclusions in historical session
-records, and advise the next planning cycle.
-
-The Supervisor only READS (never edits). Its free-form ruling is persisted
-verbatim, consumed by Orchestration, and rendered into the next Implementer
-prompt. Best-effort: any failure returns "" and the loop continues.
-"""
+"""Read-only Supervisor for the forge-loop (AVO self-supervision)."""
 
 from __future__ import annotations
 
@@ -24,7 +15,7 @@ from typing import Awaitable, Callable
 
 from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -40,11 +31,8 @@ _SUPERVISOR_ROLE = (
     "do not write code — you only analyze and issue the current planning ruling."
 )
 
-# Capability + context maxed for the heterogeneous supervisor: its periodic
-# trajectory review is worth a deep, well-grounded pass, so give it a large
-# reasoning budget and generous exploration turns. These are ceilings — a review
-# that needs less finishes early, regardless of whether the primary or fallback
-# provider model serves the request.
+# Capability + context maxed for the heterogeneous supervisor: its periodic trajectory review is worth a deep,
+# well-grounded pass, so give it a large reasoning budget and generous exploration turns.
 SUPERVISOR_THINKING_BUDGET = 64000  # deep reasoning budget for the trajectory review
 SUPERVISOR_MAX_TURNS = 40  # room to Read many prior kernels/profiles/diffs
 SUPERVISOR_DIRECTIONS = 3  # how many new directions to propose
@@ -80,14 +68,7 @@ def clear_latest_supervisor_ruling(workspace: str) -> bool:
 def _persist_interaction(
     workspace: str, iteration: int, reason: str, system: str, user: str, reply: str, *, backend: str, model: str
 ) -> None:
-    """Save one supervisor intervention (prompt + reply) for later inspection.
-
-    Written to ``<workspace>/forge_experiments/supervisor/intervention_iter_NNN.md``.
-    Best-effort: a persistence failure must never break the loop. Every attempt
-    is archived, including an empty reply. A non-empty reply also atomically
-    replaces ``latest.md`` so Orchestration and resumed runs can consume the
-    complete current ruling without parsing an event or truncated state field.
-    """
+    """Save one supervisor intervention (prompt + reply) for later inspection."""
     try:
         d = Path(workspace) / "forge_experiments" / "supervisor"
         d.mkdir(parents=True, exist_ok=True)
@@ -127,14 +108,7 @@ def persist_supervisor_ruling(
     reason: str,
     reply: str,
 ) -> tuple[Path | None, Path | None]:
-    """Ensure any injected Supervisor callback has durable audit artifacts.
-
-    The registered Supervisor persists its complete prompt and reply before
-    returning. A caller may inject another callback directly into
-    :class:`IterationLoop`; when no full interaction artifact exists, write a
-    minimal audit record containing the trigger and exact reply. In both cases,
-    atomically store the reply text unchanged in ``latest.md``.
-    """
+    """Ensure any injected Supervisor callback has durable audit artifacts."""
     if not reply or not reply.strip():
         return None, None
     interaction = Path(workspace) / "forge_experiments" / "supervisor" / f"intervention_iter_{iteration:03d}.md"
@@ -236,6 +210,10 @@ def make_supervisor_fn(
     if backend and backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             backend,
+            # The model variable is per-provider, so switching provider means
+            # re-reading it. Leaving it out ran the supervisor on the registry
+            # default no matter what ``CODEX_MODEL``/``CLAUDE_MODEL`` said.
+            model=resolve_agent_model(backend),
             executable="",
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
@@ -285,9 +263,7 @@ def make_supervisor_fn(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise asyncio.TimeoutError
-                # One budget drives both, so the backend's own deadline always fires
-                # before the outer watchdog. Rounded up: a sub-second sliver of
-                # elapsed time must not shorten the configured session budget.
+                # One budget drives both, so the backend's own deadline always fires before the outer watchdog.
                 session_budget = max(1, math.ceil(min(float(timeout_sec), remaining)))
                 result = await asyncio.wait_for(
                     selected_backend.run(
@@ -297,7 +273,6 @@ def make_supervisor_fn(
                             cwd=workspace,
                             writable=False,
                             timeout_sec=session_budget,
-                            reasoning_effort="max",
                             tool_policy=AgentToolPolicy(
                                 read=True,
                                 search=True,

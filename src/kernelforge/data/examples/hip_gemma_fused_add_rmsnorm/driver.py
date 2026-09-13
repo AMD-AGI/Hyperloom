@@ -1,28 +1,4 @@
-"""Measurement driver for the fused residual-add + Gemma RMSNorm task (HIP).
-
-forge-loop treats the driver as a black box invoked as ``python driver.py <args>``
-and communicates with it purely through stdout. This driver implements the two
-modes of that contract:
-
-  * Correctness  ``python driver.py`` -> runs the complete suite and prints
-    ``SNR: <db> dB`` (and ``allclose: True/False``).
-    forge invokes this once as the driver-owned complete correctness suite.
-
-  * Benchmark    ``python driver.py --warmup <n> --iters <n>
-    --bench-mode`` -> prints ``wall_ms`` samples plus one ``case_ms`` aggregate.
-    forge takes the median of those samples as the kernel's wall time.
-
-  * Profiling    ``python driver.py --profile-run`` -> the driver selects the
-    profile case, runs only the target kernel, and exits without reference/timing.
-
-The driver is the correctness ORACLE and the perf MEASURER; forge never edits it
-(it is a protected measurement file). It imports the kernel under optimization by
-its stable public name ``fused_add_rmsnorm`` from ``fused_add_rmsnorm_kernel.py``.
-
-The op has TWO outputs (the normalized activations and the summed residual). Both
-are scored, and the reported SNR is the WORSE of the two, so a kernel cannot pass
-by getting only one of them right.
-"""
+"""Measurement driver for the fused residual-add + Gemma RMSNorm task (HIP)."""
 
 from __future__ import annotations
 
@@ -57,8 +33,7 @@ def _make_inputs(
     residual = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
     weight = torch.randn(hidden, device=device, dtype=torch.bfloat16)
     if mode == "stability":
-        # Large magnitudes overflow a kernel that squares in bf16 instead of
-        # accumulating the mean-of-squares in fp32.
+        # Large magnitudes overflow a kernel that squares in bf16 instead of accumulating the mean-of-squares in fp32.
         x = x * 240.0
         residual = residual * 240.0
     return x, residual, weight
@@ -102,8 +77,7 @@ def _run_correctness(rows: int, hidden: int, mode: str, device: str) -> int:
 
     ref_out, ref_residual = _reference(x, residual, weight)
 
-    # Report the WORSE of the two outputs so one correct tensor cannot mask a
-    # broken one.
+    # Report the WORSE of the two outputs so one correct tensor cannot mask a broken one.
     snr = min(_snr_db(ref_out, out), _snr_db(ref_residual, residual_out))
     ok = _close(out, ref_out) and _close(residual_out, ref_residual)
     print(f"SNR: {snr:.2f} dB")
@@ -113,9 +87,8 @@ def _run_correctness(rows: int, hidden: int, mode: str, device: str) -> int:
 
 
 def _run_bench(rows: int, hidden: int, warmup: int, iters: int, device: str) -> int:
-    # Static tensors allocated once; the graph harness replays the op on the same
-    # memory so it times GPU execution, not host launch overhead. The kernel never
-    # writes to its inputs, so every replay recomputes the same result.
+    # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
+    # not host launch overhead.
     x, residual, weight = _make_inputs(rows, hidden, "full", device)
     out = torch.empty_like(x)
     residual_out = torch.empty_like(x)
@@ -124,8 +97,8 @@ def _run_bench(rows: int, hidden: int, warmup: int, iters: int, device: str) -> 
     def step() -> None:
         fused_add_rmsnorm(x, residual, weight, out, residual_out)
 
-    # dirty + verify prove the graph actually captured the kernel (an uncaptured
-    # launch would leave the outputs at their dirtied values and fail verify).
+    # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave the outputs at
+    # their dirtied values and fail verify).
     def dirty() -> None:
         out.zero_()
         residual_out.zero_()

@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unified candidate key + terminal-row invariant.
-
-Covers: candidate_key dedup unification; ``_stamp_framework_progress`` as the
-single idempotent terminal-row writer; silent apply/bench failure stamping a
-``no_result_failed`` row; and the repeated-review cap force-aborting with a
-``repeated_review_abort`` row.
-"""
+"""Unified candidate key + terminal-row invariant."""
 
 from __future__ import annotations
 
@@ -115,12 +109,7 @@ def test_stamp_empty_key_is_noop(tmp_path: Path):
 
 
 def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
-    """An upstream-PR task settling ``status="failed"`` routes to
-    ``_handle_unpromotable_result`` and must be stamped no_result_failed.
-
-    That task never reaches the promote branch that writes the terminal row,
-    so without this stamp the pump re-selects the candidate every tick.
-    """
+    """An upstream-PR task settling ``status="failed"`` routes to ``_handle_unpromotable_result`` and must be stamped no_result_failed."""
     coord = _MiniCoord(tmp_path)
     task = SimpleNamespace(
         kind="integrate_patch",
@@ -150,8 +139,8 @@ class _BusStub:
 
 
 class _ReviewCoord(_MiniCoord):
-    # Borrowed alongside the method that reads it: the stub used to get away
-    # without it because the helper swallowed its own AttributeError.
+    # Borrowed alongside the method that reads it: the stub used to get away without it because the helper swallowed
+    # its own AttributeError.
     _CRITIC_PRIORS_OUTCOME_TAIL = Coordinator._CRITIC_PRIORS_OUTCOME_TAIL
     _collect_framework_agent_candidate_priors = Coordinator._collect_framework_agent_candidate_priors
     _submit_framework_agent_candidate_for_review = Coordinator._submit_framework_agent_candidate_for_review

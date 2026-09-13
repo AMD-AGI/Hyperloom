@@ -1,20 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Field projections shared by the SBD V6 event recorders.
-
-The ``roofline`` and ``kernel`` recorders both project the result of
-``trace_analyze_handler`` -- roofline as its own ``analysis`` sub-step, kernel as
-the analysis the phase requested before dispatching a rewrite. The same tool
-result must land in the same shape in both, so the projection lives here rather
-than once per recorder: the bounds below carry measured justifications, and a
-second copy of them would drift the moment one recorder's limit is retuned.
-
-Everything here is a pure function over a tool result. Nothing here writes, and
-nothing here knows which event its output ends up in, which is what lets the
-same projection serve a row recorded at author time and the same row replayed
-out of a subprocess's own JSON.
-"""
+"""Field projections shared by the SBD V6 event recorders."""
 
 from __future__ import annotations
 
@@ -39,6 +26,7 @@ __all__ = [
     "failure_row",
     "float_or_none",
     "int_or_none",
+    "now_iso_micros",
     "now_iso_seconds",
     "summarize_hot_kernels",
     "summarize_warnings",
@@ -48,20 +36,21 @@ __all__ = [
 
 now_iso_seconds = functools.partial(now_iso, "seconds")
 
-# Kept small on purpose. The full candidate list already lives in the
-# ``kernel_candidates`` artifact, so the event carries the ranking head for
-# "what did this analysis actually hand to dispatch", not the payload. p95 is
-# 25 hot kernels and the max observed is 114; 15 matches the ``hot_kernels_top15``
-# slice that the pipeline itself routes on.
+#: For rows whose order carries meaning and that land faster than one a second.
+#: Ordering does not rest on this alone -- the wall clock is not monotonic across
+#: an NTP step or a resume, so rows that must hold an order carry an explicit
+#: ordinal and use the stamp only to read them by.
+now_iso_micros = functools.partial(now_iso, "microseconds")
+
+# The full candidate list already lives in the ``kernel_candidates`` artifact,
+# so the event carries only the ranking head. 15 matches the
+# ``hot_kernels_top15`` slice that the pipeline itself routes on.
 MAX_HOT_KERNELS = 15
 
-# Warning payloads carry long remediation prose. The code / severity pair is the
-# queryable part, so the message is clipped rather than dropped.
+# Warning payloads carry long remediation prose.
 MAX_WARNING_MESSAGE_CHARS = 600
 
-# Ceiling for the open-ended blocks a tool fills freely (``route_ext``, per-step
-# ``detail``). Generous enough for the summary dicts both tools produce today,
-# small enough that a verbose one cannot dominate the SBD payload.
+# Ceiling for the open-ended blocks a tool fills freely (``route_ext``, per-step ``detail``).
 MAX_EXT_BLOCK_BYTES = 8192
 
 
@@ -102,15 +91,8 @@ def float_or_none(value: Any) -> float | None:
 def text_or_none(value: Any) -> str | None:
     """Distinguish "not recorded" from "recorded empty".
 
-    V6 reserves ``None`` for a field nothing produced. An empty string means the
-    producer ran and had nothing to say, which is a different fact, so callers
-    that genuinely do not know must pass ``None`` rather than ``""``.
-
-    Args:
-        value: The raw value.
-
-    Returns:
-        The stripped text, or ``None`` when there is none.
+    V6 reserves ``None`` for a field nothing produced; ``""`` means the producer
+    ran and had nothing to say, so a caller that does not know passes ``None``.
     """
     if value is None:
         return None
@@ -119,14 +101,7 @@ def text_or_none(value: Any) -> str | None:
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
-    """Project the hot-kernel ranking head into the event.
-
-    Args:
-        rows: The tool's ``hot_kernels`` / ``hot_kernels_top15`` list.
-
-    Returns:
-        A dict with the full count and a bounded, trimmed ranking head.
-    """
+    """Project the hot-kernel ranking head into the event."""
     candidates = [row for row in as_list(rows) if isinstance(row, dict)]
     top: list[dict[str, Any]] = []
     for row in candidates[:MAX_HOT_KERNELS]:
@@ -149,12 +124,6 @@ def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
     ``code`` already carries its own namespace (``bypass_*`` for the TraceLens-free
     reader, bare names for TraceLens), so one flat list serves every route; the
     remaining keys are parked under ``detail`` instead of widening the row.
-
-    Args:
-        rows: The tool's ``trace_health_warnings`` list.
-
-    Returns:
-        The normalized warning rows.
     """
     out: list[dict[str, Any]] = []
     for row in as_list(rows):
@@ -173,24 +142,7 @@ def summarize_warnings(rows: Any) -> list[dict[str, Any]]:
 
 
 def bounded_block(value: Any, *, label: str, limit_bytes: int = MAX_EXT_BLOCK_BYTES) -> Any:
-    """Drop an open-ended sub-block that would blow up the event payload.
-
-    Every other field here is bounded by construction, but ``route_ext`` and the
-    per-step ``detail`` dicts are deliberately open: a tool can put anything in
-    them, and the TraceLens-free reader in particular parks whole ``attribution``
-    / ``timeline`` / ``graph_coverage`` objects there. Rather than enumerate
-    tool-specific keys -- which would defeat the point of an open block -- this
-    keeps the block when it is small and replaces it with its shape when it is
-    not, so one verbose tool cannot silently multiply the SBD payload.
-
-    Args:
-        value: The block to bound.
-        label: Block name, reported when the block is dropped.
-        limit_bytes: Serialized-size ceiling for the block.
-
-    Returns:
-        The block unchanged, or a descriptor naming what was dropped.
-    """
+    """Drop an open-ended sub-block that would blow up the event payload."""
     if not isinstance(value, (dict, list)):
         return value
     try:
@@ -213,22 +165,17 @@ def bounded_block(value: Any, *, label: str, limit_bytes: int = MAX_EXT_BLOCK_BY
 
 #: Action statuses from worst to best, for the event types whose event holds an
 #: array of actions. A failure ranks above everything so a later action that
-#: recovered from it cannot hide it, and a success ranks above ``skipped`` for
-#: the mirror-image reason: an action that was refused before it ran does not
-#: unmake the anchor a sibling action established.
+#: recovered cannot hide it, and a success ranks above ``skipped`` because an
+#: action refused before it ran does not unmake a sibling's anchor.
 STATUS_ORDER: tuple[str, ...] = ("failed", "degraded", "running", "succeeded", "skipped")
 
 
 def worst_status(statuses: Iterable[Any]) -> str:
     """Reduce the statuses of an event's actions to the one the event reports.
 
-    Args:
-        statuses (Iterable[Any]): The statuses of the actions the event holds.
-
-    Returns:
-        str: The worst of them per :data:`STATUS_ORDER`, an unranked status as
-            given when that is all there is, or ``"skipped"`` when there are
-            none -- an event holding no action recorded nothing to judge.
+    The worst of them per :data:`STATUS_ORDER`, an unranked status as given
+    when that is all there is, or ``"skipped"`` when there are none -- an event
+    holding no action recorded nothing to judge.
     """
     present = [str(status) for status in statuses if str(status or "")]
     for status in STATUS_ORDER:
@@ -247,14 +194,7 @@ def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict
 
 
 def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
-    """Project the artifact paths a ``trace_analyze`` result surfaces.
-
-    Args:
-        result: The analysis tool's result dict.
-
-    Returns:
-        The artifact path block, with absent paths as empty strings.
-    """
+    """Project the artifact paths a ``trace_analyze`` result surfaces, absent ones as ``""``."""
     return {
         "trace_report_path": str(result.get("trace_report_path") or ""),
         "analysis_report_path": str(result.get("analysis_report_path") or ""),
@@ -268,16 +208,10 @@ def analysis_artifacts(result: dict[str, Any]) -> dict[str, Any]:
 def analysis_detail(result: Any) -> dict[str, Any]:
     """Project one ``trace_analyze`` result into the shared detail block.
 
-    ``route`` and ``tool`` both come from ``_build_analysis_meta``: the agent
-    route reports ``agent`` / ``tracelens``, while the TraceLens-free reader
-    reports ``bypass`` / ``bypass``. Keeping both preserves routing policy and
-    tool provenance. Tool-specific output stays in ``route_ext``.
-
-    Args:
-        result: The analysis tool's result dict.
-
-    Returns:
-        The shared per-run detail block.
+    ``route`` and ``tool`` both come from ``_build_analysis_meta`` -- the agent
+    route reports ``agent`` / ``tracelens``, the TraceLens-free reader reports
+    ``bypass`` / ``bypass`` -- so keeping both preserves routing policy and tool
+    provenance. Tool-specific output stays in ``route_ext``.
     """
     payload = as_dict(result)
     meta = as_dict(payload.get("analysis_meta"))

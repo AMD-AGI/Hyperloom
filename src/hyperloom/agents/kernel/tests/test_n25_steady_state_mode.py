@@ -1,10 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""N25 — TraceLens splitter steady-state chunk selection contract.
-
-Explicit chunk selection (``--steady-state-mode`` + ``INFERENCE_OPTIMIZER_STEADY_STATE_MODE``) hard-fails on a structurally-empty chunk (num_gpu_events==0 OR gpu_busy_duration==0.0); busy-% judgment stays with the T3 idle gate.
-"""
+"""N25 — TraceLens splitter steady-state chunk selection contract."""
 
 from __future__ import annotations
 

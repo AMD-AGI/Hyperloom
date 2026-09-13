@@ -1,117 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Host-side evidence probe for framework-level rewrite discovery.
-
-Runs *inside* the benchmark process (injected by prepending this directory to
-``PYTHONPATH``, so the sibling ``sitecustomize`` imports it at interpreter
-start-up). Deliberately standalone: no ``hyperloom`` imports, no third-party
-imports beyond an optional ``torch``, because the benchmark process usually
-lives in a different virtualenv than the orchestrator.
-
-Why this exists
----------------
-The orchestrator's existing profile evidence is a GPU kernel-time breakdown. A
-whole class of framework-level inefficiency is invisible there because it never
-shows up as a kernel:
-
-* a collective that does a host round-trip to agree on a shape
-  (``all_gather_object`` on a Python int) burns wall time in RCCL rendezvous and
-  host stalls, not in a nameable kernel;
-* a pure function recomputed once per transformer block per denoising step costs
-  host time plus a pile of small launches;
-* a CPU-resident table re-uploaded on every use costs blocking H2D copies.
-
-This probe measures those three shapes directly.
-
-Two tiers
----------
-**Tier 1** (``HYPERLOOM_HOST_PROBE=1``) wraps a fixed, small set of host-stall
-and transfer entry points. Cost is proportional to how often those specific
-APIs are called, which is negligible against a full benchmark, so tier 1 is
-safe to run inside the ordinary profile leg alongside the torch profiler.
-
-**Tier 2** (``HYPERLOOM_HOST_PROBE_DEEP=1``) installs a :func:`sys.setprofile`
-hook that counts every call into the framework source roots and fingerprints
-its arguments. This is what surfaces memoization and loop-hoisting candidates,
-but it inflates host time enough to distort a co-collected torch trace, so it
-defaults off and is meant for a dedicated evidence leg.
-
-Argument fingerprints: strict and loose
----------------------------------------
-Every sampled call records two fingerprints of its arguments:
-
-* **strict** identifies each tensor as a *live object*, so a repeat means the
-  very same tensor was passed again and the callee's result can be memoized
-  as-is;
-* **loose** keeps only shape, dtype and device, so a repeat means the argument
-  looks like the same value in a possibly *freshly allocated* tensor.
-
-A site with a high loose-repeat rate and a low strict-repeat rate is the
-signature of a loop-invariant computation whose inputs are rebuilt every
-iteration. Memoizing it alone gains nothing (the cache would never hit); the
-allocation has to be hoisted out of the loop first, and only then does the
-memoization pay. That pairing is otherwise a human insight, and getting it wrong
-costs the whole bundle: a greedy accept/reject loop measures the hoist on its
-own, sees no gain, and discards the enabler.
-
-Why strict identity is not just ``data_ptr``
---------------------------------------------
-Under a caching allocator, a tensor allocated and freed inside a loop gets the
-same address back on the next iteration. Keying strict identity on ``data_ptr``
-would therefore report a freshly built tensor as "the same argument as last
-time" — inverting exactly the distinction above and reclassifying every hoist
-candidate as a memoization candidate that would then never hit at runtime. This
-is the same address-reuse hazard a hand-written cache has to guard against by
-pinning its source tensors.
-
-So strict identity carries a *generation* token instead: the probe holds a weak
-reference per observed tensor object and issues a fresh generation whenever an
-object address turns out to belong to a new object. Weak references keep this
-from pinning device memory, which a probe must never do.
-
-What the probe deliberately does not know
------------------------------------------
-It never reads tensor *contents*. Doing so would require a device-to-host copy
-per sampled call, injecting the very host stalls the probe exists to measure. So
-"loose repeat" means the arguments were shape-, dtype- and device-compatible, not
-that they held equal values. Treat a hoist candidate as a lead to confirm against
-the source, not as proof.
-
-Output
-------
-One JSON file per process at
-``$HYPERLOOM_HOST_PROBE_DIR/hl_host_probe_rank<N>_pid<PID>.json``, written at
-interpreter exit. Reports are merged by the orchestrator-side aggregator, which
-is the only consumer of this schema.
-
-The pid is in the name because a rank is not one process. A launcher, a re-exec,
-or any short-lived child inherits ``RANK`` from the environment and installs its
-own probe; on a real 8-rank run a 0.8-second helper process with zero recorded
-calls wrote last and destroyed rank 0's entire report. Since the aggregator globs
-and merges, an extra near-empty file costs nothing, while an overwrite silently
-loses a rank.
-
-Environment
------------
-``HYPERLOOM_HOST_PROBE``
-    ``1`` to enable tier 1. Anything else leaves the process untouched.
-``HYPERLOOM_HOST_PROBE_DEEP``
-    ``1`` to additionally enable tier 2.
-``HYPERLOOM_HOST_PROBE_DIR``
-    Output directory. The probe is inert when unset (nowhere to report).
-``HYPERLOOM_HOST_PROBE_ROOTS``
-    ``os.pathsep``-separated framework source roots. Call sites are attributed
-    to the innermost frame under one of these roots, which is what makes the
-    report point at framework code instead of at torch internals.
-``HYPERLOOM_HOST_PROBE_MAX_SITES``
-    Cap on distinct tracked sites per category (default 512).
-``HYPERLOOM_HOST_PROBE_ARG_SAMPLES``
-    Per-site cap on argument-fingerprint samples (default 256). Reading
-    ``frame.f_locals`` materializes a dict, so sampling is what keeps tier 2
-    bounded; a couple hundred calls is already far more than enough to
-    establish a repeat rate.
-"""
+"""Host-side evidence probe for framework-level rewrite discovery."""
 
 from __future__ import annotations
 
@@ -129,59 +19,35 @@ SCHEMA = "hyperloom.host_probe/1"
 _DEFAULT_MAX_SITES = 512
 _DEFAULT_ARG_SAMPLES = 256
 
-# Deepest stack walk when attributing a wrapped call to framework code. Torch
-# puts a handful of frames between the framework and the wrapper; 64 clears that
-# with room to spare while keeping the walk bounded on deep recursion.
+# Deepest stack walk when attributing a wrapped call to framework code.
 _MAX_STACK_WALK = 64
 
-# Longest string kept verbatim in a fingerprint. Longer values are truncated so
-# a giant prompt string cannot blow up probe memory.
+# Longest string kept verbatim in a fingerprint.
 _MAX_STR_FINGERPRINT = 64
 
 # Deepest container recursion when fingerprinting an argument.
 _MAX_CONTAINER_DEPTH = 3
 
-# Widest container walked element-wise when fingerprinting. Beyond this only the
-# length is recorded, which keeps a long list of tensors from dominating cost.
+# Widest container walked element-wise when fingerprinting.
 _MAX_CONTAINER_WIDTH = 8
 
-# Distinct enclosing frames retained per host-API site. Fusion detection needs
-# only enough callers to see that more than one adjacent line reaches the same
-# site with the same shapes; a hot site called from everywhere is not fusable.
+# Distinct enclosing frames retained per host-API site.
 _MAX_CALLERS_PER_SITE = 8
 
-# Tensor objects tracked for strict-identity generations before the table is
-# trimmed. The bound exists to stop unbounded growth in a long benchmark; how it
-# is enforced decides whether the probe's central distinction survives, so see
-# ``_evict_tracked_objects``.
+# Tensor objects tracked for strict-identity generations before the table is trimmed.
 _MAX_TRACKED_OBJECTS = 4096
-# Trim down to this rather than to the cap, so eviction is amortised instead of
-# running on nearly every insert once the table is full.
+# Trim down to this rather than to the cap, so eviction is amortised instead of running on nearly every insert once
+# the table is full.
 _EVICT_TRACKED_OBJECTS_TO = _MAX_TRACKED_OBJECTS // 2
 
 
 def _env_on(name: str) -> bool:
-    """Return True when environment variable ``name`` is set to a truthy token.
-
-    Args:
-        name: Environment variable to read.
-
-    Returns:
-        True for ``1`` / ``true`` / ``yes`` / ``on`` (case-insensitive).
-    """
+    """Return True when environment variable ``name`` is set to a truthy token."""
     return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _env_int(name: str, default: int) -> int:
-    """Return environment variable ``name`` as an int, or ``default``.
-
-    Args:
-        name: Environment variable to read.
-        default: Value returned when unset, unparseable, or non-positive.
-
-    Returns:
-        The parsed positive int, else ``default``.
-    """
+    """Return environment variable ``name`` as an int, or ``default``."""
     try:
         value = int(str(os.environ.get(name, "")).strip())
     except (TypeError, ValueError):
@@ -189,28 +55,53 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-class _SiteStats:
-    """Accumulator for one wrapped host-side API call site.
+#: Launcher variables naming this process's rank, most specific first.
+_RANK_ENVS = ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK")
 
-    Attributes:
-        count: Number of calls observed.
-        wall_s: Summed wall time spent inside the wrapped call.
-        nbytes: Summed transferred bytes, when the API makes that knowable.
-        shape_sigs: Distinct argument shape signatures seen, capped. Several
-            call sites sharing a signature is the collective-fusion signal.
-        callers: Distinct enclosing framework frames that reached this site,
-            capped. A collective wrapped in a framework helper attributes to a
-            single line inside that helper, so the *caller* is the only thing
-            that distinguishes three adjacent same-shape collectives (the
-            fusable case) from one collective in a loop.
-        first_s: Probe-relative timestamp of the first call.
-        last_s: Probe-relative timestamp of the last call. Together with
-            ``first_s`` this separates one-time set-up work from hot-path work:
-            loading a multi-gigabyte checkpoint issues hundreds of host-to-device
-            copies, which otherwise outranks a genuine per-step inefficiency on
-            call count alone. Set-up calls cluster at the start; hot-path calls
-            span the run.
+#: Launcher variables naming the size of the job.
+_WORLD_SIZE_ENVS = ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE")
+
+
+def _env_first_int(names: "tuple[str, ...]", default: int) -> int:
+    """Return the first of ``names`` holding an int, else ``default``."""
+    for name in names:
+        try:
+            return int(str(os.environ.get(name, "")).strip())
+        except (TypeError, ValueError):
+            continue
+    return default
+
+
+def _rank() -> int:
+    """Return this process's distributed rank, 0 when the launcher named none."""
+    return _env_first_int(_RANK_ENVS, 0)
+
+
+def _world_size() -> int:
+    """Return the size of the distributed job, 1 when the launcher named none."""
+    return _env_first_int(_WORLD_SIZE_ENVS, 1)
+
+
+def _under_roots(filename: str, roots: "tuple[str, ...]") -> bool:
+    """Return whether ``filename`` sits under one of ``roots``."""
+    return any(filename.startswith(root) for root in roots)
+
+
+def _write_json_report(out_dir: str, name: str, payload: dict) -> str:
+    """Write ``payload`` as JSON to ``out_dir/name`` and return that path.
+
+    Raises:
+        OSError: If the directory or the file cannot be written.
     """
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    return path
+
+
+class _SiteStats:
+    """Accumulator for one wrapped host-side API call site."""
 
     __slots__ = ("count", "wall_s", "nbytes", "shape_sigs", "callers", "first_s", "last_s")
 
@@ -224,15 +115,7 @@ class _SiteStats:
         self.last_s = -1.0
 
     def record(self, elapsed: float, nbytes: int, shape_sig: str, caller: str, at_s: float) -> None:
-        """Fold one observation into the accumulator.
-
-        Args:
-            elapsed: Wall seconds spent in the call.
-            nbytes: Transferred bytes, or 0 when unknown.
-            shape_sig: Shape signature of the call's tensor arguments.
-            caller: The enclosing framework frame, or ``""`` when there is none.
-            at_s: Probe-relative timestamp of this call.
-        """
+        """Fold one observation into the accumulator."""
         self.count += 1
         self.wall_s += elapsed
         self.nbytes += nbytes
@@ -246,26 +129,7 @@ class _SiteStats:
 
 
 class _CallStats:
-    """Accumulator for one framework function observed by the tier-2 hook.
-
-    Attributes:
-        count: Number of calls observed.
-        wall_s: Summed wall time of outermost invocations (recursive re-entry is
-            folded into the outermost frame so time is not double counted).
-        depth: Current recursion depth, used to identify the outermost frame.
-        started: Start timestamp of the outermost active invocation.
-        arg_samples: Number of calls whose arguments were fingerprinted.
-        strict_sigs: Distinct strict fingerprints among the samples.
-        loose_sigs: Distinct loose fingerprints among the samples.
-        first_s: Probe-relative timestamp of the first outermost call.
-        last_s: Probe-relative timestamp of the last outermost call. Carries the
-            same set-up-versus-hot-path signal as :attr:`_SiteStats.last_s`, and
-            tier 2 needs it just as much: a module constructor runs once per
-            sub-module during model construction, which looks like a repeated
-            argument identity and would otherwise rank as a memoization
-            candidate. Recorded on the same timeline as the tier-1 sites so one
-            activity end can be derived across both tables.
-    """
+    """Accumulator for one framework function observed by the tier-2 hook."""
 
     __slots__ = (
         "count",
@@ -292,12 +156,7 @@ class _CallStats:
 
 
 class HostProbe:
-    """Collects host-side rewrite evidence for one process.
-
-    Install with :meth:`install`; the report is written at interpreter exit, or
-    on demand via :meth:`write_report` (which tests use instead of relying on
-    ``atexit``).
-    """
+    """Collects host-side rewrite evidence for one process."""
 
     def __init__(
         self,
@@ -308,15 +167,7 @@ class HostProbe:
         max_sites: int = _DEFAULT_MAX_SITES,
         arg_samples: int = _DEFAULT_ARG_SAMPLES,
     ) -> None:
-        """Initialise a probe.
-
-        Args:
-            out_dir: Directory the per-rank JSON report is written to.
-            roots: Framework source roots used to attribute call sites.
-            deep: Enable the tier-2 ``sys.setprofile`` hook.
-            max_sites: Cap on distinct tracked sites per category.
-            arg_samples: Per-site cap on argument-fingerprint samples.
-        """
+        """Initialise a probe."""
         self.out_dir = out_dir
         self.roots = tuple(r for r in roots if r)
         self.deep = bool(deep)
@@ -326,29 +177,20 @@ class HostProbe:
         self._lock = threading.Lock()
         self._host_sites: dict[tuple[str, str], _SiteStats] = {}
         self._calls: dict[str, _CallStats] = {}
-        # id(code) -> attributed "file:line:name", or "" when out of scope. Keyed
-        # by id because code objects are unhashable-cheap but stable for the
-        # process lifetime; the code object is pinned in the value tuple so the
-        # id cannot be recycled underneath us.
+        # id(code) -> attributed "file:line:name", or "" when out of scope.
         self._code_cache: dict[int, tuple[object, str]] = {}
-        # id(tensor) -> (weakref, generation). The weakref is what makes a
-        # recycled object address detectable; see the module docstring.
+        # id(tensor) -> (weakref, generation).
         self._object_generations: dict[int, tuple[weakref.ref, int]] = {}
         self._next_generation = 0
         self._host_sites_truncated = False
         self._calls_truncated = False
         self._patched: list[tuple[object, str, object]] = []
         self._installed = False
-        # Whether the tier-2 hook is installed right now, versus whether it ever
-        # ran. Teardown clears the first but not the second, so a report written
-        # after teardown still says the deep data is present.
+        # Whether the tier-2 hook is installed right now, versus whether it ever ran.
         self._deep_installed = False
         self._deep_collected = False
         self._started = time.time()
-        # Same instant as ``_started``, on the monotonic clock. The tier-2 hook
-        # already reads ``perf_counter`` to time an outermost call, so deriving
-        # its timestamp from this baseline costs nothing, and both probe tiers
-        # end up measuring elapsed seconds from probe init.
+        # Same instant as ``_started``, on the monotonic clock.
         self._perf_started = time.perf_counter()
         self._report_written = False
         self._notes: list[str] = []
@@ -366,21 +208,10 @@ class HostProbe:
             configured every path qualifies, so the probe still reports
             something rather than silently producing an empty file.
         """
-        if not self.roots:
-            return True
-        return any(filename.startswith(root) for root in self.roots)
+        return not self.roots or _under_roots(filename, self.roots)
 
     def _label_code(self, code: object) -> str:
-        """Return the cached ``file:line:name`` label for ``code``, or ``""``.
-
-        Args:
-            code: A code object.
-
-        Returns:
-            The label when the code object is under a framework root, else an
-            empty string. Results are memoized per code object because this
-            runs on every observed call.
-        """
+        """Return the cached ``file:line:name`` label for ``code``, or ``\"\"``."""
         key = id(code)
         hit = self._code_cache.get(key)
         if hit is not None:
@@ -397,33 +228,14 @@ class HostProbe:
         return label
 
     def _relative(self, filename: str) -> str:
-        """Shorten ``filename`` to a path relative to its framework root.
-
-        Args:
-            filename: Absolute source path.
-
-        Returns:
-            The root-relative path when a root matches, else ``filename``.
-        """
+        """Shorten ``filename`` to a path relative to its framework root."""
         for root in self.roots:
             if filename.startswith(root):
                 return filename[len(root) :].lstrip("/")
         return filename
 
     def _caller_context(self) -> "tuple[str, str]":
-        """Attribute the current wrapped call to framework frames on the stack.
-
-        Walks outward from the wrapper until a frame's code object is under a
-        framework root, so the report names framework code rather than the torch
-        internals that sit between, then keeps walking for one more framework
-        frame to identify the enclosing call site.
-
-        Returns:
-            ``(site, caller)`` where ``site`` is the innermost framework frame as
-            ``file:line:name`` and ``caller`` is the next framework frame out
-            (``""`` when there is none). ``site`` is ``"<outside-roots>"`` when
-            no framework frame is on the stack at all.
-        """
+        """Attribute the current wrapped call to framework frames on the stack."""
         site = ""
         depth = 2
         while depth < _MAX_STACK_WALK:
@@ -445,25 +257,12 @@ class HostProbe:
     # -- fingerprinting ---------------------------------------------------
 
     def _object_generation(self, value: object) -> int:
-        """Return a token identifying ``value`` as a distinct live object.
-
-        Two different objects never share a token, even when a caching allocator
-        hands the second one the first one's address, because the weak reference
-        stored alongside the token reveals that the original object is gone.
-
-        Args:
-            value: The object to identify.
-
-        Returns:
-            A generation token, or ``-1`` when the object does not support weak
-            references (in which case its address is the best available identity
-            and the caller falls back to it).
-        """
+        """Return a token identifying ``value`` as a distinct live object."""
         key = id(value)
         hit = self._object_generations.get(key)
         if hit is not None and hit[0]() is value:
-            # Re-insert to mark it as recently seen; dicts keep insertion order,
-            # which is what makes eviction below drop the stalest entries.
+            # Re-insert to mark it as recently seen; dicts keep insertion order, which is what makes eviction below
+            # drop the stalest entries.
             del self._object_generations[key]
             self._object_generations[key] = hit
             return hit[1]
@@ -478,22 +277,7 @@ class HostProbe:
         return self._next_generation
 
     def _evict_tracked_objects(self) -> None:
-        """Make room in the generation table without forgetting live objects.
-
-        Clearing the table wholesale costs precisely what the table exists to
-        record. A tensor that is still alive and still being passed loses its
-        generation, so its next appearance reads as a brand-new object: strict
-        repeats disappear while loose repeats do not, and a memoization
-        candidate is reported as a hoist candidate. That is the one
-        misclassification this probe must not make, and on a long run -- a
-        diffusion rollout allocates intermediates continuously -- a wholesale
-        clear fires again and again rather than once.
-
-        Dead entries go first. A tensor freed inside the loop can never be
-        recognised again whatever we keep, and under allocation churn those are
-        most of the table, so this alone is usually enough. Only if it is not do
-        the least recently seen live entries go, oldest first.
-        """
+        """Make room in the generation table without forgetting live objects."""
         for key in [k for k, (ref, _gen) in self._object_generations.items() if ref() is None]:
             del self._object_generations[key]
         overflow = len(self._object_generations) - _EVICT_TRACKED_OBJECTS_TO
@@ -503,20 +287,7 @@ class HostProbe:
             del self._object_generations[key]
 
     def _fingerprint(self, value: object, *, strict: bool, depth: int = 0) -> object:
-        """Build a hashable fingerprint of one argument value.
-
-        Args:
-            value: The argument to fingerprint.
-            strict: When True a tensor is identified as a live object, so only
-                the very same tensor fingerprints equal; when False only shape,
-                dtype and device are kept, so a freshly allocated tensor of the
-                same geometry fingerprints equal.
-            depth: Current container recursion depth.
-
-        Returns:
-            A hashable fingerprint. Unknown types degrade to their type name,
-            which keeps the fingerprint total rather than raising.
-        """
+        """Build a hashable fingerprint of one argument value."""
         if value is None or isinstance(value, (bool, int, float)):
             return value
         if isinstance(value, str):
@@ -535,8 +306,8 @@ class HostProbe:
                 return base
             generation = self._object_generation(value)
             if generation < 0:
-                # No weak reference available; fall back to the address, which
-                # cannot distinguish a recycled allocation but is all there is.
+                # No weak reference available; fall back to the address, which cannot distinguish a recycled
+                # allocation but is all there is.
                 try:
                     generation = -int(value.data_ptr())
                 except Exception:  # noqa: BLE001 - meta/fake tensors have no storage
@@ -549,16 +320,7 @@ class HostProbe:
         return type(value).__name__
 
     def _shape_signature(self, values: "tuple[object, ...]") -> str:
-        """Summarise the tensor shapes among ``values`` as a stable string.
-
-        Args:
-            values: Positional argument values.
-
-        Returns:
-            A compact ``shape@dtype`` signature joined by ``|``, or ``""`` when
-            no argument looks like a tensor. Several collectives issued from one
-            enclosing function under the same signature is the fusion signal.
-        """
+        """Summarise the tensor shapes among ``values`` as a stable string."""
         parts: list[str] = []
         for value in values[:_MAX_CONTAINER_WIDTH]:
             shape = getattr(value, "shape", None)
@@ -577,14 +339,7 @@ class HostProbe:
         nbytes: int = 0,
         shape_sig: str = "",
     ) -> None:
-        """Fold one wrapped host-API observation into the tier-1 table.
-
-        Args:
-            api: Dotted API name, e.g. ``torch.distributed.all_gather_object``.
-            elapsed: Wall seconds spent in the call.
-            nbytes: Transferred bytes, or 0 when unknown.
-            shape_sig: Shape signature of the call's tensor arguments.
-        """
+        """Fold one wrapped host-API observation into the tier-1 table."""
         site, caller = self._caller_context()
         key = (api, site)
         with self._lock:
@@ -598,15 +353,7 @@ class HostProbe:
             stats.record(elapsed, nbytes, shape_sig, caller, time.time() - self._started)
 
     def _wrap(self, owner: object, attr: str, api: str, *, measure_bytes: bool = False) -> None:
-        """Replace ``owner.attr`` with a timing wrapper, if it exists.
-
-        Args:
-            owner: Module or type holding the attribute.
-            attr: Attribute name to wrap.
-            api: Dotted API name recorded in the report.
-            measure_bytes: Also attribute ``nbytes`` of the first tensor
-                argument to the call.
-        """
+        """Replace ``owner.attr`` with a timing wrapper, if it exists."""
         try:
             original = getattr(owner, attr)
         except AttributeError:
@@ -647,17 +394,7 @@ class HostProbe:
         self._patched.append((owner, attr, original))
 
     def _wrap_h2d(self, tensor_type: object) -> None:
-        """Wrap ``Tensor.to`` / ``Tensor.cuda`` to count host-to-device copies.
-
-        ``.to`` is one of the hottest methods in any model, so the wrapper takes
-        a single-attribute fast path out for tensors that are already on the
-        device: only a CPU-resident source can produce an H2D copy, and that is
-        the case worth reporting (a table rebuilt on the host and re-uploaded on
-        every use).
-
-        Args:
-            tensor_type: The ``torch.Tensor`` type to patch.
-        """
+        """Wrap ``Tensor.to`` / ``Tensor.cuda`` to count host-to-device copies."""
         probe = self
 
         for attr, api in (("to", "torch.Tensor.to"), ("cuda", "torch.Tensor.cuda")):
@@ -707,9 +444,8 @@ class HostProbe:
 
         dist = getattr(torch, "distributed", None)
         if dist is not None:
-            # Object collectives pickle through the host, so each one is a
-            # host round-trip; tensor collectives are recorded too so a
-            # rendezvous can be told apart from real payload movement.
+            # Object collectives pickle through the host, so each one is a host round-trip; tensor collectives are
+            # recorded too so a rendezvous can be told apart from real payload movement.
             for attr in (
                 "all_gather_object",
                 "gather_object",
@@ -730,14 +466,7 @@ class HostProbe:
         if tensor_type is not None:
             for attr in ("item", "tolist", "cpu", "numpy"):
                 self._wrap(tensor_type, attr, f"torch.Tensor.{attr}")
-            # The implicit conversions. A device-to-host read does not have to be
-            # spelled `.item()`: `if scalar_tensor == 0`, `float(t)`, `int(t)` and
-            # using a tensor as an index all read device memory back through these
-            # dunders, and they are the syncs a reviewer is least likely to spot in
-            # the source precisely because nothing in the line looks like a
-            # transfer. Note the boundary: a tensor passed where the C++ argument
-            # parser wants a Scalar (`torch.full((n,), t)`) converts inside ATen
-            # without calling any Python method, so it stays invisible here.
+            # The implicit conversions.
             for attr in ("__float__", "__int__", "__bool__", "__index__"):
                 self._wrap(tensor_type, attr, f"torch.Tensor.{attr}")
             self._wrap_h2d(tensor_type)
@@ -749,13 +478,7 @@ class HostProbe:
     # -- tier 2 -----------------------------------------------------------
 
     def _profile_hook(self, frame, event: str, _arg) -> None:  # noqa: ANN001
-        """``sys.setprofile`` callback counting framework calls and arg repeats.
-
-        Args:
-            frame: The frame the event belongs to.
-            event: One of the ``sys.setprofile`` event names.
-            _arg: Event payload (unused).
-        """
+        """``sys.setprofile`` callback counting framework calls and arg repeats."""
         if event != "call" and event != "return":
             return
         try:
@@ -791,24 +514,19 @@ class HostProbe:
             return
 
     def _sample_args(self, frame, stats: _CallStats) -> None:  # noqa: ANN001
-        """Fingerprint one call's positional arguments into ``stats``.
-
-        Args:
-            frame: The frame whose arguments are sampled.
-            stats: Accumulator for the frame's code object.
-        """
+        """Fingerprint one call's positional arguments into ``stats``."""
         code = frame.f_code
         argcount = int(getattr(code, "co_argcount", 0) or 0)
         if argcount <= 0:
-            # A zero-argument callable has nothing to key a cache on, so record
-            # the sample without a fingerprint rather than inventing one.
+            # A zero-argument callable has nothing to key a cache on, so record the sample without a fingerprint
+            # rather than inventing one.
             stats.arg_samples += 1
             return
         names = code.co_varnames[:argcount]
         local_vars = frame.f_locals
         values = tuple(local_vars.get(name) for name in names)
-        # Drop a bound receiver: `self` differs per module instance but is not
-        # what makes a computation repeat, and keeping it would mask the repeat.
+        # Drop a bound receiver: `self` differs per module instance but is not what makes a computation repeat, and
+        # keeping it would mask the repeat.
         if names and names[0] in ("self", "cls"):
             values = values[1:]
         stats.arg_samples += 1
@@ -816,8 +534,8 @@ class HostProbe:
             stats.strict_sigs.add(hash(self._fingerprint(values, strict=True)))
             stats.loose_sigs.add(hash(self._fingerprint(values, strict=False)))
         except TypeError:
-            # An unhashable argument makes this call unfingerprintable; the
-            # sample still counts so the repeat rate stays honest.
+            # An unhashable argument makes this call unfingerprintable; the sample still counts so the repeat rate
+            # stays honest.
             pass
 
     def _install_tier2(self) -> None:
@@ -837,11 +555,7 @@ class HostProbe:
     # -- lifecycle --------------------------------------------------------
 
     def install(self) -> "HostProbe":
-        """Install the probe and register the exit-time report writer.
-
-        Returns:
-            This probe, so callers can chain.
-        """
+        """Install the probe and register the exit-time report writer."""
         if self._installed:
             return self
         self._installed = True
@@ -865,40 +579,8 @@ class HostProbe:
                 pass
         self._installed = False
 
-    def _rank(self) -> int:
-        """Return this process's distributed rank from the launcher env.
-
-        Returns:
-            The rank from ``RANK`` / ``LOCAL_RANK`` / ``OMPI_COMM_WORLD_RANK``,
-            else 0.
-        """
-        for name in ("RANK", "LOCAL_RANK", "OMPI_COMM_WORLD_RANK"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 0
-
-    def _world_size(self) -> int:
-        """Return the distributed world size from the launcher env.
-
-        Returns:
-            The world size from ``WORLD_SIZE`` / ``OMPI_COMM_WORLD_SIZE``, else 1.
-        """
-        for name in ("WORLD_SIZE", "OMPI_COMM_WORLD_SIZE"):
-            try:
-                return int(str(os.environ.get(name, "")).strip())
-            except (TypeError, ValueError):
-                continue
-        return 1
-
     def report(self) -> dict:
-        """Build this process's evidence report.
-
-        Returns:
-            The report dict written to disk; see the module docstring for the
-            schema and the aggregator for its interpretation.
-        """
+        """Build this process's evidence report."""
         host_calls = [
             {
                 "api": api,
@@ -938,8 +620,8 @@ class HostProbe:
 
         return {
             "schema": SCHEMA,
-            "rank": self._rank(),
-            "world_size": self._world_size(),
+            "rank": _rank(),
+            "world_size": _world_size(),
             "pid": os.getpid(),
             "wall_seconds": round(time.time() - self._started, 3),
             "roots": list(self.roots),
@@ -956,48 +638,28 @@ class HostProbe:
         }
 
     def write_report(self) -> str:
-        """Write this process's report to the output directory.
-
-        Idempotent, because it is registered with ``atexit`` and may also be
-        called explicitly. Never raises: a probe that cannot report must not
-        turn a good benchmark into a failed one.
-
-        Returns:
-            The written path, or ``""`` when nothing was written.
-        """
+        """Write this process's report to the output directory."""
         if self._report_written:
             return ""
         self._report_written = True
-        # Stop collecting before serialising so the tier-2 hook cannot observe
-        # the report builder itself and mutate the dict mid-iteration.
+        # Stop collecting before serialising so the tier-2 hook cannot observe the report builder itself and mutate
+        # the dict mid-iteration.
         if self._deep_installed:
             sys.setprofile(None)
             self._deep_installed = False
         try:
-            os.makedirs(self.out_dir, exist_ok=True)
-            path = os.path.join(
+            return _write_json_report(
                 self.out_dir,
-                f"hl_host_probe_rank{self._rank()}_pid{os.getpid()}.json",
+                f"hl_host_probe_rank{_rank()}_pid{os.getpid()}.json",
+                self.report(),
             )
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(self.report(), handle, indent=2, sort_keys=True)
-            return path
         except Exception as exc:  # noqa: BLE001 - reporting is best-effort
             sys.stderr.write(f"[hl_host_probe] could not write report: {exc!r}\n")
             return ""
 
 
 def _repeat_rate(samples: int, distinct: int) -> float:
-    """Return the fraction of sampled calls that repeated an earlier signature.
-
-    Args:
-        samples: Number of fingerprinted calls.
-        distinct: Number of distinct fingerprints among them.
-
-    Returns:
-        ``1 - distinct/samples`` rounded to four places; 0.0 when there are no
-        samples or no fingerprints (an unhashable or zero-argument callable).
-    """
+    """Return the fraction of sampled calls that repeated an earlier signature."""
     if samples <= 0 or distinct <= 0:
         return 0.0
     return round(max(0.0, 1.0 - (distinct / samples)), 4)
@@ -1007,27 +669,12 @@ _ACTIVE: "HostProbe | None" = None
 
 
 def active() -> "HostProbe | None":
-    """Return the installed probe, or ``None``.
-
-    Returns:
-        The process-wide probe instance when :func:`install_from_env` installed
-        one, else ``None``.
-    """
+    """Return the installed probe, or ``None``."""
     return _ACTIVE
 
 
 def install_from_env() -> "HostProbe | None":
-    """Install a probe from the environment, or do nothing.
-
-    Called by the sibling ``sitecustomize`` at interpreter start-up. Inert
-    unless ``HYPERLOOM_HOST_PROBE`` is truthy and ``HYPERLOOM_HOST_PROBE_DIR``
-    names an output directory, so an ordinary benchmark that merely has this
-    directory on ``PYTHONPATH`` is untouched.
-
-    Returns:
-        The installed probe, or ``None`` when the environment did not ask for
-        one or installation failed.
-    """
+    """Install a probe from the environment, or do nothing."""
     global _ACTIVE
     if _ACTIVE is not None:
         return _ACTIVE
@@ -1056,4 +703,9 @@ def install_from_env() -> "HostProbe | None":
     return probe
 
 
-__all__ = ["SCHEMA", "HostProbe", "active", "install_from_env"]
+__all__ = [
+    "SCHEMA",
+    "HostProbe",
+    "active",
+    "install_from_env",
+]

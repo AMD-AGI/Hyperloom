@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared fixtures for the merged optimisation phase.
-
-Two rules these builders exist to enforce:
-
-* Never hand-roll a stand-in for a dataclass the repo owns. A hand-rolled
-  ``VariantResult`` once carried ``ttft_ms`` -- a field the real class does not
-  have, invented to match what buggy production code read -- so the suite could
-  not see the bug, and broke when it was fixed.
-* Never hand-roll a stand-in for ``SharedState``. A partial one supplies only
-  the fields today's assertions touch, so a rule that starts reading a new
-  field is tested against a stub rather than the state machine.
-"""
+"""Shared fixtures for the merged optimisation phase."""
 
 from __future__ import annotations
 
@@ -51,22 +40,7 @@ def optimize_state(
     config_empty_rounds: int = 0,
     **overrides: Any,
 ) -> SharedState:
-    """A real ``SharedState`` positioned in the optimisation phase.
-
-    The four keyword knobs drive the two arms ``exit_normal_optimize`` reads,
-    so a test states the arm condition it means rather than the ledger rows
-    that happen to encode it today.
-
-    Args:
-        source_no_keep: Trailing resolved candidates with no KEEP.
-        source_exhausted: Whether candidate discovery reported itself done.
-        config_keep_gain_pct: Gain on each recent explore winner.
-        config_empty_rounds: Trailing specialist rounds that produced nothing.
-        **overrides: Any other ``SharedState`` attribute to set.
-
-    Returns:
-        The positioned state.
-    """
+    """A real ``SharedState`` positioned in the optimisation phase."""
     from hyperloom.orchestrator.phases.machine_state import PHASE_FRAMEWORK_AGENT
 
     state = SharedState()
@@ -92,14 +66,7 @@ def optimize_state(
 
 
 class FakeCoordinator:
-    """Answers the Coordinator's state surface; resolves the rest for real.
-
-    Anything not passed as state is looked up in ``Coordinator._DELEGATED``,
-    then on ``Coordinator`` itself, then among the collaborators, and served by
-    the real object. Moving a method between collaborators costs one table edit
-    and no test edits, where a stub binding one method per line had to be
-    re-derived every time the call chain grew.
-    """
+    """Answers the Coordinator's state surface; resolves the rest for real."""
 
     def __init__(self, session_dir: Any, **state: Any) -> None:
         from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
@@ -120,9 +87,8 @@ class FakeCoordinator:
             if attr is not _MISSING:
                 get = getattr(attr, "__get__", None)
                 return get(self, type(self)) if get is not None else attr
-            # A collaborator-internal helper: reachable only from inside its
-            # own class in production, so it has no delegation entry. The test
-            # still gets it without having to know which class owns it.
+            # A collaborator-internal helper: reachable only from inside its own class in production, so it has no
+            # delegation entry.
             owner = self._sole_owner(name)
         key = f"_collab_{owner}"
         collaborator = self.__dict__.get(key)

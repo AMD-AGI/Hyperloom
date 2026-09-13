@@ -27,17 +27,7 @@ _PRECISION_MAP: dict[str, tuple[str, str, str]] = {
     "a8w4": ("torch.float8_e4m3fnuz", "torch.float4_e2m1fn_x2", "QuantType.per_1x32"),
 }
 
-# Precision -> the aiter ``dtypes`` aliases the tuner expects, as an
-# (activation, weight) pair. Resolved at run time because the backing dtype is
-# architecture-specific; the literals in _PRECISION_MAP above are only the
-# gfx942 spelling. bf16/fp16 run unquantized (QuantType.No) and keep their
-# literal torch dtype.
-#
-# The pair must stay separable: aiter's CK MoE codegen has a distinct kernel
-# family for FP8 activations against FP4 weights (``tag = "a8w4"`` in
-# ``gemm_moe_ck2stages_common.py``, gated on ``Adtype in bit8_list and Bdtype in
-# bit4_list``), which a single shared alias cannot express. Collapsing both sides
-# onto one alias emits an a4w4 key that an a8w4 runtime never looks up.
+# Precision -> the aiter ``dtypes`` aliases the tuner expects, as an (activation, weight) pair.
 _AITER_DTYPE_ALIAS: dict[str, tuple[str, str]] = {
     "fp8_per_token": ("fp8", "fp8"),
     "fp8_blockscale": ("fp8", "fp8"),
@@ -97,13 +87,7 @@ class FmoeCKTuner(BaseTuner):
         return "bf16"
 
     def _per_partition_inter_dim(self) -> int:
-        """Return the MoE intermediate width of a single tensor-parallel rank.
-
-        aiter keys its fused-MoE dispatch on the sharded width, so a table keyed
-        on the unsharded ``moe_intermediate_size`` is unreachable at tp > 1. The
-        dense shape paths in this package already divide by tp; this is the MoE
-        equivalent.
-        """
+        """Return the MoE intermediate width of a single tensor-parallel rank."""
         full = self.ctx.profile.effective_moe_intermediate
         tp = max(1, int(self.ctx.tp or 1))
         return full // tp
@@ -121,25 +105,14 @@ class FmoeCKTuner(BaseTuner):
             return "moe_intermediate_size not set in model config"
         tp = max(1, int(self.ctx.tp or 1))
         if profile.effective_moe_intermediate % tp:
-            # A non-divisible width means the serving shard size cannot be
-            # derived here; emitting a truncated one would key the table on a
-            # shape the runtime never asks for.
+            # A non-divisible width means the serving shard size cannot be derived here; emitting a truncated one
+            # would key the table on a shape the runtime never asks for.
             return (
                 f"moe_intermediate_size {profile.effective_moe_intermediate} is not "
                 f"divisible by tp {tp}; cannot derive the per-partition inter_dim"
             )
         if getattr(self.ctx, "moe_untuned_csv", None) is None and not self._demand_key():
-            # Refuse rather than tune a guessed key. Three properties of the
-            # dispatch key are set by the serving framework and are not derivable
-            # from the model config: the activation/weight dtype pair, the
-            # per-partition inter_dim, and the EP path's habit of appending a
-            # masked fake-expert slot so expert/topk arrive one higher than the
-            # config states. A key that misses on any of them yields a table no
-            # lookup reaches, and the end-to-end round then reports the unchanged
-            # config as "tuning did not pay off" -- hours spent to learn nothing.
-            #
-            # No missed key means either every observed lookup hit, MoE was not
-            # served by aiter, or no server booted. None needs a new CK table.
+            # Refuse rather than tune a guessed key.
             return (
                 "no runtime-observed MoE miss available (neither "
                 "moe_untuned_csv nor a serving log with a missed aiter "
@@ -149,17 +122,7 @@ class FmoeCKTuner(BaseTuner):
         return None
 
     def _demand_key(self) -> dict[str, Any] | None:
-        """The most-missed MoE dispatch key, or None when every lookup hit.
-
-        Same provenance as an explicit ``moe_untuned_csv`` -- both are the tuple
-        aiter printed at dispatch -- so this satisfies the guard above for the
-        same reason. It exists because the caller already hands forge a serving
-        log for the dense tuners' shapes, and that log carries the MoE key too;
-        requiring a separately-prepared CSV for it left this tuner refusing every
-        model it was ever asked to tune. A dispatch alone is not demand: that line
-        is printed for hits too, so only keys with a miss count or untuned token
-        are eligible.
-        """
+        """The most-missed MoE dispatch key, or None when every lookup hit."""
         if hasattr(self, "_cached_demand_key"):
             return self._cached_demand_key
 
@@ -167,8 +130,8 @@ class FmoeCKTuner(BaseTuner):
         if not path:
             self._cached_demand_key = None
             return None
-        # Keep evidence parsing out of module import: CLI registration must not
-        # acquire this optional analysis path merely by importing the tuner.
+        # Keep evidence parsing out of module import: CLI registration must not acquire this optional analysis path
+        # merely by importing the tuner.
         from ..evidence import load_demand, moe_ck_missed_keys
 
         report = load_demand(path)
@@ -180,9 +143,8 @@ class FmoeCKTuner(BaseTuner):
             self._cached_demand_key = None
             return None
         if len(keys) > 1:
-            # More than one MoE shape in one log means the server changed layout
-            # mid-run (or two logs were concatenated). Tune the most-missed one
-            # and say so, rather than silently picking whichever sorted first.
+            # More than one MoE shape in one log means the server changed layout mid-run (or two logs were
+            # concatenated).
             log.warning(
                 "serving log carries %d distinct MoE dispatch keys; tuning the "
                 "most-missed one (inter_dim=%s, q_dtype_w=%s)",
@@ -198,11 +160,7 @@ class FmoeCKTuner(BaseTuner):
         from ..evidence import moe_untuned_csv_text
 
         tokens = sorted({int(t) for t in (key.get("untuned_tokens") or key.get("tokens") or [])})
-        # A token hint is a *set*, not a count. The router sets it to the token
-        # counts the log shows CK 2-stage actually serving, precisely so the
-        # ones the 1-stage and Triton paths own are left out; spending budget
-        # slots on those writes rows nothing will ever look up. Intersect first,
-        # then let the budget thin whatever survives.
+        # A token hint is a *set*, not a count.
         hint = getattr(self.ctx, "token_hint", None)
         if hint and tokens:
             allowed = {int(t) for t in hint}
@@ -218,24 +176,13 @@ class FmoeCKTuner(BaseTuner):
                     )
                 tokens = kept
             else:
-                # Both sets came from the same serving log. A disjoint pair is
-                # positive evidence that these misses belong to a different
-                # stage/backend, so emitting CK rows for them is certainly
-                # wrong rather than a useful fail-open fallback.
+                # Both sets came from the same serving log.
                 raise ValueError(
                     "none of the %d observed MoE token count(s) appear in the "
                     "CK 2-stage token hint %s" % (len(tokens), sorted(allowed)[:8])
                 )
-        # Without a restrictive token hint, honour the caller's token-list
-        # length as a budget, the same way the derived path does. A router hint
-        # normally makes this a no-op because ctx.tokens and token_hint carry
-        # the same set. When it does bite, thin the list *evenly across the
-        # observed range* rather than keeping one end: the counts aiter
-        # dispatches are powers of two
-        # spanning decode (1..32) to prefill (4096..16384), so keeping the
-        # largest N would tune only prefill and leave decode -- where a serving
-        # run spends most of its time -- on the untuned heuristic fallback.
-        # Both extremes are always kept.
+        # Without a restrictive token hint, honour the caller's token-list length as a budget, the same way the
+        # derived path does.
         budget = len(self.ctx.tokens) if self.ctx.tokens else 0
         if budget and len(tokens) > budget:
             observed = len(tokens)
@@ -274,13 +221,7 @@ class FmoeCKTuner(BaseTuner):
         profile = self.ctx.profile
         prec_key = self._precision_key()
         q_dtype_a, q_dtype_w, q_type = _PRECISION_MAP.get(prec_key, _PRECISION_MAP["bf16"])
-        # Every quantized entry in ``_PRECISION_MAP`` hardcodes the CDNA3 (gfx942)
-        # fnuz FP8 value. The torch dtype behind each aiter alias is
-        # architecture-specific, so on CDNA4 (gfx950 / MI355X) that constant is
-        # absent from aiter's ``dtype2str_dict`` and the MoE tuner aborts with a
-        # dtype lookup error, tuning zero shapes. Resolve the aliases this
-        # precision actually needs from the installed aiter instead of assuming
-        # FP8: per_1x32 (FP4 / MXFP4) quantizes through ``dtypes.fp4x2``, not FP8.
+        # Every quantized entry in ``_PRECISION_MAP`` hardcodes the CDNA3 (gfx942) fnuz FP8 value.
         alias_pair = _AITER_DTYPE_ALIAS.get(prec_key)
         if alias_pair:
             from ._aiter_dense_common import _aiter_dtype_str
@@ -309,20 +250,7 @@ class FmoeCKTuner(BaseTuner):
         return csv_path
 
     def _resolve_untuned_csv(self) -> tuple[Path, str]:
-        """Return the untuned CSV to tune, and where its key came from.
-
-        A caller-supplied CSV wins over anything derived here. The caller can read
-        the tuple aiter actually dispatched off a server log, which is the only
-        authoritative source for the quantisation pair and the per-partition
-        ``inter_dim``; every derivation from the model config is a guess about what
-        the serving framework chose. The second element records that provenance so
-        a later reader can tell a measured key from an inferred one.
-
-        Reads ``moe_untuned_csv``, not ``untuned_csv``: the latter carries dense
-        M,N,K rows for the dense tuner family and is already populated in
-        production, so consuming it here would reject a perfectly valid dense
-        table as a malformed MoE one.
-        """
+        """Return the untuned CSV to tune, and where its key came from."""
         external = getattr(self.ctx, "moe_untuned_csv", None)
         if external is None:
             key = self._demand_key()
@@ -335,20 +263,14 @@ class FmoeCKTuner(BaseTuner):
             raise FileNotFoundError(f"moe_untuned_csv does not exist: {path}")
         problem = _validate_fmoe_csv(path)
         if problem:
-            # Refusing beats silently derived shapes: the caller asked for a
-            # specific key, and quietly tuning a different one is what makes a
-            # tuned table unreachable at run time.
+            # Refusing beats silently derived shapes: the caller asked for a specific key, and quietly tuning a
+            # different one is what makes a tuned table unreachable at run time.
             raise ValueError(f"unusable moe_untuned_csv {path}: {problem}")
         log.info("Using caller-supplied untuned CSV at %s", path)
         return path, "runtime_observed"
 
     def _parse_compare_output(self, stdout: str) -> list[dict[str, Any]]:
-        """Parse the compare report from tuner stdout.
-
-        Actual aiter output format (table rows):
-            (64, 2048, 768, E=128, ...) |     338.95 |     322.46 |     4.86% |  UPDATE
-            (128, ...) |     374.51 |     368.57 |     1.59% |  < 3.0% improve
-        """
+        """Parse the compare report from tuner stdout."""
         results = []
         # Match table rows: (token, ...) | Pre(us) | Post(us) | Improve% | Action
         pattern = re.compile(
@@ -389,15 +311,7 @@ class FmoeCKTuner(BaseTuner):
         return results
 
     def _find_candidate_csv(self, start_time: float, tuned_stem: str = "tuned_fmoe") -> Path | None:
-        """Find the candidate CSV produced by --compare mode for THIS run only.
-
-        Matches by:
-        1. mtime > start_time (rejects stale files)
-        2. filename contains tuned_stem (rejects candidates from other concurrent runs)
-
-        aiter writes candidates as: <tuned_stem>.<pid>.candidate.csv
-        Returns None if no matching candidate found (no fallback to avoid pollution).
-        """
+        """Find the candidate CSV produced by --compare mode for THIS run only."""
         compare_dir = Path("/tmp/aiter_compare")
         if not compare_dir.is_dir():
             return None
@@ -421,9 +335,9 @@ class FmoeCKTuner(BaseTuner):
         tuned_csv = self.work_dir / "tuned_fmoe.csv"
         profile_csv = self.work_dir / "profile_fmoe.csv"
 
-        # Flags shared by every shape (except -i/-o). aiter --timeout is injected
-        # below to activate mp_tuner's per-candidate GPU-fault isolation -- MoE
-        # asm candidates fault on gfx950, and without --timeout the run hangs.
+        # Flags shared by every shape (except -i/-o). aiter --timeout is injected below to activate mp_tuner's
+        # per-candidate GPU-fault isolation -- MoE asm candidates fault on gfx950, and without --timeout the run
+        # hangs.
         base_args = [
             "-o2",
             str(profile_csv),
@@ -498,8 +412,7 @@ class FmoeCKTuner(BaseTuner):
             # Try parsing from stderr (some versions print there)
             shape_results = self._parse_compare_output(stderr)
 
-        # Find candidate CSV. Isolation returns a merged candidate directly;
-        # otherwise glob the aiter compare dir (files newer than our run start).
+        # Find candidate CSV.
         candidate_csv = iso_candidate if iso_candidate is not None else self._find_candidate_csv(run_start_time)
         artifact = str(candidate_csv) if candidate_csv else str(tuned_csv)
 
@@ -509,22 +422,13 @@ class FmoeCKTuner(BaseTuner):
             dest.write_bytes(candidate_csv.read_bytes())
             artifact = str(dest)
 
-        # NOTE: The dense candidate-CSV fallback (_parse_candidate_csv in
-        # _aiter_dense_common) is intentionally NOT mirrored here. The MoE
-        # candidate CSV uses a materially different schema
-        # (token,model_dim,inter_dim,expert,topk,... plus selected-kernel
-        # columns) with no M,N,K,us layout, so reusing that helper would parse
-        # nothing and inventing a MoE-specific parser without a verified sample
-        # format would be a guess. Left as a follow-up if the same
-        # summary-only-output mode is confirmed for gemm_moe_tune.py.
+        # NOTE: The dense candidate-CSV fallback (_parse_candidate_csv in _aiter_dense_common) is intentionally NOT
+        # mirrored here.
 
-        # Compute metrics. Strict status (A2b): an empty parse (rc==0 but no
-        # comparison rows) is empty_output, NOT no_improvement -- do not mask it
-        # by substituting the requested token count for the parsed-shape count.
+        # Compute metrics.
         improved = [r for r in shape_results if r.get("improved")]
-        # Guard against a present-but-None speedup (mirrors the dense path): a
-        # candidate-CSV fallback row has speedup=None, and `None > 1.0` raises
-        # TypeError, so filter to real numbers before comparing.
+        # Guard against a present-but-None speedup (mirrors the dense path): a candidate-CSV fallback row has
+        # speedup=None, and `None > 1.0` raises TypeError, so filter to real numbers before comparing.
         speedups = [
             r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
         ]

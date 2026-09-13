@@ -1,11 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Objective abstraction — the goal driving early-stop and the Orchestration prompt header.
-
-Four implementations: TargetGain, TargetTput, TargetBaseline,
-TimeOnly. `build_objective(env)` takes at most one TARGET_* var.
-"""
+"""Objective abstraction — the goal driving early-stop and the Orchestration prompt header."""
 
 from __future__ import annotations
 
@@ -37,61 +33,28 @@ class Objective(ABC):
 
     @abstractmethod
     def kind(self) -> str:
-        """Return the short tag identifying this objective type.
-
-        Returns:
-            str: Stable kind identifier (e.g. ``"gain_pct"`` or ``"time_only"``).
-        """
+        """Return the short tag identifying this objective type."""
 
     @abstractmethod
     def progress(self, state: "SharedState") -> float:
-        """Compute fractional progress toward the goal.
-
-        Args:
-            state (SharedState): Current shared optimization state to evaluate.
-
-        Returns:
-            float: Progress in the range 0.0 → 1.0, where 1.0 means the goal is hit.
-        """
+        """Compute fractional progress toward the goal."""
 
     @abstractmethod
     def reached(self, state: "SharedState") -> bool:
-        """Report whether the goal has been met.
-
-        Args:
-            state (SharedState): Current shared optimization state to evaluate.
-
-        Returns:
-            bool: ``True`` if the objective is satisfied, otherwise ``False``.
-        """
+        """Report whether the goal has been met."""
 
     @abstractmethod
     def describe(self) -> str:
-        """Return a one-line summary of the objective for prompt injection.
-
-        Returns:
-            str: Human-readable description of the configured target.
-        """
+        """Return a one-line summary of the objective for prompt injection."""
 
     @abstractmethod
     def gap_pct(self, state: "SharedState") -> float:
-        """Compute the percent improvement still required to reach the goal.
-
-        Args:
-            state (SharedState): Current shared optimization state to evaluate.
-
-        Returns:
-            float: Remaining distance in percent; 0.0 once the goal is met.
-        """
+        """Compute the percent improvement still required to reach the goal."""
 
 
 @dataclass
 class _RatioObjective(Objective):
-    """Objective scored as ``current / target`` (clamped to [0, 1]); reached when ``current >= target``.
-
-    Subclasses supply the ``_current`` / ``_target`` hooks; ``progress`` and
-    ``reached`` are shared. Targets are validated positive by each subclass.
-    """
+    """Objective scored as ``current / target`` (clamped to [0, 1]); reached when ``current >= target``."""
 
     @abstractmethod
     def _current(self, state: "SharedState") -> float:
@@ -128,20 +91,12 @@ class TargetGainObjective(_RatioObjective):
     target_gain_pct: float
 
     def __post_init__(self) -> None:
-        """Validate the configured target after dataclass initialization.
-
-        Raises:
-            ObjectiveError: If ``target_gain_pct`` is not strictly positive.
-        """
+        """Validate the configured target after dataclass initialization."""
         if self.target_gain_pct <= 0:
             raise ObjectiveError(f"TargetGainObjective: target_gain_pct must be > 0, got {self.target_gain_pct}")
 
     def kind(self) -> str:
-        """Return the objective kind tag.
-
-        Returns:
-            str: Always ``"gain_pct"``.
-        """
+        """Return the objective kind tag."""
         return "gain_pct"
 
     def _current(self, state: "SharedState") -> float:
@@ -157,41 +112,25 @@ class TargetGainObjective(_RatioObjective):
         return max(0.0, self._target() - self._current(state))
 
     def describe(self) -> str:
-        """Return a one-line summary of the configured gain target.
-
-        Returns:
-            str: Description of the form ``"target_gain_pct=<value>"``.
-        """
+        """Return a one-line summary of the configured gain target."""
         return f"target_gain_pct={self.target_gain_pct}"
 
 
 @dataclass
 class TargetRooflineObjective(_RatioObjective):
-    """Reach ``target_within_pct`` % of the modelled roofline ceiling.
-
-    The live metric reads 0 until a roofline has been measured, so the
-    objective cannot be met on a session that never profiled one.
-    """
+    """Reach ``target_within_pct`` % of the modelled roofline ceiling."""
 
     target_within_pct: float
 
     def __post_init__(self) -> None:
-        """Validate the configured target after dataclass initialization.
-
-        Raises:
-            ObjectiveError: If ``target_within_pct`` is outside ``(0, 100]``.
-        """
+        """Validate the configured target after dataclass initialization."""
         if not 0 < self.target_within_pct <= 100:
             raise ObjectiveError(
                 f"TargetRooflineObjective: target_within_pct must be in (0, 100], got {self.target_within_pct}"
             )
 
     def kind(self) -> str:
-        """Return the objective kind tag.
-
-        Returns:
-            str: Always ``"roofline_pct"``.
-        """
+        """Return the objective kind tag."""
         return "roofline_pct"
 
     def _current(self, state: "SharedState") -> float:
@@ -207,22 +146,13 @@ class TargetRooflineObjective(_RatioObjective):
         return max(0.0, self._target() - self._current(state))
 
     def describe(self) -> str:
-        """Return a one-line summary of the configured roofline target.
-
-        Returns:
-            str: Description of the form ``"target_within_roofline_pct=<value>"``.
-        """
+        """Return a one-line summary of the configured roofline target."""
         return f"target_within_roofline_pct={self.target_within_pct}"
 
 
 @dataclass
 class AnyObjective(Objective):
-    """Met when any member is met.
-
-    ``gap_pct`` is the first member's. Members count percentage points of
-    different quantities, so anything that picks between them per call changes
-    the axis of a value ``explore`` renders as one throughput gap.
-    """
+    """Met when any member is met."""
 
     objectives: list[Objective]
 
@@ -249,34 +179,19 @@ class AnyObjective(Objective):
 
 @dataclass
 class TargetTputObjective(_RatioObjective):
-    """Reach an absolute throughput number (progress against best-so-far tput, not baseline).
-
-    The unit is framework-dependent: tok/s for serving frameworks, img/s for
-    scriptable xDiT (surfaced elsewhere as the equivalent e2el_mean_ms). Scope
-    is whole-server total, not per-GPU; the ``per_gpu`` field name is a
-    misnomer kept for compatibility. Callers wanting a per-GPU target convert
-    on the way in.
-    """
+    """Reach an absolute throughput number (progress against best-so-far tput, not baseline)."""
 
     target_tput_per_gpu: float
 
     def __post_init__(self) -> None:
-        """Validate the configured target after dataclass initialization.
-
-        Raises:
-            ObjectiveError: If ``target_tput_per_gpu`` is not strictly positive.
-        """
+        """Validate the configured target after dataclass initialization."""
         if self.target_tput_per_gpu <= 0:
             raise ObjectiveError(
                 f"TargetTputObjective: target_tput_per_gpu must be > 0, got {self.target_tput_per_gpu}"
             )
 
     def kind(self) -> str:
-        """Return the objective kind tag.
-
-        Returns:
-            str: Always ``"tput"``.
-        """
+        """Return the objective kind tag."""
         return "tput"
 
     def _current(self, state: "SharedState") -> float:
@@ -288,11 +203,7 @@ class TargetTputObjective(_RatioObjective):
         return self.target_tput_per_gpu
 
     def describe(self) -> str:
-        """Return a one-line summary of the configured throughput target.
-
-        Returns:
-            str: Description of the form ``"target_tput_per_gpu=<value>"``.
-        """
+        """Return a one-line summary of the configured throughput target."""
         return f"target_tput_per_gpu={self.target_tput_per_gpu}"
 
 
@@ -304,16 +215,7 @@ class TargetBaselineObjective(_RatioObjective):
     _ref_tput: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
-        """Load the reference throughput from the newest report in the baseline directory.
-
-        Prefers a measured round. A budget-dropped measure round leaves the
-        warmup as the only report, which is a usable reference and is reported
-        as such rather than refused.
-
-        Raises:
-            ObjectiveError: If the directory is missing, no report is found, or the
-                report's ``output_throughput`` is missing or not strictly positive.
-        """
+        """Load the reference throughput from the newest report in the baseline directory."""
         path = Path(self.baseline_dir)
         if not path.exists():
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
@@ -331,11 +233,7 @@ class TargetBaselineObjective(_RatioObjective):
         self._ref_tput = float(tput)
 
     def kind(self) -> str:
-        """Return the objective kind tag.
-
-        Returns:
-            str: Always ``"baseline"``.
-        """
+        """Return the objective kind tag."""
         return "baseline"
 
     def _current(self, state: "SharedState") -> float:
@@ -347,93 +245,37 @@ class TargetBaselineObjective(_RatioObjective):
         return self._ref_tput
 
     def describe(self) -> str:
-        """Return a one-line summary of the configured baseline target.
-
-        Returns:
-            str: Description including the baseline directory and reference throughput.
-        """
+        """Return a one-line summary of the configured baseline target."""
         return f"target_baseline_dir={self.baseline_dir} (ref_tput={self._ref_tput:.1f})"
 
 
 @dataclass
 class TimeOnlyObjective(Objective):
-    """No target — just spend the budget. Never "reached".
-
-    Used when no ``TARGET_*`` env var is supplied; optimization runs until the
-    Coordinator's wall-clock budget (``MAX_HOURS``) is exhausted.
-    """
+    """No target — just spend the budget. Never \"reached\"."""
 
     def kind(self) -> str:
-        """Return the objective kind tag.
-
-        Returns:
-            str: Always ``"time_only"``.
-        """
+        """Return the objective kind tag."""
         return "time_only"
 
     def progress(self, state: "SharedState") -> float:
-        """Report progress, which is always zero since there is no target.
-
-        Args:
-            state (SharedState): Current shared optimization state (unused).
-
-        Returns:
-            float: Always 0.0.
-        """
+        """Report progress, which is always zero since there is no target."""
         return 0.0
 
     def reached(self, state: "SharedState") -> bool:
-        """Report whether the goal is met, which is never for this objective.
-
-        Args:
-            state (SharedState): Current shared optimization state (unused).
-
-        Returns:
-            bool: Always ``False``.
-        """
+        """Report whether the goal is met, which is never for this objective."""
         return False
 
     def describe(self) -> str:
-        """Return a one-line summary indicating no target is configured.
-
-        Returns:
-            str: Always ``"time_only (no target)"``.
-        """
+        """Return a one-line summary indicating no target is configured."""
         return "time_only (no target)"
 
     def gap_pct(self, state: "SharedState") -> float:
-        """Report the distance to the goal, which is always zero since there is no target.
-
-        Args:
-            state (SharedState): Current shared optimization state (unused).
-
-        Returns:
-            float: Always 0.0.
-        """
+        """Report the distance to the goal, which is always zero since there is no target."""
         return 0.0
 
 
 def build_objective(env: dict[str, Any]) -> Objective:
-    """Factory: requires MAX_HOURS; at most one throughput target, plus an optional roofline one.
-
-    ``TARGET_GAIN_PCT`` / ``TARGET_TPUT_PER_GPU`` / ``TARGET_DIR`` measure the
-    same axis three ways and stay mutually exclusive.
-    ``TARGET_WITHIN_ROOFLINE_PCT`` measures a different one, so it composes with
-    whichever of those is set: either being met ends the run.
-
-    Args:
-        env: Environment mapping; must contain ``MAX_HOURS``, may contain at
-            most one of ``TARGET_GAIN_PCT``, ``TARGET_TPUT_PER_GPU`` or
-            ``TARGET_DIR``, and may contain ``TARGET_WITHIN_ROOFLINE_PCT``.
-
-    Returns:
-        The objective matching the supplied targets, an :class:`AnyObjective`
-        when both sides are named, or a ``TimeOnlyObjective`` when none is.
-
-    Raises:
-        ObjectiveError: If ``MAX_HOURS`` is missing, non-numeric, or
-            non-positive, or if more than one throughput target is supplied.
-    """
+    """Factory: requires MAX_HOURS; at most one throughput target, plus an optional roofline one."""
     if "MAX_HOURS" not in env:
         raise ObjectiveError("build_objective: MAX_HOURS is required")
     try:

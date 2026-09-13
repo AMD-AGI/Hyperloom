@@ -1,13 +1,4 @@
-"""A server log is only a shape source if it dispatched through aiter.
-
-``_resolve_forge_server_log`` used to pick the first log that *existed*. A
-``current_best`` workspace whose server never routed a GEMM through aiter
-therefore ended the search, and the ``runs/`` fallback -- which might hold a log
-that did -- was unreachable. The tuner then read shapes from a file with none.
-
-The same scan feeds ``--tokens``: the M values in those lines are the only
-record of what the model actually ran.
-"""
+"""A server log is only a shape source if it dispatched through aiter."""
 
 from __future__ import annotations
 
@@ -26,8 +17,8 @@ HIT = (
 )
 MISS = "shape is M:{m}, N:512, K:4096 not found tuned config in /tmp/aiter_configs/bf16_tuned_gemm.csv, using default\n"
 QUIET = "INFO server started on 0.0.0.0:8000\nINFO warmup complete\n"
-# A MoE dispatch line: no dense "shape is M:" anywhere, but the log is fully
-# informative for the routing decisions kernelforge makes off the same path.
+# A MoE dispatch line: no dense "shape is M:" anywhere, but the log is fully informative for the routing decisions
+# kernelforge makes off the same path.
 MOE = "[aiter] [fused_moe] using ck_moe_2stages for ('bf16', 'bf16', 128, 8, 1, 0, 0)\n"
 
 
@@ -48,8 +39,8 @@ class TestEvidenceDetection:
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=128)))
 
     def test_a_miss_line_is_also_evidence(self, tmp_path):
-        # A miss still proves the process routed a GEMM through aiter, which is
-        # what makes the log a usable shape source.
+        # A miss still proves the process routed a GEMM through aiter, which is what makes the log a usable shape
+        # source.
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", MISS.format(m=128)))
 
     def test_a_quiet_log_is_not_evidence(self, tmp_path):
@@ -59,8 +50,7 @@ class TestEvidenceDetection:
         assert not rh._log_has_aiter_evidence(tmp_path / "nope.log")
 
     def test_a_marker_straddling_a_chunk_boundary_is_still_found(self, tmp_path, monkeypatch):
-        # Fleet logs are ~17MB, so the scan is chunked; the overlap must cover a
-        # marker split across two reads.
+        # Fleet logs are ~17MB, so the scan is chunked; the overlap must cover a marker split across two reads.
         monkeypatch.setattr(rh, "_LOG_SCAN_CHUNK", 16)
         text = "x" * 10 + HIT.format(m=128)
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
@@ -70,11 +60,8 @@ class TestEvidenceDetection:
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
 
     def test_a_moe_only_log_is_evidence_too(self, tmp_path):
-        # The resolved log is not only a dense-shape source: kernelforge's router
-        # reads it for MoE stage coverage and 1-stage ASM detection, which parse
-        # [fused_moe] lines. Rejecting a log that has those but no dense
-        # "shape is M:" line would blind the router on exactly the MoE models
-        # this lane runs against.
+        # The resolved log is not only a dense-shape source: kernelforge's router reads it for MoE stage coverage and
+        # 1-stage ASM detection, which parse [fused_moe] lines.
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", MOE))
         assert rh._log_has_aiter_evidence(_log(tmp_path / "b.log", "Mxfp4 MoE backend selected\n"))
 
@@ -83,8 +70,7 @@ class TestEvidenceDetection:
         assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", MOE)) == ""
 
     def test_a_dispatch_line_at_m_zero_is_still_evidence(self, tmp_path):
-        # The M counter skips 0, so an evidence check derived from its output
-        # read this log as silent.
+        # The M counter skips 0, so an evidence check derived from its output read this log as silent.
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=0)))
 
 
@@ -106,9 +92,8 @@ class TestSelection:
         assert rh._resolve_forge_server_log(_State(current_best={"workspace": str(ws)}), tmp_path) == str(mine)
 
     def test_the_warmup_sibling_search_skips_quiet_logs(self, tmp_path):
-        # server.log lives in warmup_round while current_best points at
-        # measure_round; several warmup benchmark dirs can exist and only some
-        # of them dispatched.
+        # server.log lives in warmup_round while current_best points at measure_round; several warmup benchmark dirs
+        # can exist and only some of them dispatched.
         run = tmp_path / "runs" / "explore" / "h1"
         ws = run / "measure_round" / "b1"
         ws.mkdir(parents=True)
@@ -137,8 +122,7 @@ class TestSelection:
         with caplog.at_level("WARNING"):
             assert rh._resolve_forge_server_log(_State(), tmp_path) == ""
 
-        # "no log at all" and "logs exist but are silent" are different
-        # problems; only the second is actionable.
+        # "no log at all" and "logs exist but are silent" are different problems; only the second is actionable.
         assert "AITER_LOG_TUNED_CONFIG" in caplog.text
 
     def test_no_logs_at_all_is_quiet(self, tmp_path, caplog):
@@ -169,19 +153,14 @@ class TestTokensFromServingLog:
         assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text)) == "32,64"
 
     def test_the_most_frequent_m_values_win_the_budget(self, tmp_path):
-        # 1 appears once, 2..4 appear three times each; with a budget of 3 the
-        # rare one is dropped. Tuning where the model spends its time beats
-        # tuning the largest M it ever reached.
+        # 1 appears once, 2..4 appear three times each; with a budget of 3 the rare one is dropped.
         text = HIT.format(m=1) + "".join(HIT.format(m=m) * 3 for m in (2, 3, 4))
         assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=3) == "2,3,4"
 
     def test_uniform_counts_do_not_starve_the_prefill_end(self, tmp_path):
-        # Regression: a serving warmup sweeps every M about equally often, so
-        # the counts come out uniform and a plain frequency ranking degenerates
-        # into its tie-break -- which kept the smallest M and dropped the large
-        # prefill shapes the runtime then missed. Both fleet sessions we
-        # replayed looked exactly like this (17 distinct M x4, 44 distinct
-        # M x40), and both missed on 16384/24576/32768 and 57344/65536.
+        # Regression: a serving warmup sweeps every M about equally often, so the counts come out uniform and a plain
+        # frequency ranking degenerates into its tie-break -- which kept the smallest M and dropped the large prefill
+        # shapes the runtime then missed.
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 8192, 16384, 24576, 32768]
         text = "".join(HIT.format(m=m) * 4 for m in ms)
         got = rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=8)
@@ -198,8 +177,8 @@ class TestTokensFromServingLog:
         assert rh._tokens_from_serving_log(tmp_path / "nope.log") == ""
 
     def test_the_result_is_what_forge_accepts(self, tmp_path):
-        # forge parses --tokens as int(t) for t in value.split(","); round-trip
-        # through the normaliser must not change it.
+        # forge parses --tokens as int(t) for t in value.split(","); round-trip through the normaliser must not change
+        # it.
         text = "".join(HIT.format(m=m) for m in (7, 4096))
         raw = rh._tokens_from_serving_log(_log(tmp_path / "a.log", text))
         assert rh._normalize_tokens(raw) == raw
@@ -266,16 +245,7 @@ class _StopHere(Exception):
 
 
 class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
-    """Both lanes must see the observed M sweep, not just the dense one.
-
-    ``_write_fmoe_untuned_csv_from_log`` consumes ``tokens`` directly and its
-    fallback for an empty one is ``[1]``. While the serving-log derivation sat
-    below that call, the dense lane got the full sweep and the MoE lane got a
-    one-row table -- which then missed on every prefill and large-batch lookup
-    and was reverted as ``no_shape_key_matched``. That is the exact failure this
-    change set exists to remove, so an ordering regression here would leave the
-    MoE half of it in place.
-    """
+    """Both lanes must see the observed M sweep, not just the dense one."""
 
     @pytest.mark.asyncio
     async def test_the_moe_writer_receives_the_serving_log_sweep(self, tmp_path, monkeypatch):

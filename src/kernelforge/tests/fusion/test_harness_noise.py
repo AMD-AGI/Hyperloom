@@ -1,13 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The KEEP bar and the inherited floor assume measurements are stable.
-
-Nothing had ever checked that. If run-to-run spread on a real GPU is comparable
-to the 3% improvement margin, then "beat the previous result by 3%" is partly
-deciding on noise -- and it decides whether a result is recorded at all. This
-diagnostic measures the spread so the assumption can be checked per machine.
-"""
+"""The KEEP bar and the inherited floor assume measurements are stable."""
 
 from __future__ import annotations
 

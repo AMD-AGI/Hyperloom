@@ -1,12 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the report-narrative LLM client adapters.
-
-The adapters call through ``hyperloom.common.llm_config``, so these tests patch
-its entry points by their real names: a rename on the contract side has to fail
-here rather than silently install an unused stub.
-"""
+"""Unit tests for the report-narrative LLM client adapters."""
 
 from __future__ import annotations
 
@@ -61,11 +56,7 @@ def _install_factories(
     anthropic_error: Exception | None = None,
     transport: str = "sdk",
 ) -> dict[str, list[dict[str, Any]]]:
-    """Patch the OpenAI factory and the Anthropic transport probe.
-
-    ``transport`` stands in for the credential shape llm_config would resolve,
-    so a test can pick a branch without exporting provider variables.
-    """
+    """Patch the OpenAI factory and the Anthropic transport probe."""
     built: dict[str, list[dict[str, Any]]] = {"openai": [], "anthropic": []}
 
     def _openai(**kwargs: Any) -> str:

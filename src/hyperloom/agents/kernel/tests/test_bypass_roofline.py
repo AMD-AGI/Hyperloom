@@ -18,8 +18,8 @@ from _bypass_roofline import compute_roofline  # noqa: E402
 
 
 def test_large_square_gemm_is_compute_bound():
-    # (4096,4096)x(4096,4096) bf16: AI ~= 4096/3 ~= 1365 FLOPs/byte, well above the
-    # MI300X bf16 machine balance (~134) -> compute bound; efficiency in (0,100].
+    # (4096,4096)x(4096,4096) bf16: AI ~= 4096/3 ~= 1365 FLOPs/byte, well above the MI300X bf16 machine balance (~134)
+    # -> compute bound; efficiency in (0,100].
     r = compute_roofline(
         category="GEMM",
         shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
@@ -72,8 +72,8 @@ def test_roofline_attainment_is_binding_side():
     )
     assert g["bound_type"] == "compute_bound"
     assert g["roofline_attainment_pct"] == g["compute_utilization_pct"]
-    # memory-bound elementwise: attainment == bandwidth utilization, NOT the
-    # compute-side efficiency_percent (which reads ~0 for a memory-bound kernel).
+    # memory-bound elementwise: attainment == bandwidth utilization, NOT the compute-side efficiency_percent (which
+    # reads ~0 for a memory-bound kernel).
     e = compute_roofline(
         category="Elementwise",
         shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
@@ -101,8 +101,7 @@ def test_convolution_estimates_bound():
 
 
 def test_vendor_gemm_gets_bound_even_without_source():
-    # A vendor GEMM (non-rewritable) still gets an analytical bound purely from
-    # shapes + measured time.
+    # A vendor GEMM (non-rewritable) still gets an analytical bound purely from shapes + measured time.
     r = compute_roofline(
         category="GEMM",
         shape_str="(2048,2240) bf16<br>(2240,2240) bf16",
@@ -121,8 +120,8 @@ def test_unestimable_returns_none():
 
 
 def test_efficiency_capped_flag_when_estimate_overshoots():
-    # Implausibly tiny time -> estimated achieved FLOPS >> peak -> clamped to 100%
-    # AND flagged, so a capped 100% isn't mistaken for a real measurement.
+    # Implausibly tiny time -> estimated achieved FLOPS >> peak -> clamped to 100% AND flagged, so a capped 100% isn't
+    # mistaken for a real measurement.
     r = compute_roofline(
         category="GEMM",
         shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
@@ -171,8 +170,6 @@ def test_gpu_and_dtype_change_peak():
 
 def test_depthwise_conv_uses_group_channels_not_input_channels():
     # Depthwise conv: input (2,11200,32,32), weight (Cout=11200, Cin/groups=1, 3, 3).
-    # FLOPs must use wc=1, not the 11200 input channels (the dense formula
-    # overcounts by groups=Cin, faking compute-bound eff=100%).
     B, C, HW, Cout, wc, R, S = 2, 11200, 32, 11200, 1, 3, 3
     r = compute_roofline(
         category="Convolution",
@@ -213,8 +210,7 @@ def test_dense_conv_flops_unchanged_by_wc_fix():
 
 
 def test_sdpa_cross_attention_infers_bshd_layout():
-    # Cross-attn Q(B,Sq,H,D), K/V(B,Skv,H,D), score(B,H,Sq,Skv). The shared head
-    # dim resolves the layout exactly and FLOPs use Sq*Skv (Skv=300 != Sq=1024).
+    # Cross-attn Q(B,Sq,H,D), K/V(B,Skv,H,D), score(B,H,Sq,Skv).
     B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
     shp = (
         f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{H},{Sq},{Skv}) bf16"
@@ -229,9 +225,8 @@ def test_sdpa_cross_attention_infers_bshd_layout():
 
 
 def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
-    # Self-attn Q=K=V=(B,H,S,D) with no score tensor: Q/K middle dims are
-    # identical so H vs S can't be resolved from shapes -> heuristic (H=smaller)
-    # AND the row is flagged roofline_layout_inferred so the estimate is honest.
+    # Self-attn Q=K=V=(B,H,S,D) with no score tensor: Q/K middle dims are identical so H vs S can't be resolved from
+    # shapes -> heuristic (H=smaller) AND the row is flagged roofline_layout_inferred so the estimate is honest.
     B, H, S, D = 2, 8, 1024, 64
     shp = f"({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16<br>({B},{H},{S},{D}) bf16"
     r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
@@ -245,9 +240,8 @@ def test_sdpa_self_attention_ambiguous_layout_is_marked_inferred():
 
 
 def test_sdpa_score_tensor_disambiguates_shared_seqlen():
-    # Equal-seq cross-attn with different Q/K head counts (Hq=16, Hkv=4): Q/K
-    # middle dims share only the seq length, so the authoritative score
-    # (B,Hq,Sq,Skv) must resolve H=Hq.
+    # Equal-seq cross-attn with different Q/K head counts (Hq=16, Hkv=4): Q/K middle dims share only the seq length,
+    # so the authoritative score (B,Hq,Sq,Skv) must resolve H=Hq.
     B, S, Hq, Hkv, D = 2, 256, 16, 4, 64
     shp = f"({B},{S},{Hq},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>({B},{S},{Hkv},{D}) bf16<br>({B},{Hq},{S},{S}) bf16"
     r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=100.0, call_count=1, gpu_type="mi300x")
@@ -258,8 +252,8 @@ def test_sdpa_score_tensor_disambiguates_shared_seqlen():
 
 
 def test_sdpa_cross_attention_shared_dim_without_score():
-    # Cross-attn Q/K/V only (no score operand): the shared head dim resolves the
-    # layout exactly (Sq=1024 != Skv=300) -> not inferred.
+    # Cross-attn Q/K/V only (no score operand): the shared head dim resolves the layout exactly (Sq=1024 != Skv=300)
+    # -> not inferred.
     B, Sq, H, D, Skv = 2, 1024, 20, 112, 300
     shp = f"({B},{Sq},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16<br>({B},{Skv},{H},{D}) bf16"
     r = compute_roofline(category="SDPA", shape_str=shp, gpu_time_us=200.0, call_count=1, gpu_type="mi300x")
@@ -271,8 +265,8 @@ def test_sdpa_cross_attention_shared_dim_without_score():
 
 
 def test_efficiency_uses_achievable_peak_not_vendor():
-    # Per-kernel efficiency% must use the max-achievable peak (708 TFLOPS bf16
-    # mi300x), not the vendor dense peak (1307.4).
+    # Per-kernel efficiency% must use the max-achievable peak (708 TFLOPS bf16 mi300x), not the vendor dense peak
+    # (1307.4).
     r = compute_roofline(
         category="GEMM",
         shape_str="(4096,4096) bf16<br>(4096,4096) bf16",
