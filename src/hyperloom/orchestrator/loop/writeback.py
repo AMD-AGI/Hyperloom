@@ -3075,6 +3075,29 @@ class WritebackCollaborator:
             len(self.shared_state.research_scout_seen_pr_ids or []),
         )
 
+    def _record_latency_refusal(self, task_kind: str, bv: Any, best_tput: float, reason: str) -> None:
+        """Log and record a winner the latency budget refused."""
+        observed = bv.get("e2el_mean_ms") if isinstance(bv, dict) else None
+        log.warning(
+            "current_best held: %s winner measured %.1f tput but %s (budget %.1f ms, measured %s)",
+            task_kind,
+            float(best_tput),
+            reason,
+            float(self.shared_state.latency_budget_ms),
+            f"{float(observed):.1f} ms" if isinstance(observed, (int, float)) else "nothing",
+        )
+        self.shared_state.latency_refusals.append(
+            {
+                "action": task_kind,
+                "variant_name": str((bv.get("name") if isinstance(bv, dict) else "") or ""),
+                "tput": float(best_tput),
+                "e2el_mean_ms": observed if isinstance(observed, (int, float)) else None,
+                "budget_ms": float(self.shared_state.latency_budget_ms),
+                "reason": reason,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
     def _lift_to_current_best(
         self,
         task_kind: str,
@@ -3128,6 +3151,9 @@ class WritebackCollaborator:
             graded = resolve_graded_comparison(self.shared_state, cand_source)
             if not graded.comparable:
                 log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
+                return False
+            if graded.veto_reason:
+                self._record_latency_refusal(task_kind, bv, best_tput, graded.veto_reason)
                 return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
@@ -3714,6 +3740,29 @@ class WritebackCollaborator:
             # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
+            # The reference the run is measured against is itself over the SLA, so
+            # nothing that follows can clear it. Stopping here costs one baseline;
+            # continuing spends the whole --max-hours refusing every candidate to
+            # learn something already knowable.
+            from hyperloom.common.perf_metric import latency_veto_reason
+
+            baseline_veto = latency_veto_reason(
+                result.get("e2el_mean_ms"),
+                float(self.shared_state.latency_budget_ms),
+            )
+            if baseline_veto:
+                log.error(
+                    "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
+                    "No candidate can clear a ceiling the reference already breaks; stopping.",
+                    baseline_veto,
+                    float(self.shared_state.latency_budget_ms),
+                    (
+                        f"{float(result['e2el_mean_ms']):.1f} ms"
+                        if isinstance(result.get("e2el_mean_ms"), (int, float))
+                        else "reported no end-to-end latency"
+                    ),
+                )
+                self.shared_state.set_stop_reason("baseline_over_latency_budget")
         if anchor_accepted:
             audit_decision = "promoted"
         elif isinstance(tput, (int, float)) and tput > 0:
@@ -5492,6 +5541,9 @@ class WritebackCollaborator:
                 "extra_envs": dict(result.get("extra_envs_applied") or {}),
                 "tput": float(tput),
                 **graded_axes_of(result.get("bench_result") or result),
+                # ``graded_axes_of`` carries the throughput axes only; the latency
+                # budget grades on this one and fails closed without it.
+                "e2el_mean_ms": (result.get("bench_result") or result).get("e2el_mean_ms"),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

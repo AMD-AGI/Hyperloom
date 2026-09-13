@@ -275,6 +275,36 @@ class _RenderMixin:
             lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
         return "\n".join(lines) or "(no phase history yet)"
 
+    def to_latency_budget_summary(self, *, max_rows: int = 5) -> str:
+        """Render the ``=== Latency budget (constraint) ===`` block; empty when unset.
+
+        Under a budget a throughput gain no longer predicts a KEEP, so the router
+        needs the constraint and the winners it has refused. A refusal list that
+        keeps growing means the SLA is the binding limit rather than an exhausted
+        search space, and the two call for opposite responses.
+        """
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
+        if budget <= 0:
+            return ""
+        refusals = [r for r in (self.latency_refusals or []) if isinstance(r, dict)]
+        lines = [
+            f"budget    : {budget:g} ms mean end-to-end, enforced on every KEEP",
+            "unmeasured: refused (a constraint that was not measured is not satisfied)",
+        ]
+        if not refusals:
+            lines.append("refused   : none so far")
+            return "\n".join(lines)
+        lines.append(f"refused   : {len(refusals)} winner(s) so far")
+        for row in refusals[-max_rows:]:
+            observed = row.get("e2el_mean_ms")
+            measured = f"{float(observed):.0f} ms" if isinstance(observed, (int, float)) else "not measured"
+            name = str(row.get("variant_name") or "?")
+            action = str(row.get("action") or "?")
+            lines.append(f"  - {name} ({action}): {measured}")
+        if len(refusals) > max_rows:
+            lines.append(f"  - (+{len(refusals) - max_rows} more elided; see state.json `latency_refusals`)")
+        return "\n".join(lines)
+
     def to_resource_pools_summary(self) -> str:
         """Render the GPU pool / lane capacity block."""
         from ...bus.storage.schema import DEFAULT_LANE_CAPACITIES

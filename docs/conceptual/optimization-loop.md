@@ -185,6 +185,28 @@ authoring specialist's prompt. The rungs, in increasing complexity:
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
 
+### Latency budget (constraint on KEEP)
+
+`--max-latency-ms` sets a ceiling on mean end-to-end latency. It is a
+constraint rather than an objective: it does not decide when the run stops,
+only which winners are admissible, so it composes with whichever `--target-*`
+is in use. It rides the same verdict the gain gates decide — a candidate that
+clears its objective and breaks the ceiling is a REVERT, carrying a
+`veto_reason` that distinguishes it from one that simply did not gain.
+
+The constraint exists because a throughput-only comparison does not merely
+tolerate a latency-for-throughput trade, it selects for the worst one on
+offer: facing a lever that raises aggregate throughput *by* making each stream
+slower, the largest regression is where the most throughput is.
+
+It fails closed. A candidate that reported no end-to-end latency is refused,
+since a constraint nobody measured is not one anybody satisfied — which is why
+every lane copies `e2el_mean_ms` onto the dict it promotes. It fails closed at
+the boundary too: if the baseline itself exceeds the ceiling, the run stops
+with `baseline_over_latency_budget` rather than spending its whole budget
+refusing every candidate to learn what was knowable at launch. Off by default,
+leaving KEEP behaviour unchanged when unset.
+
 ### Runnable gate (earned KEEP)
 
 A verified build does not KEEP on artifact verification alone. After a

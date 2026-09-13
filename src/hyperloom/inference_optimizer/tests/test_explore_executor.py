@@ -2731,3 +2731,73 @@ async def test_explore_call_skips_reap_under_pytest(tmp_path):
 
     assert result["status"] == "failed"
     assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "budget_ms,expected_outcome,expected_reason",
+    [
+        (250.0, "REVERT", "latency_budget_exceeded"),
+        (5000.0, "KEEP", ""),
+        (0.0, "KEEP", ""),
+    ],
+)
+async def test_explore_refuses_an_over_budget_winner_in_the_round_that_measured_it(
+    sub_agent_runner, tmp_path, monkeypatch, budget_ms, expected_outcome, expected_reason
+):
+    """``--max-latency-ms`` rides the verdict explore's ladder already reads.
+
+    The variant gains throughput either way; only the SLA separates the cases.
+    Refusing here rather than at promotion keeps an over-budget variant from
+    being folded onto the stack and becoming the anchor the rest of the batch is
+    graded against, and gives the ledger a latency reason for the REVERT.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang")
+    state.baseline_tput = 200.0
+    state.latency_budget_ms = budget_ms
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        # The harness workspace reports e2el mean 2500 ms, well over the 250 ms budget.
+        _fake_workspace(slot, tput=20000.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / f"explore-latency-{budget_ms:g}"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_slow_but_fast", "extra_args": "--split 8"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key=f"ex-latency-{budget_ms:g}",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--split 8", {})]
+    assert tested["status"] == "succeeded"
+    assert tested["outcome"] == expected_outcome
+    if expected_outcome == "REVERT":
+        # Not "gain_below_threshold": the variant gained 100x. Naming the wrong
+        # gate would send the search looking for throughput it already has.
+        assert out["losers"][0]["reason"] == expected_reason
+        assert out["winners"] == []
+        gates = {g["gate"]: g for g in tested["gates"]}
+        assert "latency_budget" in gates
+        assert gates["latency_budget"]["passed"] is False
+    else:
+        assert [w["name"] for w in out["winners"]] == ["v_slow_but_fast"]

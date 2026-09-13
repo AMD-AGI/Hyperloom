@@ -207,6 +207,48 @@ for the user-facing summary.
 
 ### Added
 
+- **`--max-latency-ms` makes a latency SLA a constraint on every KEEP.**
+  The optimizer maximized `output_throughput` and nothing else. Latency was
+  measured, reported and fed to the prompts, but no latency number could block a
+  promotion. That is survivable for a lever that raises throughput without
+  touching per-request latency, and unsafe for any lever that raises throughput
+  *by* making each stream slower: against a throughput-only gate such a lever
+  does not merely tolerate a latency regression, it selects for the largest one
+  on offer. Measured on one MI355X, splitting the card eight ways at two streams
+  each bought about 20% aggregate throughput while mean end-to-end latency went
+  from 183 ms to 1211 ms — a 6.6x regression that the session would have signed
+  off as a win.
+
+  The ceiling rides the verdict the gain gates already decide rather than
+  arriving as a second opinion beside them: `graded_comparison` marks an
+  over-budget candidate `REVERT` and names it in a new
+  `GradedComparison.veto_reason`, so every consumer of the verdict — the
+  promotion choke point, explore's round ladder, the kernel stack — honours it
+  without a lane-by-lane check. Explore therefore refuses in the round that
+  measured the variant, which keeps an over-budget config from being folded onto
+  the stack and becoming the anchor the rest of the batch is graded against.
+
+  It fails closed: a candidate that reported no end-to-end latency is refused,
+  since a constraint nobody measured is not one anybody satisfied. That makes
+  latency part of the promotion contract, so each lane copies `e2el_mean_ms`
+  from its `VariantResult` onto the dict it promotes — a lane that does not is
+  that lane's bug, not a spelling the lookup should learn. It fails closed at
+  the boundary too: a baseline already over the ceiling stops the run with
+  `baseline_over_latency_budget` instead of spending the whole `--max-hours`
+  refusing every candidate to discover what was knowable at launch, which is
+  also why no `current_best` can end a session over budget.
+
+  The budget has one home, `SharedState.latency_budget_ms`, written at launch
+  and archived with the session so a resume restores it. Parse failures happen
+  only at the CLI, which exits 2: the switch on a fail-closed gate must not
+  itself fail open, and a value like `--max-latency-ms 200ms` silently resolving
+  to "no budget" would leave an operator believing an SLA was enforced.
+  Refusals are recorded on `SharedState.latency_refusals` and rendered as
+  `=== Latency budget (constraint) ===`, because a constrained session that ends
+  near baseline is otherwise indistinguishable from one that found no headroom,
+  and the two call for opposite responses. Off by default; KEEP behaviour is
+  exactly as it was when unset.
+
 - **Session breakdown exports now include the additive V6 startup contract.**
   The existing V5 payload remains intact while `metadata`, `outcome`,
   `timeline`, and `close` provide the V6 read model. Install and model-gate
