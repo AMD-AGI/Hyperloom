@@ -3606,9 +3606,7 @@ class IntegratePatchExecutor:
         # operation a later patch declares must override an earlier one's for the
         # same file. ``kept_patches`` then this round's ``applied`` is the order
         # the stack was built in and the order a consumer replays it in.
-        ordered_patches = [
-            str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)
-        ]
+        ordered_patches = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
         # ``_accepted_patch_roots`` binds only patches that ARE in the accepted
         # stack, so this normally adds nothing. It stays because the durable
         # mapping outlives the round that wrote it: an entry for a patch no

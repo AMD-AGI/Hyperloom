@@ -172,7 +172,9 @@ def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[st
     section: dict[str, Any] = {}
     try:
         state = asdict(enablement) if is_dataclass(enablement) else dict(_as_dict(enablement))
-        collected = collect_enablement(Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, [])
+        collected = collect_enablement(
+            Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, []
+        )
         section = {key: collected[key] for key in _RECIPE_KEYS if key in collected}
         # The collector emits this unconditionally beside the steps; carrying its
         # own absence forward would hand a consumer a recipe with no verdict.

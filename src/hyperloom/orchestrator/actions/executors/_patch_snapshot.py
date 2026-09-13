@@ -152,13 +152,28 @@ _UNREPRESENTABLE_MODES: frozenset[str] = frozenset({"120000", "160000"})
 _ISOLATION_ROOT: Path | None = None
 
 
+def _own_private_dir(path: Path) -> Path:
+    """Make ``path`` 0700 regardless of the ambient umask, and return it.
+
+    ``mkdtemp`` and ``mkdir(mode=0o700)`` both pass the mode through the
+    process umask, so under a restrictive one (0o111) they produce 0600 -- a
+    directory its own non-root owner cannot traverse. Every git invocation
+    beneath it then fails, and the replay refuses a stack it should have
+    verified. Setting the child umask fixed what git creates; this fixes what
+    WE create, which the child umask never touched.
+    """
+    path.chmod(0o700)
+    return path
+
+
 def _isolation_root() -> Path:
     """Create (once) and return the private directory replay git runs against."""
     global _ISOLATION_ROOT
     if _ISOLATION_ROOT is None or not _ISOLATION_ROOT.is_dir():
-        root = Path(tempfile.mkdtemp(prefix="hl-replay-isolation-"))
-        (root / "hooks").mkdir(mode=0o700)
-        (root / "home").mkdir(mode=0o700)
+        root = _own_private_dir(Path(tempfile.mkdtemp(prefix="hl-replay-isolation-")))
+        for name in ("hooks", "home"):
+            (root / name).mkdir()
+            _own_private_dir(root / name)
         (root / "config").write_text("", encoding="utf-8")
         atexit.register(shutil.rmtree, str(root), True)
         _ISOLATION_ROOT = root
@@ -244,7 +259,9 @@ def _isolated_git_env(trust: Path | None = None) -> dict[str, str]:
 _REPLAY_UMASK = 0o022
 
 
-def _git(tree: Path, *args: str, timeout: int = 300, trust: Path | None = None) -> subprocess.CompletedProcess[bytes] | None:
+def _git(
+    tree: Path, *args: str, timeout: int = 300, trust: Path | None = None
+) -> subprocess.CompletedProcess[bytes] | None:
     """Run git inside ``tree``, isolated from ambient configuration.
 
     Disabling attributes is not enough to make the replay reproducible. A
@@ -355,6 +372,10 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
     try:
         info = dest / ".git" / "info"
         info.mkdir(parents=True, exist_ok=True)
+        # Created by us, not by git (the template is empty), so it lands under
+        # the ambient umask: a restrictive one leaves a directory its own
+        # non-root owner cannot enter, and the write below fails.
+        _own_private_dir(info)
         (info / "attributes").write_text(
             "* -text -eol -filter -diff -ident -merge -working-tree-encoding\n", encoding="utf-8"
         )
@@ -512,7 +533,7 @@ def replayed_stack_ops(
     if located is None:
         return None
     toplevel, prefix = located
-    tmp = Path(tempfile.mkdtemp(prefix="hl-replay-"))
+    tmp = _own_private_dir(Path(tempfile.mkdtemp(prefix="hl-replay-")))
     try:
         if not _checkout_base_tree(toplevel, base_sha, tmp):
             return None
@@ -534,6 +555,7 @@ def replayed_stack_ops(
             # missing cwd.
             try:
                 work_tree.mkdir(parents=True, exist_ok=True)
+                _own_private_dir(work_tree)
             except OSError:
                 return None
             if not _apply_at_some_level(work_tree, patch) or not _commit_replay_step(tmp):

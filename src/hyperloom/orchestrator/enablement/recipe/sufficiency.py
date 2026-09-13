@@ -422,7 +422,6 @@ def _patch_step_reasons(
     return reasons
 
 
-
 def _expected_op_reasons(
     section: Mapping[str, Any],
     by_root: Mapping[str, Mapping[str, Any]],

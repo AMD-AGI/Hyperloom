@@ -803,9 +803,7 @@ async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make():
     fake.shared_state.enablement.installed_versions_at_keep = {"torch": "2.6"}
     fake.shared_state.enablement.launch_evidence = {"recipe_digest": "sha256:old"}
 
-    await fake._maybe_rearm_enablement(
-        {"status": "kept", "enablement": True, "specialist_task_id": "spec-1"}
-    )
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
 
     assert fake.shared_state.enablement.environment_closure == {}
     assert fake.shared_state.enablement.installed_versions_at_keep == {}
@@ -819,9 +817,7 @@ async def test_rearm_kept_leaves_the_accepted_stack_records_a_round_did_not_touc
     fake.shared_state.enablement.roots = [{"id": "r1", "path": "/fr"}]
     fake.shared_state.enablement.base_sha = "a" * 40
 
-    await fake._maybe_rearm_enablement(
-        {"status": "kept", "enablement": True, "specialist_task_id": "spec-1"}
-    )
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
 
     assert fake.shared_state.enablement.roots == [{"id": "r1", "path": "/fr"}]
     assert fake.shared_state.enablement.base_sha == "a" * 40

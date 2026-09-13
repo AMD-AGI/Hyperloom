@@ -645,9 +645,7 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
         _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
         _ip_shared_state=SimpleNamespace(
             enablement=EnablementRound(
-                kept_artifacts=[
-                    {"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}
-                ],
+                kept_artifacts=[{"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}],
             )
         ),
     )
@@ -1074,10 +1072,14 @@ def test_a_never_applied_patch_cannot_borrow_a_matching_block_elsewhere(repo: Pa
     was never applied succeeded against a similar block further down the file.
     The forward replay meets the exact preimage instead."""
     twin = "srt/twin.py"
-    (repo / twin).write_text("header\nv=old\ntail\n" + "".join(f"x{i}\n" for i in range(10)) + "header\nv=new\ntail\n", encoding="utf-8")
+    (repo / twin).write_text(
+        "header\nv=old\ntail\n" + "".join(f"x{i}\n" for i in range(10)) + "header\nv=new\ntail\n", encoding="utf-8"
+    )
     _commit_all(repo, "a file with two similar blocks")
     base_sha = _git_head_sha(repo)
-    patch = _patch(tmp_path, "twin.patch", f"--- a/{twin}\n+++ b/{twin}\n@@ -1,3 +1,3 @@\n header\n-v=old\n+v=new\n tail\n")
+    patch = _patch(
+        tmp_path, "twin.patch", f"--- a/{twin}\n+++ b/{twin}\n@@ -1,3 +1,3 @@\n header\n-v=old\n+v=new\n tail\n"
+    )
     # Never applied: the tree still holds the base.
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
 
@@ -1281,9 +1283,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
         save=lambda session_dir, *a, **k: saved.append(Path(session_dir)),
     )
     session = tmp_path / "session"
-    _note_pre_mutation_head(
-        SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=session
-    )
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=session)
     assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
     assert saved == [session], "the reading must reach disk before the round mutates the tree"
 
@@ -1297,10 +1297,10 @@ def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
         raise OSError("disk full")
 
     state = SimpleNamespace(enablement=EnablementRound(), save=_boom)
-    _note_pre_mutation_head(
-        SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=tmp_path
-    )
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=tmp_path)
     assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
+
+
 def test_a_hunk_body_cannot_pass_itself_off_as_a_file_header(repo: Path, tmp_path: Path):
     """A removed line beginning ``-- `` followed by an added line beginning
     ``++ `` reads as another file header to a text parse -- enough to make a
@@ -1371,6 +1371,7 @@ def test_export_attributes_cannot_move_the_base_the_replay_compares_against(repo
     (repo / "srt" / "tpl.py").write_text(f"SHA = {base_sha}\nvalue = 2\n", encoding="utf-8")
     _commit_all(repo, "an unrecorded substitution")
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
 
 def test_a_patch_on_a_root_with_no_base_commit_declares_nothing(tmp_path: Path):
     """A tree with no identity has no preimage to replay from.
@@ -1476,7 +1477,9 @@ def test_an_apply_root_below_the_repository_top_level_replays(repo: Path, tmp_pa
     executor's own resolver accepts such a root."""
     inner = repo / "srt"
     base_sha = _git_head_sha(repo)
-    patch = _patch(tmp_path, "inner.patch", f"--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    patch = _patch(
+        tmp_path, "inner.patch", f"--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}"
+    )
     subprocess.run(["git", "-C", str(inner), "apply", str(patch)], check=True)
     _commit_all(repo, "applied under the subdirectory root")
 
@@ -1605,9 +1608,7 @@ def test_a_tree_whose_attributes_transform_content_is_refused(repo: Path, tmp_pa
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
 
 
-def test_a_smudge_filter_cannot_attribute_its_output_to_the_first_patch(
-    repo: Path, tmp_path: Path, monkeypatch
-):
+def test_a_smudge_filter_cannot_attribute_its_output_to_the_first_patch(repo: Path, tmp_path: Path, monkeypatch):
     """A ``smudge`` filter rewrites the file on the way OUT of the object
     database. Disabling transformations only AFTER checkout cannot undo that,
     and the first replay commit then records the smudged bytes as an effect of
@@ -1631,9 +1632,7 @@ def test_a_smudge_filter_cannot_attribute_its_output_to_the_first_patch(
     patch = _patch(tmp_path, "sm.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
 
     global_config = tmp_path / "gitconfig"
-    global_config.write_text(
-        "[filter \"replaytest\"]\n\tsmudge = sed s/base/unrecorded/\n", encoding="utf-8"
-    )
+    global_config.write_text('[filter "replaytest"]\n\tsmudge = sed s/base/unrecorded/\n', encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
 
     ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
@@ -1736,10 +1735,19 @@ def test_the_replay_isolation_root_is_private_and_not_a_predictable_path():
 
     env = _isolated_git_env()
     # No GIT_* the caller happens to be carrying survives into the replay.
-    assert not [key for key in env if key.startswith("GIT_") and key not in {
-        "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
-        "GIT_ATTR_NOSYSTEM", "GIT_TERMINAL_PROMPT",
-    }]
+    assert not [
+        key
+        for key in env
+        if key.startswith("GIT_")
+        and key
+        not in {
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_ATTR_NOSYSTEM",
+            "GIT_TERMINAL_PROMPT",
+        }
+    ]
     assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_ATTR_NOSYSTEM"] == "1"
     # System, global and user configuration all resolve inside the private root.
     for key in ("GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME"):
@@ -1816,6 +1824,4 @@ def test_a_repository_name_git_config_would_reinterpret_still_replays(tmp_path: 
         _git(root, "commit", "-qm", "accepted")
         patch = _patch(tmp_path, f"{abs(hash(name))}.patch", _git(root, "diff", "HEAD~1", "HEAD") + "\n")
 
-        assert replayed_stack_ops(root, [patch], base_sha=base_sha) == {
-            str(patch): {TARGET: "upsert"}
-        }, name
+        assert replayed_stack_ops(root, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}, name

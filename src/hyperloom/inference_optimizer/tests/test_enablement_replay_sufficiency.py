@@ -1767,8 +1767,11 @@ def test_a_file_the_accepted_stack_never_names_is_the_per_step_rules_own():
     """The gap no other rule can reach: a step touching a file the stack does
     not name at all, which is exactly what a capture derived from one round of
     several produces."""
-    section = {**_sufficient_section(), "accepted_stack_targets": {"r1": {"srt/other.py": "upsert"}},
-               "source_snapshots": [_snapshot(files=(("srt/other.py", "upsert"),))]}
+    section = {
+        **_sufficient_section(),
+        "accepted_stack_targets": {"r1": {"srt/other.py": "upsert"}},
+        "source_snapshots": [_snapshot(files=(("srt/other.py", "upsert"),))],
+    }
     assert "patch_step_not_captured" in _codes(_decide(_sufficient_state(), section))
 
 
