@@ -1771,29 +1771,51 @@ def test_a_restrictive_umask_cannot_be_attributed_to_a_patch(repo: Path, tmp_pat
     assert ops[str(patch)] == {"srt/touched.txt": "upsert"}, "the umask must not add an entry"
 
 
-def test_a_source_checkout_owned_by_another_uid_still_replays(repo: Path, tmp_path: Path, monkeypatch):
+def test_a_source_checkout_owned_by_another_uid_still_replays(repo: Path, tmp_path: Path):
     """Emptying the global configuration also drops the operator's
     ``safe.directory`` exceptions, and a shared or container-mounted framework
     checkout owned by another uid is then refused as dubious ownership before
     the replay begins -- a false refusal the isolation introduced.
 
-    ``safe.directory`` is honoured only in PROTECTED configuration -- git
-    ignores it from ``-c`` and ``GIT_CONFIG_*`` so a repository cannot vouch for
-    itself -- so the exception is written into the private config file the
-    replay already supplies, scoped to this one repository.
+    The ownership is really changed here. An earlier version of this test
+    asserted the config text and then exercised the same-owner path, which
+    pinned the file's contents but not the behaviour it exists for.
     """
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import _trust_config
-
     base_sha = _git_head_sha(repo)
     (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
     _commit_all(repo, "the accepted change")
     patch = _patch(tmp_path, "own.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
 
-    config = _trust_config(repo).read_text(encoding="utf-8")
-    assert f"directory = {repo}" in config
-    assert f"directory = {repo / '.git'}" in config, "clone validates .git on its own"
-    # Scoped: the file names this repository and nothing else.
-    assert config.count("directory =") == 2
+    if os.geteuid() != 0:
+        pytest.skip("changing ownership to another uid requires root")
+    for target in (repo, repo / ".git"):
+        os.chown(target, 65534, 65534)
+    assert repo.stat().st_uid != os.geteuid(), "the checkout must really be foreign-owned"
 
-    # The ordinary same-owner path is unaffected by carrying the exception.
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}
+
+
+def test_a_repository_name_git_config_would_reinterpret_still_replays(tmp_path: Path):
+    """A config VALUE is not a plain path: git reads quotes and backslashes as
+    syntax and ``#`` as the start of a comment. Interpolated directly, a
+    checkout named ``framework"review`` produced a bad config line -- refusing
+    an ordinary same-owner replay -- and one named ``framework#review`` was
+    silently truncated to a shorter path granting nothing."""
+    for name in ('framework"review', "framework#review", "framework\\review"):
+        root = tmp_path / name
+        (root / "srt").mkdir(parents=True)
+        (root / TARGET).write_text(BASE_TEXT, encoding="utf-8")
+        _git(root.parent, "init", "-q", str(root))
+        _git(root, "config", "user.email", "t@example.com")
+        _git(root, "config", "user.name", "t")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "base")
+        base_sha = _git_head_sha(root)
+        (root / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "accepted")
+        patch = _patch(tmp_path, f"{abs(hash(name))}.patch", _git(root, "diff", "HEAD~1", "HEAD") + "\n")
+
+        assert replayed_stack_ops(root, [patch], base_sha=base_sha) == {
+            str(patch): {TARGET: "upsert"}
+        }, name

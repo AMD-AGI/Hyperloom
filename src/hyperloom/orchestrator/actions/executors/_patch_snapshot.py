@@ -168,12 +168,14 @@ def _isolation_root() -> Path:
 def _trust_config(trust: Path | None) -> Path:
     """A protected config file granting ``trust`` -- and nothing else -- access.
 
-    ``safe.directory`` is honoured only in PROTECTED configuration: git ignores
-    it from ``-c`` and from ``GIT_CONFIG_*`` on purpose, so that a repository
-    cannot vouch for itself. The empty global config this replay supplies is
-    therefore also where a legitimate exception has to be written, and writing
-    one there keeps the exception scoped to the single repository the caller
-    already resolved rather than restoring the operator's whole configuration.
+    ``safe.directory`` is only fully honoured in PROTECTED configuration. The
+    precise behaviour is narrower than "git ignores ``-c``": on git 2.34.1 a
+    command-line exception does satisfy direct discovery in the source repo,
+    but NOT the source-side access a ``clone`` performs, which is the step this
+    replay needs. The empty global config the replay already supplies is
+    therefore where the exception has to be written, and writing it there keeps
+    it scoped to the single repository the caller resolved rather than
+    restoring the operator's whole configuration.
     """
     root = _isolation_root()
     if trust is None:
@@ -184,11 +186,20 @@ def _trust_config(trust: Path | None) -> Path:
     digest = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()[:16]
     path = root / f"trust-{digest}.config"
     if not path.exists():
-        # Both the work tree and its ``.git``: clone validates the second on its
-        # own and refuses on that path alone.
-        path.write_text(
-            f"[safe]\n\tdirectory = {repo}\n\tdirectory = {Path(repo) / '.git'}\n", encoding="utf-8"
-        )
+        # Written by git, not by string interpolation. A config VALUE is not a
+        # plain path: git reads quotes and backslashes as syntax and ``#`` as
+        # the start of a comment, so a checkout legitimately named
+        # ``framework"review`` produces a bad config line -- refusing an
+        # ordinary same-owner replay -- and one named ``framework#review`` is
+        # silently truncated to a shorter path that grants nothing.
+        #
+        # Both the work tree and its ``.git``: clone validates the second
+        # separately and refuses on that path alone.
+        for target in (repo, str(Path(repo) / ".git")):
+            done = _git(root, "config", "--file", str(path), "--add", "safe.directory", target, timeout=60)
+            if done is None or done.returncode != 0:
+                path.unlink(missing_ok=True)
+                return root / "config"
     return path
 
 
