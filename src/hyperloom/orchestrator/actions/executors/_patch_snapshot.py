@@ -183,23 +183,36 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
     clone = _git(Path("."), "clone", "--shared", "-n", "-q", str(framework_root), str(dest), timeout=600)
     if clone is None or clone.returncode != 0:
         return False
-    done = _git(dest, "checkout", "-q", "--detach", base_sha, timeout=600)
-    if done is None or done.returncode != 0:
-        return False
-    # ``$GIT_DIR/info/attributes`` outranks a tracked ``.gitattributes``, so
-    # this turns off every content transformation staging would otherwise
-    # apply. Without it ``git add`` normalises, and a patch whose whole effect
-    # is a CRLF line ending is staged back to the byte-identical LF blob it
-    # started as: the commit shows no change, the inventory omits the file, and
-    # nothing downstream compares or ships it. ``--force`` fixed ignore rules;
-    # this is the other way staging can discard evidence.
+    # BEFORE the checkout, not after. ``$GIT_DIR/info/attributes`` outranks a
+    # tracked ``.gitattributes``, and this turns off every transformation that
+    # can sit between the object database and the working tree -- in BOTH
+    # directions, which is why the order matters:
+    #
+    #   * on the way out, a ``smudge`` filter or an encoding declared by the
+    #     base itself rewrites the checked-out file. Installed afterwards, the
+    #     override cannot undo that, and the first replay commit then records
+    #     the smudged bytes as an effect of ITS patch -- content the recorded
+    #     base and patch do not produce for anyone without that filter
+    #     configured. The preimage has to be the commit, not the commit as this
+    #     host renders it.
+    #   * on the way in, ``git add`` converts eol, runs ``clean`` filters,
+    #     expands ``$Id$`` and applies ``working-tree-encoding``. Any of those
+    #     can stage a genuinely changed file back to the blob it started from,
+    #     so the commit shows no change, the inventory omits the file, and
+    #     nothing compares or ships it.
+    #
+    # ``working-tree-encoding`` is listed explicitly: it is not implied by
+    # ``-text`` and converts independently of it.
     try:
         info = dest / ".git" / "info"
         info.mkdir(parents=True, exist_ok=True)
-        (info / "attributes").write_text("* -text -filter -diff -ident -merge\n", encoding="utf-8")
+        (info / "attributes").write_text(
+            "* -text -eol -filter -diff -ident -merge -working-tree-encoding\n", encoding="utf-8"
+        )
     except OSError:
         return False
-    return True
+    done = _git(dest, "checkout", "-q", "--detach", base_sha, timeout=600)
+    return done is not None and done.returncode == 0
 
 
 def _commit_replay_step(tree: Path) -> bool:

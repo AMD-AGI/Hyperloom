@@ -1575,3 +1575,67 @@ def test_a_root_a_deletion_empties_is_recreated_for_the_next_round(repo: Path, t
         str(first): {"only.py": "delete"},
         str(second): {"only.py": "upsert"},
     }
+
+
+def test_a_tree_whose_attributes_transform_content_is_refused(repo: Path, tmp_path: Path):
+    """``working-tree-encoding`` converts independently of ``text``, so it is not
+    implied by ``-text``. Left enabled during staging it converted a re-encoded
+    working file back to the blob it came from, and the change vanished from
+    the inventory silently -- with the file outside the comparison set, content
+    no patch produced verified too.
+
+    The replay now disables every transformation at BOTH ends, so a tree whose
+    attributes rewrite working-tree content no longer matches its own replay
+    and the stack is refused. That is a real narrowing, in the same explicit
+    category as symlinks and roots with no base: the capture would otherwise
+    have to claim that bytes produced by an attribute were produced by a patch.
+    What it is not is silent -- the omission is now a refusal.
+    """
+    rel = "srt/enc.txt"
+    (repo / rel).write_bytes("old\n".encode("utf-16-le"))
+    (repo / ".gitattributes").write_text(f"{rel} working-tree-encoding=UTF-16LE\n", encoding="utf-8")
+    _commit_all(repo, "a file with a declared working-tree encoding")
+    base_sha = _git_head_sha(repo)
+
+    (repo / rel).write_bytes("new\n".encode("utf-16-le"))
+    _commit_all(repo, "re-encode its content")
+    patch = _patch(tmp_path, "enc.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_smudge_filter_cannot_attribute_its_output_to_the_first_patch(
+    repo: Path, tmp_path: Path, monkeypatch
+):
+    """A ``smudge`` filter rewrites the file on the way OUT of the object
+    database. Disabling transformations only AFTER checkout cannot undo that,
+    and the first replay commit then records the smudged bytes as an effect of
+    its own patch -- content the recorded base and patch do not produce for a
+    consumer without that filter configured.
+
+    The filter is supplied through ``GIT_CONFIG_GLOBAL`` because that is where
+    the hazard lives: host configuration the clone inherits and an outside
+    consumer does not have. A repository-level filter would not be inherited by
+    the clone at all, so a test using one proves nothing.
+    """
+    filtered, plain = "srt/filtered.txt", "srt/plain.txt"
+    (repo / filtered).write_text("base\n", encoding="utf-8")
+    (repo / plain).write_text("old\n", encoding="utf-8")
+    (repo / ".gitattributes").write_text(f"{filtered} filter=replaytest\n", encoding="utf-8")
+    _commit_all(repo, "a file declaring a smudge filter")
+    base_sha = _git_head_sha(repo)
+
+    (repo / plain).write_text("new\n", encoding="utf-8")
+    _commit_all(repo, "the accepted patch touches only the plain file")
+    patch = _patch(tmp_path, "sm.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text(
+        "[filter \"replaytest\"]\n\tsmudge = sed s/base/unrecorded/\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+    ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    assert ops is not None, "the stack itself is valid and must still verify"
+    # The smudged file is not an effect of the patch and must not be claimed.
+    assert ops[str(patch)] == {plain: "upsert"}
