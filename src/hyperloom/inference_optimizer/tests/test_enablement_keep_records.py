@@ -1480,3 +1480,98 @@ def test_an_apply_root_below_the_repository_top_level_replays(repo: Path, tmp_pa
     _commit_all(repo, "applied under the subdirectory root")
 
     assert replayed_stack_ops(inner, [patch], base_sha=base_sha) == {str(patch): {"module.py": "upsert"}}
+
+
+def test_the_execute_bit_compared_is_the_one_git_records(repo: Path, tmp_path: Path):
+    """``mode & 0o111`` asks whether ANY execute bit is set, which accepts 0645
+    -- a mode git classifies as non-executable and whose owner cannot run it.
+
+    Restored after being deleted by accident while the non-git tests were being
+    replaced. Its guarantee has nothing to do with that contract change, and
+    the surviving content-plus-mode test compares 0755 against 0644, which the
+    old incorrect ``0o111`` comparison would also have passed.
+    """
+    script = repo / "srt" / "run.sh"
+    script.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+    _commit_all(repo, "add the script")
+    base_sha = _git_head_sha(repo)
+    script.write_text("#!/bin/sh\necho two\n", encoding="utf-8")
+    script.chmod(0o755)
+    _commit_all(repo, "content and mode")
+    patch = _patch(tmp_path, "x.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/run.sh": "upsert"}}
+
+    # 0645 has a group execute bit but not the owner one git records as 100755.
+    script.chmod(0o645)
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_change_staging_would_normalize_away_is_still_inventoried(repo: Path, tmp_path: Path):
+    """``git add`` applies eol normalization and clean filters, so a patch whose
+    whole effect is a line ending was staged back to the byte-identical blob it
+    started as: the replay commit showed no change, the inventory omitted the
+    file, and nothing compared or shipped it. Forcing ignored files closed one
+    way staging discards evidence; this is the other."""
+    (repo / ".gitattributes").write_text("srt/crlf.txt text\n", encoding="utf-8")
+    (repo / "srt" / "crlf.txt").write_bytes(b"old\n")
+    (repo / "srt" / "other.txt").write_bytes(b"old\n")
+    _commit_all(repo, "a file tracked as text")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(
+        tmp_path,
+        "crlf.patch",
+        "--- a/srt/crlf.txt\n+++ b/srt/crlf.txt\n@@ -1 +1 @@\n-old\n+old\r\n"
+        "--- a/srt/other.txt\n+++ b/srt/other.txt\n@@ -1 +1 @@\n-old\n+new\n",
+    )
+    _git(repo, "apply", str(patch))
+    _git(repo, "-c", "core.autocrlf=false", "add", "-A", "--force")
+    _git(repo, "commit", "-qm", "applied")
+
+    ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    assert ops is not None
+    # Both entries, not just the one normalization left visible.
+    assert ops[str(patch)] == {"srt/crlf.txt": "upsert", "srt/other.txt": "upsert"}
+
+    # And the negative control: with the file in the comparison set, content
+    # no patch produced is refused.
+    (repo / "srt" / "crlf.txt").write_bytes(b"not produced by any patch\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_an_apply_root_absent_at_base_is_created_for_the_replay(repo: Path, tmp_path: Path):
+    """Git records no empty directory, so the apply root may not exist at base
+    -- an untracked directory the first accepted patch populates."""
+    base_sha = _git_head_sha(repo)
+    fresh = repo / "srt" / "fresh"
+    fresh.mkdir()
+    patch = _patch(tmp_path, "fresh.patch", "--- /dev/null\n+++ b/made.py\n@@ -0,0 +1 @@\n+x = 1\n")
+    subprocess.run(["git", "-C", str(fresh), "apply", str(patch)], check=True)
+    _commit_all(repo, "populate a directory the base does not have")
+
+    assert replayed_stack_ops(fresh, [patch], base_sha=base_sha) == {str(patch): {"made.py": "upsert"}}
+
+
+def test_a_root_a_deletion_empties_is_recreated_for_the_next_round(repo: Path, tmp_path: Path):
+    """A deletion that takes the last file under the apply root removes the
+    directory, and the next step's git invocations would run with a missing
+    working directory."""
+    root = repo / "srt" / "solo"
+    root.mkdir()
+    (root / "only.py").write_text("one\n", encoding="utf-8")
+    _commit_all(repo, "a root with a single file")
+    base_sha = _git_head_sha(repo)
+
+    first = _patch(tmp_path, "s1.patch", "--- a/only.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-one\n")
+    subprocess.run(["git", "-C", str(root), "apply", str(first)], check=True)
+    _commit_all(repo, "round one empties the root")
+    assert not root.exists(), "git should have removed the now-empty directory"
+
+    root.mkdir()
+    second = _patch(tmp_path, "s2.patch", "--- /dev/null\n+++ b/only.py\n@@ -0,0 +1 @@\n+two\n")
+    subprocess.run(["git", "-C", str(root), "apply", str(second)], check=True)
+    _commit_all(repo, "round two recreates it")
+
+    assert replayed_stack_ops(root, [first, second], base_sha=base_sha) == {
+        str(first): {"only.py": "delete"},
+        str(second): {"only.py": "upsert"},
+    }

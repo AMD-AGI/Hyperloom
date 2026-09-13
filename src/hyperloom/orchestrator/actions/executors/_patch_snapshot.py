@@ -184,7 +184,22 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
     if clone is None or clone.returncode != 0:
         return False
     done = _git(dest, "checkout", "-q", "--detach", base_sha, timeout=600)
-    return done is not None and done.returncode == 0
+    if done is None or done.returncode != 0:
+        return False
+    # ``$GIT_DIR/info/attributes`` outranks a tracked ``.gitattributes``, so
+    # this turns off every content transformation staging would otherwise
+    # apply. Without it ``git add`` normalises, and a patch whose whole effect
+    # is a CRLF line ending is staged back to the byte-identical LF blob it
+    # started as: the commit shows no change, the inventory omits the file, and
+    # nothing downstream compares or ships it. ``--force`` fixed ignore rules;
+    # this is the other way staging can discard evidence.
+    try:
+        info = dest / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        (info / "attributes").write_text("* -text -filter -diff -ident -merge\n", encoding="utf-8")
+    except OSError:
+        return False
+    return True
 
 
 def _commit_replay_step(tree: Path) -> bool:
@@ -219,7 +234,16 @@ def _step_inventory(tree: Path, *, prefix: str = "") -> dict[str, str] | None:
     done = _git(tree, "diff", "--raw", "--no-renames", "-z", "HEAD~1", "HEAD")
     if done is None or done.returncode != 0:
         return None
-    fields = done.stdout.decode("utf-8", errors="replace").split("\0")
+    # Strict, not ``errors="replace"``: git paths are byte strings, and
+    # replacing an undecodable byte can turn one real filename into another
+    # real filename -- verification then checks an unrelated file that happens
+    # to exist, and capture ships it. The durable schema is UTF-8, so a name it
+    # cannot carry is refused rather than approximated.
+    try:
+        raw = done.stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    fields = raw.split("\0")
     ops: dict[str, str] = {}
     index = 0
     while index + 1 < len(fields):
@@ -341,6 +365,15 @@ def replayed_stack_ops(
         # still travel, because the recipe emits one step per patch.
         end_state: dict[str, str] = {}
         for patch in patches:
+            # Git records no empty directory, so the apply root may be absent at
+            # base -- an untracked directory the first patch populates -- and a
+            # deletion can remove it again when it takes the last file under it.
+            # Either way the next step's git invocations would run with a
+            # missing cwd.
+            try:
+                work_tree.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                return None
             if not _apply_at_some_level(work_tree, patch) or not _commit_replay_step(tmp):
                 return None
             ops = _step_inventory(tmp, prefix=prefix)
