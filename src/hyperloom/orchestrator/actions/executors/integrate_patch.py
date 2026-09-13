@@ -604,19 +604,33 @@ def _accepted_patch_roots(
     here: a step whose root resolves to no record is refused as
     ``root_unidentified``, and one silently re-pointed at this round's root
     would be captured against a tree that never held it.
+
+    The ``done_payload`` contribution is admitted only for patches that ARE in
+    the accepted stack, on the same rule :func:`_sole_patch_root` applies to the
+    selected set: a recorded entry for a patch this integration did not take
+    cannot attest anything about the stack. Admitting it would add a root record
+    and a set of declared targets for a tree nothing in the stack touched, and
+    the capture would then be judged against files no round wrote.
     """
+    accepted = [str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)]
+    in_stack = set(accepted)
     roots: dict[str, str] = {}
     prior = getattr(enablement, "patch_roots", None)
     if isinstance(prior, Mapping):
+        # The durable mapping is keyed by the stack's own paths by construction:
+        # it is this function's own output from an earlier round.
         roots.update({str(k): str(v) for k, v in prior.items() if str(k) and str(v)})
     roots.update(
-        {str(k): str(v) for k, v in ((done_payload or {}).get("patch_roots") or {}).items() if str(k) and str(v)}
+        {
+            str(k): str(v)
+            for k, v in ((done_payload or {}).get("patch_roots") or {}).items()
+            if str(k) and str(v) and str(k) in in_stack
+        }
     )
     # The same fallback the projection uses, so the captured set and the
     # replayed set cannot disagree about which tree a patch belongs to.
-    for patch in (*(getattr(enablement, "kept_patches", None) or []), *applied):
-        key = str(patch)
-        if key and not roots.get(key) and framework_root:
+    for key in accepted:
+        if not roots.get(key) and framework_root:
             roots[key] = framework_root
     return roots
 
@@ -706,23 +720,61 @@ def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
     return texts
 
 
-def _sole_patch_root(done_payload: dict[str, Any] | None) -> str | None:
+def _sole_patch_root(
+    done_payload: dict[str, Any] | None,
+    patch_paths: list[Path],
+    *,
+    specialist_workspace: Path,
+) -> str | None:
     """Return the one apply root recorded for every patch, or ``None``.
 
-    A set spanning two trees has no single apply root, so it falls back to
-    resolution rather than silently picking one.
+    Only metadata covering the selected patch set can replace target
+    resolution. Unselected patches cannot supply or contradict its root.
+    Localization patches outside the specialist workspace deliberately use
+    full-set content resolution: the specialist cannot attest their paths.
 
     Args:
         done_payload: The originating specialist's done payload, if any.
+        patch_paths: The complete patch set selected for this integration.
+        specialist_workspace: Workspace used to resolve recorded patch paths.
 
     Returns:
         The sole recorded root, or ``None``.
     """
     raw = (done_payload or {}).get("patch_roots")
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not patch_paths:
         return None
-    roots = {str(v) for v in raw.values() if str(v).strip()}
-    return roots.pop() if len(roots) == 1 else None
+    try:
+        selected = {patch.resolve() for patch in patch_paths}
+    except (OSError, RuntimeError, ValueError):
+        return None
+    covered: set[Path] = set()
+    roots: set[str] = set()
+    for recorded_patch, root in raw.items():
+        if not isinstance(recorded_patch, str) or not recorded_patch.strip():
+            continue
+        try:
+            resolved = _resolve_patch_paths(
+                specialist_workspace=specialist_workspace,
+                explicit_patches=[recorded_patch],
+                done_payload=None,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        for patch in resolved:
+            if patch not in selected:
+                continue
+            if not isinstance(root, str) or not root.strip():
+                return None
+            covered.add(patch)
+            try:
+                root_path = Path(root).expanduser()
+                if not root_path.is_absolute():
+                    root_path = specialist_workspace / root_path
+                roots.add(str(root_path.resolve()))
+            except (OSError, RuntimeError, ValueError):
+                return None
+    return roots.pop() if covered == selected and len(roots) == 1 else None
 
 
 def _resolve_framework_root(
@@ -2594,7 +2646,7 @@ class IntegratePatchExecutor:
         framework_root = _resolve_framework_root(
             explicit_framework_root,
             patch_paths=patch_paths,
-            recorded_root=_sole_patch_root(done_payload),
+            recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
@@ -3470,8 +3522,13 @@ class IntegratePatchExecutor:
         ordered_patches = [
             str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)
         ]
-        # Anything bound to a root but absent from the durable order still has to
-        # be classified; it goes first, before every patch whose position is known.
+        # ``_accepted_patch_roots`` binds only patches that ARE in the accepted
+        # stack, so this normally adds nothing. It stays because the durable
+        # mapping outlives the round that wrote it: an entry for a patch no
+        # longer in ``kept_patches`` would otherwise contribute a root record
+        # with no declared target, and be refused as an uncaptured root rather
+        # than classified. First, because a position it does not have cannot
+        # override one that is known.
         ordered_patches = [p for p in patch_roots if p not in set(ordered_patches)] + ordered_patches
         patches_by_root: dict[str, list[Path]] = {}
         for patch_path in dict.fromkeys(ordered_patches):

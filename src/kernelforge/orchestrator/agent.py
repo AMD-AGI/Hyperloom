@@ -29,7 +29,6 @@ from kernelforge.loop.scoring import (
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
-from kernelforge import rtk
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -171,51 +170,29 @@ def make_agent_fn(
             file=sys.stderr,
         )
 
-    # Kernel-backend prompts name build/test/bench/pmc/registers as if they were tools.
+    # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
+    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
+    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
+    # now, so only the framing that is actually about this loop is left.
     kernel_backend_section = ""
     if kernel_backend_context:
-        # Drop the profile/pmc mentions from this framing when profiling is disabled, so the implementer prompt
-        # carries no profiling guidance. (The loaded kernel_backend_context is backend domain knowledge and is left
-        # as-is.)
+        # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
+        # kernel_backend_context is backend domain knowledge and is left as-is.)
         _self_verbs = (
-            "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
+            "build, run, and profile the kernel YOURSELF via Bash"
             if profiling_enabled
-            else "build and run the kernel YOURSELF via the Bash tool (compile, run the driver)"
-        )
-        _self_tools = (
-            "`build`/`test`/`bench`/`pmc`/`registers`" if profiling_enabled else "`build`/`test`/`bench`/`registers`"
+            else "build and run the kernel YOURSELF via Bash"
         )
         kernel_backend_section = (
             f"{chr(10)}## Backend Expertise ({kernel_backend_name}){chr(10)}"
             "Backend guidance for choosing and implementing your edit. In this "
             f"loop you {_self_verbs} to verify every change before finishing. "
-            f"Where the guidance below names {_self_tools} tools, run those steps "
-            "as shell commands via Bash. After you finish, the loop also runs an "
-            "SNR pre-filter + benchmark pass on your final kernel, and accepts it "
-            "only if the task's own correctness suite passes too."
+            "After you finish, the loop also runs an SNR pre-filter + benchmark "
+            "pass on your final kernel, and accepts it only if the task's own "
+            "correctness suite passes too."
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
-
-    # `rtk` (token filter) is advertised to the agent ONLY when it's actually on PATH; otherwise the agent would
-    # prefix every shell command with a missing binary (command not found).
-    if rtk.is_available():
-        _rtk_guidance = (
-            "Always prefix shell commands with `rtk` — it filters verbose output (ninja,\n"
-            "cmake, git, grep, find, ls, rocprofv3, etc.) for 60-90% fewer tokens, and\n"
-            "passes through unchanged for unknown commands. Examples:\n"
-            "  - `rtk git diff` instead of `git diff`\n"
-            "  - `rtk grep -r foo .` instead of `grep -r foo .`\n"
-            "  - `rtk ninja -j4` instead of `ninja -j4`\n"
-            "  - `rtk ls path/` instead of `ls path/`\n"
-        )
-        _rtk_guidance_terse = (
-            "Prefix noisy shell commands with `rtk` to filter verbose output (ninja, cmake,\n"
-            "git, grep, find, ls, rocprofv3, …) for 60-90% fewer tokens; it passes unknown\n"
-            "commands through unchanged. "
-        )
-    else:
-        _rtk_guidance = ""
-        _rtk_guidance_terse = ""
 
     workspace_hygiene_rule = (
         "Do NOT create or leave new non-ignored files in the workspace. Run "
@@ -326,7 +303,7 @@ keep exploring until you are done rather than reserving effort for a summary.
 {self_profiling_section}
 ## Tool usage — token discipline
 Every Bash invocation's stdout/stderr is billed back to you on the next turn.
-{_rtk_guidance}Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
+Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
 """
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
@@ -434,7 +411,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 
 {self_profiling_section}
 ## Tool usage — token discipline
-{_rtk_guidance_terse}Never `cat` a whole file — use the Read tool.
+Never `cat` a whole file — use the Read tool.
 """
 
     async def agent_fn(
@@ -577,6 +554,7 @@ Make your change(s) now.
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=prompt,
+            role="implementer",
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,

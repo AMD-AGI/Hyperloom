@@ -20,11 +20,13 @@ from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
 from hyperloom.orchestrator.loop.coordinator_helpers import (
+    _accepted_config_as_variant,
     _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
 )
+from ._accuracy_gate import parse_eval_results
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
@@ -74,20 +76,6 @@ def _serving_gpus(tp: int) -> str:
 def _parse_isl_osl(spec: str) -> tuple[int, int]:
     isl_s, _, osl_s = str(spec).partition(":")
     return int(isl_s or 1024), int(osl_s or 1024)
-
-
-def _accepted_env_mapping(raw_env: str) -> dict[str, str]:
-    """Parse GEAK's shell-style accepted environment without executing it."""
-    try:
-        tokens = shlex.split(raw_env)
-    except ValueError:
-        tokens = raw_env.split()
-    values: dict[str, str] = {}
-    for token in tokens:
-        name, separator, value = token.partition("=")
-        if separator and name:
-            values[name] = value
-    return values
 
 
 def _geak_replay_server_log(out_dir: Path) -> str | None:
@@ -172,17 +160,29 @@ async def sweep_via_geak(
     final_launch_script = str(result.get("final_launch_script") or "").strip()
     final_launch_path = Path(final_launch_script) if final_launch_script else None
     use_final_launch = bool(final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK))
+    tuning = result.get("tuning_skillset")
+    requires_deployment = (
+        isinstance(tuning, dict)
+        and tuning.get("gate") == "accepted"
+        and bool(tuning.get("live_tree_files") or tuning.get("cache_invalidation"))
+    )
+    if requires_deployment and not use_final_launch:
+        return {
+            "status": "failed",
+            "error_class": "missing_deployment_launcher",
+            "error": "GEAK accepted tuning requires file deployment, but its final launch script is unavailable.",
+        }
     replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
-    cfg = result.get("accepted_config") or {}
-    flags = str(cfg.get("flags") or "")
-    env_str = str(cfg.get("env") or "")
+    try:
+        flags, accepted_env = _accepted_config_as_variant(result.get("accepted_config"))
+    except ValueError as exc:
+        return {"status": "failed", "error_class": "invalid_accepted_config", "error": str(exc)}
+    env_str = shlex.join(f"{name}={value}" for name, value in accepted_env.items())
 
     if not replay_script.is_file():
         return {
             "status": "failed",
-            # Keep the established error contract: a final launch script is optional, and unavailable final scripts
-            # fall back to bench_e2e.
             "error_class": "missing_bench_script",
             "error": (
                 f"GEAK final launch script is not executable ({final_launch_script}); "
@@ -304,12 +304,15 @@ async def sweep_via_geak(
                 e2el = summ.get("e2el_ms_median")
                 if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
                     succeeded = True
+                    evaluation = parse_eval_results(out_dir, framework=backend)
                     entry.update(
                         {
                             "status": "succeeded",
                             "output_throughput": tput,
                             "ttft_mean_ms": ttft,
                             "tpot_mean_ms": tpot,
+                            "accuracy": evaluation.get("accuracy"),
+                            "accuracy_source": evaluation.get("source_file"),
                         }
                     )
                 else:
@@ -326,7 +329,7 @@ async def sweep_via_geak(
                 framework=backend,
                 slot=out_dir,
                 requested_server_args=flags,
-                requested_server_env=_accepted_env_mapping(env_str),
+                requested_server_env=accepted_env,
                 model_path=model,
             )
             entry["server_log_path"] = actual_log or ""

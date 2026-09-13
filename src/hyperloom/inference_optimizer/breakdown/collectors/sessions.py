@@ -259,10 +259,18 @@ def collect_model_info(
 # durable ``EnablementRound`` state onto the ordered ``recipe_steps`` array and
 # the ``replay_sufficiency`` decision over it -- the fail-closed judgement of
 # whether a consumer outside this session receives enough to replay the
-# accepted stack. That judgement has no author-time home yet (see the module
-# note in ``recorder/enablement_event``), and it must not silently disappear:
-# an absent ``replay_sufficiency`` is read as insufficient by contract, so
-# dropping the producer would report every session as uncertifiable.
+# accepted stack.
+#
+# That judgement is a statement about the finished *stack*, not about what one
+# round did, so it is the one enablement fact no per-round ``record_*`` can
+# make. It is computed here and published by
+# ``recorder/enablement_event.finish`` at the lane's terminal, which is the
+# first moment the accepted stack is complete; this module stays its
+# implementation so there is exactly one projection and one verdict rather than
+# a read-side and an author-side that can disagree. It must not silently
+# disappear either way: an absent ``replay_sufficiency`` is read as
+# insufficient by contract, so dropping the producer would report every session
+# as uncertifiable.
 #
 # The round lifecycle counters this used to report -- ``attempts``,
 # ``inflight_task_id``, ``stall_streak`` -- are no longer fields of the

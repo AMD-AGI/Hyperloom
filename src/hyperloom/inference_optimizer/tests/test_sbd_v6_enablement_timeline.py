@@ -610,7 +610,15 @@ def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
 
 def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
     """Fail closed, both ways: nothing was captured for the patch this recipe
-    replays, so the verdict says so rather than the key going missing."""
+    replays, so the verdict says so rather than the key going missing.
+
+    The outcome is what this test owns -- a KEEP whose stack was never captured
+    closes ``insufficient`` and names why. Which rule catches it is settled in
+    :mod:`test_enablement_replay_sufficiency`, and pinning a specific code here
+    would restate that instead of testing the recorder.
+    """
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS
+
     _boot_trigger()
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
@@ -622,7 +630,10 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
 
     decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
     assert decision["status"] == "insufficient"
-    assert "patch_step_not_captured" in [r["code"] for r in decision["reasons"]]
+    codes = [r["code"] for r in decision["reasons"]]
+    assert codes, "an insufficient verdict that names no reason cannot be acted on"
+    # The vocabulary is closed; an unrecognized code is itself insufficient.
+    assert set(codes) <= set(REASON_BLOCKS)
 
 
 def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_one(_bound_session):

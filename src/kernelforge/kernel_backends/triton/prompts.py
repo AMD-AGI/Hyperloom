@@ -29,12 +29,12 @@ code generation, plus `@triton.autotune` for configuration search.
 1. READ the target operation and any existing implementation
 2. WRITE the Triton kernel with @triton.jit and reasonable initial config
 3. BUILD — verify import succeeds (Triton compiles on first call)
-4. TEST correctness with the `test` tool, then the task's own correctness suite
-5. BENCH wall-clock with the `bench` tool (30-iter median, in-context)
+4. TEST correctness by running the driver yourself, then the task's own correctness suite
+5. BENCH wall-clock by running the driver in bench mode
 6. SWEEP the dispatch constants one case at a time (see the shared
    `lever_cheap_sweeps.md` pointer below) — measure the question instead of arguing it
 7. AUTOTUNE — define config space, let Triton search, then verify winner
-8. PROFILE PMC with the `pmc` tool if needed
+8. PROFILE PMC if you need it to decide the next change
 9. CHECK register pressure — reduce num_stages/num_warps if spilling
 10. Log experiment: config, SNR, wall_ms, diagnosis
 
@@ -95,36 +95,22 @@ confirm against these cards (and the AMDGCN dump) before trusting a config.
 Autotune converged (top 3 within 2%) but PMC still shows the matrix core far
 from peak is NOT "at the hardware limit". It is the signature of a scheduling
 problem Triton's compiler cannot see past, and the answer is one level down in
-the SAME language family, not a different backend.
-
-Gluon is Triton's low-level dialect: same Python frontend, same `@…jit`, same
-`Triton → TritonGPU → TritonAMDGPU → AMDGCN` lowering, same JIT cache, same
-launch and `@triton.autotune` surface. What it adds is explicit control over the
-four things Triton's compiler owns and you cannot steer with knobs — tile
-layouts (including swizzled/padded LDS layouts), the software pipeline (there is
-no `num_stages`; you author the stages), the register budget, and the MFMA
-instruction itself including CDNA4's native scaled MFMA. Going lower can also
-buy capability, not just speed: aiter's production paged-MQA-logits Gluon path
-supports preshuffle and multi-element KV blocks that its Triton path cannot
-express at all.
+the SAME language family, not a different backend: Gluon is Triton's low-level
+dialect — same Python frontend, same lowering, same JIT cache, same launch and
+`@triton.autotune` surface — that hands you the tile layouts, the software
+pipeline, the register budget and the MFMA itself, which Triton's compiler owns
+and no knob steers.
 
 You may do this yourself — it is an edit to the kernel, not a change of project.
-The shape that works inside this loop: add the `@gluon.jit` kernel to the SAME
-TRACKED FILE, keep the public entry signature identical, dispatch to it at
-runtime, and leave the Triton path live as the fallback. A new file is not
-committed by a KEEP unless the campaign allowlisted it, and the fallback is what
-saves the candidate when the task's `compile_command` builds a smaller shape
-than the one you benchmarked.
-
-Before writing any of it, confirm the toolchain: Gluon is `triton.experimental`,
-is not a stabilized API, and has shipped release-to-release breakage —
-`from triton.experimental import gluon` must import, and native scaled MFMA is
-CDNA4-only. Read `languages/gluon/skills/optimize/gluon_levers/forge_integration.md`
-(the version traps and the change shape) and `.../overview.md` (whether the
-evidence really supports the drop, and the measured rung ladder) first. If the
-remaining session budget cannot reach a rung that would beat the incumbent, say
-so and stay in Triton — a naive Gluon rewrite loses to a tuned Triton kernel and
-nothing will be kept.
+It is also the one escalation whose natural change shape a KEEP silently refuses
+to carry, on a `triton.experimental` API that has shipped release-to-release
+breakage, so do not write any of it from memory. Read
+`languages/gluon/skills/optimize/gluon_levers/overview.md` (whether the evidence
+really supports the drop, and the measured rung ladder) and then
+`.../forge_integration.md` (the change shape the loop can keep, and the version
+traps) BEFORE the first edit. If the remaining session budget cannot reach a rung
+that would beat the incumbent, say so and stay in Triton — a naive Gluon rewrite
+loses to a tuned Triton kernel and nothing will be kept.
 
 ## When to Stop
 - Gate met → STOP, report GREEN

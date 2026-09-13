@@ -431,6 +431,7 @@ class PlanCriticAgent:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        role="plan critic",
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=budget_sec,
@@ -526,6 +527,7 @@ class PlanCriticAgent:
             result = await asyncio.wait_for(
                 self.backend.run(
                     AgentRunSpec(
+                        role="plan critic repair",
                         system_prompt=_WIDTH_REPAIR_SYSTEM_PROMPT,
                         user_prompt=build_repair_prompt(
                             label=_WIDTH_BLOCK_LABEL,

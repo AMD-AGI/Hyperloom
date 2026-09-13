@@ -1086,6 +1086,7 @@ def _run_registered_author(
     spec = AgentRunSpec(
         system_prompt=_author_system_prompt(guard.new_module_dirs),
         user_prompt=prompt,
+        role="fusion author",
         cwd=workdir,
         model=model,
         writable=True,

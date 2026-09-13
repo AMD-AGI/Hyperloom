@@ -345,12 +345,19 @@ def _patch_step_reasons(
     than it replays is refused by the deciding side rather than only by the
     producing side happening to be correct.
 
-    The two rules are made disjoint rather than merely both fail-closed: a
-    target ``accepted_stack_targets`` already names *with the operation this
-    step declares* belongs to the rule above, so only the targets that rule
-    cannot reach are judged here. A wider reason set than the defect makes the
-    verdict unreadable, and a target named under a different operation is a
-    defect that rule cannot see, so it stays here.
+    This rule is scoped to the gap the others cannot reach, because a reason set
+    wider than the defect makes the verdict unreadable. Already owned elsewhere,
+    and therefore skipped here:
+
+    * a step whose ``root_id`` matches no root record -- ``root_unidentified``;
+    * a root record whose capture returned no manifest -- ``source_snapshot_missing``;
+    * a target ``accepted_stack_targets`` names under the operation this step
+      declares -- ``accepted_stack_not_launched``.
+
+    What is left is exactly this rule's own: a snapshot that exists and does not
+    cover a target only this step declares. A target named under a *different*
+    operation stays here too, because comparing the stack's op against the
+    snapshot cannot see that the step wanted another one.
 
     Args:
         section: The emitted section, read for ``accepted_stack_targets``.
@@ -386,7 +393,9 @@ def _patch_step_reasons(
             continue
         snapshot = by_root.get(root_id)
         if not isinstance(snapshot, Mapping):
-            reasons.append(_reason("patch_step_not_captured", scope))
+            # ``root_unidentified`` or ``source_snapshot_missing`` already
+            # stands over this step; both refuse, and one code per defect is
+            # what keeps the verdict readable.
             continue
         captured = {
             str(f.get("rel")): str(f.get("op")) for f in (snapshot.get("files") or []) if isinstance(f, Mapping)

@@ -323,6 +323,7 @@ async def _run_agent(
     run_spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=prompt,
+        role="flydsl driver preparation",
         cwd=str(stage),
         writable=True,
         timeout_sec=timeout_sec,

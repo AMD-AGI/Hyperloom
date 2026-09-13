@@ -96,12 +96,7 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: (
-            "--block-size 64",
-            {"ENV_A": "1"},
-            "Kimi-K2.6",
-            "/recipes/kimi.sh",
-        ),
+        lambda _args: ("--block-size 64", {"ENV_A": "1"}, "Kimi-K2.6", "/recipes/kimi.sh", {}),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -152,7 +147,7 @@ def test_seed_shared_state_records_custom_workload_paths(
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
     from hyperloom.orchestrator.policy import gate as policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
@@ -168,7 +163,7 @@ def _neutralize_seed_io(monkeypatch):
     """Stub the model/recipe reads so a seed can be asserted on one field."""
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
     from hyperloom.orchestrator.policy import gate as policy
 
     monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
@@ -207,7 +202,7 @@ def test_seed_shared_state_exact_forge_records_the_forge_kernel_optimizer(
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
     monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", "", {}))
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
@@ -236,7 +231,7 @@ def test_seed_shared_state_loads_model_arch_from_session_dir(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -262,7 +257,7 @@ def test_seed_shared_state_preserves_quantized_model_identity(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -292,7 +287,7 @@ def test_seed_shared_state_falls_back_to_path_basename(
     monkeypatch.setattr(
         cb,
         "_resolve_reference_recipe",
-        lambda _args: ("", {}, "", ""),
+        lambda _args: ("", {}, "", "", {}),
     )
 
     from hyperloom.orchestrator.policy import gate as policy
@@ -422,7 +417,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
     import pytest
     from hyperloom.inference_optimizer import reference_script
 
-    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(_args(reference_script="")) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -438,6 +433,7 @@ def test_resolve_reference_recipe_branches_and_final_summary(tmp_path: Path, mon
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path raises SystemExit(2) instead of falling back to discovery.
@@ -662,7 +658,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
     from hyperloom.inference_optimizer import reference_script
 
     args = _args(model="/models/kimi", reference_script="")
-    assert cb._resolve_reference_recipe(args) == ("", {}, "", "")
+    assert cb._resolve_reference_recipe(args) == ("", {}, "", "", {})
 
     monkeypatch.setattr(
         reference_script,
@@ -678,6 +674,7 @@ def test_resolve_reference_recipe_branches(tmp_path: Path, monkeypatch) -> None:
         {"A": "1"},
         "kimi",
         "usable.sh",
+        {},
     )
 
     # Unreadable path → SystemExit(2), no discovery fallback.

@@ -526,6 +526,66 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
 
 
 @pytest.mark.asyncio
+async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    from hyperloom.inference_optimizer.tests.test_geak_gain_alignment import _coord, _ok_result
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    state = coord.shared_state
+    state.framework = "sglang"
+    state.benchmark_mode = "agentx"
+    state.baseline_perf = {"total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    state.current_best.update(state.baseline_perf)
+    state.geak_result = _ok_result(final=150.0)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    fingerprint = canonical_fingerprint("--test-flag", {})
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "axis-rejection"),
+            "base_tput": 110.0,
+            "grid": [{"name": "candidate", "extra_args": "--test-flag"}],
+            "source": "resume_stack_revalidate",
+            "geak_fallback": True,
+            "expected_cfg_hash": fingerprint,
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="geak-axis-rejection",
+    )
+    state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
+    state.resume_pending_revalidation = True
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+
+    def fake_measure(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=132.0, perf_axes={"total_token_throughput": 900.0, "e2e_norm_intvty_p90": 50.0})
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    async def must_not_replay(**kwargs):
+        pytest.fail("native rejection must settle the candidate before any favorable fallback can run")
+
+    coord._validate_geak_via_geak_harness = must_not_replay
+    with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
+        produced = (await sub.run_task(task)).result
+    rejection = produced["per_variant_outcomes"][0]
+    assert rejection["reason"].startswith("both_axes_regressed")
+    assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
+    await coord._promote_to_shared_state("explore", produced, task=task)
+    assert state.current_best["tput"] == 110.0
+    assert state.geak_result["revalidation_status"] == "no_promote"
+    assert state.geak_result["revalidation_error"] == rejection["reason"]
+    assert not state.optimization_stack
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
 @pytest.mark.parametrize("output,expected_outcome", [(20000.0, "KEEP"), (180.0, "REVERT")])

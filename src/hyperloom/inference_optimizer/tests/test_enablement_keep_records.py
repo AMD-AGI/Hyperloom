@@ -606,7 +606,9 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
         params={},
         specialist_task_id=PROBE_TASK,
         framework_root=repo,
-        applied=[],
+        # In the accepted stack, not merely recorded beside it: a root binding
+        # is admitted for the patches this integration took.
+        applied=[Path("/p/1.patch")],
         applied_artifacts=[{"target": str(second / "lib/a.so"), "rel_target": "lib/a.so", "root": str(second)}],
         done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
         provision_result=None,
@@ -701,7 +703,7 @@ def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path
         params={},
         specialist_task_id=PROBE_TASK,
         framework_root=repo,
-        applied=[],
+        applied=[Path("/p/1.patch")],
         applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
         done_payload={"patch_roots": {"/p/1.patch": str(repo)}},
         provision_result=None,
@@ -900,3 +902,29 @@ def test_the_base_sha_reported_is_this_roots_own(repo: Path, tmp_path: Path):
     )
     assert out["enablement_base_sha"] == _git_head_sha(repo)
     assert out["enablement_base_sha"] != "b" * 40
+
+
+def test_a_recorded_root_for_a_patch_outside_the_stack_is_ignored(repo: Path, tmp_path: Path):
+    """The sibling rule to ``_sole_patch_root``'s selected-set check.
+
+    A ``done_payload`` entry for a patch this integration did not take cannot
+    attest anything about the accepted stack. Admitted, it adds a root record
+    and a declared-target set for a tree no round wrote, and the capture is then
+    judged against files that were never part of the stack.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _accepted_patch_roots
+
+    unrelated = tmp_path / "aiter"
+    applied = tmp_path / "2.patch"
+    roots = _accepted_patch_roots(
+        EnablementRound(),
+        done_payload={
+            "patch_roots": {
+                str(applied): str(repo),
+                "unselected-harvest.patch": str(unrelated),
+            }
+        },
+        applied=[applied],
+        framework_root=str(repo),
+    )
+    assert roots == {str(applied): str(repo)}

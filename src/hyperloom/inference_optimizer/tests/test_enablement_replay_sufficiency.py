@@ -1737,9 +1737,27 @@ def test_a_patch_step_named_under_a_different_operation_is_refused():
 
 
 def test_a_patch_step_whose_root_has_no_snapshot_at_all_is_refused():
+    """Refused, and by exactly one rule.
+
+    The outcome is what matters -- the step is not certified -- and the code is
+    ``source_snapshot_missing``, which already owns a root whose capture
+    returned no manifest. Adding a second code for the same defect would make
+    the verdict report two problems where there is one.
+    """
     section = {**_sufficient_section(), "accepted_stack_targets": {}, "source_snapshots": []}
+    decision = _decide(_sufficient_state(), section)
+    codes = _codes(decision)
+    assert decision["status"] == "insufficient"
+    assert "source_snapshot_missing" in codes
+    assert "patch_step_not_captured" not in codes
+
+
+def test_a_patch_step_naming_no_root_is_faulted_once():
+    """``root_unidentified`` owns an unrecorded root; this rule stands down."""
+    section = {**_sufficient_section(), "roots": [], "source_snapshots": []}
     codes = _codes(_decide(_sufficient_state(), section))
-    assert "patch_step_not_captured" in codes
+    assert "root_unidentified" in codes
+    assert "patch_step_not_captured" not in codes
 
 
 def test_a_patch_step_with_no_recorded_targets_is_refused():

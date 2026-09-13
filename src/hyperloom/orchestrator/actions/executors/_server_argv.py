@@ -101,10 +101,8 @@ def seal_server_argv(envs: MutableMapping[str, Any], framework: str | None) -> S
     env_name = server_args_env_name(framework)
     text = validate_server_args_shell_safe(str(envs.get(env_name) or ""))
     sealed = _sealed(framework, env_name, text)
-    if sealed.text:
+    if sealed.text or env_name in envs:
         envs[env_name] = sealed.text
-    else:
-        envs.pop(env_name, None)
     return sealed
 
 

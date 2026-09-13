@@ -1107,6 +1107,7 @@ def registered_agent_llm_fn(
             spec = AgentRunSpec(
                 system_prompt=_DISCOVERY_SYSTEM_PROMPT,
                 user_prompt=prompt,
+                role="fusion discovery",
                 cwd=workdir,
                 model=selected_model,
                 writable=False,

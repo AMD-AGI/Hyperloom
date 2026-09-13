@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration."""
+"""Tests for ``_subprocess_kill.kill_my_spawned_server`` and the BaselineExecutor integration.
+
+Covers the no-op / already-exited cases, the same-session-group refusal guard,
+SIGTERM→grace→SIGKILL ordering, and grandchild reaping.
+"""
 
 from __future__ import annotations
 
@@ -266,9 +270,8 @@ def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
 
 
 def test_run_with_session_kill_eval_start_marker_retires_soft_deadline(tmp_path):
-    """Once the accuracy eval announces itself the soft deadline stops applying: the deadline bounds the throughput
-    phase, and its anchor excludes eval.
-    """
+    """Once the accuracy eval announces itself the soft deadline stops applying:
+    the deadline bounds the throughput phase, and its anchor excludes eval."""
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\nHYPERLOOM_EVAL_START\n")
     start = time.monotonic()
@@ -284,7 +287,8 @@ def test_run_with_session_kill_eval_start_marker_retires_soft_deadline(tmp_path)
 
 
 def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp_path):
-    """Without the eval marker the deadline keeps its teeth — a genuinely slow throughput phase is still reaped."""
+    """Without the eval marker the deadline keeps its teeth — a genuinely slow
+    throughput phase is still reaped."""
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n")
     start = time.monotonic()
@@ -300,7 +304,12 @@ def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp
 
 
 class TestSessionDeadline:
-    """The session budget is a separate channel from the soft deadline."""
+    """The session budget is a separate channel from the soft deadline.
+
+    The soft deadline answers "is this variant abnormally slow", which is why it
+    retires when the accuracy eval starts. The session budget answers "is the run
+    out of time", which no phase boundary changes.
+    """
 
     def test_expired_session_budget_reaps_the_tree_with_its_own_sentinel(self):
         start = time.monotonic()
@@ -317,7 +326,11 @@ class TestSessionDeadline:
         assert elapsed < 10.0, f"session-deadline path took {elapsed:.2f}s"
 
     def test_eval_start_does_not_retire_the_session_budget(self, tmp_path):
-        """The marker that retires the soft deadline must not retire this one."""
+        """The marker that retires the soft deadline must not retire this one.
+
+        An accuracy eval that starts one minute before the run is out of time
+        still has to stop; this is the whole reason the two are separate channels.
+        """
         log_path = tmp_path / "server.log"
         log_path.write_text("Application startup complete\nHYPERLOOM_EVAL_START\n")
         start = time.monotonic()
@@ -354,7 +367,12 @@ class TestSessionDeadline:
 
 
 class TestAnOrchestratorCancelReachesTheChild:
-    """The last defence has to stop the child, not just the coroutine above it."""
+    """The last defence has to stop the child, not just the coroutine above it.
+
+    The executor blocks in a worker thread, so cancelling its task frees the
+    lanes and the GPU lease while the benchmark is still running. The cancel
+    scope is the channel the thread checks, at the poll it already runs.
+    """
 
     def test_a_cancel_raised_before_the_call_reaps_the_tree(self):
         scope = CancelScope()
@@ -398,7 +416,11 @@ class TestAnOrchestratorCancelReachesTheChild:
         assert "done" in (cp.stdout or "")
 
     def test_a_spent_budget_keeps_its_own_attribution(self):
-        """Both are true at once whenever the budget is what triggered the cancel."""
+        """Both are true at once whenever the budget is what triggered the cancel.
+
+        The budget is a fact about the run and the cancel is only the dispatcher
+        acting on it, so the ledger gets the cause, not the mechanism.
+        """
         scope = CancelScope()
         scope.cancel(reason="session_time_exhausted")
         with use_cancel_scope(scope):
@@ -431,7 +453,12 @@ class TestAnOrchestratorCancelReachesTheChild:
 
 
 class TestSessionDeadlineCrossesAProcessBoundary:
-    """A ``time.monotonic()`` instant is only meaningful in the process that read it."""
+    """A ``time.monotonic()`` instant is only meaningful in the process that read it.
+
+    Handing the absolute deadline to a Ray worker would name an instant on the
+    worker's own clock, whose origin is unrelated -- an immediate kill or one
+    that never fires, both silently. Only a duration survives the trip.
+    """
 
     def test_an_unbounded_budget_stays_unbounded_in_both_directions(self):
         assert session_deadline_to_remaining_sec(None) is None
@@ -475,7 +502,14 @@ def _sentinel_returncodes() -> dict[int, set[str]]:
 
 
 def test_every_sentinel_returncode_names_exactly_one_cause():
-    """A sentinel shared by two causes makes attribution a coin flip."""
+    """A sentinel shared by two causes makes attribution a coin flip.
+
+    The codes are handed out in more than one module and all arrive at their
+    consumer as a plain ``returncode``, so a new one can quietly reuse a number
+    already taken. That is how the session-budget code first landed on the Ray
+    actor-died number, which would have had every actor death read as a spent
+    budget and taught the ledger the wrong thing about both.
+    """
     assigned = _sentinel_returncodes()
 
     collisions = {code: sorted(names) for code, names in assigned.items() if len(names) > 1}
@@ -484,7 +518,14 @@ def test_every_sentinel_returncode_names_exactly_one_cause():
 
 
 def test_an_actor_timeout_is_not_recorded_as_a_failed_agentx_preflight():
-    """The two causes that share ``_run_magpie``'s return channel stay apart."""
+    """The two causes that share ``_run_magpie``'s return channel stay apart.
+
+    ``_run_magpie`` returns ``AGENTX_PREFLIGHT_RETURNCODE`` when the execution
+    boundary fails preflight and, a few lines on, whatever the serving lease's
+    actor returned -- including ``_ACTOR_TIMEOUT_RC``. Callers see one
+    ``returncode`` either way, so the two sharing a number (which they did) is
+    enough to have a hung actor blamed on a missing aiperf.
+    """
     from hyperloom.orchestrator.actions.executors import _ray_serving, _subprocess_kill
 
     assert _ray_serving._ACTOR_TIMEOUT_RC != _subprocess_kill.AGENTX_PREFLIGHT_RETURNCODE
@@ -519,7 +560,19 @@ def test_run_with_session_kill_reports_each_line_of_child_output():
 
 
 def _appends_until_stopped(path: Path, line: str, stop: threading.Event) -> threading.Thread:
-    """Start a writer that appends ``line`` to ``path`` until ``stop`` is set."""
+    """Start a writer that appends ``line`` to ``path`` until ``stop`` is set.
+
+    Stands in for a writer that is provably not the child under test: the
+    inference server, which keeps logging while its benchmark client is wedged.
+
+    Args:
+        path (Path): Log file to append to.
+        line (str): Line written each round, newline included.
+        stop (threading.Event): Set by the caller to end the writer.
+
+    Returns:
+        threading.Thread: The started daemon writer.
+    """
 
     def _write() -> None:
         with path.open("a") as fh:
@@ -550,7 +603,21 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
     appended_line: str,
     reports_liveness: bool,
 ):
-    """A log that grew is not the child talking; a log that shows tokens flowing is."""
+    """A log that grew is not the child talking; a log that shows tokens flowing is.
+
+    All three lines are written by the same third party, so growth alone cannot
+    tell them apart — and one of them is the access line vLLM and sglang emit
+    per request, including the health probe the robustness agent issues on its
+    own tick. Counting those as the child's output closes a loop where the
+    monitor's probe manufactures the evidence that suppresses its own stall
+    accusation, and turns the heartbeat into the bare timer it documents itself
+    as never being. A throughput line is different in kind — whoever logged it,
+    tokens were being produced during the interval — but only if it carries a
+    rate: some vLLM builds keep printing the stats line at ``0.0 tokens/s`` on
+    an idle engine, and an engine goes idle precisely when the client that was
+    driving it wedges, so the zero-rate line is the shape this failure actually
+    takes in production.
+    """
     log_path = tmp_path / "server.log"
     log_path.write_text("Application startup complete\n")
     stop = threading.Event()
@@ -575,7 +642,13 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
 
 
 def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp_path):
-    """A round whose body writes only to ``benchmark_stderr.log`` is still working."""
+    """A round whose body writes only to ``benchmark_stderr.log`` is still working.
+
+    The scriptable and bypass paths run the customer body with its stderr
+    redirected there rather than into the parent's pipe, and a long phase of one
+    — a client that logs its request counter but produces no server throughput
+    line yet — would otherwise have nothing left to report liveness with.
+    """
     bench = tmp_path / "benchmark_atom_20260731_085850"
     bench.mkdir(parents=True)
     (bench / "server.log").write_text("Application startup complete\n")
@@ -628,7 +701,8 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
 
 # Server-liveness watchdog
 def test_server_log_shows_death_detects_marker(tmp_path):
-    """A ``server.log`` containing a terminal-init marker reads as dead; a healthy / missing log reads as alive."""
+    """A ``server.log`` containing a terminal-init marker reads as dead;
+    a healthy / missing log reads as alive."""
     log_path = tmp_path / "server.log"
     assert _server_log_shows_death(str(log_path)) is None  # missing → alive
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
@@ -653,7 +727,9 @@ def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
 
 
 def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
-    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a nested ``benchmark_<fw>_<ts>/server.log``."""
+    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a
+    nested ``benchmark_<fw>_<ts>/server.log``. The watchdog must still detect the
+    crash via that nested file even when the watched ``output_dir/server.log`` is absent."""
     watched = tmp_path / "server.log"  # never written by the wrapper
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
@@ -669,7 +745,8 @@ def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
-    """The excerpt helper also falls back to a nested ``benchmark_*/server.log`` so the failure classifier still surfaces the real server fault."""
+    """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
+    so the failure classifier still surfaces the real server fault."""
     watched = tmp_path / "server.log"
     nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
     nested_dir.mkdir()
@@ -686,7 +763,8 @@ def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
-    """The excerpt helper returns the engine/worker-init root-cause line (with a little context) for the failure classifier; a healthy / missing log returns ``None``."""
+    """The excerpt helper returns the engine/worker-init root-cause line (with a
+    little context) for the failure classifier; a healthy / missing log returns ``None``."""
     log_path = tmp_path / "server.log"
     assert server_log_death_excerpt(str(log_path)) is None  # missing → None
     log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
@@ -704,7 +782,12 @@ def test_server_log_death_excerpt_surfaces_root_cause(tmp_path):
 
 
 def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path):
-    """A config-validation-stage failure (brand-new checkpoint ``model_type`` unknown to the installed transformers/vLLM) dies BEFORE the engine starts and must still be surfaced as a fatal excerpt."""
+    """A config-validation-stage failure (brand-new checkpoint ``model_type``
+    unknown to the installed transformers/vLLM) dies BEFORE the engine starts and
+    must still be surfaced as a fatal excerpt. Without this the enablement failure
+    classifier only sees Magpie's ``subprocess_nonzero`` stdout tail, classifies
+    ``unknown``, and never seeds the ``pip install -U transformers`` bridge —
+    starving every enablement round of the real root cause (DeepSeek-V4 repro)."""
     from hyperloom.agents.framework.enablement import classify_failure
 
     log_path = tmp_path / "server.log"
@@ -723,15 +806,16 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     excerpt = server_log_death_excerpt(str(log_path))
     assert excerpt is not None
     assert "does not recognize this architecture" in excerpt
-    # The extracted excerpt must classify as missing_model_arch (not unknown), which is what seeds the deterministic
-    # pip-install enablement bridge.
+    # The extracted excerpt must classify as missing_model_arch (not unknown),
+    # which is what seeds the deterministic pip-install enablement bridge.
     sig = classify_failure(excerpt)
     assert sig.kind == "missing_model_arch"
     assert sig.offending_symbol == "deepseek_v4"
 
 
 def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
-    """A child that writes a fatal server marker then hangs is reaped via the watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
+    """A child that writes a fatal server marker then hangs is reaped via the
+    watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -752,7 +836,8 @@ def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
 
 
 def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
-    """If the harness exits on its own within the grace window after emitting a marker, its real returncode wins (no spurious SERVER_DEAD)."""
+    """If the harness exits on its own within the grace window after emitting a
+    marker, its real returncode wins (no spurious SERVER_DEAD)."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -771,7 +856,8 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
 
 
 def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
-    """A child with a clean server.log returns its own returncode — the watchdog must not false-positive on a healthy (or slow) server."""
+    """A child with a clean server.log returns its own returncode — the
+    watchdog must not false-positive on a healthy (or slow) server."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys\n"
@@ -791,36 +877,42 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
 
 # ── Detokenizer-stall watchdog ──
 def test_scan_server_log_increment_detects_ready_and_progress(tmp_path):
-    """The incremental scanner advances its offset and flags ready/progress markers only in the newly appended bytes."""
+    """The incremental scanner advances its offset and flags ready/progress
+    markers only in the newly appended bytes."""
     log_path = tmp_path / "server.log"
     log_path.write_text("INFO loading weights\nApplication startup complete\n")
-    off, ready, prog, ev = _scan_server_log_increment(str(log_path), 0)
-    assert ready is True and prog is False and ev is False and off == log_path.stat().st_size
+    first = _scan_server_log_increment(str(log_path), 0)
+    assert first.saw_ready is True
+    assert first.saw_progress is False and first.saw_eval_start is False
+    assert first.offset == log_path.stat().st_size
     # Re-scan from the advanced offset: nothing new, no re-trigger.
-    off2, ready2, prog2, ev2 = _scan_server_log_increment(str(log_path), off)
-    assert ready2 is False and prog2 is False and ev2 is False and off2 == off
+    second = _scan_server_log_increment(str(log_path), first.offset)
+    assert second.saw_ready is False and second.saw_progress is False and second.saw_eval_start is False
+    assert second.offset == first.offset
     # Append a vLLM throughput line; only the new bytes are scanned.
     with log_path.open("a") as f:
         f.write("Avg generation throughput: 123.4 tokens/s, Running: 8\n")
-    off3, ready3, prog3, ev3 = _scan_server_log_increment(str(log_path), off2)
-    assert prog3 is True and ready3 is False and ev3 is False and off3 == log_path.stat().st_size
+    third = _scan_server_log_increment(str(log_path), second.offset)
+    assert third.saw_progress is True and third.saw_ready is False and third.saw_eval_start is False
+    assert third.offset == log_path.stat().st_size
     # The eval-start marker is reported independently of ready/progress.
     with log_path.open("a") as f:
         f.write("HYPERLOOM_EVAL_START\n")
-    off4, ready4, prog4, ev4 = _scan_server_log_increment(str(log_path), off3)
-    assert ev4 is True and ready4 is False and prog4 is False and off4 == log_path.stat().st_size
-    # An idle engine keeps printing the same line with no rate on it: the value is the progress signal, not the
-    # marker.
+    fourth = _scan_server_log_increment(str(log_path), third.offset)
+    assert fourth.saw_eval_start is True and fourth.saw_ready is False and fourth.saw_progress is False
+    assert fourth.offset == log_path.stat().st_size
+    # An idle engine keeps printing the same line with no rate on it: the value
+    # is the progress signal, not the marker.
     with log_path.open("a") as f:
         f.write("Avg generation throughput: 0.0 tokens/s, Running: 0 reqs\n")
-    off5, _ready5, prog5, _ev5 = _scan_server_log_increment(str(log_path), off4)
-    assert prog5 is False and off5 == log_path.stat().st_size
+    fifth = _scan_server_log_increment(str(log_path), fourth.offset)
+    assert fifth.saw_progress is False and fifth.offset == log_path.stat().st_size
 
 
 def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
-    """The real Magpie layout: the caller passes ``<output_dir>/server.log``, which does not exist, while the engine
-    log and the eval-start marker live in a ``benchmark_*/`` subdir -- the marker only ever reaching stderr.
-    """
+    """The real Magpie layout: the caller passes ``<output_dir>/server.log``,
+    which does not exist, while the engine log and the eval-start marker live in
+    a ``benchmark_*/`` subdir -- the marker only ever reaching stderr."""
     output_dir = tmp_path / "measure_round"
     bench = output_dir / "benchmark_atom_20260731_085850"
     bench.mkdir(parents=True)
@@ -845,7 +937,14 @@ def test_scan_logs_increment_reads_nested_stderr_for_eval_start(tmp_path):
 
 
 def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path):
-    """Only one of the resolved logs is written by the process being waited on."""
+    """Only one of the resolved logs is written by the process being waited on.
+
+    ``server.log`` is the inference server's; ``benchmark_stderr.log`` is where
+    Magpie redirects the benchmark body's own stderr, so the parent's pipe stays
+    empty for the whole round and that file is the only place the child's own
+    output shows up. Liveness that cannot tell them apart either vouches for a
+    wedged client or leaves a working one unable to report.
+    """
     bench = tmp_path / "benchmark_atom_20260731_085850"
     bench.mkdir(parents=True)
     server_log = bench / "server.log"
@@ -868,7 +967,8 @@ def test_scan_logs_increment_tells_the_childs_own_log_from_the_servers(tmp_path)
 
 
 def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_path):
-    """A server that reports ready then produces no generation progress is reaped with ``DETOKENIZER_STALL_RETURNCODE`` well before the hard timeout."""
+    """A server that reports ready then produces no generation progress is
+    reaped with ``DETOKENIZER_STALL_RETURNCODE`` well before the hard timeout."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -888,7 +988,8 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
 
 
 def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
-    """A server still loading weights (no ready marker) must NOT trip the stall gate even past the grace window — slow is not stalled."""
+    """A server still loading weights (no ready marker) must NOT trip the stall
+    gate even past the grace window — slow is not stalled."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -906,7 +1007,8 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
 
 
 def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
-    """Continued generation-progress lines reset the stall clock so a healthy (if slow) run finishes with its own returncode."""
+    """Continued generation-progress lines reset the stall clock so a healthy
+    (if slow) run finishes with its own returncode."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"
@@ -927,7 +1029,9 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
 
 
 def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
-    """A long, quiet first-request JIT/compile after ready must NOT trip the gate: ANY new log line (not just throughput) is liveness, so a huge model that logs compile progress between ready and its first token survives."""
+    """A long, quiet first-request JIT/compile after ready must NOT trip the
+    gate: ANY new log line (not just throughput) is liveness, so a huge model
+    that logs compile progress between ready and its first token survives."""
     log_path = tmp_path / "server.log"
     script = (
         "import sys, time\n"

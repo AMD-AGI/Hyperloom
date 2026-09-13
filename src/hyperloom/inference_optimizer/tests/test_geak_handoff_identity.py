@@ -159,6 +159,37 @@ def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_p
     assert writer.build_env_spec()["launch_identity"] != identity
 
 
+@pytest.mark.parametrize(
+    "control",
+    [
+        {"unset_envs": ["SGLANG_AITER_MLA_PERSIST"]},
+        {"remove_args": ["--disable-cuda-graph"]},
+        {"args_mode": "replace"},
+    ],
+    ids=["unset_env", "remove_arg", "empty_replacement"],
+)
+def test_measurement_identity_invalidates_when_launch_controls_change(tmp_path: Path, control: dict) -> None:
+    state = SharedState(current_best={"tput": 100.0, "extra_server_args": "", "optimization_stack": []})
+    writer = _writeback(tmp_path, state)
+    writer._stamp_current_best_measurement()
+    identity = state.current_best_measurement["launch_identity"]
+
+    state.current_best.update(control)
+
+    assert writer.build_env_spec()["launch_identity"] != identity
+
+
+def test_default_launch_controls_preserve_legacy_handoff_identity(tmp_path: Path) -> None:
+    state = _verified_current_best(tmp_path)
+    writer = _writeback(tmp_path, state)
+    env_spec = writer.build_env_spec()
+    identity = env_spec["launch_identity"]
+    for key in ("args_mode", "remove_args", "unset_envs"):
+        env_spec["config"].pop(key)
+
+    assert writer._handoff_launch_identity(env_spec) == identity
+
+
 def test_measurement_identity_invalidates_when_recipe_content_changes(tmp_path: Path) -> None:
     recipe = tmp_path / "baseline.yaml"
     recipe.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")

@@ -10,8 +10,9 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 separately by the CLI to the matching provider's Agent SDK backend.
 
 Two agent CLIs can drive that contract, and the deployment's credential shape
-picks one (:func:`resolve_specialist_agent_backend`): ``claude --print
---output-format stream-json`` authenticates against the Anthropic side, and
+picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
+``claude --print --output-format stream-json`` authenticates against the
+Anthropic side, and
 ``codex exec --json`` against the OpenAI side. An OpenAI-only deployment has no
 Anthropic credential at all, so spawning the Claude CLI there produced a
 ``Not logged in`` exit on every specialist task and silently cost the session
@@ -46,6 +47,11 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
+from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    AGENT_BACKEND_CODEX,
+    preferred_agent_backend,
+)
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     redact_file_in_place,
@@ -78,37 +84,6 @@ class SpecialistAgentUnavailableError(RuntimeError):
     run specialists at all. It surfaces as the task's failure rather than being
     absorbed into a fallback CLI that would fail to authenticate.
     """
-
-
-# The two agent CLIs that can drive the specialist contract (module docstring).
-AGENT_BACKEND_CLAUDE = "claude"
-AGENT_BACKEND_CODEX = "codex"
-
-
-def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return the agent CLI the deployment's credentials can actually drive.
-
-    An OpenAI-only deployment holds no Anthropic credential, so the Claude CLI
-    starts and immediately fails with ``Not logged in``; the Codex CLI is the
-    only runtime that can authenticate there. Every other shape — Anthropic-only,
-    both configured, or nothing configured (a CLI logged in by other means, or
-    Bedrock) — keeps the Claude CLI, so this only ever redirects the shape that
-    could not work at all.
-
-    The shape test itself belongs to :mod:`hyperloom.common.llm_config`, so this
-    cannot disagree with backend selection, the TraceLens runner or the forge
-    kernel_backend.
-
-    Args:
-        env: Environment mapping to read; defaults to ``os.environ``.
-
-    Returns:
-        :data:`AGENT_BACKEND_CODEX` for an OpenAI-only deployment, else
-        :data:`AGENT_BACKEND_CLAUDE`.
-    """
-    from hyperloom.common import llm_config  # local import: keep module import-light
-
-    return AGENT_BACKEND_CODEX if llm_config.is_openai_only(env) else AGENT_BACKEND_CLAUDE
 
 
 def resolve_codex_executable(explicit: str = "") -> str:
@@ -523,7 +498,7 @@ class SpecialistSubprocessConfig:
     """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
 
     Empty resolves the deployment's credential shape per dispatch via
-    :func:`resolve_specialist_agent_backend`. The CLI pins it explicitly at boot
+    :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
     so the backend cannot disagree with the executable and model chosen next to
     it; leaving it empty is for callers that construct a config directly.
     """
@@ -1192,7 +1167,7 @@ class SpecialistSubprocessDispatcher:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`resolve_specialist_agent_backend`).
+        credential shape decides (:func:`preferred_agent_backend`).
 
         Returns:
             str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
@@ -1203,7 +1178,7 @@ class SpecialistSubprocessDispatcher:
         """
         pinned = (self.config.agent_backend or "").strip().lower()
         if not pinned:
-            return resolve_specialist_agent_backend()
+            return preferred_agent_backend()
         if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
@@ -1783,8 +1758,6 @@ class SpecialistSubprocessDispatcher:
 
 
 __all__ = [
-    "AGENT_BACKEND_CLAUDE",
-    "AGENT_BACKEND_CODEX",
     "UNBOUNDED_REAP_CAP_SEC",
     "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
@@ -1793,5 +1766,4 @@ __all__ = [
     "_pick_worktree_base",
     "_setup_worktree",
     "resolve_codex_executable",
-    "resolve_specialist_agent_backend",
 ]

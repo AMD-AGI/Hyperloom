@@ -187,6 +187,29 @@ class Config:
     # overwrite an explicit False with whatever the env var said.
     include_mori_kb: bool | None = field(default=None)
 
+    # On by default: render every knowledge pillar as a one-line pointer instead
+    # of inlining its whole INDEX.md map. The maps are re-read on every turn of
+    # every session, and the index is carried into each specialist and synthesis
+    # payload as well, so the cost is far larger than one copy: measured on the
+    # analysis role, the first-turn prefix falls from 51,275 tokens to 8,415
+    # (-83.6%), and on the implementer lanes from a mean 62,022 (n=18) to 17,704
+    # (n=4, -71.5%, ranges disjoint).
+    #
+    # The behaviour question -- does an agent still go looking once the map is a
+    # pointer -- was the reason this stayed opt-in, and a four-a-side A/B on
+    # forge-loop softmax answered it. Deferred: speedup 1.2036 / 1.1562 / 1.1068
+    # / 1.1193, improved 4 of 4. Inlined: 1.0800 / 1.0481 / 1.1447 / 1.0000,
+    # improved 3 of 4. The deferred arm's worst run beats the inlined arm's mean
+    # (1.1068 vs 1.0682). Agents do follow the pointer: two INDEX.md reads in the
+    # deferred arm were each followed by a card read, where the inlined arm read
+    # INDEX.md zero times in 98 sessions.
+    #
+    # Set KERNELFORGE_DEFER_KNOWLEDGE_MAPS=0 to inline the maps again. Note the
+    # A/B covers one kernel at n=4 a side, so that escape hatch is deliberate.
+    # None means "unset, defer to the env var" -- see include_mori_kb above for
+    # why a plain bool would make an explicit False indistinguishable.
+    defer_knowledge_maps: bool | None = field(default=None)
+
     def __post_init__(self):
         """Derive paths and validate provider-specific runtime settings."""
         from kernelforge.agent_backends.registry import get_agent_provider
@@ -238,6 +261,14 @@ class Config:
         # wins over the environment.
         if self.include_mori_kb is None:
             self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
+        if self.defer_knowledge_maps is None:
+            # Defaults on, so the env var reads as an opt-*out*: anything that
+            # is not an explicit "off" leaves the pointers in place.
+            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() not in (
+                "0",
+                "false",
+                "no",
+            )
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
@@ -293,7 +324,14 @@ class Config:
                     os.getenv("FORGE_AGENT_TIMEOUT_SEC", "1800"),
                 )
             ),
-            agent_reasoning_effort=overrides.get("agent_reasoning_effort", resolve_agent_reasoning_effort()),
+            # Resolved lazily: the env ladder refuses an off-ladder value by
+            # raising, and a caller who named an effort explicitly must not be
+            # made to answer for a variable their value was going to override.
+            agent_reasoning_effort=(
+                overrides["agent_reasoning_effort"]
+                if "agent_reasoning_effort" in overrides
+                else resolve_agent_reasoning_effort()
+            ),
             agent_sandbox_mode=overrides.get(
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),
@@ -330,4 +368,5 @@ class Config:
             gbrain_token=knowledge_config.gbrain_token,
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
+            defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
         )

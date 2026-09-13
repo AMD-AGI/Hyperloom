@@ -89,11 +89,10 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
+    from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
     from hyperloom.orchestrator.specialists.subprocess_ import (
-        AGENT_BACKEND_CODEX,
         SpecialistSubprocessConfig,
         resolve_codex_executable,
-        resolve_specialist_agent_backend,
     )
 
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
@@ -103,7 +102,7 @@ def _build_specialist_executor(
     framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
-    agent_backend = resolve_specialist_agent_backend()
+    agent_backend = preferred_agent_backend()
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
     selected_model = specialist_override or (
         str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()

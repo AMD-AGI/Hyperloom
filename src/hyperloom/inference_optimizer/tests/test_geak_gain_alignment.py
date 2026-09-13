@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -370,7 +371,7 @@ async def test_agentx_2b_uses_current_canonical_measurement(
         assert state.cumulative_gain_validated_stack_len == 1
         assert state.cumulative_gain_validated_ts == "2026-09-08T00:00:00Z"
         assert state.resume_pending_revalidation is True
-        if case in {"total_regression", "lift_refused"}:
+        if case in {"total_regression", "lift_refused", "missing_axes"}:
             assert attempt["decision"] == "no_promote"
             assert attempt["status"] == "no_promote"
             assert state.geak_result["revalidation_status"] == "no_promote"
@@ -381,6 +382,86 @@ async def test_agentx_2b_uses_current_canonical_measurement(
             assert state.geak_result["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
             assert result["status"] == "incomparable"
     assert {key: state.geak_result[key] for key in before_proposal} == before_proposal
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fresh_accuracy,expected_reason",
+    [
+        (None, "accuracy_unavailable"),
+        (True, "accuracy_unavailable"),
+        ("0.99", "accuracy_unavailable"),
+        (float("nan"), "accuracy_unavailable"),
+        (float("inf"), "accuracy_unavailable"),
+        (-0.1, "accuracy_unavailable"),
+        (1.1, "accuracy_unavailable"),
+        (0.0, "accuracy_drop"),
+        (0.7, "accuracy_drop"),
+    ],
+)
+async def test_geak_harness_rejects_missing_or_failed_fresh_accuracy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_accuracy, expected_reason: str
+) -> None:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    ss = coord.shared_state
+    ss.baseline_accuracy = 0.8
+    ss.optimization_stack = [{"action": "explore", "tput": 110.0}]
+    ss.cumulative_gain_validated = 10.0
+    ss.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 1.2,
+        "accuracy": 0.99,
+        "accepted_config": {"flags": "--block-size 32"},
+    }
+    before = deepcopy((ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated))
+
+    async def _fake_sweep(**_kwargs):
+        return {
+            "status": "succeeded",
+            "promotion_measurement": {"output_throughput": 120.0, "accuracy": fresh_accuracy},
+        }
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
+    out = await coord._validate_geak_via_geak_harness(reason="inconclusive_orchestrator_rebench")
+
+    assert out == {"validated": False, "status": "no_promote", "reason": expected_reason}
+    assert (ss.current_best, ss.optimization_stack, ss.cumulative_gain_validated) == before
+    assert ss.geak_result["revalidation_status"] == "no_promote"
+    assert ss.geak_result["failure_reason"] == expected_reason
+    assert ss.geak_result["baseline_accuracy"] == 0.8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_accuracy", [0.79, 0.8])
+async def test_geak_harness_accepts_fresh_accuracy_within_native_tolerance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fresh_accuracy: float
+) -> None:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.baseline_accuracy = 0.8
+    coord.shared_state.geak_result = {
+        "status": "ok",
+        "throughput_speedup": 1.2,
+        "accuracy": 0.0,
+        "accepted_config": {"flags": "--block-size 32"},
+    }
+
+    async def _fake_sweep(**_kwargs):
+        return {
+            "status": "succeeded",
+            "promotion_measurement": {
+                "output_throughput": 120.0,
+                "accuracy": fresh_accuracy,
+                "accuracy_source": "/fresh/bench_summary.json",
+            },
+        }
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _fake_sweep)
+    out = await coord._validate_geak_via_geak_harness(reason="unit")
+    assert out["validated"] is True
+    assert coord.shared_state.current_best["tput"] == 120.0
+    assert coord.shared_state.cumulative_gain_validated == 20.0
+    entry = next(entry for entry in coord.shared_state.optimization_stack if entry.get("action") == "geak_e2e")
+    assert entry["accuracy"] == fresh_accuracy
 
 
 # ── Fix B: report renders a PROVISIONAL gain honestly (not "+0.00% validated") ─
@@ -563,6 +644,138 @@ async def test_2b_no_promote_when_rebench_loses_to_current_best(tmp_path: Path) 
 
 
 # ── Rebench-first: candidate recorded, headline deferred to measured rebench ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["accuracy_drop", "accuracy_unavailable", "intvty_regression"])
+@pytest.mark.parametrize("expected_hash", ["abc", ""])
+async def test_2b_native_revert_is_conclusive(tmp_path: Path, reason: str, expected_hash: str) -> None:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.geak_result = {
+        **_ok_result(final=150.0),
+        "kernel_journey_path": _journey_with_validated_keeps(tmp_path, [1.5]),
+    }
+    coord.shared_state.resume_pending_revalidation = True
+
+    async def _must_not_fallback(**_kwargs):
+        pytest.fail("native REVERT must not fall back to another harness")
+
+    coord._validate_geak_via_geak_harness = _must_not_fallback
+    result = {
+        "status": "succeeded",
+        "output_throughput": None,
+        "winners": [],
+        "per_variant_outcomes": [{"outcome": "REVERT", "reason": reason, "fingerprint": "abc"}],
+    }
+    await coord._promote_to_shared_state("explore", result, task=_revalidate_task(expected_hash=expected_hash))
+
+    assert coord.shared_state.current_best["tput"] == 110.0
+    assert coord.shared_state.cumulative_gain_validated == 0.0
+    assert not coord.shared_state.optimization_stack
+    assert not coord.shared_state.geak_pending
+    assert coord.shared_state.resume_pending_revalidation
+    assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert coord.shared_state.geak_result["revalidation_error"] == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["both_axes_regressed (intvty 100.0->50.0 tput 1000.0->900.0)", "new gate wording"])
+async def test_structured_native_rejection_prevents_fresh_fallback(tmp_path, reason):
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.geak_result = _ok_result(final=150.0)
+    coord.shared_state.resume_pending_revalidation = True
+    coord.shared_state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+
+    async def must_not_replay(**_kwargs):
+        pytest.fail("a conclusive native graded-axis rejection must not invoke fallback")
+
+    coord._validate_geak_via_geak_harness = must_not_replay
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "status": "succeeded",
+            "output_throughput": None,
+            "winners": [],
+            "per_variant_outcomes": [
+                {
+                    "outcome": "REVERT",
+                    "reason": reason,
+                    "fingerprint": "abc",
+                    "gates": [{"gate": "graded_axes", "passed": False, "reason": reason}],
+                }
+            ],
+        },
+        task=_revalidate_task(expected_hash="abc"),
+    )
+    assert coord.shared_state.current_best["tput"] == 110.0
+    assert coord.shared_state.geak_result["revalidation_status"] == "no_promote"
+    assert coord.shared_state.geak_result["revalidation_error"] == reason
+
+
+@pytest.mark.asyncio
+async def test_complete_return_with_inherited_removals_cannot_credit_measurement_noise(tmp_path):
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    state = coord.shared_state
+    state.current_best.update(
+        {
+            "extra_server_args": "--mem-fraction-static 0.95",
+            "args_mode": "replace",
+            "remove_args": ["--disable-radix-cache"],
+        }
+    )
+    state.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--mem-fraction-static 0.95",
+            "env_map": {},
+            "args_mode": "replace",
+        },
+    }
+    state.resume_pending_revalidation = True
+    state.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": "reval-1"}
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "status": "succeeded",
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=_revalidate_task(expected_hash="abc"),
+    )
+    assert state.current_best["tput"] == 110.0
+    assert state.geak_result["revalidation_status"] == "no_material"
+    assert state.cumulative_gain_validated == 0.0
+    assert not state.optimization_stack
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,reason,fingerprint",
+    [("FAILED", "no_measurement", "abc"), ("REVERT", "accuracy_drop", "different")],
+)
+async def test_2b_inconclusive_replay_still_allows_fallback(
+    tmp_path: Path, outcome: str, reason: str, fingerprint: str
+) -> None:
+    coord = _coord(tmp_path, baseline=100.0, best_tput=110.0)
+    coord.shared_state.resume_pending_revalidation = True
+    calls = []
+
+    async def _fallback(**kwargs):
+        calls.append(kwargs)
+        return {"validated": False, "reason": "no_fresh_accuracy"}
+
+    coord._validate_geak_via_geak_harness = _fallback
+    await coord._promote_to_shared_state(
+        "explore",
+        {
+            "output_throughput": None,
+            "winners": [],
+            "per_variant_outcomes": [{"outcome": outcome, "reason": reason, "fingerprint": fingerprint}],
+        },
+        task=_revalidate_task(expected_hash="abc"),
+    )
+    assert calls == [{"reason": "2b_inconclusive"}]
 
 
 def _ok_result(*, final: float, base_for_gain: float | None = None) -> dict:

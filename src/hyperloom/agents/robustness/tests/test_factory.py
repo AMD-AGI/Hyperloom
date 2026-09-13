@@ -98,9 +98,9 @@ async def test_config_discover_normalizes_retired_deepseek_env(monkeypatch, tmp_
     monkeypatch.delenv("LLM_MODEL", raising=False)
     config = Config.discover()
 
-    # The OpenAI side is filled too, and it is checked first.
-    assert config.llm_provider == "openai"
-    assert config.llm_base_url == "https://api.deepseek.com/v1"
+    # Normalization fills both sides, and a dual-configured deployment prefers Claude.
+    assert config.llm_provider == "anthropic"
+    assert config.llm_base_url == "https://api.deepseek.com/anthropic"
     assert config.llm_api_key == "deepseek-token"
     assert config.llm_model == "deepseek-v4-pro"
 
@@ -211,10 +211,10 @@ async def test_factory_uses_llm_engine_when_credentials_present(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkeypatch):
+async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path):
+    """A keyed Anthropic side is an HTTP client, so no CLI transport is required."""
     from hyperloom.agents.robustness.decision.rca_engine import AnthropicRcaEngine
 
-    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: True)
     config = Config(
         session_dir=tmp_path,
         llm_base_url="https://api.deepseek.com/anthropic",
@@ -230,6 +230,23 @@ async def test_factory_uses_anthropic_engine_for_provider(tmp_path: Path, monkey
         await engine.aclose()
     finally:
         await bundle.aclose()
+
+
+@pytest.mark.asyncio
+async def test_discover_llm_credentials_falls_back_to_openai_when_oauth_transport_is_unusable(
+    monkeypatch,
+):
+    """A subscription token must not block a working OpenAI key when the CLI is absent."""
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-fake")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-working")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setattr("hyperloom.common.llm_config.anthropic_transport_ready", lambda *_a, **_kw: False)
+
+    assert config_module._discover_llm_credentials() == (
+        "https://api.openai.com/v1",
+        "sk-openai-working",
+        "openai",
+    )
 
 
 @pytest.mark.asyncio

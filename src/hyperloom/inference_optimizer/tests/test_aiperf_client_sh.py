@@ -577,6 +577,61 @@ def test_failed_request_threshold_is_passed(tmp_path):
     assert "--failed-request-threshold" in _aiperf_args(res)
 
 
+def test_progress_api_is_enabled_on_an_ordinary_measurement_round(tmp_path):
+    """Not just under PROFILE=1.
+
+    ``phases.<name>.start_ns`` is the only authoritative phase boundary; the log
+    line the KV collector otherwise greps for is written after the fact. Leaving
+    the endpoint off outside trace capture meant every measured round attributed
+    its warmup traffic by a timestamp that lagged the real transition.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+
+    argv = _aiperf_args(res).splitlines()
+    assert "--api-host" in argv
+    assert "--api-port" in argv
+    assert "19090" in argv  # the fake gate's pick-port
+
+
+def test_progress_api_address_is_published_for_the_watchdog(tmp_path):
+    """The reader is a different process and only sees this round's result dir."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+
+    published = json.loads((res / "aiperf_artifacts" / "progress_api.json").read_text(encoding="utf-8"))
+    assert published["url"] == "http://127.0.0.1:19090"
+
+
+def test_run_survives_a_phase_gate_that_cannot_allocate_a_port(tmp_path):
+    """Phase timing is observational: losing it must not cost the measurement."""
+    bench, bind, res = _sandbox(tmp_path)
+    (bench / "aiperf_phase_gate.py").write_text(
+        "#!/usr/bin/env python3\nimport sys\nraise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    r = _run(bench, bind, res, tmp_path)
+
+    assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
+    argv = _aiperf_args(res).splitlines()
+    assert "--api-host" not in argv
+    assert not (res / "aiperf_artifacts" / "progress_api.json").exists()
+
+
+def test_run_survives_a_missing_phase_gate(tmp_path):
+    """The asset can be absent on an older deployment; the round still measures."""
+    bench, bind, res = _sandbox(tmp_path)
+    (bench / "aiperf_phase_gate.py").unlink()
+    r = _run(bench, bind, res, tmp_path)
+
+    assert r.returncode == 0, r.stderr
+    assert (res / "inferencex_result.json").exists()
+    assert "--api-host" not in _aiperf_args(res).splitlines()
+
+
 # The upstream contract, flag by flag.
 _UPSTREAM_FLAGS = (
     ("--scenario", "inferencex-agentx-mvp"),

@@ -803,6 +803,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_parse_geak_accepted_config": "phase_kernel",
         "_record_geak_candidate": "phase_kernel",
         "_promote_geak_from_candidate": "phase_kernel",
+        "_reject_geak_promotion": "phase_kernel",
         "_record_geak_kernel_journey": "phase_kernel",
         "_ck_blockscale_switch_eligible": "phase_kernel",
         "_ck_switch_precision_is_fp8": "phase_kernel",
