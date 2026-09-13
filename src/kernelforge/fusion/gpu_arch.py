@@ -17,6 +17,7 @@ _ARCH_ALIASES = {
     "mi308x": "gfx942",
     "mi325x": "gfx942",
     "mi355x": "gfx950",
+    "radeon8065s": "gfx1151",
 }
 _GFX_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 
