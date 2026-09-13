@@ -927,7 +927,11 @@ def _stub_preflight(monkeypatch, *, source_ms=1.0, best_ms=0.5, case_ids=("case0
         runner.driver_contract,
         "preflight_reference",
         lambda *a, **k: driver_contract.PreflightReport(
-            ok=True, timing_ms=source_ms, timing_metric="median_ms", case_ids=case_ids
+            ok=True,
+            timing_ms=source_ms,
+            timing_metric="median_ms",
+            case_ids=case_ids,
+            case_ms=dict.fromkeys(case_ids, source_ms),
         ),
     )
     monkeypatch.setattr(
@@ -939,7 +943,11 @@ def _stub_preflight(monkeypatch, *, source_ms=1.0, best_ms=0.5, case_ids=("case0
         runner.driver_contract,
         "preflight_candidate",
         lambda *a, **k: driver_contract.PreflightReport(
-            ok=True, timing_ms=best_ms, timing_metric="median_ms", case_ids=case_ids
+            ok=True,
+            timing_ms=best_ms,
+            timing_metric="median_ms",
+            case_ids=case_ids,
+            case_ms=dict.fromkeys(case_ids, best_ms),
         ),
     )
 

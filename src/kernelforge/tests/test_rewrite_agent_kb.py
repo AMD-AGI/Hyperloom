@@ -733,6 +733,7 @@ def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
         _remote_config_with_token(tmp_path, token),
         source_ms=2.0,
         flydsl_best_ms=1.0,
+        speedup=2.0,
         framework="vllm",
     )
 

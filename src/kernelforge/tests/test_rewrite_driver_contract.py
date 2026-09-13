@@ -90,6 +90,14 @@ def test_case_ids_come_from_both_reporting_conventions():
     assert reading.case_ids == ("shape_b", "shape_a")
 
 
+def test_per_case_timings_are_kept_not_just_their_ids():
+    """The scored metric divides case by case, so the ids alone cannot produce it."""
+    reading = driver_contract.read_driver_output("case_ms: m_1 0.5\ncase_ms: m_4096 80.0\nmean_ms: 40.25\n")
+
+    assert reading.case_ms == {"m_1": 0.5, "m_4096": 80.0}
+    assert reading.case_ids == ("m_1", "m_4096")
+
+
 def test_correctness_verdicts_are_read_from_either_metric():
     assert driver_contract.read_driver_output("SNR: 45.2 dB").snr_db == 45.2
     assert driver_contract.read_driver_output("allclose: True").allclose is True

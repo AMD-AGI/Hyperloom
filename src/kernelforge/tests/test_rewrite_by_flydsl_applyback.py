@@ -291,6 +291,7 @@ def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
             commit_ref="refs/forge-rewrite/applyback/softmax-abcdef123456",
             source_ms=2.0,
             flydsl_best_ms=1.0,
+            speedup=2.0,
             reference_snr_db=45.0,
             patch=f"framework patch {index}\n",
             changed_files=["softmax.py"],
