@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import asdict
@@ -1743,3 +1744,56 @@ def test_the_replay_isolation_root_is_private_and_not_a_predictable_path():
     # System, global and user configuration all resolve inside the private root.
     for key in ("GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME"):
         assert str(root) in env[key], key
+
+
+def test_a_restrictive_umask_cannot_be_attributed_to_a_patch(repo: Path, tmp_path: Path):
+    """Environment isolation does not reach the umask, which child processes
+    inherit. Under a restrictive one, checkout creates a tracked 100755 file
+    without its owner execute bit, and the first replay commit inventories that
+    mode change as an effect of ITS patch -- after which a live file whose mode
+    no patch changed is accepted against it."""
+    script = repo / "srt" / "keep.sh"
+    script.write_text("#!/bin/sh\nunchanged\n", encoding="utf-8")
+    script.chmod(0o755)
+    (repo / "srt" / "touched.txt").write_text("old\n", encoding="utf-8")
+    _commit_all(repo, "an executable the patch never touches")
+    base_sha = _git_head_sha(repo)
+    (repo / "srt" / "touched.txt").write_text("new\n", encoding="utf-8")
+    _commit_all(repo, "the accepted patch touches only the other file")
+    patch = _patch(tmp_path, "um.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    previous = os.umask(0o111)
+    try:
+        ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    finally:
+        os.umask(previous)
+    assert ops is not None
+    assert ops[str(patch)] == {"srt/touched.txt": "upsert"}, "the umask must not add an entry"
+
+
+def test_a_source_checkout_owned_by_another_uid_still_replays(repo: Path, tmp_path: Path, monkeypatch):
+    """Emptying the global configuration also drops the operator's
+    ``safe.directory`` exceptions, and a shared or container-mounted framework
+    checkout owned by another uid is then refused as dubious ownership before
+    the replay begins -- a false refusal the isolation introduced.
+
+    ``safe.directory`` is honoured only in PROTECTED configuration -- git
+    ignores it from ``-c`` and ``GIT_CONFIG_*`` so a repository cannot vouch for
+    itself -- so the exception is written into the private config file the
+    replay already supplies, scoped to this one repository.
+    """
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import _trust_config
+
+    base_sha = _git_head_sha(repo)
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    _commit_all(repo, "the accepted change")
+    patch = _patch(tmp_path, "own.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    config = _trust_config(repo).read_text(encoding="utf-8")
+    assert f"directory = {repo}" in config
+    assert f"directory = {repo / '.git'}" in config, "clone validates .git on its own"
+    # Scoped: the file names this repository and nothing else.
+    assert config.count("directory =") == 2
+
+    # The ordinary same-owner path is unaffected by carrying the exception.
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}

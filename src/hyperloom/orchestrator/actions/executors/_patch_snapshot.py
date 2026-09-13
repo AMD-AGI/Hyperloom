@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.git_safety import repo_root, safe_directory_args
 
 from ...specialists.patch_safety import patch_file_targets
 from ._git import _run_git_cp
@@ -164,7 +165,34 @@ def _isolation_root() -> Path:
     return _ISOLATION_ROOT
 
 
-def _isolated_git_env() -> dict[str, str]:
+def _trust_config(trust: Path | None) -> Path:
+    """A protected config file granting ``trust`` -- and nothing else -- access.
+
+    ``safe.directory`` is honoured only in PROTECTED configuration: git ignores
+    it from ``-c`` and from ``GIT_CONFIG_*`` on purpose, so that a repository
+    cannot vouch for itself. The empty global config this replay supplies is
+    therefore also where a legitimate exception has to be written, and writing
+    one there keeps the exception scoped to the single repository the caller
+    already resolved rather than restoring the operator's whole configuration.
+    """
+    root = _isolation_root()
+    if trust is None:
+        return root / "config"
+    repo = repo_root(trust)
+    if not repo:
+        return root / "config"
+    digest = hashlib.sha256(str(repo).encode("utf-8")).hexdigest()[:16]
+    path = root / f"trust-{digest}.config"
+    if not path.exists():
+        # Both the work tree and its ``.git``: clone validates the second on its
+        # own and refuses on that path alone.
+        path.write_text(
+            f"[safe]\n\tdirectory = {repo}\n\tdirectory = {Path(repo) / '.git'}\n", encoding="utf-8"
+        )
+    return path
+
+
+def _isolated_git_env(trust: Path | None = None) -> dict[str, str]:
     """The environment replay git runs in: this repository and nothing else.
 
     Enumerating settings to override does not work, and several rounds of review
@@ -187,7 +215,7 @@ def _isolated_git_env() -> dict[str, str]:
             "XDG_CONFIG_HOME": str(root / "home"),
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_CONFIG_SYSTEM": str(root / "config"),
-            "GIT_CONFIG_GLOBAL": str(root / "config"),
+            "GIT_CONFIG_GLOBAL": str(_trust_config(trust)),
             # The system-wide attributes file is a transformation channel too.
             "GIT_ATTR_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0",
@@ -196,7 +224,16 @@ def _isolated_git_env() -> dict[str, str]:
     return env
 
 
-def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[bytes] | None:
+#: The mask replay git runs its children under. Environment isolation does not
+#: reach the umask, which subprocesses inherit: a restrictive one (0111) makes
+#: checkout create a tracked 100755 file without its owner execute bit, and the
+#: first replay commit then inventories that mode change as an effect of ITS
+#: patch. 0o022 is the ordinary mask, under which git's own 100644/100755
+#: distinction survives the checkout.
+_REPLAY_UMASK = 0o022
+
+
+def _git(tree: Path, *args: str, timeout: int = 300, trust: Path | None = None) -> subprocess.CompletedProcess[bytes] | None:
     """Run git inside ``tree``, isolated from ambient configuration.
 
     Disabling attributes is not enough to make the replay reproducible. A
@@ -217,7 +254,14 @@ def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProc
     # eol, encoding, ``core.ignoreStat``, ``core.fsmonitor`` and whatever is
     # added to git next -- is handled by the empty configuration the environment
     # supplies, because enumerating settings is the approach that kept failing.
-    isolation = ("-c", f"core.hooksPath={hooks}")
+    isolation = ["-c", f"core.hooksPath={hooks}"]
+    # The empty configuration also drops the operator's ``safe.directory``
+    # exceptions, and a framework checkout owned by another uid -- a shared or
+    # container-mounted tree -- is then refused as dubious ownership before the
+    # replay begins. That is a false refusal this isolation introduced, so the
+    # one repository the caller has already resolved gets a narrowly scoped
+    # exception rather than the whole global configuration back.
+
     try:
         return subprocess.run(
             ["git", *isolation, *args],
@@ -225,7 +269,8 @@ def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProc
             capture_output=True,
             timeout=timeout,
             check=False,
-            env=_isolated_git_env(),
+            env=_isolated_git_env(trust),
+            umask=_REPLAY_UMASK,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -239,8 +284,8 @@ def _repo_prefix(framework_root: Path) -> tuple[Path, str] | None:
     directory clones nothing. The enclosing repository is what carries the
     base commit; the prefix is where the stack actually lands inside it.
     """
-    top = _git(framework_root, "rev-parse", "--show-toplevel", timeout=60)
-    pre = _git(framework_root, "rev-parse", "--show-prefix", timeout=60)
+    top = _git(framework_root, "rev-parse", "--show-toplevel", timeout=60, trust=framework_root)
+    pre = _git(framework_root, "rev-parse", "--show-prefix", timeout=60, trust=framework_root)
     if top is None or pre is None or top.returncode != 0 or pre.returncode != 0:
         return None
     toplevel = top.stdout.decode("utf-8", errors="replace").strip()
@@ -272,6 +317,7 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
         str(framework_root),
         str(dest),
         timeout=600,
+        trust=framework_root,
     )
     if clone is None or clone.returncode != 0:
         return False
