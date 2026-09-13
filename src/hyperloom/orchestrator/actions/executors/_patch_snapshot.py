@@ -8,9 +8,10 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import tempfile
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from hyperloom.common.git_safety import safe_directory_args
 
@@ -142,105 +143,149 @@ def _declares_every_block(text: str, pairs: list[tuple[str, str]]) -> bool:
     return blocks == 0 or blocks == len(pairs)
 
 
-def _path_in_tree(framework_root: Path, base_sha: str, rel: str) -> bool | None:
-    """Whether ``rel`` existed at ``base_sha``; ``None`` when unanswerable."""
-    if not base_sha or not rel:
-        return None
+def _extract_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool:
+    """Materialise ``base_sha``'s tree into ``dest``. Never mutates the source."""
     try:
-        done = subprocess.run(
-            ["git", *safe_directory_args(["cat-file", "-e", f"{base_sha}:{rel}"], cwd=str(framework_root))],
+        archive = subprocess.run(
+            ["git", *safe_directory_args(["archive", base_sha], cwd=str(framework_root))],
             cwd=str(framework_root),
             capture_output=True,
-            timeout=30,
+            timeout=300,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return done.returncode == 0
-
-
-def _reverses_cleanly(framework_root: Path, patch: Path, level: int) -> bool:
-    """Whether ``patch`` can be un-applied from the tree at strip ``level``."""
-    try:
-        done = subprocess.run(
-            [
-                "git",
-                *safe_directory_args(
-                    ["apply", "--reverse", "--check", f"-p{level}", str(patch)], cwd=str(framework_root)
-                ),
-            ],
-            cwd=str(framework_root),
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        if archive.returncode != 0:
+            return False
+        done = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True, timeout=300)
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
 
 
-def verified_patch_ops(framework_root: Path, patch: Path, *, base_sha: str) -> dict[str, str] | None:
-    """Return the ops ``patch`` declares, PROVEN against the tree, or ``None``.
+def _apply_at_some_level(tree: Path, patch: Path) -> int | None:
+    """Apply ``patch`` inside ``tree`` at the first level that takes it."""
+    for level in _P_LEVELS:
+        try:
+            check = subprocess.run(
+                ["git", "apply", "--check", f"-p{level}", str(patch)],
+                cwd=str(tree),
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            if check.returncode != 0:
+                continue
+            done = subprocess.run(
+                ["git", "apply", f"-p{level}", str(patch)],
+                cwd=str(tree),
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if done.returncode == 0:
+            return level
+    return None
 
-    :func:`patch_declared_ops` reads the diff headers and believes them. That is
-    the right source for WHAT a patch declares, but it establishes nothing about
-    whether the tree being captured actually contains it, and two gaps follow:
 
-    * an ordinary modification declares ``upsert``, and the capture calls any
-      existing file an upsert -- so a KEEP reached with its mutation inputs
-      stripped ships the BASE bytes under a declaration that says they were
-      changed, and the recipe's patch step and its snapshot describe different
-      results;
-    * the strip level is guessed from paths that currently exist, and a deletion
-      has erased exactly that evidence, so a ``-p0`` deletion resolves at
-      ``-p1`` and the capture emits a complete tombstone for a path that was
-      never in the tree.
+def _ops_at_level(text: str, level: int) -> dict[str, str]:
+    """The ops a diff declares once the strip level is known to be right."""
+    ops: dict[str, str] = {}
+    for old, new in patch_file_targets(text):
+        rel_new = _strip_path_prefix(new, level) if new and new != _PATCH_DEV_NULL else None
+        rel_old = _strip_path_prefix(old, level) if old and old != _PATCH_DEV_NULL else None
+        if rel_new:
+            ops[rel_new] = "upsert"
+            if rel_old and rel_old != rel_new:
+                ops[rel_old] = "delete"
+        elif rel_old:
+            ops[rel_old] = "delete"
+    return ops
 
-    Both are settled by asking git rather than by guessing. A patch that is
-    applied can be un-applied, so a clean ``git apply --reverse --check`` at
-    some level is proof of presence AND identifies the level. Reverse-applying
-    a deletion only creates a file, which succeeds at more than one level, so
-    the base tree breaks the tie: every path the patch modifies or deletes must
-    have existed at ``base_sha``, and every path it creates must not have.
+
+def _same_file(replayed: Path, captured: Path) -> bool:
+    """Whether two paths hold the same bytes AND the same executability."""
+    try:
+        if replayed.is_file() != captured.is_file():
+            return False
+        if not replayed.is_file():
+            return True
+        if replayed.read_bytes() != captured.read_bytes():
+            return False
+        # A recipe that restores a script without its execute bit does not
+        # reproduce the accepted stack, and git treats a mode disagreement as a
+        # warning rather than a failure, so it has to be compared here.
+        return bool(replayed.stat().st_mode & 0o111) == bool(captured.stat().st_mode & 0o111)
+    except OSError:
+        return False
+
+
+def replayed_stack_ops(
+    framework_root: Path,
+    patches: Sequence[Path],
+    *,
+    base_sha: str,
+) -> dict[str, dict[str, str]] | None:
+    """Replay the ordered stack from ``base_sha`` and prove it rebuilds the tree.
+
+    This is the only question worth asking of a replay contract: does
+    ``base_sha`` plus these patches, in this order, produce the files the
+    capture is about to ship? Everything cheaper answers a different question
+    and gets it wrong in both directions.
+
+    Reading the diff headers says what a patch DECLARES and nothing about the
+    tree. Reverse-applying each patch against the FINAL tree is worse than it
+    looks: git searches for the postimage with an offset, so a patch that was
+    never applied can reverse against a similar block elsewhere in the file; a
+    deletion reverses by creating a file, which succeeds whatever it writes; a
+    mode disagreement is only a warning; and it is simultaneously too strict,
+    because an earlier round's patch cannot reverse once a later round has
+    rewritten the same region, and because a patch that edits a file an earlier
+    round created has no preimage in the stack's base at all.
+
+    Replaying forward has none of those problems, because every patch meets
+    exactly the tree it was authored against: the level that applies is the
+    level that was used, the ops it declares are then trustworthy, and the
+    final comparison covers content and mode for every declared path.
+
+    Args:
+        framework_root: The captured tree, compared against the replay.
+        patches: The accepted stack's patches for this root, in apply order.
+        base_sha: The commit the stack applies to.
 
     Returns:
-        The proven ``{rel: op}`` map, or ``None`` when the patch cannot be shown
-        to be what the tree contains -- which the caller must treat as an
-        undeclared step rather than a satisfied one.
+        ``{patch_path: {rel: op}}`` when the replay reproduces every declared
+        path, else ``None`` -- which the caller must treat as an undeclared
+        step rather than a satisfied one.
     """
+    # No explicit git-tree probe: ``git archive`` below fails on a root that is
+    # not one, which is the same answer for one fewer subprocess.
+    if not base_sha or not patches:
+        return None
+    tmp = Path(tempfile.mkdtemp(prefix="hl-replay-"))
     try:
-        text = patch.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    pairs = patch_file_targets(text)
-    if not pairs or not _declares_every_block(text, pairs):
-        return None
-    for level in _P_LEVELS:
-        ops: dict[str, str] = {}
-        consistent = True
-        for old, new in pairs:
-            rel_new = _strip_path_prefix(new, level) if new and new != _PATCH_DEV_NULL else None
-            rel_old = _strip_path_prefix(old, level) if old and old != _PATCH_DEV_NULL else None
-            # A path the patch modifies, renames from, or deletes was in the
-            # base tree; one it creates was not. Either answer being
-            # unavailable leaves the level unconfirmed rather than confirmed.
-            if rel_old is not None:
-                consistent = _path_in_tree(framework_root, base_sha, rel_old) is True
-            elif rel_new is not None:
-                consistent = _path_in_tree(framework_root, base_sha, rel_new) is False
-            else:
-                consistent = False
-            if not consistent:
-                break
-            if rel_new:
-                ops[rel_new] = "upsert"
-                if rel_old and rel_old != rel_new:
-                    ops[rel_old] = "delete"
-            elif rel_old:
-                ops[rel_old] = "delete"
-        if consistent and ops and _reverses_cleanly(framework_root, patch, level):
-            return ops
-    return None
+        if not _extract_base_tree(framework_root, base_sha, tmp):
+            return None
+        by_patch: dict[str, dict[str, str]] = {}
+        for patch in patches:
+            try:
+                text = patch.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+            pairs = patch_file_targets(text)
+            if not pairs or not _declares_every_block(text, pairs):
+                return None
+            level = _apply_at_some_level(tmp, patch)
+            if level is None:
+                return None
+            by_patch[str(patch)] = _ops_at_level(text, level)
+        for ops in by_patch.values():
+            for rel in ops:
+                if not _same_file(tmp / rel, framework_root / rel):
+                    return None
+        return by_patch
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
@@ -459,6 +504,6 @@ __all__ = [
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
     "patch_declared_ops",
-    "verified_patch_ops",
+    "replayed_stack_ops",
     "harvest_realized_diff",
 ]

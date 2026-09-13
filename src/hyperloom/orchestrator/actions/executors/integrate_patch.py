@@ -3547,7 +3547,7 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import verified_patch_ops
+        from ._patch_snapshot import patch_declared_ops, replayed_stack_ops
 
         root = str(framework_root or "")
         # Read as an attribute, not with a default: the durable round state IS
@@ -3628,24 +3628,32 @@ class IntegratePatchExecutor:
         # the diffs itself.
         patch_targets: dict[str, dict[str, str]] = {}
         for patch_root, patches in patches_by_root.items():
-            for patch in patches:
-                # Proven against the tree, not read off the headers and
-                # believed. A patch whose presence cannot be shown declares
-                # nothing here, which the decision refuses as
-                # ``patch_targets_unknown`` -- the alternative is a step that
-                # claims a file the capture holds in its unmodified form.
-                ops = verified_patch_ops(
-                    Path(patch_root), patch, base_sha=str(base_sha_by_root.get(patch_root) or "")
+            root_base = str(base_sha_by_root.get(patch_root) or "")
+            # Proven, not believed: the whole stack is replayed from its base in
+            # an isolated tree and the result compared against what is about to
+            # be captured. Per root and over the ORDERED stack, because a patch's
+            # preimage is the tree its predecessors left behind, not this root's
+            # base and not the final tree.
+            replayed = replayed_stack_ops(Path(patch_root), patches, base_sha=root_base)
+            if replayed is None and root_base:
+                log.warning(
+                    "integrate_patch: enablement KEEP cannot replay the stack on %s from %s; "
+                    "its targets are left undeclared and the recipe is refused",
+                    patch_root,
+                    root_base,
                 )
+                continue
+            if replayed is None:
+                # No base commit, so there is no "checkout and apply" replay to
+                # prove: a non-git root is restored by overlaying the snapshot,
+                # which the declared-op rules certify on their own. Falling back
+                # to the headers keeps that path exactly as it was rather than
+                # making a supported contract unsatisfiable by construction.
+                replayed = {str(p): patch_declared_ops(Path(patch_root), [p]) for p in patches}
+            for patch_path, ops in replayed.items():
                 if not ops:
-                    log.warning(
-                        "integrate_patch: enablement KEEP cannot verify patch %s against %s; "
-                        "its targets are left undeclared and the recipe is refused",
-                        patch,
-                        patch_root,
-                    )
                     continue
-                patch_targets[str(patch)] = ops
+                patch_targets[patch_path] = ops
                 targets.setdefault(patch_root, {}).update(ops)
         for declared_root, ops in declared_targets(
             framework_root=root,

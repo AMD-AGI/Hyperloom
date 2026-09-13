@@ -399,19 +399,22 @@ def _patch_step_reasons(
             reasons.append(_reason("patch_targets_unknown", scope))
             continue
         root_id = str(step.get("root_id") or "")
-        snapshot = by_root.get(root_id)
-        if not isinstance(snapshot, Mapping):
+        if not isinstance(by_root.get(root_id), Mapping):
+            # ``root_unidentified`` or ``source_snapshot_missing`` already
+            # stands over this step; both refuse, and one code per defect is
+            # what keeps the verdict readable.
             continue
         named = expected.get(root_id)
         named = named if isinstance(named, Mapping) else {}
-        captured = {
-            str(f.get("rel")): str(f.get("op")) for f in (snapshot.get("files") or []) if isinstance(f, Mapping)
-        }
         for raw_rel, raw_op in declared.items():
             rel, op = str(raw_rel), str(raw_op)
-            # ``missing`` is the capture reporting that it could not read the
-            # file, which is not coverage.
-            uncovered = rel not in named or captured.get(rel, "missing") == "missing"
+            # Only whether the accepted stack NAMES this file. Whether what it
+            # names was actually captured -- a ``missing`` entry included --
+            # belongs to ``_expected_op_reasons``, which refuses it as
+            # ``accepted_stack_not_launched`` and carries the wider ``blocks``
+            # of the two. Re-testing it here would add a replay-only reason
+            # that restricts nothing further.
+            uncovered = rel not in named
             disagrees = last_declaring.get((root_id, rel)) == index and str(named.get(rel) or "") != op
             if uncovered or disagrees:
                 reasons.append(_reason("patch_step_not_captured", scope))

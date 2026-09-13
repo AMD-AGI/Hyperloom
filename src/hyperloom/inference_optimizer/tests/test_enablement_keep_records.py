@@ -17,7 +17,7 @@ from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     patch_declared_ops,
-    verified_patch_ops,
+    replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
@@ -1044,13 +1044,111 @@ def test_a_modification_that_was_never_applied_declares_nothing(repo: Path, tmp_
     patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
     # The headers still say what the patch WOULD do...
     assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-    # ...but nothing in the tree contains it.
-    assert verified_patch_ops(repo, patch, base_sha=base_sha) is None
+    # ...but the replay produces bytes the captured tree does not have.
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
     assert (repo / TARGET).read_text(encoding="utf-8") == BASE_TEXT
 
     _git(repo, "apply", str(patch))
     _commit_all(repo, "applied")
-    assert verified_patch_ops(repo, patch, base_sha=base_sha) == {TARGET: "upsert"}
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}
+
+
+def test_an_unrecorded_edit_outside_the_patch_breaks_the_replay(repo: Path, tmp_path: Path):
+    """Reverse-applying a patch only inspects its own hunks, so an edit made
+    outside them passed while base + patch no longer reproduced the captured
+    bytes. Replaying forward compares the whole declared file."""
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    _git(repo, "apply", str(patch))
+    _commit_all(repo, "applied")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}
+
+    (repo / TARGET).write_text(PATCHED_TEXT + "an unrecorded line\n", encoding="utf-8")
+    _commit_all(repo, "an edit no patch declares")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_never_applied_patch_cannot_borrow_a_matching_block_elsewhere(repo: Path, tmp_path: Path):
+    """Git finds a postimage with an offset, so reverse-applying a patch that
+    was never applied succeeded against a similar block further down the file.
+    The forward replay meets the exact preimage instead."""
+    twin = "srt/twin.py"
+    (repo / twin).write_text("header\nv=old\ntail\n" + "".join(f"x{i}\n" for i in range(10)) + "header\nv=new\ntail\n", encoding="utf-8")
+    _commit_all(repo, "a file with two similar blocks")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "twin.patch", f"--- a/{twin}\n+++ b/{twin}\n@@ -1,3 +1,3 @@\n header\n-v=old\n+v=new\n tail\n")
+    # Never applied: the tree still holds the base.
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_content_and_mode_patch_must_agree_on_the_mode(repo: Path, tmp_path: Path):
+    """Git treats a mode disagreement as a warning, not a failed apply, and the
+    snapshot copies whatever mode it finds -- so a recipe could restore a
+    script without its execute bit and still certify."""
+    script = "srt/run.sh"
+    (repo / script).write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+    _commit_all(repo, "add the script")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(
+        tmp_path,
+        "mode.patch",
+        f"diff --git a/{script} b/{script}\nold mode 100644\nnew mode 100755\n"
+        f"--- a/{script}\n+++ b/{script}\n@@ -1,2 +1,2 @@\n #!/bin/sh\n-echo one\n+echo two\n",
+    )
+    _git(repo, "apply", str(patch))
+    _commit_all(repo, "content and mode")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {script: "upsert"}}
+
+    # Same bytes, mode put back: the replay would produce an executable file.
+    (repo / script).chmod(0o644)
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_overlapping_rounds_on_one_file_both_verify(repo: Path, tmp_path: Path):
+    """Each patch's preimage is the tree its predecessors left behind. Checked
+    independently against the FINAL tree, the earlier patch of two edits to one
+    file could never reverse, and a valid stack was refused."""
+    base_sha = _git_head_sha(repo)
+    first = _patch(tmp_path, "a1.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+middle\n")
+    second = _patch(tmp_path, "a2.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-middle\n+{PATCHED_TEXT}")
+    for patch, msg in ((first, "r1"), (second, "r2")):
+        _git(repo, "apply", str(patch))
+        _commit_all(repo, msg)
+    assert replayed_stack_ops(repo, [first, second], base_sha=base_sha) == {
+        str(first): {TARGET: "upsert"},
+        str(second): {TARGET: "upsert"},
+    }
+
+
+def test_a_round_editing_a_file_an_earlier_round_created_verifies(repo: Path, tmp_path: Path):
+    """The preimage of a later patch can be a file that does not exist at the
+    stack's base at all, so checking every patch against the base's inventory
+    refused a legitimate stack."""
+    base_sha = _git_head_sha(repo)
+    created = "srt/made.py"
+    first = _patch(tmp_path, "c1.patch", f"--- /dev/null\n+++ b/{created}\n@@ -0,0 +1 @@\n+one\n")
+    second = _patch(tmp_path, "c2.patch", f"--- a/{created}\n+++ b/{created}\n@@ -1 +1 @@\n-one\n+two\n")
+    for patch, msg in ((first, "create"), (second, "edit")):
+        _git(repo, "apply", str(patch))
+        _commit_all(repo, msg)
+    assert replayed_stack_ops(repo, [first, second], base_sha=base_sha) == {
+        str(first): {created: "upsert"},
+        str(second): {created: "upsert"},
+    }
+
+
+def test_a_deletion_whose_twin_also_exists_at_base_resolves_to_the_right_path(repo: Path, tmp_path: Path):
+    """Both candidate strip levels named a path that existed at base, so a
+    base-inventory check could not disambiguate and the wrong path was
+    recorded as deleted."""
+    (repo / "srt" / "gone").write_text("inner\n", encoding="utf-8")
+    (repo / "gone").write_text("outer\n", encoding="utf-8")
+    _commit_all(repo, "two candidates")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "d.patch", "--- srt/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-inner\n")
+    _git(repo, "apply", "-p0", str(patch))
+    _commit_all(repo, "deleted the inner one")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone": "delete"}}
 
 
 def test_a_mixed_diff_whose_metadata_block_cannot_be_read_declares_nothing(repo: Path, tmp_path: Path):
@@ -1074,7 +1172,7 @@ def test_a_mixed_diff_whose_metadata_block_cannot_be_read_declares_nothing(repo:
     # The text half alone would have passed; the announced block count is what
     # makes the partial case indistinguishable from the empty one.
     assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
-    assert verified_patch_ops(repo, mixed, base_sha=base_sha) is None
+    assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) is None
 
 
 def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: Path, tmp_path: Path):
@@ -1092,7 +1190,7 @@ def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: P
     # The header-only reader falls back to -p1 and names a path that was never
     # in the tree.
     assert patch_declared_ops(repo, [patch]) == {"gone.py": "delete"}
-    assert verified_patch_ops(repo, patch, base_sha=base_sha) == {"srt/gone.py": "delete"}
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone.py": "delete"}}
 
 
 def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, tmp_path: Path):
@@ -1197,3 +1295,39 @@ def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
         SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=tmp_path
     )
     assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
+
+
+def test_a_non_git_root_is_still_declarable_without_a_base(tmp_path: Path):
+    """A root with no commit has no "checkout and apply" replay to prove.
+
+    It is restored by overlaying the snapshot, which the declared-op rules
+    certify on their own, so the capture falls back to the diff headers there.
+    Proving application is impossible without a base, and making a supported
+    contract unsatisfiable by construction is not the same as failing closed.
+    """
+    plain = tmp_path / "site-packages" / "pkg"
+    plain.mkdir(parents=True)
+    (plain / "mod.py").write_text(PATCHED_TEXT, encoding="utf-8")
+    patch = _patch(tmp_path, "ng.patch", f"--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+
+    # No base commit exists, so the replay cannot run at all...
+    assert replayed_stack_ops(plain, [patch], base_sha="") is None
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
+    out = executor._enablement_keep_records(
+        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=plain,
+        applied=[patch],
+        applied_artifacts=[],
+        done_payload={"patch_roots": {str(patch): str(plain)}},
+        provision_result=None,
+        bench_result={},
+    )
+    # ...and the step is still declared, so the snapshot-overlay contract that
+    # predates this change keeps working.
+    assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
+    record = out["enablement_roots"][0]
+    assert record["is_git"] is False and record["base_sha"] == ""

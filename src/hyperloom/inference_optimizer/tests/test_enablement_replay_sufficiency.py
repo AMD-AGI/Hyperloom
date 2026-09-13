@@ -1748,9 +1748,28 @@ def test_a_round_that_deletes_what_a_later_round_recreates_is_sufficient():
 
 
 def test_the_recreated_file_must_still_be_covered_by_the_capture():
-    """Accepting the intermediate delete does not relax coverage."""
+    """Accepting the intermediate delete does not relax coverage.
+
+    The accepted stack still NAMES the file, so the per-step rule stands down
+    and ``_expected_op_reasons`` owns the miss -- under the code with the wider
+    ``blocks`` of the two. What matters is that the stack is refused and by
+    exactly one rule.
+    """
     section = {**_sufficient_section(), "source_snapshots": [_snapshot(files=(("srt/other.py", "upsert"),))]}
-    assert "patch_step_not_captured" in _codes(_decide(_delete_then_recreate_state(), section))
+    decision = _decide(_delete_then_recreate_state(), section)
+    codes = _codes(decision)
+    assert decision["status"] == "insufficient"
+    assert "accepted_stack_not_launched" in codes
+    assert "patch_step_not_captured" not in codes
+
+
+def test_a_file_the_accepted_stack_never_names_is_the_per_step_rules_own():
+    """The gap no other rule can reach: a step touching a file the stack does
+    not name at all, which is exactly what a capture derived from one round of
+    several produces."""
+    section = {**_sufficient_section(), "accepted_stack_targets": {"r1": {"srt/other.py": "upsert"}},
+               "source_snapshots": [_snapshot(files=(("srt/other.py", "upsert"),))]}
+    assert "patch_step_not_captured" in _codes(_decide(_sufficient_state(), section))
 
 
 def test_the_last_step_to_touch_a_file_must_agree_with_the_accepted_stack():
@@ -1777,10 +1796,14 @@ def test_an_earlier_step_disagreeing_with_the_end_state_is_not_faulted():
     assert [r for r in decision["reasons"] if r["scope"] == "step[0]"] == []
 
 
-def test_a_target_the_capture_could_not_read_is_not_coverage():
-    """``missing`` is the capture reporting failure, not a captured file."""
+def test_a_target_the_capture_could_not_read_is_refused_once():
+    """``missing`` is the capture reporting failure, not a captured file -- and
+    it is ``_expected_op_reasons``' case, which already refuses it with the
+    wider ``blocks``. A second replay-only reason would restrict nothing."""
     section = {**_sufficient_section(), "source_snapshots": [_snapshot(files=(("srt/a.py", "missing"),))]}
-    assert "patch_step_not_captured" in _codes(_decide(_sufficient_state(), section))
+    codes = _codes(_decide(_sufficient_state(), section))
+    assert "accepted_stack_not_launched" in codes
+    assert "patch_step_not_captured" not in codes
 
 
 def test_a_patch_step_whose_root_has_no_snapshot_at_all_is_refused():
