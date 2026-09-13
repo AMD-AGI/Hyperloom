@@ -141,10 +141,34 @@ _REPLAY_IDENTITY: tuple[str, ...] = ("-c", "user.email=replay@hyperloom.invalid"
 _UNREPRESENTABLE_MODES: frozenset[str] = frozenset({"120000", "160000"})
 
 
+def _no_hooks_dir() -> Path:
+    """An empty directory this process owns, used as a hooks and template dir."""
+    path = Path(tempfile.gettempdir()) / "hyperloom-replay-no-hooks"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[bytes] | None:
-    """Run git inside ``tree``; ``None`` when it could not be run at all."""
+    """Run git inside ``tree``, isolated from ambient configuration.
+
+    Disabling attributes is not enough to make the replay reproducible. A
+    clone inherits the host's ``core.hooksPath``, and a hook is free to rewrite
+    and re-stage a file: a ``pre-commit`` formatter can put a patched file back
+    to its base content before the inventory is read off the commit, which
+    drops it from the comparison and capture set exactly as a normalising
+    ``clean`` filter did. A ``post-checkout`` hook can likewise change the
+    preimage the replay claims to have started from.
+
+    So every git invocation here runs with hooks pointed at an empty directory
+    this process owns. The replay's answer has to be a function of the
+    repository and the patches, not of what the host happens to have configured.
+    """
+    hooks = str(_no_hooks_dir())
+    isolation = ("-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false")
     try:
-        return subprocess.run(["git", *args], cwd=str(tree), capture_output=True, timeout=timeout, check=False)
+        return subprocess.run(
+            ["git", *isolation, *args], cwd=str(tree), capture_output=True, timeout=timeout, check=False
+        )
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -180,7 +204,17 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
     ``-n`` skips the checkout until the detached one below, so the captured
     repository is never written to.
     """
-    clone = _git(Path("."), "clone", "--shared", "-n", "-q", str(framework_root), str(dest), timeout=600)
+    clone = _git(
+        Path("."),
+        "clone",
+        "--shared",
+        "-n",
+        "-q",
+        f"--template={_no_hooks_dir()}",
+        str(framework_root),
+        str(dest),
+        timeout=600,
+    )
     if clone is None or clone.returncode != 0:
         return False
     # BEFORE the checkout, not after. ``$GIT_DIR/info/attributes`` outranks a

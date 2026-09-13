@@ -1639,3 +1639,40 @@ def test_a_smudge_filter_cannot_attribute_its_output_to_the_first_patch(
     assert ops is not None, "the stack itself is valid and must still verify"
     # The smudged file is not an effect of the patch and must not be claimed.
     assert ops[str(patch)] == {plain: "upsert"}
+
+
+def test_a_host_hook_cannot_remove_a_patch_effect_from_the_inventory(repo: Path, tmp_path: Path, monkeypatch):
+    """Disabling attributes does not disable hooks, and a clone inherits the
+    host's ``core.hooksPath``. A ``pre-commit`` formatter is free to rewrite and
+    re-stage a patched file back to its base content before the inventory is
+    read off the commit, which drops it from the comparison and capture set --
+    the same certification failure as a normalising ``clean`` filter, through a
+    different channel.
+
+    The replay's answer has to be a function of the repository and the patches,
+    not of what the host happens to have configured.
+    """
+    (repo / "srt" / "a.txt").write_text("old\n", encoding="utf-8")
+    (repo / "srt" / "b.txt").write_text("old\n", encoding="utf-8")
+    _commit_all(repo, "two files")
+    base_sha = _git_head_sha(repo)
+    (repo / "srt" / "a.txt").write_text("new\n", encoding="utf-8")
+    (repo / "srt" / "b.txt").write_text("new\n", encoding="utf-8")
+    _commit_all(repo, "the accepted patch changes both")
+    patch = _patch(tmp_path, "both.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    # A hook that undoes one of the patch's effects and re-stages it, supplied
+    # the way a host supplies one: globally, so the clone inherits it.
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "pre-commit").write_text("#!/bin/sh\nsed -i s/new/old/ srt/a.txt\ngit add srt/a.txt\n", encoding="utf-8")
+    (hooks / "pre-commit").chmod(0o755)
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text(f"[core]\n\thooksPath = {hooks}\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+    # The live tree holds content no patch produced, in the file the hook hides.
+    (repo / "srt" / "a.txt").write_text("not produced by any patch\n", encoding="utf-8")
+
+    ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    assert ops is None, "a hook must not be able to drop a patch effect out of verification"
