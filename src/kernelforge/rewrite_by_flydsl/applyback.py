@@ -592,6 +592,7 @@ def _publish_patch(
     commit_ref: str,
     source_ms: float | None,
     flydsl_best_ms: float | None,
+    speedup: float | None,
     reference_snr_db: float | None,
     patch: str,
     changed_files: list[str],
@@ -620,7 +621,6 @@ def _publish_patch(
     version_name = f"iter_{iteration:03d}"
     version = best_root / version_name
     relative_dir = version.relative_to(root)
-    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms and flydsl_best_ms > 0 else None
     manifest = validate_applyback_manifest(
         {
             "schema_version": protocol.ARTIFACT_SCHEMA_VERSION,
@@ -722,6 +722,7 @@ def generate_applyback_patch(
     best_commit: str = "",
     source_ms: float | None = None,
     flydsl_best_ms: float | None = None,
+    speedup: float | None = None,
     reference_snr_db: float | None = None,
     deadline_unix: float | None = None,
     import_modules: list[str] | tuple[str, ...] = (),
@@ -890,6 +891,7 @@ def generate_applyback_patch(
                     commit_ref=commit_ref,
                     source_ms=source_ms,
                     flydsl_best_ms=flydsl_best_ms,
+                    speedup=speedup,
                     reference_snr_db=reference_snr_db,
                     patch=patch,
                     changed_files=changed_files,

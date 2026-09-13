@@ -81,6 +81,7 @@ class DriverReading:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     snr_db: float | None = None
     allclose: bool | None = None
 
@@ -103,6 +104,7 @@ class PreflightReport:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -126,9 +128,13 @@ def read_driver_output(text: str) -> DriverReading:
             reading.timing_metric = metric
 
     case_ids: list[str] = []
-    for case_id, _ms in _CASE_MS_RE.findall(text or ""):
+    for case_id, raw in _CASE_MS_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
+        try:
+            reading.case_ms[case_id] = float(raw)
+        except ValueError:
+            continue
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -265,6 +271,7 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
+        case_ms=dict(reading.case_ms),
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(
