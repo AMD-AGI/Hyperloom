@@ -1300,55 +1300,6 @@ def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
         SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=tmp_path
     )
     assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
-
-
-def test_a_non_git_root_is_still_declarable_without_a_base(tmp_path: Path):
-    """A root with no commit has no "checkout and apply" replay to prove.
-
-    It is restored by overlaying the snapshot, which the declared-op rules
-    certify on their own, so the capture falls back to the diff headers there.
-    Proving application is impossible without a base, and making a supported
-    contract unsatisfiable by construction is not the same as failing closed.
-    """
-    plain = tmp_path / "site-packages" / "pkg"
-    plain.mkdir(parents=True)
-    (plain / "mod.py").write_text(PATCHED_TEXT, encoding="utf-8")
-    patch = _patch(tmp_path, "ng.patch", f"--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-
-    # No base commit exists, so the replay cannot run at all...
-    assert replayed_stack_ops(plain, [patch], base_sha="") is None
-    # ...but the overlay must still list EVERY target, so the inventory is
-    # git's own reading of the patch rather than a header parse.
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
-
-    assert declared_inventory_without_base(plain, patch) == {"mod.py": "upsert"}
-
-    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
-    state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
-    out = executor._enablement_keep_records(
-        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
-        params={},
-        specialist_task_id=PROBE_TASK,
-        framework_root=plain,
-        applied=[patch],
-        applied_artifacts=[],
-        done_payload={"patch_roots": {str(patch): str(plain)}},
-        provision_result=None,
-        bench_result={},
-    )
-    # ...and the step is still declared, so the snapshot-overlay contract that
-    # predates this change keeps working.
-    assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
-    record = out["enablement_roots"][0]
-    assert record["is_git"] is False and record["base_sha"] == ""
-
-
-# --------------------------------------------------------------------------
-# Entry kinds the snapshot contract cannot represent, and the ones it can only
-# represent if it is asked the right question.
-# --------------------------------------------------------------------------
-
-
 def test_a_hunk_body_cannot_pass_itself_off_as_a_file_header(repo: Path, tmp_path: Path):
     """A removed line beginning ``-- `` followed by an added line beginning
     ``++ `` reads as another file header to a text parse -- enough to make a
@@ -1420,48 +1371,112 @@ def test_export_attributes_cannot_move_the_base_the_replay_compares_against(repo
     _commit_all(repo, "an unrecorded substitution")
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
 
+def test_a_patch_on_a_root_with_no_base_commit_declares_nothing(tmp_path: Path):
+    """A tree with no identity has no preimage to replay from.
 
-def test_the_execute_bit_compared_is_the_one_git_records(repo: Path, tmp_path: Path):
-    """``mode & 0o111`` asks whether ANY execute bit is set, which accepts 0645
-    -- a mode git classifies as non-executable and whose owner cannot run it."""
-    script = repo / "srt" / "run.sh"
-    script.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
-    _commit_all(repo, "add the script")
-    base_sha = _git_head_sha(repo)
-    script.write_text("#!/bin/sh\necho two\n", encoding="utf-8")
-    script.chmod(0o755)
-    _commit_all(repo, "content and mode")
-    patch = _patch(tmp_path, "x.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
-    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/run.sh": "upsert"}}
-
-    script.chmod(0o645)
-    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
-
-
-def test_a_non_git_overlay_lists_a_mode_only_block_too(tmp_path: Path):
-    """Restoring the old header parse for non-git roots would restore exactly
-    its omissions, for the one class of root the replay cannot check."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
-
+    Three successive attempts to certify such a root from the patch text alone
+    each left a different hole -- a hunk body posing as a file header, an
+    ambiguous strip level resolved to the wrong path, git's abbreviated
+    ``dir/{old => new}`` rename summary inventing a source, and a declared
+    symlink certified into a regular file. A patch step bound to a tree that
+    names no base cannot be certified, so it declares nothing and the decision
+    refuses it.
+    """
     plain = tmp_path / "site-packages" / "pkg"
     plain.mkdir(parents=True)
-    (plain / "a.py").write_text(PATCHED_TEXT, encoding="utf-8")
-    (plain / "script").write_text("#!/bin/sh\n", encoding="utf-8")
-    (plain / "script").chmod(0o755)
-    mixed = _patch(
-        tmp_path,
-        "ngmix.patch",
-        f"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}"
-        "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n",
+    (plain / "mod.py").write_text(PATCHED_TEXT, encoding="utf-8")
+    patch = _patch(tmp_path, "ng.patch", f"--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
+    out = executor._enablement_keep_records(
+        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=plain,
+        applied=[patch],
+        applied_artifacts=[],
+        done_payload={"patch_roots": {str(patch): str(plain)}},
+        provision_result=None,
+        bench_result={},
     )
-    assert declared_inventory_without_base(plain, mixed) == {"a.py": "upsert", "script": "upsert"}
+    assert out["enablement_patch_targets"] == {}
 
 
-def test_a_non_git_patch_whose_targets_do_not_resolve_declares_nothing(tmp_path: Path):
-    """An unresolvable level is refused rather than guessed at."""
-    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
+def test_an_artifact_on_a_root_with_no_base_commit_is_unaffected(tmp_path: Path):
+    """Narrowing what a PATCH step may claim does not touch artifacts, which
+    are judged against their own captured payload."""
+    plain = tmp_path / "plain_root"
+    (plain / "lib").mkdir(parents=True)
+    (plain / "lib" / "a.so").write_bytes(b"\x00artifact")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    state = SimpleNamespace(enablement=EnablementRound())
+    out = executor._enablement_keep_records(
+        SimpleNamespace(_ip_base_sha_by_root={}, _ip_shared_state=state),
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=plain,
+        applied=[],
+        applied_artifacts=[{"target": str(plain / "lib/a.so"), "rel_target": "lib/a.so", "root": str(plain)}],
+        done_payload={},
+        provision_result=None,
+        bench_result={},
+    )
+    record = next(r for r in out["enablement_roots"] if r["path"] == str(plain))
+    assert record["contributions"] == ["artifact_install"]
+    root_id = record["id"]
+    assert out["enablement_accepted_stack_targets"][root_id] == {"lib/a.so": "upsert"}
 
-    plain = tmp_path / "pkg"
-    plain.mkdir(parents=True)
-    patch = _patch(tmp_path, "absent.patch", "--- a/nowhere.py\n+++ b/nowhere.py\n@@ -1 +1 @@\n-a\n+b\n")
-    assert declared_inventory_without_base(plain, patch) is None
+
+def test_a_round_deleting_what_a_later_round_recreates_replays(repo: Path, tmp_path: Path):
+    """The comparison is over the FOLDED end state. Walking each patch's own
+    operation against the final tree required the deleted file to be absent,
+    and refused a stack a later round legitimately recreated."""
+    victim = repo / "srt" / "v.py"
+    victim.write_text("one\n", encoding="utf-8")
+    _commit_all(repo, "add the file")
+    base_sha = _git_head_sha(repo)
+    victim.unlink()
+    _commit_all(repo, "round one deletes it")
+    first = _patch(tmp_path, "d1.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    victim.write_text("two\n", encoding="utf-8")
+    _commit_all(repo, "round two recreates it")
+    second = _patch(tmp_path, "d2.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    assert replayed_stack_ops(repo, [first, second], base_sha=base_sha) == {
+        str(first): {"srt/v.py": "delete"},
+        str(second): {"srt/v.py": "upsert"},
+    }
+
+
+def test_a_patch_created_file_the_base_gitignores_is_still_inventoried(repo: Path, tmp_path: Path):
+    """``git add -A`` skips a newly created file the base's .gitignore matches,
+    so an unforced stage drops it from the replay commit -- moving the
+    completeness gap from the diff parser to the index."""
+    (repo / ".gitignore").write_text("srt/generated.out\n", encoding="utf-8")
+    _commit_all(repo, "ignore the generated file")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(
+        tmp_path,
+        "gen.patch",
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}"
+        "--- /dev/null\n+++ b/srt/generated.out\n@@ -0,0 +1 @@\n+generated\n",
+    )
+    _git(repo, "apply", str(patch))
+    _git(repo, "add", "-A", "--force")
+    _git(repo, "commit", "-qm", "applied incl. the ignored file")
+
+    ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    assert ops == {str(patch): {TARGET: "upsert", "srt/generated.out": "upsert"}}
+
+
+def test_an_apply_root_below_the_repository_top_level_replays(repo: Path, tmp_path: Path):
+    """``git clone`` of a directory inside a worktree clones nothing, and the
+    executor's own resolver accepts such a root."""
+    inner = repo / "srt"
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "inner.patch", f"--- a/module.py\n+++ b/module.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    subprocess.run(["git", "-C", str(inner), "apply", str(patch)], check=True)
+    _commit_all(repo, "applied under the subdirectory root")
+
+    assert replayed_stack_ops(inner, [patch], base_sha=base_sha) == {str(patch): {"module.py": "upsert"}}

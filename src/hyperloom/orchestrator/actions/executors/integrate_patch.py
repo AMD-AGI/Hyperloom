@@ -3547,7 +3547,7 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import declared_inventory_without_base, replayed_stack_ops
+        from ._patch_snapshot import replayed_stack_ops
 
         root = str(framework_root or "")
         # Read as an attribute, not with a default: the durable round state IS
@@ -3644,26 +3644,28 @@ class IntegratePatchExecutor:
                 )
                 continue
             if replayed is None:
-                # No base commit, so there is no "checkout and apply" replay to
-                # prove: a non-git root is restored by overlaying the snapshot,
-                # which the declared-op rules certify on their own. The overlay
-                # still has to contain EVERY target, so the inventory is git's
-                # own -- falling back to a header parse would restore exactly
-                # the omissions this replaces, for the roots nothing else
-                # checks. A patch whose targets cannot be resolved against the
-                # tree declares nothing and the recipe is refused.
-                replayed = {}
-                for patch in patches:
-                    ops = declared_inventory_without_base(Path(patch_root), patch)
-                    if ops is None:
-                        log.warning(
-                            "integrate_patch: enablement KEEP cannot resolve %s against the "
-                            "non-git root %s; its targets are left undeclared",
-                            patch,
-                            patch_root,
-                        )
-                        continue
-                    replayed[str(patch)] = ops
+                # A root with no base commit has no preimage to replay from, so
+                # nothing here can establish what its patches did. Three
+                # successive attempts to certify it from the patch text alone --
+                # a header parse, a block count, and git's own --numstat plus
+                # --summary -- each left a different hole: a hunk body posing as
+                # a file header, an ambiguous strip level silently resolved to
+                # the wrong path, git's abbreviated `dir/{old => new}` rename
+                # summary inventing a source, and a declared symlink certified
+                # into a regular file. The honest answer is that a patch step
+                # bound to a tree with no identity cannot be certified at all;
+                # it declares nothing and the decision refuses it.
+                #
+                # This narrows what a non-git root may claim, and deliberately.
+                # Artifacts on such a root are unaffected -- they are judged by
+                # ``_artifact_reasons`` against their own captured payload.
+                log.warning(
+                    "integrate_patch: enablement KEEP cannot replay %d patch(es) on %s: "
+                    "the root names no base commit, so its patch steps are left undeclared",
+                    len(patches),
+                    patch_root,
+                )
+                continue
             for patch_path, ops in replayed.items():
                 if not ops:
                     continue

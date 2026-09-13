@@ -149,6 +149,23 @@ def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProc
         return None
 
 
+def _repo_prefix(framework_root: Path) -> tuple[Path, str] | None:
+    """Return ``(toplevel, prefix)`` for a root that may sit inside a repo.
+
+    An apply root is allowed to name a directory INSIDE a worktree -- the
+    executor's own resolver accepts one -- and ``git clone`` of such a
+    directory clones nothing. The enclosing repository is what carries the
+    base commit; the prefix is where the stack actually lands inside it.
+    """
+    top = _git(framework_root, "rev-parse", "--show-toplevel", timeout=60)
+    pre = _git(framework_root, "rev-parse", "--show-prefix", timeout=60)
+    if top is None or pre is None or top.returncode != 0 or pre.returncode != 0:
+        return None
+    toplevel = top.stdout.decode("utf-8", errors="replace").strip()
+    prefix = pre.stdout.decode("utf-8", errors="replace").strip()
+    return (Path(toplevel), prefix) if toplevel else None
+
+
 def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool:
     """Check ``base_sha`` out into ``dest``, byte for byte.
 
@@ -171,15 +188,22 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
 
 
 def _commit_replay_step(tree: Path) -> bool:
-    """Commit whatever the last apply left, so its inventory can be read back."""
-    added = _git(tree, "add", "-A")
+    """Commit whatever the last apply left, so its inventory can be read back.
+
+    ``--force``, because ``git add -A`` skips a newly created file the base's
+    ``.gitignore`` matches. A patch creating one applies fine and the replay
+    creates it too, but an unforced stage drops it from the commit -- which
+    would move the completeness gap from the diff parser to the index instead
+    of closing it.
+    """
+    added = _git(tree, "add", "-A", "--force")
     if added is None or added.returncode != 0:
         return False
     done = _git(tree, *_REPLAY_IDENTITY, "commit", "--allow-empty", "-q", "-m", "replay step")
     return done is not None and done.returncode == 0
 
 
-def _step_inventory(tree: Path) -> dict[str, str] | None:
+def _step_inventory(tree: Path, *, prefix: str = "") -> dict[str, str] | None:
     """What the last replay commit changed, as git itself reports it.
 
     Read from ``git diff --raw`` rather than parsed out of the diff text.
@@ -209,6 +233,12 @@ def _step_inventory(tree: Path) -> dict[str, str] | None:
         src_mode, dst_mode, status = parts[0], parts[1], parts[4]
         if src_mode in _UNREPRESENTABLE_MODES or dst_mode in _UNREPRESENTABLE_MODES:
             return None
+        if prefix:
+            if not rel.startswith(prefix):
+                # The stack reached outside the apply root, which no snapshot of
+                # that root can carry.
+                return None
+            rel = rel[len(prefix) :]
         ops[rel] = "delete" if status.startswith("D") else "upsert"
     return ops
 
@@ -252,45 +282,6 @@ def _same_entry(replayed: Path, captured: Path, *, op: str) -> bool:
         return False
 
 
-def declared_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | None:
-    """The complete target set of ``patch``, for a root with no base commit.
-
-    Still git's own reading rather than a hand parse: ``--numstat`` lists every
-    file the patch touches, mode-only and binary blocks included, and
-    ``--summary`` says which of them are creations, deletions and renames. The
-    strip level is then the one whose resulting paths agree with the tree --
-    every upsert present, every deletion absent -- and an ambiguous or
-    unsatisfiable level is refused rather than guessed at.
-    """
-    for level in _P_LEVELS:
-        numstat = _git(tree, "apply", "--numstat", f"-p{level}", str(patch), timeout=60)
-        summary = _git(tree, "apply", "--summary", f"-p{level}", str(patch), timeout=60)
-        if numstat is None or summary is None or numstat.returncode != 0 or summary.returncode != 0:
-            continue
-        ops: dict[str, str] = {}
-        for row in numstat.stdout.decode("utf-8", errors="replace").splitlines():
-            parts = row.split("\t")
-            if len(parts) >= 3 and parts[2]:
-                ops[parts[2]] = "upsert"
-        for row in summary.stdout.decode("utf-8", errors="replace").splitlines():
-            row = row.strip()
-            if row.startswith("delete mode "):
-                ops[row.split(" ", 3)[-1]] = "delete"
-            elif row.startswith("rename "):
-                # ``rename old => new (NN%)`` -- the source is gone either way.
-                body = row[len("rename ") :].split(" (")[0]
-                if " => " in body:
-                    ops[body.split(" => ")[0]] = "delete"
-        if not ops:
-            continue
-        if all(
-            (not os.path.lexists(tree / rel)) if op == "delete" else (tree / rel).is_file()
-            for rel, op in ops.items()
-        ):
-            return ops
-    return None
-
-
 def replayed_stack_ops(
     framework_root: Path,
     patches: Sequence[Path],
@@ -331,22 +322,35 @@ def replayed_stack_ops(
     """
     if not base_sha or not patches:
         return None
+    located = _repo_prefix(framework_root)
+    if located is None:
+        return None
+    toplevel, prefix = located
     tmp = Path(tempfile.mkdtemp(prefix="hl-replay-"))
     try:
-        if not _checkout_base_tree(framework_root, base_sha, tmp):
+        if not _checkout_base_tree(toplevel, base_sha, tmp):
             return None
+        # ``git apply`` resolves a patch's paths against the working directory,
+        # so the stack is applied where it actually landed inside the repo.
+        work_tree = tmp / prefix if prefix else tmp
         by_patch: dict[str, dict[str, str]] = {}
+        # Folded in apply order: a step's own operation is an INTERMEDIATE
+        # state, so comparing each of them against the final tree refuses a
+        # round that deletes what a later round recreates -- the same mistake
+        # the decision side already had to unlearn. The per-step inventories
+        # still travel, because the recipe emits one step per patch.
+        end_state: dict[str, str] = {}
         for patch in patches:
-            if not _apply_at_some_level(tmp, patch) or not _commit_replay_step(tmp):
+            if not _apply_at_some_level(work_tree, patch) or not _commit_replay_step(tmp):
                 return None
-            ops = _step_inventory(tmp)
+            ops = _step_inventory(tmp, prefix=prefix)
             if ops is None:
                 return None
             by_patch[str(patch)] = ops
-        for ops in by_patch.values():
-            for rel, op in ops.items():
-                if not _same_entry(tmp / rel, framework_root / rel, op=op):
-                    return None
+            end_state.update(ops)
+        for rel, op in end_state.items():
+            if not _same_entry(work_tree / rel, framework_root / rel, op=op):
+                return None
         return by_patch
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -568,7 +572,6 @@ __all__ = [
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
     "patch_declared_ops",
-    "declared_inventory_without_base",
     "replayed_stack_ops",
     "harvest_realized_diff",
 ]
