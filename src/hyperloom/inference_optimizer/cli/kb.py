@@ -363,6 +363,7 @@ def _bootstrap_recipe_kb(
             on_status=print,
             session_dir=session_dir,
             save_state=True,
+            strict_shape=bool(getattr(args, "recipe_kb_strict_fingerprint", False)),
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")

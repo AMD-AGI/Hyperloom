@@ -13,7 +13,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Collection, Mapping
+from typing import Any, Collection, Final, Mapping
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
@@ -127,17 +127,51 @@ def _positive_int(value: Any) -> int | None:
     return resolved if resolved > 0 else None
 
 
-def _workload_shape(state: Any) -> dict[str, int]:
-    """Return the replay-sensitive workload dimensions."""
+#: Shape dimensions read straight off the session state.
+_STATE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "ep", "conc", "isl", "osl")
+
+#: Every key ``workload_shape`` can publish. :func:`knowledge_to_warm_recipe` projects exactly these onto the warm
+#: row, derived from the writer so the projection cannot quietly drop a dimension the writer started publishing.
+SHAPE_KEYS: Final[tuple[str, ...]] = (*_STATE_SHAPE_KEYS, "partitions")
+
+
+def workload_shape(state: Any) -> dict[str, int]:
+    """Return the replay-sensitive workload dimensions.
+
+    ``ep`` and ``partitions`` are here for the same reason ``tp`` is: none of them
+    is a dimension of the ``canonical_id``, so two rows that differ only in these
+    share an identity and a warm-start hit cannot tell them apart. ``partitions``
+    is the count the mode implies rather than the mode name, since it is the
+    quantity that scales the per-partition ceiling.
+    """
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
     shape: dict[str, int] = {}
-    for key in ("tp", "conc", "isl", "osl"):
+    for key in _STATE_SHAPE_KEYS:
         value = _positive_int(getattr(state, key, None))
         if value is None:
             value = _positive_int(extra.get(key))
         if value is not None:
             shape[key] = value
+    partitions = _partition_count(state)
+    if partitions is not None:
+        shape["partitions"] = partitions
     return shape
+
+
+def _partition_count(state: Any) -> int | None:
+    """Partitions per card, for a mode that actually divides the card.
+
+    SPX is omitted along with an unpublished mode. One partition is the whole card, which is what a row that recorded
+    no mode at all was necessarily running on, so publishing it would turn every such row into a false disagreement
+    while describing the same machine. The full observed shape stays in the platform fingerprint; this projection
+    carries only what changes whether a config transfers.
+    """
+    from hyperloom.common.gpu_partition import MODE_PARTITION_COUNTS
+
+    partition = _mapping(getattr(state, "compute_partition", {}))
+    mode = str(partition.get("mode") or "").strip().upper()
+    count = MODE_PARTITION_COUNTS.get(mode) if mode else None
+    return count if count is not None and count > 1 else None
 
 
 class _Files:
@@ -1121,7 +1155,7 @@ def build_remote_knowledge(
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             "optimized_throughput": optimized_throughput,
             "validated_e2e_gain": validated_gain,
-            "workload_shape": _workload_shape(state),
+            "workload_shape": workload_shape(state),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),
@@ -1221,7 +1255,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
     for key, value in _mapping(knowledge.get("workload_shape")).items():
-        if key in {"tp", "conc", "isl", "osl"}:
+        if key in SHAPE_KEYS:
             resolved = _positive_int(value)
             if resolved is not None:
                 row[key] = resolved
@@ -1241,4 +1275,5 @@ __all__ = [
     "has_new_keep",
     "match_rewrite_attempt",
     "merge_staged_sections",
+    "workload_shape",
 ]

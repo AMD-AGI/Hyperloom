@@ -5,6 +5,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **A warm-start hit no longer replays a config tuned on a differently shaped
+  machine, and `--recipe-kb-strict-fingerprint` now does something.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. Tensor and expert parallelism
+  are not among those dimensions, and neither is the compute-partition mode, so
+  `kb_hardware_slug` collapses to the bare GPU type on a single node and a run in
+  SPX and a run in CPX land on one identity — `inference:qwen3-32b:mi355x:...`
+  either way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `workload_shape` now publishes `ep` alongside `tp`, plus `partitions` — the
+  count the mode implies, since that is the quantity scaling the per-partition
+  ceiling. `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. SPX is deliberately omitted: one partition is the
+  whole card, which is what a row recording no mode at all was necessarily
+  running on, so publishing it would turn every historical row into a false
+  disagreement while describing the same machine.
+
+  `--recipe-kb-strict-fingerprint` was declared in the parser and read nowhere;
+  it promised to refuse rows whose `stack_fingerprint` disagreed with the pod,
+  which was never the exposure — framework version and precision are already
+  identity dimensions. It now enforces the dimensions nothing guards, demoting a
+  disagreeing row to `seed_only` rather than dropping it, so its lessons and
+  pitfalls still reach the prompt while its config loses the replay it has not
+  earned here. A dimension neither side recorded is not a disagreement. Default
+  is unchanged and still lenient.
+
 ### Changed
 
 - **One rule now picks the agent backend, in both packages: a configured

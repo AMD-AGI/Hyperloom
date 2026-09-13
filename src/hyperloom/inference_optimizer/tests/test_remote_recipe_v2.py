@@ -2870,3 +2870,68 @@ def test_vendored_sdk_uses_new_view_and_search_routes() -> None:
             },
         ),
     ]
+
+
+# --- shape dimensions the canonical_id cannot express ------------------------
+
+
+def test_workload_shape_publishes_ep_and_partition_count(tmp_path: Path) -> None:
+    """``ep`` and the partition count ride the same projection ``tp`` does."""
+    state = _state(tmp_path)
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 256
+    state.ep = 8
+    state.compute_partition = {"mode": "CPX", "cu_per_partition": 32}
+    bundle = _build(state, tmp_path / "files-shape-ep")
+
+    assert bundle.knowledge["workload_shape"] == {
+        "tp": 8,
+        "ep": 8,
+        "conc": 64,
+        "isl": 1024,
+        "osl": 256,
+        "partitions": 8,
+    }
+
+
+def test_workload_shape_omits_spx_because_one_partition_is_the_whole_card(
+    tmp_path: Path,
+) -> None:
+    """SPX must look identical to an unrecorded mode, or every historical row reads as a mismatch."""
+    state = _state(tmp_path)
+    state.compute_partition = {"mode": "SPX"}
+    spx = _build(state, tmp_path / "files-shape-spx").knowledge["workload_shape"]
+
+    state.compute_partition = {}
+    unset = _build(state, tmp_path / "files-shape-unset").knowledge["workload_shape"]
+
+    assert "partitions" not in spx
+    assert spx == unset
+
+
+def test_warm_row_projection_carries_every_published_shape_key(tmp_path: Path) -> None:
+    """The projection allowlist must not drop a dimension the publisher emits."""
+    state = _state(tmp_path)
+    state.conc = 64
+    state.isl = 1024
+    state.osl = 256
+    state.ep = 4
+    state.compute_partition = {"mode": "DPX"}
+    bundle = _build(state, tmp_path / "files-shape-projection")
+
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True},
+        }
+    )
+
+    published = bundle.knowledge["workload_shape"]
+    assert published["ep"] == 4
+    assert published["partitions"] == 2
+    # Every key that was published survives onto the row the warm-start read compares against.
+    assert {key: row.get(key) for key in published} == published
