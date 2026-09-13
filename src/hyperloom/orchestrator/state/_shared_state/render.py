@@ -283,7 +283,7 @@ class _RenderMixin:
         keeps growing means the SLA is the binding limit rather than an exhausted
         search space, and the two call for opposite responses.
         """
-        budget = float(getattr(self, "latency_budget_ms", 0.0) or 0.0)
+        budget = float(getattr(self, "latency_budget_ms", 0.0))
         if budget <= 0:
             return ""
         refusals = [r for r in (self.latency_refusals or []) if isinstance(r, dict)]

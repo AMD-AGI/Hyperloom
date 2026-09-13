@@ -3083,7 +3083,7 @@ class WritebackCollaborator:
             task_kind,
             float(best_tput),
             reason,
-            float(self.shared_state.latency_budget_ms or 0.0),
+            float(self.shared_state.latency_budget_ms),
             f"{float(observed):.1f} ms" if isinstance(observed, (int, float)) else "nothing",
         )
         self.shared_state.latency_refusals.append(
@@ -3092,7 +3092,7 @@ class WritebackCollaborator:
                 "variant_name": str((bv.get("name") if isinstance(bv, dict) else "") or ""),
                 "tput": float(best_tput),
                 "e2el_mean_ms": observed if isinstance(observed, (int, float)) else None,
-                "budget_ms": float(self.shared_state.latency_budget_ms or 0.0),
+                "budget_ms": float(self.shared_state.latency_budget_ms),
                 "reason": reason,
                 "ts": datetime.now(timezone.utc).isoformat(),
             }
@@ -3748,14 +3748,14 @@ class WritebackCollaborator:
 
             baseline_veto = latency_veto_reason(
                 result.get("e2el_mean_ms"),
-                float(self.shared_state.latency_budget_ms or 0.0),
+                float(self.shared_state.latency_budget_ms),
             )
             if baseline_veto:
                 log.error(
                     "baseline does not satisfy --max-latency-ms (%s): budget %.1f ms, baseline %s. "
                     "No candidate can clear a ceiling the reference already breaks; stopping.",
                     baseline_veto,
-                    float(self.shared_state.latency_budget_ms or 0.0),
+                    float(self.shared_state.latency_budget_ms),
                     (
                         f"{float(result['e2el_mean_ms']):.1f} ms"
                         if isinstance(result.get("e2el_mean_ms"), (int, float))

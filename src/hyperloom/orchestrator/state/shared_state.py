@@ -133,7 +133,7 @@ def resolve_graded_comparison(
     # objective and breaks the SLA is a REVERT, on whichever axis graded it.
     sla_veto = latency_veto_reason(
         measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None,
-        float(getattr(state, "latency_budget_ms", 0.0) or 0.0),
+        float(getattr(state, "latency_budget_ms", 0.0)),
     )
     degrade_reason = ""
     if intvty_serving_grading_enabled(
