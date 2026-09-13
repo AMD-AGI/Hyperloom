@@ -64,6 +64,15 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "reports/bringup/**",
     # ── reports/ ──────────────────────────────────────────────────────
     "reports/enablement/**",
+    # ── the enablement KEEP's source overlay ──────────────────────────
+    # Every ``snapshot_ref`` in ``session_breakdown.json`` points in here. The
+    # replay-sufficiency verdict certifies that the accepted stack's files were
+    # captured; without the capture in the bundle the reference resolves to
+    # nothing on the consumer's side, so a "sufficient" recipe would ship with
+    # its own evidence missing. Scoped to ``enablement/`` rather than the whole
+    # directory: this is the only writer under it, and a broader glob would
+    # silently adopt whatever lands there next.
+    "optimization_stack/enablement/**",
     "reports/final.md",
     "reports/optimization_journal.json",
     "reports/kernel_optimization_summary.json",

@@ -48,6 +48,7 @@ _KEEP_STACK_FIELDS = ("roots", "patch_roots", "base_sha", "source_snapshots")
 #: records, including when a target set is empty or a probe could not run.
 _KEEP_OBSERVED_FIELDS = (
     "accepted_stack_targets",
+    "patch_targets",
     "launch_evidence",
     "environment_closure",
     "installed_versions_at_keep",
@@ -595,6 +596,7 @@ class EnablementLane(CoordinatorCollaborator):
             stop_reason=stop_set,
             attempt=attempt,
             stall_streak=await self.rounds.consecutive_stalled(),
+            session_dir=str(self.session_dir or ""),
         )
         state.save(self.session_dir)
         log.info(
@@ -810,6 +812,7 @@ def _record_enablement_round(
     stop_reason: str,
     attempt: int,
     stall_streak: int,
+    session_dir: str = "",
 ) -> None:
     """Record how one authoring round settled, and close a lane that ended.
 
@@ -851,4 +854,9 @@ def _record_enablement_round(
         attempt_runtimes=lane.attempt_runtimes,
         framework_root=str(lane.framework_root or ""),
         stall_streak=int(stall_streak or 0),
+        # The replay contract is judged at the terminal, which is here: the
+        # accepted stack is complete only once the lane has closed on one.
+        enablement=lane,
+        session_dir=str(session_dir or ""),
+        mode=str(getattr(state, "enablement_mode", "") or ""),
     )

@@ -1234,6 +1234,9 @@ def _sufficient_state():
         "setup_commands": [cmd],
         "setup_executions": rows,
         "kept_patches": ["/p/1.patch"],
+        # What the patch's own diff headers declare, which is what the capture
+        # is judged against step by step.
+        "patch_targets": {"/p/1.patch": {"srt/a.py": "upsert"}},
         "framework_root": "/fr",
         "roots": [{**_root(), "path": "/fr"}],
     }
@@ -1348,6 +1351,8 @@ def test_reason_code_vocabulary_matches_the_closed_contract():
         "root_unidentified",
         "root_unmappable",
         "accepted_stack_not_launched",
+        "patch_targets_unknown",
+        "patch_step_not_captured",
         "source_snapshot_incomplete",
         "source_snapshot_missing",
         "artifact_not_self_contained",
@@ -1664,3 +1669,95 @@ def test_acquisition_channels_reach_runtime_provenance_and_block_replay():
     provenance = project_runtime_provenance(state)
     assert provenance["acquisition"]["credential_channels"] == ["ssh_agent"]
     assert "credential_required" in _codes(_decide(state, {"runtime_provenance": provenance}))
+
+
+# --------------------------------------------------------------------------
+# The multi-round fail-open: a recipe that replays more rounds than the session
+# captured. The producing side is expected to capture the whole accepted stack;
+# these pin the *deciding* side, so a producer that regresses to the final round
+# alone is refused here rather than certified.
+# --------------------------------------------------------------------------
+
+
+def _two_round_state(**overrides):
+    """Two kept patches, each declaring a file of its own."""
+    state = {
+        **_sufficient_state(),
+        "kept_patches": ["/p/1.patch", "/p/2.patch"],
+        "patch_targets": {
+            "/p/1.patch": {"srt/a.py": "upsert"},
+            "/p/2.patch": {"srt/b.py": "upsert"},
+        },
+    }
+    state.update(overrides)
+    return state
+
+
+def test_two_rounds_captured_whole_are_sufficient():
+    """The control for the two cases below: nothing about a second round is
+    refused per se, only a second round nothing verified."""
+    section = {
+        **_sufficient_section(),
+        "accepted_stack_targets": {"r1": {"srt/a.py": "upsert", "srt/b.py": "upsert"}},
+        "source_snapshots": [_snapshot(files=(("srt/a.py", "upsert"), ("srt/b.py", "upsert")))],
+    }
+    decision = _decide(_two_round_state(), section)
+    assert decision["status"] == "sufficient", decision["reasons"]
+
+
+def test_a_recipe_replaying_a_round_the_capture_missed_is_refused():
+    """The inverse of what this contract exists to guarantee, stated directly.
+
+    ``accepted_stack_targets`` and the snapshot both describe the final round
+    only -- exactly what a capture derived from the current round produces --
+    while ``recipe_steps`` still replays both. Walking the declared set finds
+    everything it names captured, so without the per-step rule this reads as
+    ``sufficient`` over a tree the replay cannot rebuild.
+    """
+    section = {
+        **_sufficient_section(),
+        "accepted_stack_targets": {"r1": {"srt/b.py": "upsert"}},
+        "source_snapshots": [_snapshot(files=(("srt/b.py", "upsert"),))],
+    }
+    decision = _decide(_two_round_state(), section)
+    assert decision["status"] == "insufficient"
+    assert [r for r in decision["reasons"] if r["code"] == "patch_step_not_captured"] == [
+        {"code": "patch_step_not_captured", "blocks": "replay", "scope": "step[1]"}
+    ]
+
+
+def test_a_patch_step_named_under_a_different_operation_is_refused():
+    """Named is not enough: the stack says delete, the step declares upsert."""
+    section = {
+        **_sufficient_section(),
+        "accepted_stack_targets": {"r1": {"srt/a.py": "delete"}},
+        "source_snapshots": [_snapshot(files=(("srt/a.py", "delete"),))],
+    }
+    assert "patch_step_not_captured" in _codes(_decide(_sufficient_state(), section))
+
+
+def test_a_patch_step_whose_root_has_no_snapshot_at_all_is_refused():
+    section = {**_sufficient_section(), "accepted_stack_targets": {}, "source_snapshots": []}
+    codes = _codes(_decide(_sufficient_state(), section))
+    assert "patch_step_not_captured" in codes
+
+
+def test_a_patch_step_with_no_recorded_targets_is_refused():
+    """``patch_targets`` absent is "no producer recorded this", not "touches
+    nothing" -- the state a session written before this contract carries."""
+    state = {k: v for k, v in _sufficient_state().items() if k != "patch_targets"}
+    codes = _codes(_decide(state, _sufficient_section()))
+    assert "patch_targets_unknown" in codes
+    assert "patch_step_not_captured" not in codes
+
+
+def test_an_empty_target_map_for_a_patch_is_also_unknown():
+    state = {**_sufficient_state(), "patch_targets": {"/p/1.patch": {}}}
+    assert "patch_targets_unknown" in _codes(_decide(state, _sufficient_section()))
+
+
+def test_patch_step_reasons_never_carry_the_patch_path():
+    """A scope is an address into the recipe, never a host value."""
+    state = {k: v for k, v in _two_round_state().items() if k != "patch_targets"}
+    for reason in _decide(state, _sufficient_section())["reasons"]:
+        assert "/p/" not in reason["scope"]

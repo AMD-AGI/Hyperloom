@@ -563,3 +563,80 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
     row = _ext(_bound_session)["attempts"]["rows"][0]
     assert row["files"] == []
     assert row["accepted_config_path"] is None
+
+
+# --------------------------------------------------------------------------
+# The replay contract reaches the event.
+#
+# #1455 retired the export-time reader that used to publish this; the verdict
+# was then computed on every KEEP and discarded, which is indistinguishable
+# from never judging one. These pin the author-time producer instead: the
+# assertion is that the key EXISTS on a closed lane, because its absence is
+# what a consumer reads as "nothing judged this".
+# --------------------------------------------------------------------------
+
+
+def _closing_round():
+    """The durable state a boot-origin KEEP leaves behind, one patch deep."""
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    return EnablementRound(
+        succeeded=True,
+        framework_root="/fr",
+        kept_patches=["/p/1.patch"],
+        patch_roots={"/p/1.patch": "/fr"},
+        patch_targets={"/p/1.patch": {"srt/a.py": "upsert"}},
+        last_specialist_task_id="spec-1",
+    )
+
+
+def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None, "a closed lane with no verdict is read as never judged"
+    assert recipe["replay_sufficiency"]["status"] in ("sufficient", "insufficient")
+    # The steps the verdict was reached over travel with it, so a consumer can
+    # re-derive the decision rather than only trust it.
+    assert [step["kind"] for step in recipe["recipe_steps"]] == ["patch"]
+
+
+def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
+    """Fail closed, both ways: nothing was captured for the patch this recipe
+    replays, so the verdict says so rather than the key going missing."""
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
+    assert decision["status"] == "insufficient"
+    assert "patch_step_not_captured" in [r["code"] for r in decision["reasons"]]
+
+
+def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_one(_bound_session):
+    """A caller that passes no state judged nothing, and says so by absence.
+
+    ``read_status`` reads an absent decision as ``not_evaluated`` /
+    insufficient, so the null is the fail-closed answer. What it must never be
+    is a *present* verdict synthesised over a state nobody supplied.
+    """
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
+
+    _boot_trigger()
+    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="cap reached")
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is None
+    assert read_status(recipe or {})["status"] == "insufficient"

@@ -66,6 +66,63 @@ def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tup
     return upserted, deleted
 
 
+def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, str]:
+    """Return ``{rel: "upsert" | "delete"}`` as the patches themselves declare it.
+
+    The operation comes from the diff headers -- a ``/dev/null`` post-image is a
+    deletion, any other post-image is an upsert, and a rename declares both --
+    and never from whether the path happens to exist in the tree at capture
+    time. :func:`_patch_touched_paths_split` asks the tree instead, which is the
+    wrong question twice over for the accepted-stack capture:
+
+    * A KEEP reached with its mutation inputs stripped still finds the *base*
+      file present, so a tree probe declares a satisfied upsert over content
+      that contains none of the stack's changes -- the exact case
+      ``declared_targets`` exists to refuse.
+    * Across a multi-round stack the tree only shows the final state, and the
+      two accumulated lists are merged with deletions applied last. A file an
+      early round deleted and a later round recreated therefore lands in both
+      lists and is declared ``delete``, so the replay removes a file the
+      accepted stack requires.
+
+    Ordering is the caller's: later patches override earlier ones for the same
+    path, which is the order ``kept_patches`` records and the order a consumer
+    replays them in.
+
+    Args:
+        framework_root: Tree the patches were bound to; read only to choose the
+            ``-p`` strip level.
+        patches: The accepted stack's patch files for that root, in apply order.
+
+    Returns:
+        The declared operation per repo-relative path. Unreadable patches are
+        skipped, which leaves their targets undeclared and therefore uncaptured,
+        and the decision refuses the recipe rather than certifying a gap.
+    """
+    ops: dict[str, str] = {}
+    for patch in patches:
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        pairs = patch_file_targets(text)
+        if not pairs:
+            continue
+        lvl = _commit_strip_level(framework_root, pairs)
+        for old, new in pairs:
+            rel_new = _strip_path_prefix(new, lvl) if new and new != _PATCH_DEV_NULL else None
+            rel_old = _strip_path_prefix(old, lvl) if old and old != _PATCH_DEV_NULL else None
+            if rel_new:
+                ops[rel_new] = "upsert"
+                # A rename declares its source gone; a plain modify has old == new
+                # and must not declare a deletion of the file it just wrote.
+                if rel_old and rel_old != rel_new:
+                    ops[rel_old] = "delete"
+            elif rel_old:
+                ops[rel_old] = "delete"
+    return ops
+
+
 def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
     """Repo-relative paths to stage, for callers that need no upsert/delete split."""
     upserted, deleted = _patch_touched_paths_split(framework_root, patches)
@@ -281,5 +338,6 @@ __all__ = [
     "_patch_touched_paths_from_text",
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
+    "patch_declared_ops",
     "harvest_realized_diff",
 ]

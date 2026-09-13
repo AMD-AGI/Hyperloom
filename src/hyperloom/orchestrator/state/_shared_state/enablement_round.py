@@ -103,6 +103,12 @@ class EnablementRound:
     # {root_id: {rel: op}} the accepted stack declares, checked against what each
     # snapshot actually captured.
     accepted_stack_targets: dict = field(default_factory=dict)
+    # {patch_path: {rel: op}} each kept patch declares, as its own diff headers
+    # state it. The recipe emits one patch step per kept patch, and this is the
+    # only record of what any one of them touches: without it the decision can
+    # check that *some* targets were captured but not that *this step's* were,
+    # which is how a recipe covering the final round alone reads as complete.
+    patch_targets: dict = field(default_factory=dict)
     # Which branch produced accepted_config: a booted kept bench, or an advanced
     # round's proposal merge, which is by construction never booted.
     accepted_config_source: str = ""

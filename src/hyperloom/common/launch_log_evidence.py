@@ -76,6 +76,15 @@ def split_launch_flags(argv_tail: str) -> str:
     while index < len(tokens):
         token = tokens[index]
         flag = token.split("=", 1)[0]
+        # ``vllm serve <model>`` carries the model as a positional, so the
+        # flag list above cannot reach it. Left in, it would travel as an
+        # observed launch flag -- a host model path in the durable record, and
+        # a term the requested side can never match.
+        if token == "serve":
+            index += 1
+            if index < len(tokens) and not tokens[index].startswith("-"):
+                index += 1
+            continue
         if flag in _RUN_SPECIFIC_LAUNCH_FLAGS or flag in _PROFILING_LAUNCH_FLAGS:
             if "=" not in token and index + 1 < len(tokens) and not tokens[index + 1].startswith("-"):
                 index += 2
@@ -96,13 +105,22 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     try:
         with open(path, encoding="utf-8", errors="ignore") as handle:
             for line in handle:
-                if marker not in line or "--model-path" not in line:
+                if marker not in line:
                     continue
                 match = pattern.search(line)
                 tail = (match.group(1) if match else "").strip()
                 if not tail:
                     start = line.find("--")
                     tail = line[start:].strip() if start >= 0 else ""
+                # The gate says "this line IS the launch command", and it says
+                # it by naming the model served. Keyed on ``--model-path``
+                # alone it was a gate only SGLang could pass: vLLM writes
+                # ``--model <m>`` or ``serve <m>``, so every vLLM session
+                # produced empty observed flags, every requested flag was read
+                # as absent, and the verdict was insufficient by construction
+                # rather than by evidence.
+                if not _names_a_model(tail):
+                    continue
                 flags = split_launch_flags(tail)
                 if flags:
                     return flags
@@ -146,6 +164,20 @@ def _serve_subcommand_operand(tokens: list[str]) -> str:
                 return candidate
         return ""
     return ""
+
+
+def _names_a_model(tail: str) -> bool:
+    """Whether a candidate launch tail names the model the server will serve.
+
+    Exact over tokens rather than a substring test: ``--model`` is a prefix of
+    ``--model-len`` and of ``--model-loader-extra-config``, neither of which
+    names a model.
+    """
+    try:
+        tokens = shlex.split(tail)
+    except ValueError:
+        tokens = tail.split()
+    return bool(_operand_for(tokens, _MODEL_OPERAND_FLAGS) or _serve_subcommand_operand(tokens))
 
 
 def _digest(value: str) -> str:

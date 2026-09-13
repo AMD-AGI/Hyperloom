@@ -14,8 +14,12 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
-from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
-from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _git_head_sha
+from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept, patch_declared_ops
+from hyperloom.orchestrator.actions.executors.integrate_patch import (
+    IntegratePatchExecutor,
+    KeepStackStateUnavailable,
+    _git_head_sha,
+)
 from hyperloom.orchestrator.enablement.lane import _rearm_on_kept
 from hyperloom.orchestrator.enablement.recipe.keep_records import (
     accepted_stack_artifacts,
@@ -228,7 +232,7 @@ def test_keep_sanitizer_refusal_reaches_activation_verdict_and_resets(
 ):
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     monkeypatch.setattr(executor, "_probe_keep_environment", lambda *_args, **_kwargs: ({}, {}))
-    state = SimpleNamespace(enablement=EnablementRound(attempts=1, origin="eval"))
+    state = SimpleNamespace(enablement=EnablementRound(origin="eval"))
     for argv, refused in (("--flag 'unterminated", True), ("", False)):
         evidence = {
             "framework": "sglang",
@@ -619,21 +623,30 @@ def test_a_round_spanning_two_roots_names_each_tree_on_its_own_terms(repo: Path,
 
 def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Path, tmp_path: Path):
     """The lane replaces these records with the latest KEEP's, so a round that
-    captured only its own installs would drop an earlier round's payload."""
+    captured only its own installs would drop an earlier round's payload.
+
+    The inheritance arrives on the durable round state, not as a dispatch
+    parameter: #1409 ended the "re-apply every prior round before each boot"
+    model and deleted ``enablement_base_artifacts``. ``kept_artifacts`` is what
+    the earlier round's rearm stacked, and it is the only thing left that says
+    an earlier round contributed anything.
+    """
     inherited_rel = "srt/inherited.py"
     (repo / inherited_rel).write_text("value = 7\n", encoding="utf-8")
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
         _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
-        _ip_shared_state=SimpleNamespace(enablement=None),
+        _ip_shared_state=SimpleNamespace(
+            enablement=EnablementRound(
+                kept_artifacts=[
+                    {"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}
+                ],
+            )
+        ),
     )
     out = executor._enablement_keep_records(
         ctx,
-        params={
-            "enablement_base_artifacts": [
-                {"target": str(repo / inherited_rel), "rel_target": inherited_rel, "root": str(repo)}
-            ]
-        },
+        params={},
         specialist_task_id=PROBE_TASK,
         framework_root=repo,
         applied=[],
@@ -648,6 +661,29 @@ def test_an_inherited_artifact_is_captured_by_the_keep_that_launched_it(repo: Pa
     assert {f["rel"] for f in snapshot["files"]} == {TARGET, inherited_rel}
     overlay = executor.session_dir / snapshot["snapshot_ref"] / "files"
     assert (overlay / inherited_rel).read_text(encoding="utf-8") == "value = 7\n"
+
+
+def test_a_keep_that_cannot_see_the_round_state_captures_no_stack_at_all(repo: Path, tmp_path: Path):
+    """No durable state means no view of the inherited stack, which must refuse.
+
+    Pins the producer of :class:`KeepStackStateUnavailable`: delete the raise in
+    ``_enablement_keep_records`` and this goes green on a silently single-round
+    capture, which is the fail-open the whole replay contract exists to deny.
+    """
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_base_sha_by_root={str(repo): _git_head_sha(repo)})
+    with pytest.raises(KeepStackStateUnavailable):
+        executor._enablement_keep_records(
+            ctx,
+            params={},
+            specialist_task_id=PROBE_TASK,
+            framework_root=repo,
+            applied=[],
+            applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+            done_payload={},
+            provision_result=None,
+            bench_result={},
+        )
 
 
 def test_a_non_git_contributing_root_carries_no_base_commit(repo: Path, tmp_path: Path):
@@ -736,3 +772,131 @@ def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
     silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     silent.chmod(0o755)
     assert probe_environment_closure(str(silent), override=None, packages=("demo",)) == ({}, {})
+
+
+# --------------------------------------------------------------------------
+# The declared operation of a patch, and where it is read from.
+# --------------------------------------------------------------------------
+
+
+def _patch(tmp_path: Path, name: str, body: str) -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_a_deletion_is_declared_by_its_dev_null_post_image(repo: Path, tmp_path: Path):
+    patch = _patch(
+        tmp_path,
+        "del.patch",
+        f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}",
+    )
+    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete"}
+
+
+def test_a_creation_is_an_upsert_even_when_the_tree_does_not_hold_it(repo: Path, tmp_path: Path):
+    """The stripped-inputs case, stated as a unit.
+
+    A KEEP reached without its mutation inputs boots against the base tree, so
+    the created file is absent at capture time. A tree probe reads that absence
+    as a deletion and declares a target the snapshot then satisfies trivially;
+    the diff says the file must exist, and that is what a replay must produce.
+    """
+    rel = "srt/created.py"
+    assert not (repo / rel).exists()
+    patch = _patch(tmp_path, "new.patch", f"--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1 @@\n+x = 1\n")
+    assert patch_declared_ops(repo, [patch]) == {rel: "upsert"}
+
+
+def test_a_later_patch_recreating_a_deleted_file_wins(repo: Path, tmp_path: Path):
+    """Order, not set-merge: the accumulated upsert/delete lists put every
+    deletion last, so the recreation loses and the replay removes a file the
+    accepted stack requires."""
+    first = _patch(tmp_path, "1.patch", f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}")
+    second = _patch(tmp_path, "2.patch", f"--- /dev/null\n+++ b/{TARGET}\n@@ -0,0 +1 @@\n+{PATCHED_TEXT}")
+    assert patch_declared_ops(repo, [first, second]) == {TARGET: "upsert"}
+    # ...and the other way round, so this is an ordering rule and not a
+    # preference for one operation.
+    assert patch_declared_ops(repo, [second, first]) == {TARGET: "delete"}
+
+
+def test_a_rename_declares_both_ends(repo: Path, tmp_path: Path):
+    moved = "srt/moved.py"
+    patch = _patch(tmp_path, "mv.patch", f"--- a/{TARGET}\n+++ b/{moved}\n@@ -1 +1 @@\n-{BASE_TEXT}+{BASE_TEXT}")
+    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete", moved: "upsert"}
+
+
+def test_a_plain_modify_declares_no_deletion_of_the_file_it_writes(repo: Path, tmp_path: Path):
+    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
+
+
+def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Path):
+    """Pins the producer of ``enablement_patch_targets``.
+
+    The decision cross-checks each patch step against the snapshot of the files
+    that step declares and cannot read the diffs itself, so this mapping is the
+    only thing standing between a multi-round recipe and an unverified replay.
+    """
+    created = "srt/round_one.py"
+    (repo / created).write_text("x = 1\n", encoding="utf-8")
+    first = _patch(tmp_path, "1.patch", f"--- /dev/null\n+++ b/{created}\n@@ -0,0 +1 @@\n+x = 1\n")
+    second = _patch(tmp_path, "2.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        # The first round is durable state; only the second is this round's.
+        _ip_shared_state=SimpleNamespace(
+            enablement=EnablementRound(kept_patches=[str(first)], patch_roots={str(first): str(repo)})
+        ),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[second],
+        applied_artifacts=[],
+        done_payload={"patch_roots": {str(second): str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    assert out["enablement_patch_targets"] == {
+        str(first): {created: "upsert"},
+        str(second): {TARGET: "upsert"},
+    }
+    root_id = out["enablement_roots"][0]["id"]
+    # Both rounds' files, not just this round's: the capture is over the stack.
+    assert out["enablement_accepted_stack_targets"][root_id] == {created: "upsert", TARGET: "upsert"}
+
+
+def test_the_base_sha_reported_is_this_roots_own(repo: Path, tmp_path: Path):
+    """An earlier round's scalar names the tree THAT round applied to.
+
+    Preferring it outright hands a different root's sha to this one, and the
+    snapshot is then captured against a base commit this tree never had.
+    """
+    other = "/some/other/framework/root"
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_shared_state=SimpleNamespace(
+            enablement=EnablementRound(
+                base_sha="b" * 40,
+                roots=[{"id": "other", "path": other, "base_sha": "b" * 40}],
+            )
+        ),
+    )
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        done_payload={},
+        provision_result=None,
+        bench_result={},
+    )
+    assert out["enablement_base_sha"] == _git_head_sha(repo)
+    assert out["enablement_base_sha"] != "b" * 40

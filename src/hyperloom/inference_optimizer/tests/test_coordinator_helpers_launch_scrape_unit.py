@@ -152,3 +152,57 @@ def test_launch_argv_from_log_falls_back_to_double_dash_scan(
     )
     flags = launch_argv_from_log(str(log), "vllm")
     assert "--mem-fraction-static 0.9" in flags
+
+
+# ── vLLM: the launch line this reader has to be able to pass ──────────────
+
+
+def test_vllm_module_form_yields_observed_flags(tmp_path: Path) -> None:
+    """Keyed on ``--model-path``, this line could never pass the gate, so every
+    vLLM session produced empty observed flags and a verdict that was
+    insufficient by construction rather than by evidence."""
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO 09-13 10:00:00 [api_server.py:1] python3 -m vllm.entrypoints.openai.api_server "
+        "--model /models/glm5 --max-num-seqs 256 --enable-chunked-prefill\n",
+        encoding="utf-8",
+    )
+    flags = launch_argv_from_log(str(log), "vllm")
+    assert flags == "--max-num-seqs 256 --enable-chunked-prefill"
+    assert "/models/glm5" not in flags
+
+
+def test_vllm_serve_form_yields_observed_flags_without_the_model(tmp_path: Path) -> None:
+    """``vllm serve <model>`` carries the model as a positional, which the
+    run-specific FLAG list cannot reach; left in it would put a host model path
+    in the durable record."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm serve /models/glm5 --max-num-seqs 256 --tensor-parallel-size 8\n", encoding="utf-8")
+    flags = launch_argv_from_log(str(log), "vllm")
+    assert flags == "--max-num-seqs 256"
+    assert "/models/glm5" not in flags and "serve" not in flags
+
+
+def test_a_line_that_names_no_model_is_not_a_launch_line(tmp_path: Path) -> None:
+    """The gate still has to reject a passing mention of the marker; it was
+    widened to every model spelling, not removed."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm is starting up --max-num-seqs 256\n", encoding="utf-8")
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_a_model_prefixed_flag_does_not_pass_the_gate(tmp_path: Path) -> None:
+    """``--model`` is a prefix of ``--model-loader-extra-config``; a substring
+    test would read that as the model operand."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm --model-loader-extra-config {} --max-num-seqs 256\n", encoding="utf-8")
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_sglang_model_path_still_passes_the_gate(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO: python3 -m sglang.launch_server --model-path /models/glm5 --chunked-prefill-size 2048\n",
+        encoding="utf-8",
+    )
+    assert launch_argv_from_log(str(log), "sglang") == "--chunked-prefill-size 2048"

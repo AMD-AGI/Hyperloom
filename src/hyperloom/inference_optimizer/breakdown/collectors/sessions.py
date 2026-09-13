@@ -382,6 +382,7 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "launch_argv_refused",
     "launch_evidence",
     "patch_roots",
+    "patch_targets",
     "roots",
     "setup_commands",
     "setup_executions",
@@ -492,15 +493,28 @@ def _lane_dispatched(state: dict[str, Any]) -> bool:
     """Whether the lane ever opened a round, over both state generations.
 
     A round no longer parks its task id in the enablement state, so the
-    post-rework evidence that one ran is the specialist it settled onto and the
-    per-round records it kept. ``inflight_task_id`` / ``attempts`` are read for
-    a document written before the rework, not as the primary signal -- reading
-    only those would report every current session as never dispatched.
+    post-rework evidence that one ran is the specialist it settled onto, the
+    per-round records it kept, and the setup rows a round stamped its own id
+    onto. ``inflight_task_id`` / ``attempts`` are read for a document written
+    before the rework, not as the primary signal -- reading only those would
+    report every current session as never dispatched.
+
+    ``launch_observation_path`` is deliberately NOT read here. All three of its
+    writers (``writeback._record_enablement_eval_trigger`` and the two boot
+    failure paths) set it from the *trigger* observation -- the failed launch or
+    failed eval that gives the lane something to author against -- and they run
+    before any round is dispatched. Reading it would report ``dispatched: true``
+    for a session whose lane never opened a round, which is a false positive in
+    the one direction this section must not fail.
     """
     return bool(
         _eg(state, "last_specialist_task_id")
         or _eg(state, "kept_rounds")
-        or _eg(state, "launch_observation_path")
+        or any(
+            str(row.get("round_task_id") or "")
+            for row in (_eg(state, "setup_executions") or [])
+            if isinstance(row, dict)
+        )
         or _eg(state, "inflight_task_id")
         or _as_int(_eg(state, "attempts")) > 0
     )
@@ -605,8 +619,14 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     human_review = _eg(state, "human_review_logged")
     if isinstance(human_review, list) and human_review:
         out["human_review_count"] = len(human_review)
+    accepted_cfg = str(_eg(state, "accepted_config_path", "") or "")
+    if accepted_cfg:
+        out["accepted_config_path"] = _rel(Path(accepted_cfg), session_dir) or accepted_cfg
     setting_script_path = session_dir / "reports" / "enablement" / "enablement_setting.sh"
-    if setting_script_path.exists():
+    # is_file(), not exists(): a directory at that path is not a script a
+    # consumer can source, and emitting it would name a replay input that
+    # cannot be replayed.
+    if setting_script_path.is_file():
         out["setting_script"] = str(
             _rel(setting_script_path, session_dir) or "reports/enablement/enablement_setting.sh"
         )

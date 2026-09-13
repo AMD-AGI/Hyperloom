@@ -105,6 +105,18 @@ from ._workload_envs import (
 log = logging.getLogger(__name__)
 
 
+class KeepStackStateUnavailable(RuntimeError):
+    """The accepted stack cannot be observed because the round state is absent.
+
+    Raised only by the enablement KEEP capture, and only for the one condition
+    under which it would otherwise answer a multi-round stack with this round's
+    contents: no ``_ip_shared_state`` on the context at all. The caller records
+    the KEEP without the recipe fields, which leaves ``accepted_stack_targets``
+    empty and the replay decision refusing -- an insufficient recipe rather than
+    a certified partial one.
+    """
+
+
 _HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
 # Deliberately shares no substring with the auto-stash tag: _find_hyperloom_auto_stash
 # matches by message, and a quarantined merge must never be picked up and popped back.
@@ -3350,10 +3362,11 @@ class IntegratePatchExecutor:
                     bench_result=bench_result,
                 )
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, KeepStackStateUnavailable):
             # Every field this fills is one the decision refuses the replay for
-            # when absent, so a capture that cannot read the tree or spawn the
-            # probe leaves the recipe insufficient rather than failing the round.
+            # when absent, so a capture that cannot read the tree, spawn the
+            # probe, or see the durable stack leaves the recipe insufficient
+            # rather than failing the round.
             log.exception("integrate_patch: enablement KEEP record capture failed")
         return _with_stash_restore(framework_root, stash_state, stash_note, kept_result)
 
@@ -3395,10 +3408,23 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import _patch_touched_paths_split
+        from ._patch_snapshot import patch_declared_ops
 
         root = str(framework_root or "")
-        enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+        # Read as an attribute, not with a default: the durable round state IS
+        # the inherited stack since the round lifecycle stopped shipping it as a
+        # dispatch parameter, so a ctx that never had one cannot see any round
+        # but this one. Answering that with an empty inheritance would emit a
+        # one-round recipe over a multi-round stack and certify it -- the exact
+        # fail-open this capture exists to close -- so the miss is raised and the
+        # caller records the KEEP with no recipe fields at all.
+        try:
+            shared_state = ctx._ip_shared_state  # type: ignore[attr-defined]
+        except AttributeError as exc:
+            raise KeepStackStateUnavailable(
+                "enablement KEEP capture reached with no _ip_shared_state on the context"
+            ) from exc
+        enablement = getattr(shared_state, "enablement", None)
         patch_roots = _accepted_patch_roots(
             enablement,
             done_payload=done_payload,
@@ -3432,23 +3458,37 @@ class IntegratePatchExecutor:
             git_roots=git_roots,
             session_framework_root=resolve_session_framework_root(),
         )
-        # One split per root: a rel path is only meaningful against the tree its
-        # patch was bound to, and reading them all against this round's root
-        # would name files that root does not have.
+        # One classification per root: a rel path is only meaningful against the
+        # tree its patch was bound to, and reading them all against this round's
+        # root would name files that root does not have.
+        #
+        # Apply order, not dict order: ``patch_roots`` is keyed by patch path and
+        # its iteration order follows how the mapping was assembled, while the
+        # operation a later patch declares must override an earlier one's for the
+        # same file. ``kept_patches`` then this round's ``applied`` is the order
+        # the stack was built in and the order a consumer replays it in.
+        ordered_patches = [
+            str(p) for p in (*(getattr(enablement, "kept_patches", None) or []), *applied) if str(p)
+        ]
+        # Anything bound to a root but absent from the durable order still has to
+        # be classified; it goes first, before every patch whose position is known.
+        ordered_patches = [p for p in patch_roots if p not in set(ordered_patches)] + ordered_patches
         patches_by_root: dict[str, list[Path]] = {}
-        for patch_path, patch_root in patch_roots.items():
-            patches_by_root.setdefault(str(patch_root), []).append(Path(patch_path))
+        for patch_path in dict.fromkeys(ordered_patches):
+            patch_root = str(patch_roots.get(patch_path) or "")
+            if patch_root:
+                patches_by_root.setdefault(patch_root, []).append(Path(patch_path))
         targets: dict[str, dict[str, str]] = {}
+        # Per patch as well as per root: the decision cross-checks each patch step
+        # against the snapshot of the files that step declares, and it cannot read
+        # the diffs itself.
+        patch_targets: dict[str, dict[str, str]] = {}
         for patch_root, patches in patches_by_root.items():
-            upserted, deleted = _patch_touched_paths_split(Path(patch_root), patches)
-            declared = declared_targets(
-                framework_root=patch_root,
-                upserted=upserted,
-                deleted=deleted,
-                artifacts=(),
-            )
-            for declared_root, ops in declared.items():
-                targets.setdefault(declared_root, {}).update(ops)
+            for patch in patches:
+                ops = patch_declared_ops(Path(patch_root), [patch])
+                if ops:
+                    patch_targets[str(patch)] = ops
+                targets.setdefault(patch_root, {}).update(ops)
         for declared_root, ops in declared_targets(
             framework_root=root,
             upserted=(),
@@ -3472,8 +3512,14 @@ class IntegratePatchExecutor:
         return {
             "enablement_roots": records,
             "enablement_patch_roots": patch_roots,
-            "enablement_base_sha": str(getattr(enablement, "base_sha", "") or "") or captured.get(root, ""),
+            # Per root, and through the same inherited-then-captured resolution
+            # every other root gets. Preferring the persisted scalar outright
+            # hands this round's root the sha an earlier round read off a
+            # *different* tree, and the snapshot is then captured against a base
+            # commit that tree never had.
+            "enablement_base_sha": str(base_sha_by_root.get(root) or ""),
             "enablement_source_snapshots": snapshots,
+            "enablement_patch_targets": patch_targets,
             "enablement_accepted_stack_targets": {
                 str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
             },

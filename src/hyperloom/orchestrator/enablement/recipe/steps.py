@@ -135,10 +135,21 @@ def root_ids_by_path(enablement: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _patch_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Project the accumulated patches in ``kept_patches`` order."""
+    """Project the accumulated patches in ``kept_patches`` order.
+
+    Each step carries the targets its own diff declares. The decision cannot
+    read the patch files -- it runs over durable state, long after the session
+    that wrote them -- so without this key it can only check that the capture
+    covered *some* declared set, which a recipe describing the final round alone
+    satisfies while every earlier round's step goes unverified. ``None`` states
+    that no producer recorded the targets, which the decision refuses; an empty
+    mapping would read as a patch that touches nothing.
+    """
     framework_root = str(enablement.get("framework_root") or "")
     patch_roots = enablement.get("patch_roots")
     patch_roots = patch_roots if isinstance(patch_roots, Mapping) else {}
+    patch_targets = enablement.get("patch_targets")
+    patch_targets = patch_targets if isinstance(patch_targets, Mapping) else {}
     roots_by_path = root_ids_by_path(enablement)
     steps: list[dict[str, Any]] = []
     for raw in enablement.get("kept_patches") or []:
@@ -146,12 +157,16 @@ def _patch_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not path:
             continue
         root = str(patch_roots.get(path) or "") or framework_root
+        declared = patch_targets.get(path)
         steps.append(
             {
                 "kind": PATCH_KIND,
                 "path": path,
                 "root": framework_root,
                 "root_id": roots_by_path.get(root) or None,
+                "targets": (
+                    {str(rel): str(op) for rel, op in declared.items()} if isinstance(declared, Mapping) else None
+                ),
             }
         )
     return steps

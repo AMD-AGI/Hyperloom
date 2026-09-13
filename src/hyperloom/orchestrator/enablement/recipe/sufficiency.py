@@ -32,6 +32,8 @@ REASON_BLOCKS: dict[str, str] = {
     "root_unidentified": BLOCKS_REPLAY,
     "root_unmappable": BLOCKS_REPLAY,
     "accepted_stack_not_launched": BLOCKS_BOTH,
+    "patch_targets_unknown": BLOCKS_REPLAY,
+    "patch_step_not_captured": BLOCKS_REPLAY,
     "source_snapshot_incomplete": BLOCKS_REPLAY,
     "source_snapshot_missing": BLOCKS_REPLAY,
     "artifact_not_self_contained": BLOCKS_REPLAY,
@@ -322,6 +324,75 @@ def _snapshot_reasons(
         if not snapshot.get("complete"):
             reasons.append(_reason("source_snapshot_incomplete", str(snapshot.get("root_id"))))
     reasons.extend(_expected_op_reasons(section, by_root, steps))
+    reasons.extend(_patch_step_reasons(section, by_root, steps))
+    return reasons
+
+
+def _patch_step_reasons(
+    section: Mapping[str, Any],
+    by_root: Mapping[str, Mapping[str, Any]],
+    steps: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Judge every patch step against the snapshot of the files IT declares.
+
+    :func:`_expected_op_reasons` walks ``accepted_stack_targets`` and asks
+    whether each target it names was captured. That direction cannot see a
+    target the producer never named: a capture derived from the final round
+    alone declares that round's files, the snapshot holds exactly them, the
+    comparison passes -- and the recipe still emits one patch step per round,
+    every earlier one replaying files nothing verified. Judged the other way
+    round, each step must account for itself, so a recipe covering fewer rounds
+    than it replays is refused by the deciding side rather than only by the
+    producing side happening to be correct.
+
+    The two rules are made disjoint rather than merely both fail-closed: a
+    target ``accepted_stack_targets`` already names *with the operation this
+    step declares* belongs to the rule above, so only the targets that rule
+    cannot reach are judged here. A wider reason set than the defect makes the
+    verdict unreadable, and a target named under a different operation is a
+    defect that rule cannot see, so it stays here.
+
+    Args:
+        section: The emitted section, read for ``accepted_stack_targets``.
+        by_root: Snapshot manifests keyed by ``root_id``.
+        steps: The projected recipe steps.
+
+    Returns:
+        One reason per patch step that cannot be shown to be covered.
+    """
+    expected = section.get("accepted_stack_targets")
+    expected = expected if isinstance(expected, Mapping) else {}
+    reasons: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        if step.get("kind") != PATCH_KIND:
+            continue
+        # ``step[index]``, never the patch path: a scope is an address into the
+        # recipe, and a reason that carries a host path leaks a value.
+        scope = f"step[{index}]"
+        declared = step.get("targets")
+        # ``None`` is "no producer recorded this", which is not the same claim as
+        # "this patch declares nothing" -- and a patch that declares nothing is
+        # itself a step a replay cannot act on.
+        if not isinstance(declared, Mapping) or not declared:
+            reasons.append(_reason("patch_targets_unknown", scope))
+            continue
+        root_id = str(step.get("root_id") or "")
+        named = expected.get(root_id)
+        named = named if isinstance(named, Mapping) else {}
+        unreached = {
+            str(rel): str(op) for rel, op in declared.items() if str(named.get(str(rel)) or "") != str(op)
+        }
+        if not unreached:
+            continue
+        snapshot = by_root.get(root_id)
+        if not isinstance(snapshot, Mapping):
+            reasons.append(_reason("patch_step_not_captured", scope))
+            continue
+        captured = {
+            str(f.get("rel")): str(f.get("op")) for f in (snapshot.get("files") or []) if isinstance(f, Mapping)
+        }
+        if any(captured.get(rel) != op for rel, op in unreached.items()):
+            reasons.append(_reason("patch_step_not_captured", scope))
     return reasons
 
 
