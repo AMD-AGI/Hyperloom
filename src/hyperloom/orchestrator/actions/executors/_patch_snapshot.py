@@ -152,6 +152,40 @@ _UNREPRESENTABLE_MODES: frozenset[str] = frozenset({"120000", "160000"})
 _ISOLATION_ROOT: Path | None = None
 
 
+def _own_private_file(path: Path) -> Path:
+    """Make ``path`` 0600 regardless of the ambient umask, and return it.
+
+    A file this process writes for git to read is created under the ambient
+    umask, and a mask that clears owner-read (0o400) produces a file git cannot
+    open. The write itself succeeds through the already-open descriptor, so
+    nothing here fails -- git simply proceeds WITHOUT the policy the file
+    carries, which for ``.git/info/attributes`` silently restores every staging
+    transformation this replay disables. 0600 is the right mode because parent
+    and child share a uid; what was wrong was assuming ambient creation
+    produces it.
+    """
+    path.chmod(0o600)
+    return path
+
+
+def _mkdir_private(path: Path, *, under: Path) -> None:
+    """Create ``path`` and every missing component below ``under``, 0700 each.
+
+    ``mkdir(parents=True)`` followed by one chmod of the leaf repairs only the
+    leaf, and under a mask that clears traversal it never reaches the leaf at
+    all: the first component is created without execute, and creating the next
+    one beneath it fails. Each component is therefore repaired as it is made.
+    """
+    missing: list[Path] = []
+    current = path
+    while current != under and current != current.parent and not current.exists():
+        missing.append(current)
+        current = current.parent
+    for component in reversed(missing):
+        component.mkdir(exist_ok=True)
+        _own_private_dir(component)
+
+
 def _own_private_dir(path: Path) -> Path:
     """Make ``path`` 0700 regardless of the ambient umask, and return it.
 
@@ -175,6 +209,7 @@ def _isolation_root() -> Path:
             (root / name).mkdir()
             _own_private_dir(root / name)
         (root / "config").write_text("", encoding="utf-8")
+        _own_private_file(root / "config")
         atexit.register(shutil.rmtree, str(root), True)
         _ISOLATION_ROOT = root
     return _ISOLATION_ROOT
@@ -379,6 +414,7 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
         (info / "attributes").write_text(
             "* -text -eol -filter -diff -ident -merge -working-tree-encoding\n", encoding="utf-8"
         )
+        _own_private_file(info / "attributes")
     except OSError:
         return False
     done = _git(dest, "checkout", "-q", "--detach", base_sha, timeout=600)
@@ -554,8 +590,7 @@ def replayed_stack_ops(
             # Either way the next step's git invocations would run with a
             # missing cwd.
             try:
-                work_tree.mkdir(parents=True, exist_ok=True)
-                _own_private_dir(work_tree)
+                _mkdir_private(work_tree, under=tmp)
             except OSError:
                 return None
             if not _apply_at_some_level(work_tree, patch) or not _commit_replay_step(tmp):

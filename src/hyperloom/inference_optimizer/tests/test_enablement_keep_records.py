@@ -1825,3 +1825,82 @@ def test_a_repository_name_git_config_would_reinterpret_still_replays(tmp_path: 
         patch = _patch(tmp_path, f"{abs(hash(name))}.patch", _git(root, "diff", "HEAD~1", "HEAD") + "\n")
 
         assert replayed_stack_ops(root, [patch], base_sha=base_sha) == {str(patch): {TARGET: "upsert"}}, name
+
+
+def test_policy_files_are_readable_whatever_the_umask(repo: Path, tmp_path: Path):
+    """A mask that clears owner-read (0o400) produces a policy file git cannot
+    open. The write succeeds through the already-open descriptor, so nothing
+    fails -- git just proceeds WITHOUT the policy, which for
+    ``.git/info/attributes`` silently restores every staging transformation the
+    replay disables, and a normalised-away patch effect leaves the comparison
+    set again.
+
+    Asserted on the MODE rather than the behaviour, because root can read a
+    file whatever its mode: a behavioural check passes vacuously on the host
+    this suite is developed on and only fails in CI.
+    """
+    import stat as _stat
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+        _checkout_base_tree,
+        _isolation_root,
+        _repo_prefix,
+    )
+
+    base_sha = _git_head_sha(repo)
+    previous = os.umask(0o400)
+    try:
+        root = _isolation_root()
+        assert _stat.S_IMODE((root / "config").stat().st_mode) == 0o600
+
+        located = _repo_prefix(repo)
+        assert located is not None
+        dest = tmp_path / "replay-clone"
+        assert _checkout_base_tree(located[0], base_sha, dest)
+        attributes = dest / ".git" / "info" / "attributes"
+        assert attributes.is_file()
+        assert _stat.S_IMODE(attributes.stat().st_mode) == 0o600, "git must be able to read the policy"
+        assert attributes.read_text(encoding="utf-8").strip().startswith("* -text")
+    finally:
+        os.umask(previous)
+
+
+def test_a_nested_apply_root_is_created_traversably_at_every_level(repo: Path, tmp_path: Path):
+    """``mkdir(parents=True)`` then one chmod of the leaf repairs only the leaf,
+    and under a traversal-clearing mask it never reaches the leaf: the first
+    component is made without execute and the next cannot be created beneath
+    it. Each component has to be repaired as it is made."""
+    import stat as _stat
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import _mkdir_private
+
+    # Created before the mask is applied and repaired, exactly as production
+    # does: the replay root comes from ``mkdtemp`` and is chmod'd 0700 before
+    # anything is made beneath it. Creating it under the hostile mask would
+    # test the fixture rather than the helper.
+    under = tmp_path / "replay"
+    under.mkdir()
+    under.chmod(0o700)
+    previous = os.umask(0o111)
+    try:
+        _mkdir_private(under / "one" / "two" / "three", under=under)
+        for rel in ("one", "one/two", "one/two/three"):
+            mode = _stat.S_IMODE((under / rel).stat().st_mode)
+            assert mode == 0o700, f"{rel} is {oct(mode)}; every component must be traversable"
+    finally:
+        os.umask(previous)
+
+
+def test_a_stack_under_a_nested_apply_root_replays(repo: Path, tmp_path: Path):
+    """The end-to-end form of the above: an apply root several levels below the
+    repository top, absent from the base commit."""
+    base_sha = _git_head_sha(repo)
+    nested = repo / "srt" / "one" / "two"
+    nested.mkdir(parents=True)
+    patch = _patch(tmp_path, "nested.patch", "--- /dev/null\n+++ b/made.py\n@@ -0,0 +1 @@\n+x = 1\n")
+    subprocess.run(["git", "-C", str(nested), "apply", str(patch)], check=True)
+    _commit_all(repo, "populate a nested root the base does not have")
+
+    previous = os.umask(0o111)
+    try:
+        assert replayed_stack_ops(nested, [patch], base_sha=base_sha) == {str(patch): {"made.py": "upsert"}}
+    finally:
+        os.umask(previous)
