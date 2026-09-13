@@ -1676,3 +1676,70 @@ def test_a_host_hook_cannot_remove_a_patch_effect_from_the_inventory(repo: Path,
 
     ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
     assert ops is None, "a hook must not be able to drop a patch effect out of verification"
+
+
+def test_host_git_configuration_cannot_reach_the_replay(repo: Path, tmp_path: Path, monkeypatch):
+    """``core.ignoreStat`` marks tracked files assumed-unchanged at checkout, so
+    the staging pass skips their modifications and they leave the comparison set
+    -- another inherited setting reaching the same omission that filters,
+    attributes and hooks each reached before it.
+
+    Enumerating settings to override is what failed; this asserts the rule
+    instead. The value is supplied the way a host supplies one, and the replay
+    must be indifferent to it.
+    """
+    (repo / "srt" / "a.txt").write_text("old\n", encoding="utf-8")
+    _commit_all(repo, "tracked file")
+    base_sha = _git_head_sha(repo)
+    (repo / "srt" / "a.txt").write_text("new\n", encoding="utf-8")
+    (repo / "srt" / "made.txt").write_text("created\n", encoding="utf-8")
+    _commit_all(repo, "the accepted patch")
+    patch = _patch(tmp_path, "cfg.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    global_config = tmp_path / "gitconfig"
+    global_config.write_text("[core]\n\tignoreStat = true\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+
+    # The correctly applied stack still verifies...
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {
+        str(patch): {"srt/a.txt": "upsert", "srt/made.txt": "upsert"}
+    }
+    # ...and content no patch produced is still refused, rather than being
+    # dropped from the inventory by the host's setting.
+    (repo / "srt" / "a.txt").write_text("not produced by any patch\n", encoding="utf-8")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_the_replay_isolation_root_is_private_and_not_a_predictable_path():
+    """A fixed public name is worse than no isolation: another user on a shared
+    host creates it first, puts executable hooks in it, and the ENFORCED
+    ``core.hooksPath`` points replay straight at them -- hook execution under
+    this process's identity, and the certification hole restored.
+    """
+    import os as _os
+    import stat as _stat
+    import tempfile as _tempfile
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+        _isolated_git_env,
+        _isolation_root,
+    )
+
+    root = _isolation_root()
+    assert root.is_dir()
+    # Unpredictable, not a fixed name under the temp directory.
+    assert root.name != "hyperloom-replay-no-hooks"
+    assert str(root).startswith(_tempfile.gettempdir())
+    assert _stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert root.stat().st_uid == _os.getuid()
+    assert not any((root / "hooks").iterdir()), "the hooks directory must be empty"
+
+    env = _isolated_git_env()
+    # No GIT_* the caller happens to be carrying survives into the replay.
+    assert not [key for key in env if key.startswith("GIT_") and key not in {
+        "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
+        "GIT_ATTR_NOSYSTEM", "GIT_TERMINAL_PROMPT",
+    }]
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_ATTR_NOSYSTEM"] == "1"
+    # System, global and user configuration all resolve inside the private root.
+    for key in ("GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "HOME", "XDG_CONFIG_HOME"):
+        assert str(root) in env[key], key

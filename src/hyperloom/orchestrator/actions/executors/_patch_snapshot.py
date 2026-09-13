@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import re
@@ -141,11 +142,58 @@ _REPLAY_IDENTITY: tuple[str, ...] = ("-c", "user.email=replay@hyperloom.invalid"
 _UNREPRESENTABLE_MODES: frozenset[str] = frozenset({"120000", "160000"})
 
 
-def _no_hooks_dir() -> Path:
-    """An empty directory this process owns, used as a hooks and template dir."""
-    path = Path(tempfile.gettempdir()) / "hyperloom-replay-no-hooks"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+#: The replay's private, securely created isolation root: an empty hooks and
+#: template directory, an empty HOME, and an empty config file. Created once per
+#: process with ``mkdtemp`` -- 0700 and an unpredictable name -- and removed at
+#: exit. A fixed public path would be worse than no isolation at all: another
+#: user on a shared host can create it first and put executable hooks in it, and
+#: the enforced ``core.hooksPath`` would then point replay straight at them.
+_ISOLATION_ROOT: Path | None = None
+
+
+def _isolation_root() -> Path:
+    """Create (once) and return the private directory replay git runs against."""
+    global _ISOLATION_ROOT
+    if _ISOLATION_ROOT is None or not _ISOLATION_ROOT.is_dir():
+        root = Path(tempfile.mkdtemp(prefix="hl-replay-isolation-"))
+        (root / "hooks").mkdir(mode=0o700)
+        (root / "home").mkdir(mode=0o700)
+        (root / "config").write_text("", encoding="utf-8")
+        atexit.register(shutil.rmtree, str(root), True)
+        _ISOLATION_ROOT = root
+    return _ISOLATION_ROOT
+
+
+def _isolated_git_env() -> dict[str, str]:
+    """The environment replay git runs in: this repository and nothing else.
+
+    Enumerating settings to override does not work, and several rounds of review
+    were spent proving it -- ``clean``/``smudge`` filters, then eol and encoding
+    attributes, then ``core.hooksPath``, then ``core.ignoreStat``, each found
+    after the previous one had been called "the boundary". They are instances of
+    one rule, so the rule is enforced here instead: git reads no system config,
+    no global config, no user config, no system attributes, and none of the
+    ``GIT_*`` variables the caller happens to be carrying. Whatever the host has
+    configured, the replay's answer stays a function of the repository and the
+    patches.
+    """
+    root = _isolation_root()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(
+        {
+            # ~/.gitconfig and $XDG_CONFIG_HOME/git/config resolve into an empty
+            # directory we own, so "global" config is empty rather than trusted.
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "home"),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": str(root / "config"),
+            "GIT_CONFIG_GLOBAL": str(root / "config"),
+            # The system-wide attributes file is a transformation channel too.
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+    )
+    return env
 
 
 def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[bytes] | None:
@@ -163,11 +211,21 @@ def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProc
     this process owns. The replay's answer has to be a function of the
     repository and the patches, not of what the host happens to have configured.
     """
-    hooks = str(_no_hooks_dir())
-    isolation = ("-c", f"core.hooksPath={hooks}", "-c", "core.fsmonitor=false")
+    hooks = _isolation_root() / "hooks"
+    # Only the hooks path is named here, and only because it also has to point
+    # somewhere safe rather than merely be unset. Everything else -- filters,
+    # eol, encoding, ``core.ignoreStat``, ``core.fsmonitor`` and whatever is
+    # added to git next -- is handled by the empty configuration the environment
+    # supplies, because enumerating settings is the approach that kept failing.
+    isolation = ("-c", f"core.hooksPath={hooks}")
     try:
         return subprocess.run(
-            ["git", *isolation, *args], cwd=str(tree), capture_output=True, timeout=timeout, check=False
+            ["git", *isolation, *args],
+            cwd=str(tree),
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            env=_isolated_git_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -210,7 +268,7 @@ def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool
         "--shared",
         "-n",
         "-q",
-        f"--template={_no_hooks_dir()}",
+        f"--template={_isolation_root() / 'hooks'}",
         str(framework_root),
         str(dest),
         timeout=600,
