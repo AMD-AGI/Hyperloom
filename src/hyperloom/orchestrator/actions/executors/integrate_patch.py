@@ -577,7 +577,13 @@ def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str,
     return list(dict.fromkeys(r for r in roots if r))
 
 
-def _note_pre_mutation_head(ctx: Any, root: str | Path | None, *, enablement: bool = False) -> None:
+def _note_pre_mutation_head(
+    ctx: Any,
+    root: str | Path | None,
+    *,
+    enablement: bool = False,
+    session_dir: Path | None = None,
+) -> None:
     """Record ``root``'s HEAD once, before the first mutation of it.
 
     Never replaced: a later read would name a tree that has already changed, and
@@ -611,7 +617,7 @@ def _note_pre_mutation_head(ctx: Any, root: str | Path | None, *, enablement: bo
         heads[key] = str(durable.get(key) or "") or _git_head_sha(Path(key))
     ctx._ip_base_sha_by_root = heads
     if enablement and heads.get(key) and not str(durable.get(key) or ""):
-        _persist_base_sha_for_root(ctx, key, str(heads[key]))
+        _persist_base_sha_for_root(ctx, key, str(heads[key]), session_dir=session_dir)
 
 
 def _durable_base_sha_by_root(ctx: Any) -> dict[str, str]:
@@ -620,9 +626,17 @@ def _durable_base_sha_by_root(ctx: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)} if isinstance(raw, Mapping) else {}
 
 
-def _persist_base_sha_for_root(ctx: Any, root: str, sha: str) -> None:
-    """Record this root's pre-mutation head on the durable stack, once."""
-    enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+def _persist_base_sha_for_root(ctx: Any, root: str, sha: str, *, session_dir: Path | None = None) -> None:
+    """Record this root's pre-mutation head on the durable stack, once.
+
+    Saved here rather than left for the rearm: the reading is only correct
+    BEFORE the mutation, and the mutation is the next thing that happens. A
+    round that commits its patch and then dies would otherwise resume with the
+    entry absent and HEAD already moved, which is exactly the state this map
+    exists to prevent.
+    """
+    shared_state = getattr(ctx, "_ip_shared_state", None)
+    enablement = getattr(shared_state, "enablement", None)
     if enablement is None:
         return
     current = dict(getattr(enablement, "base_sha_by_root", None) or {})
@@ -630,6 +644,14 @@ def _persist_base_sha_for_root(ctx: Any, root: str, sha: str) -> None:
         return
     current[root] = sha
     enablement.base_sha_by_root = current
+    if session_dir is None:
+        return
+    try:
+        shared_state.save(session_dir)
+    except (OSError, AttributeError):
+        # The value is on the in-memory state either way, and the rearm saves
+        # again; a failed write must not stop the round.
+        log.debug("integrate_patch: save after base-sha record failed", exc_info=True)
 
 
 def _accepted_patch_roots(
@@ -2508,7 +2530,7 @@ class IntegratePatchExecutor:
         # install writes into the same trees the patches and artifacts land in.
         is_enablement = bool(params.get("enablement"))
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
-            _note_pre_mutation_head(ctx, candidate, enablement=is_enablement)
+            _note_pre_mutation_head(ctx, candidate, enablement=is_enablement, session_dir=self.session_dir)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2815,7 +2837,9 @@ class IntegratePatchExecutor:
 
         # Normally already recorded before the setup commands; a root that
         # resolved only here is still recorded before the stash and the apply.
-        _note_pre_mutation_head(ctx, framework_root, enablement=bool(params.get("enablement")))
+        _note_pre_mutation_head(
+            ctx, framework_root, enablement=bool(params.get("enablement")), session_dir=self.session_dir
+        )
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -3353,6 +3377,20 @@ class IntegratePatchExecutor:
                     "status": "advanced",
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [str(p) for p in applied],
+                    # An ADVANCED round stacks its patch and never reaches the
+                    # KEEP capture, so without this the tree its patch applied
+                    # to is never recorded and a later KEEP binds it to that
+                    # round's framework root instead. Since the capture now
+                    # PROVES a patch against the tree it is bound to, a
+                    # mis-binding no longer certifies anything -- it refuses the
+                    # whole recipe, which for a legitimate multi-root stack is a
+                    # false refusal rather than a false pass.
+                    "enablement_patch_roots": _accepted_patch_roots(
+                        getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None),
+                        done_payload=done_payload,
+                        applied=applied,
+                        framework_root=str(framework_root or ""),
+                    ),
                     "patches_reverted": [],
                     "artifacts_applied": applied_artifacts,
                     "extra_envs_applied": extra_envs_applied,

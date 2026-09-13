@@ -632,6 +632,25 @@ class EnablementLane(CoordinatorCollaborator):
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
 
 
+def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:
+    """Bind this round's patches to the tree they applied to, once.
+
+    An ADVANCED round never reaches the KEEP capture that writes the durable
+    ``patch_roots``, so a stack whose rounds used different trees would leave
+    every advanced patch to be re-bound to the FINAL round's framework root.
+    First writer wins, for the same reason the base sha's does: the round that
+    applied a patch is the one that knows which tree it applied to.
+    """
+    incoming = res.get("enablement_patch_roots")
+    if not isinstance(incoming, dict) or not incoming:
+        return
+    merged = dict(state.enablement.patch_roots or {})
+    for patch, root in incoming.items():
+        if str(patch) and str(root):
+            merged.setdefault(str(patch), str(root))
+    state.enablement.patch_roots = merged
+
+
 def _stack_setup_commands(state: Any, res: dict[str, Any]) -> None:
     """Append this round's applied setup commands to the durable stack."""
     cur = list(state.enablement.setup_commands or [])
@@ -767,6 +786,7 @@ def _rearm_on_kept(state: Any, res: dict[str, Any]) -> None:
 def _rearm_on_advanced(state: Any, res: dict[str, Any]) -> None:
     """Stack the progressing round and pivot the mandate to the new gap."""
     _push_kept_round(state, res, [str(p) for p in (res.get("patches_applied") or []) if str(p)])
+    _stack_patch_roots(state, res)
     _stack_setup_commands(state, res)
     _stack_kept_runtime(state, res)
     # Accumulated so a later kept round replays every advance, not just patches.

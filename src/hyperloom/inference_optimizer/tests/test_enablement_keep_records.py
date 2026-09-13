@@ -1125,3 +1125,75 @@ def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, t
     codes = [r["code"] for r in section["replay_sufficiency"]["reasons"]]
     assert section["replay_sufficiency"]["status"] == "insufficient"
     assert "patch_targets_unknown" in codes
+
+
+def test_an_advanced_round_binds_its_patch_to_the_tree_it_applied_to(repo: Path, tmp_path: Path):
+    """A stack whose rounds used different trees must keep each binding.
+
+    An ADVANCED round never reaches the KEEP capture that writes the durable
+    ``patch_roots``, so without this its patch is re-bound to the FINAL round's
+    framework root. Since the capture now PROVES a patch against the tree it is
+    bound to, the mis-binding does not certify anything -- it refuses the whole
+    recipe, which for a legitimate multi-root stack is a false refusal.
+    """
+    from hyperloom.orchestrator.enablement.lane import _rearm_on_advanced
+
+    other = tmp_path / "aiter"
+    state = SimpleNamespace(enablement=EnablementRound(), baseline_failure_streak=1, baseline_total_failures=0)
+    _rearm_on_advanced(
+        state,
+        {
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": ["/p/1.patch"],
+            "enablement_patch_roots": {"/p/1.patch": str(other)},
+        },
+    )
+    assert state.enablement.patch_roots == {"/p/1.patch": str(other)}
+
+    # A later round on a different tree must not re-point it.
+    _rearm_on_advanced(
+        state,
+        {
+            "status": "advanced",
+            "advanced": True,
+            "patches_applied": ["/p/2.patch"],
+            "enablement_patch_roots": {"/p/1.patch": str(repo), "/p/2.patch": str(repo)},
+        },
+    )
+    assert state.enablement.patch_roots == {"/p/1.patch": str(other), "/p/2.patch": str(repo)}
+
+
+def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo: Path, tmp_path: Path):
+    """The reading is only correct BEFORE the mutation, and the mutation is the
+    next thing that happens. Left for the rearm, a round that commits its patch
+    and then dies resumes with the entry absent and HEAD already moved -- the
+    exact state this map exists to prevent."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+
+    saved: list[Path] = []
+    state = SimpleNamespace(
+        enablement=EnablementRound(),
+        save=lambda session_dir, *a, **k: saved.append(Path(session_dir)),
+    )
+    session = tmp_path / "session"
+    _note_pre_mutation_head(
+        SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=session
+    )
+    assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
+    assert saved == [session], "the reading must reach disk before the round mutates the tree"
+
+
+def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
+    """A record that cannot be written is still on the in-memory state, and the
+    rearm saves again; a failed write must not cost the round."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+
+    def _boom(*_a, **_k):
+        raise OSError("disk full")
+
+    state = SimpleNamespace(enablement=EnablementRound(), save=_boom)
+    _note_pre_mutation_head(
+        SimpleNamespace(_ip_shared_state=state), repo, enablement=True, session_dir=tmp_path
+    )
+    assert state.enablement.base_sha_by_root == {str(repo): _git_head_sha(repo)}
