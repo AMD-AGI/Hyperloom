@@ -98,6 +98,14 @@ class EnablementRound:
     # the tree the kept patches apply to. Read pre-mutation, never after a KEEP
     # commit, or the recorded sha would already contain the patches.
     base_sha: str = ""
+    # {root: sha} read BEFORE the stack's first mutation of each root, and
+    # never replaced. ``base_sha`` above is the one this round's KEEP reports;
+    # this is the map that carries the FIRST mutating round's reading forward.
+    # An ADVANCED round commits and stacks a patch while recording no per-root
+    # identity at all, so without this the KEEP that finally reports a base
+    # reads a HEAD that already contains every advanced round's patch -- and the
+    # recipe still replays those patches on top of it.
+    base_sha_by_root: dict = field(default_factory=dict)
     # Per-root snapshot manifests captured at the enablement KEEP.
     source_snapshots: list = field(default_factory=list)
     # {root_id: {rel: op}} the accepted stack declares, checked against what each

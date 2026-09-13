@@ -14,7 +14,11 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
-from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept, patch_declared_ops
+from hyperloom.orchestrator.actions.executors._patch_snapshot import (
+    _git_commit_kept,
+    patch_declared_ops,
+    verified_patch_ops,
+)
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     KeepStackStateUnavailable,
@@ -841,12 +845,19 @@ def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Pa
     only thing standing between a multi-round recipe and an unverified replay.
     """
     created = "srt/round_one.py"
-    (repo / created).write_text("x = 1\n", encoding="utf-8")
     first = _patch(tmp_path, "1.patch", f"--- /dev/null\n+++ b/{created}\n@@ -0,0 +1 @@\n+x = 1\n")
     second = _patch(tmp_path, "2.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    base_sha = _git_head_sha(repo)
+    # Really applied and committed, round by round: the capture proves a patch
+    # is present by un-applying it, so a fixture that only writes the end state
+    # would be certifying something no patch produced.
+    for patch, message in ((first, "round one"), (second, "round two")):
+        _git(repo, "apply", str(patch))
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", message)
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
-        _ip_base_sha_by_root={str(repo): _git_head_sha(repo)},
+        _ip_base_sha_by_root={str(repo): base_sha},
         # The first round is durable state; only the second is this round's.
         _ip_shared_state=SimpleNamespace(
             enablement=EnablementRound(kept_patches=[str(first)], patch_roots={str(first): str(repo)})
@@ -928,3 +939,189 @@ def test_a_recorded_root_for_a_patch_outside_the_stack_is_ignored(repo: Path, tm
         framework_root=str(repo),
     )
     assert roots == {str(applied): str(repo)}
+
+
+# --------------------------------------------------------------------------
+# The base a multi-round stack replays onto.
+# --------------------------------------------------------------------------
+
+
+def test_an_advanced_round_carries_its_base_to_the_keep_that_follows(repo: Path, tmp_path: Path):
+    """ADVANCED commits and stacks a patch while recording no per-root identity.
+
+    Every KEEP is committed too, so by the next round HEAD already contains the
+    advanced round's patch. If the KEEP reports THAT head as the recipe's base,
+    the recipe names a tree its own first patch step has already been applied
+    to, and a consumer replaying it applies that patch a second time -- while
+    the verdict certifies the recipe as sufficient.
+
+    Pins the durable ``base_sha_by_root`` write: drop it from
+    ``_note_pre_mutation_head`` and this goes red.
+    """
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+
+    true_base = _git_head_sha(repo)
+    state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
+
+    # Round one: ADVANCED. It captures the head, mutates, and commits.
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=True)
+    (repo / TARGET).write_text(PATCHED_TEXT, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "advanced round")
+    state.enablement.kept_patches = ["/p/1.patch"]
+    state.enablement.patch_roots = {"/p/1.patch": str(repo)}
+    assert state.enablement.base_sha_by_root == {str(repo): true_base}
+    assert _git_head_sha(repo) != true_base, "the advanced round must really have moved HEAD"
+
+    # Round two: a FRESH context, as the next integrate_patch invocation gets.
+    ctx = SimpleNamespace(_ip_shared_state=state)
+    _note_pre_mutation_head(ctx, repo, enablement=True)
+    out = executor_keep_records(tmp_path, ctx, repo)
+    assert out["enablement_base_sha"] == true_base
+    assert out["enablement_base_sha"] != _git_head_sha(repo)
+
+
+def executor_keep_records(tmp_path: Path, ctx, repo: Path):
+    """Run the KEEP capture for a round that installed one artifact."""
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    return executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[],
+        applied_artifacts=[{"target": str(repo / TARGET), "rel_target": TARGET, "root": str(repo)}],
+        done_payload={},
+        provision_result=None,
+        bench_result={},
+    )
+
+
+def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
+    """The head before an unrelated patch is not the tree the enablement stack
+    applies to, so a non-enablement round must not claim the base."""
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+
+    state = SimpleNamespace(enablement=EnablementRound())
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=False)
+    assert state.enablement.base_sha_by_root == {}
+
+
+def test_the_recorded_base_is_never_replaced_by_a_later_reading(repo: Path):
+    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+
+    state = SimpleNamespace(enablement=EnablementRound())
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=True)
+    first = dict(state.enablement.base_sha_by_root)
+    (repo / TARGET).write_text("moved on\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "later")
+    _note_pre_mutation_head(SimpleNamespace(_ip_shared_state=state), repo, enablement=True)
+    assert state.enablement.base_sha_by_root == first
+
+
+# --------------------------------------------------------------------------
+# Proving a patch is what the captured tree contains, rather than believing
+# its headers.
+# --------------------------------------------------------------------------
+
+
+def _commit_all(repo: Path, message: str) -> None:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", message)
+
+
+def test_a_modification_that_was_never_applied_declares_nothing(repo: Path, tmp_path: Path):
+    """The stripped-mutation-input case, for a MODIFIED file.
+
+    Header classification calls an ordinary modification ``upsert``, and the
+    capture calls any existing file an upsert, so a KEEP that booted without its
+    mutation inputs ships the BASE bytes under a declaration saying they were
+    changed -- and the recipe's patch step and its snapshot then describe
+    different results with nothing objecting.
+    """
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    # The headers still say what the patch WOULD do...
+    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
+    # ...but nothing in the tree contains it.
+    assert verified_patch_ops(repo, patch, base_sha=base_sha) is None
+    assert (repo / TARGET).read_text(encoding="utf-8") == BASE_TEXT
+
+    _git(repo, "apply", str(patch))
+    _commit_all(repo, "applied")
+    assert verified_patch_ops(repo, patch, base_sha=base_sha) == {TARGET: "upsert"}
+
+
+def test_a_mixed_diff_whose_metadata_block_cannot_be_read_declares_nothing(repo: Path, tmp_path: Path):
+    """A pure rename, a mode-only change and a binary block carry no
+    ``---``/``+++`` pair. A patch made only of those already declares nothing;
+    one that ALSO carries a text hunk declared a non-empty but PARTIAL map, and
+    the accepted stack then omitted exactly the same files, so nothing
+    downstream could see the omission."""
+    (repo / "srt" / "exec.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    _commit_all(repo, "add the script whose mode the patch changes")
+    base_sha = _git_head_sha(repo)
+    mixed = _patch(
+        tmp_path,
+        "mixed.patch",
+        f"diff --git a/{TARGET} b/{TARGET}\n"
+        f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}"
+        "diff --git a/srt/exec.sh b/srt/exec.sh\nold mode 100644\nnew mode 100755\n",
+    )
+    _git(repo, "apply", str(mixed))
+    _commit_all(repo, "mixed applied")
+    # The text half alone would have passed; the announced block count is what
+    # makes the partial case indistinguishable from the empty one.
+    assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
+    assert verified_patch_ops(repo, mixed, base_sha=base_sha) is None
+
+
+def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: Path, tmp_path: Path):
+    """The strip level was guessed from paths that currently exist, and a
+    deletion has erased exactly that evidence -- so a ``-p0`` deletion resolved
+    at ``-p1`` and the capture emitted a complete tombstone for a path the tree
+    never held, with both declaration maps agreeing with the wrong snapshot."""
+    (repo / "srt" / "gone.py").write_text("gone\n", encoding="utf-8")
+    _commit_all(repo, "add the file the patch deletes")
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "del.patch", "--- srt/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n")
+    _git(repo, "apply", "-p0", str(patch))
+    _commit_all(repo, "deleted")
+
+    # The header-only reader falls back to -p1 and names a path that was never
+    # in the tree.
+    assert patch_declared_ops(repo, [patch]) == {"gone.py": "delete"}
+    assert verified_patch_ops(repo, patch, base_sha=base_sha) == {"srt/gone.py": "delete"}
+
+
+def test_a_patch_that_cannot_be_verified_leaves_the_recipe_refused(repo: Path, tmp_path: Path):
+    """End to end: an unapplied patch reaches the decision as an undeclared
+    step, not as a satisfied one."""
+    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
+
+    base_sha = _git_head_sha(repo)
+    patch = _patch(tmp_path, "never.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
+    ctx = SimpleNamespace(_ip_base_sha_by_root={str(repo): base_sha}, _ip_shared_state=state)
+    out = executor._enablement_keep_records(
+        ctx,
+        params={},
+        specialist_task_id=PROBE_TASK,
+        framework_root=repo,
+        applied=[patch],
+        applied_artifacts=[],
+        done_payload={"patch_roots": {str(patch): str(repo)}},
+        provision_result=None,
+        bench_result={},
+    )
+    assert out["enablement_patch_targets"] == {}
+    state.enablement.kept_patches = [str(patch)]
+    state.enablement.patch_roots = {str(patch): str(repo)}
+    for key, value in out.items():
+        setattr(state.enablement, key.removeprefix("enablement_"), value)
+    section = collect_enablement(executor.session_dir, {"enablement": asdict(state.enablement)}, [])
+    codes = [r["code"] for r in section["replay_sufficiency"]["reasons"]]
+    assert section["replay_sufficiency"]["status"] == "insufficient"
+    assert "patch_targets_unknown" in codes

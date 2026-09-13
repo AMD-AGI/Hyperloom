@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -121,6 +122,125 @@ def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, s
             elif rel_old:
                 ops[rel_old] = "delete"
     return ops
+
+
+_GIT_DIFF_BLOCK_RE = re.compile(r"^diff --git ", re.MULTILINE)
+
+
+def _declares_every_block(text: str, pairs: list[tuple[str, str]]) -> bool:
+    """Whether every file block a git diff announces reached ``pairs``.
+
+    ``patch_file_targets`` reads adjacent ``---``/``+++`` lines, which a pure
+    rename, a mode-only change and a ``GIT binary patch`` block need not carry.
+    A patch made only of those declares nothing and is refused for it; one that
+    ALSO carries an ordinary text hunk declares a non-empty but partial map, and
+    both the per-patch map and the accepted stack then omit the same files -- so
+    nothing downstream can see the omission. Counting the announced blocks is
+    what makes the partial case indistinguishable from the empty one.
+    """
+    blocks = len(_GIT_DIFF_BLOCK_RE.findall(text))
+    return blocks == 0 or blocks == len(pairs)
+
+
+def _path_in_tree(framework_root: Path, base_sha: str, rel: str) -> bool | None:
+    """Whether ``rel`` existed at ``base_sha``; ``None`` when unanswerable."""
+    if not base_sha or not rel:
+        return None
+    try:
+        done = subprocess.run(
+            ["git", *safe_directory_args(["cat-file", "-e", f"{base_sha}:{rel}"], cwd=str(framework_root))],
+            cwd=str(framework_root),
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return done.returncode == 0
+
+
+def _reverses_cleanly(framework_root: Path, patch: Path, level: int) -> bool:
+    """Whether ``patch`` can be un-applied from the tree at strip ``level``."""
+    try:
+        done = subprocess.run(
+            [
+                "git",
+                *safe_directory_args(
+                    ["apply", "--reverse", "--check", f"-p{level}", str(patch)], cwd=str(framework_root)
+                ),
+            ],
+            cwd=str(framework_root),
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def verified_patch_ops(framework_root: Path, patch: Path, *, base_sha: str) -> dict[str, str] | None:
+    """Return the ops ``patch`` declares, PROVEN against the tree, or ``None``.
+
+    :func:`patch_declared_ops` reads the diff headers and believes them. That is
+    the right source for WHAT a patch declares, but it establishes nothing about
+    whether the tree being captured actually contains it, and two gaps follow:
+
+    * an ordinary modification declares ``upsert``, and the capture calls any
+      existing file an upsert -- so a KEEP reached with its mutation inputs
+      stripped ships the BASE bytes under a declaration that says they were
+      changed, and the recipe's patch step and its snapshot describe different
+      results;
+    * the strip level is guessed from paths that currently exist, and a deletion
+      has erased exactly that evidence, so a ``-p0`` deletion resolves at
+      ``-p1`` and the capture emits a complete tombstone for a path that was
+      never in the tree.
+
+    Both are settled by asking git rather than by guessing. A patch that is
+    applied can be un-applied, so a clean ``git apply --reverse --check`` at
+    some level is proof of presence AND identifies the level. Reverse-applying
+    a deletion only creates a file, which succeeds at more than one level, so
+    the base tree breaks the tie: every path the patch modifies or deletes must
+    have existed at ``base_sha``, and every path it creates must not have.
+
+    Returns:
+        The proven ``{rel: op}`` map, or ``None`` when the patch cannot be shown
+        to be what the tree contains -- which the caller must treat as an
+        undeclared step rather than a satisfied one.
+    """
+    try:
+        text = patch.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    pairs = patch_file_targets(text)
+    if not pairs or not _declares_every_block(text, pairs):
+        return None
+    for level in _P_LEVELS:
+        ops: dict[str, str] = {}
+        consistent = True
+        for old, new in pairs:
+            rel_new = _strip_path_prefix(new, level) if new and new != _PATCH_DEV_NULL else None
+            rel_old = _strip_path_prefix(old, level) if old and old != _PATCH_DEV_NULL else None
+            # A path the patch modifies, renames from, or deletes was in the
+            # base tree; one it creates was not. Either answer being
+            # unavailable leaves the level unconfirmed rather than confirmed.
+            if rel_old is not None:
+                consistent = _path_in_tree(framework_root, base_sha, rel_old) is True
+            elif rel_new is not None:
+                consistent = _path_in_tree(framework_root, base_sha, rel_new) is False
+            else:
+                consistent = False
+            if not consistent:
+                break
+            if rel_new:
+                ops[rel_new] = "upsert"
+                if rel_old and rel_old != rel_new:
+                    ops[rel_old] = "delete"
+            elif rel_old:
+                ops[rel_old] = "delete"
+        if consistent and ops and _reverses_cleanly(framework_root, patch, level):
+            return ops
+    return None
 
 
 def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
@@ -339,5 +459,6 @@ __all__ = [
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
     "patch_declared_ops",
+    "verified_patch_ops",
     "harvest_realized_diff",
 ]

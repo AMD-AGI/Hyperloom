@@ -20,6 +20,7 @@ and records its own row.
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -129,6 +130,15 @@ _RECIPE_KEYS: tuple[str, ...] = (
     "launch_evidence",
 )
 
+#: Ceiling on the serialized recipe. A real host's environment closure runs to
+#: roughly 12 KB, so this is generous; what it exists for is that nothing else
+#: on this path bounds the block. Exceeding it does NOT truncate: a shortened
+#: closure is indistinguishable from a narrow one, and the verdict was computed
+#: over the full payload, so the pair would contradict each other. The recipe is
+#: replaced by the explicit ``not_evaluated`` decision instead, which every
+#: consumer already reads as insufficient.
+_MAX_RECIPE_BYTES = 256 * 1024
+
 
 def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[str, Any]:
     """Project the durable round state onto the replay contract and judge it.
@@ -172,6 +182,17 @@ def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[st
         note_failure(section="enablement_event", error=exc, detail="enablement event: recipe projection failed")
     if not isinstance(section.get("replay_sufficiency"), Mapping):
         section["replay_sufficiency"] = read_status({})
+    try:
+        oversize = len(json.dumps(section, default=str).encode("utf-8")) > _MAX_RECIPE_BYTES
+    except (TypeError, ValueError):
+        oversize = True
+    if oversize:
+        note_failure(
+            section="enablement_event",
+            error=ValueError("recipe exceeds the recorded ceiling"),
+            detail="enablement event: recipe too large to record; reporting it as unjudged",
+        )
+        return {"replay_sufficiency": read_status({})}
     return section
 
 

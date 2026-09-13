@@ -333,7 +333,7 @@ def _patch_step_reasons(
     by_root: Mapping[str, Mapping[str, Any]],
     steps: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Judge every patch step against the snapshot of the files IT declares.
+    """Judge every patch step against the capture of the files IT declares.
 
     :func:`_expected_op_reasons` walks ``accepted_stack_targets`` and asks
     whether each target it names was captured. That direction cannot see a
@@ -345,19 +345,26 @@ def _patch_step_reasons(
     than it replays is refused by the deciding side rather than only by the
     producing side happening to be correct.
 
-    This rule is scoped to the gap the others cannot reach, because a reason set
-    wider than the defect makes the verdict unreadable. Already owned elsewhere,
-    and therefore skipped here:
+    Two things are checked, and neither is "does this step's operation match the
+    snapshot":
 
-    * a step whose ``root_id`` matches no root record -- ``root_unidentified``;
-    * a root record whose capture returned no manifest -- ``source_snapshot_missing``;
-    * a target ``accepted_stack_targets`` names under the operation this step
-      declares -- ``accepted_stack_not_launched``.
+    * COVERAGE -- every file a step touches is named by the accepted stack and
+      present in that root's capture. This is what catches a recipe replaying
+      more rounds than were captured.
+    * END-STATE AGREEMENT -- for each file, the LAST step that declares it
+      agrees with the operation the accepted stack records. That ordered fold is
+      how the producer builds the stack summary, so a disagreement means the
+      step list and the summary describe different end states.
 
-    What is left is exactly this rule's own: a snapshot that exists and does not
-    cover a target only this step declares. A target named under a *different*
-    operation stays here too, because comparing the stack's op against the
-    snapshot cannot see that the step wanted another one.
+    A step's own operation is an INTERMEDIATE state while the snapshot is the
+    final one, so comparing them directly would refuse a legitimate stack: a
+    round that deletes a file and a later round that recreates it is correct,
+    ends as an upsert, and must certify. Refusing a valid stack costs the
+    verdict its meaning as surely as certifying a broken one.
+
+    Defects already owned elsewhere are skipped so one defect yields one code: a
+    step whose ``root_id`` matches no root record is ``root_unidentified``, and
+    a root whose capture returned no manifest is ``source_snapshot_missing``.
 
     Args:
         section: The emitted section, read for ``accepted_stack_targets``.
@@ -365,44 +372,52 @@ def _patch_step_reasons(
         steps: The projected recipe steps.
 
     Returns:
-        One reason per patch step that cannot be shown to be covered.
+        One reason per patch step that cannot be shown to be covered, or whose
+        end state contradicts the accepted stack.
     """
     expected = section.get("accepted_stack_targets")
     expected = expected if isinstance(expected, Mapping) else {}
+    patch_steps = [(index, step) for index, step in enumerate(steps) if step.get("kind") == PATCH_KIND]
+    # Which step last declares each (root, file); only that one states the end
+    # state, so only that one is compared against the accepted stack.
+    last_declaring: dict[tuple[str, str], int] = {}
+    for index, step in patch_steps:
+        declared = step.get("targets")
+        if isinstance(declared, Mapping):
+            for rel in declared:
+                last_declaring[(str(step.get("root_id") or ""), str(rel))] = index
     reasons: list[dict[str, Any]] = []
-    for index, step in enumerate(steps):
-        if step.get("kind") != PATCH_KIND:
-            continue
+    for index, step in patch_steps:
         # ``step[index]``, never the patch path: a scope is an address into the
         # recipe, and a reason that carries a host path leaks a value.
         scope = f"step[{index}]"
         declared = step.get("targets")
-        # ``None`` is "no producer recorded this", which is not the same claim as
-        # "this patch declares nothing" -- and a patch that declares nothing is
-        # itself a step a replay cannot act on.
+        # ``None`` is "no producer recorded this", which is not the same claim
+        # as "this patch declares nothing" -- and a patch that declares nothing
+        # is itself a step a replay cannot act on.
         if not isinstance(declared, Mapping) or not declared:
             reasons.append(_reason("patch_targets_unknown", scope))
             continue
         root_id = str(step.get("root_id") or "")
-        named = expected.get(root_id)
-        named = named if isinstance(named, Mapping) else {}
-        unreached = {
-            str(rel): str(op) for rel, op in declared.items() if str(named.get(str(rel)) or "") != str(op)
-        }
-        if not unreached:
-            continue
         snapshot = by_root.get(root_id)
         if not isinstance(snapshot, Mapping):
-            # ``root_unidentified`` or ``source_snapshot_missing`` already
-            # stands over this step; both refuse, and one code per defect is
-            # what keeps the verdict readable.
             continue
+        named = expected.get(root_id)
+        named = named if isinstance(named, Mapping) else {}
         captured = {
             str(f.get("rel")): str(f.get("op")) for f in (snapshot.get("files") or []) if isinstance(f, Mapping)
         }
-        if any(captured.get(rel) != op for rel, op in unreached.items()):
-            reasons.append(_reason("patch_step_not_captured", scope))
+        for raw_rel, raw_op in declared.items():
+            rel, op = str(raw_rel), str(raw_op)
+            # ``missing`` is the capture reporting that it could not read the
+            # file, which is not coverage.
+            uncovered = rel not in named or captured.get(rel, "missing") == "missing"
+            disagrees = last_declaring.get((root_id, rel)) == index and str(named.get(rel) or "") != op
+            if uncovered or disagrees:
+                reasons.append(_reason("patch_step_not_captured", scope))
+                break
     return reasons
+
 
 
 def _expected_op_reasons(

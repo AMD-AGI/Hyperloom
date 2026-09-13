@@ -577,17 +577,59 @@ def _candidate_mutation_roots(*, params: dict[str, Any], done_payload: dict[str,
     return list(dict.fromkeys(r for r in roots if r))
 
 
-def _note_pre_mutation_head(ctx: Any, root: str | Path | None) -> None:
-    """Record ``root``'s HEAD once, the first time the round is about to touch it.
+def _note_pre_mutation_head(ctx: Any, root: str | Path | None, *, enablement: bool = False) -> None:
+    """Record ``root``'s HEAD once, before the first mutation of it.
 
-    Never replaced: a later read would name a tree this round has already
-    changed, and every patch the recipe carries would replay onto its own result.
+    Never replaced: a later read would name a tree that has already changed, and
+    every patch the recipe carries would replay onto its own result.
+
+    For an enablement round the scope of "once" is the STACK, not the round. A
+    KEEP is committed, and an ADVANCED round commits and stacks its patch while
+    recording no per-root identity of its own, so by the next round HEAD already
+    contains every earlier round's work. Reading it again would name a tree the
+    recipe's own earlier patch steps have already been applied to, and a
+    consumer replaying that would apply them a second time. The durable map is
+    therefore consulted before git and written first-writer-wins -- which also
+    carries the reading across a resume, where the per-round map does not
+    survive at all.
+
+    Args:
+        ctx: The executor context; carries the per-round map and the shared state.
+        root: The tree about to be mutated.
+        enablement: Whether this round belongs to the enablement stack. An
+            ordinary patch round must NOT seed the enablement base: the head
+            before an unrelated patch is not the tree the enablement stack
+            applies to.
     """
     heads: dict[str, str] = getattr(ctx, "_ip_base_sha_by_root", None) or {}
     key = str(root or "")
-    if key and key not in heads:
-        heads[key] = _git_head_sha(Path(key))
+    if not key:
+        ctx._ip_base_sha_by_root = heads
+        return
+    durable = _durable_base_sha_by_root(ctx) if enablement else {}
+    if key not in heads:
+        heads[key] = str(durable.get(key) or "") or _git_head_sha(Path(key))
     ctx._ip_base_sha_by_root = heads
+    if enablement and heads.get(key) and not str(durable.get(key) or ""):
+        _persist_base_sha_for_root(ctx, key, str(heads[key]))
+
+
+def _durable_base_sha_by_root(ctx: Any) -> dict[str, str]:
+    """The per-root base shas earlier rounds of this stack already recorded."""
+    raw = getattr(getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None), "base_sha_by_root", None)
+    return {str(k): str(v) for k, v in raw.items() if str(k) and str(v)} if isinstance(raw, Mapping) else {}
+
+
+def _persist_base_sha_for_root(ctx: Any, root: str, sha: str) -> None:
+    """Record this root's pre-mutation head on the durable stack, once."""
+    enablement = getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None)
+    if enablement is None:
+        return
+    current = dict(getattr(enablement, "base_sha_by_root", None) or {})
+    if current.get(root):
+        return
+    current[root] = sha
+    enablement.base_sha_by_root = current
 
 
 def _accepted_patch_roots(
@@ -645,12 +687,18 @@ def _inherited_base_sha_by_root(enablement: Any) -> dict[str, str]:
     one that names the tree the whole stack applies to.
     """
     inherited: dict[str, str] = {}
+    # The roots records only exist from the first KEEP onward; the durable map
+    # is written by every round that mutates a tree, advanced ones included, so
+    # it is the one that survives an ADVANCED -> KEEP sequence.
+    raw = getattr(enablement, "base_sha_by_root", None)
+    if isinstance(raw, Mapping):
+        inherited.update({str(k): str(v) for k, v in raw.items() if str(k) and str(v)})
     for record in getattr(enablement, "roots", None) or []:
         if not isinstance(record, Mapping):
             continue
         path, sha = str(record.get("path") or ""), str(record.get("base_sha") or "")
         if path and sha:
-            inherited[path] = sha
+            inherited.setdefault(path, sha)
     return inherited
 
 
@@ -2458,8 +2506,9 @@ class IntegratePatchExecutor:
         """
         # Before the setup commands, which are the round's first mutation: an
         # install writes into the same trees the patches and artifacts land in.
+        is_enablement = bool(params.get("enablement"))
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
-            _note_pre_mutation_head(ctx, candidate)
+            _note_pre_mutation_head(ctx, candidate, enablement=is_enablement)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
@@ -2766,7 +2815,7 @@ class IntegratePatchExecutor:
 
         # Normally already recorded before the setup commands; a root that
         # resolved only here is still recorded before the stash and the apply.
-        _note_pre_mutation_head(ctx, framework_root)
+        _note_pre_mutation_head(ctx, framework_root, enablement=bool(params.get("enablement")))
         stash_state, stash_note = _git_stash_if_dirty(framework_root)
         if stash_state == "failed":
             log.error(
@@ -3460,7 +3509,7 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import patch_declared_ops
+        from ._patch_snapshot import verified_patch_ops
 
         root = str(framework_root or "")
         # Read as an attribute, not with a default: the durable round state IS
@@ -3542,9 +3591,23 @@ class IntegratePatchExecutor:
         patch_targets: dict[str, dict[str, str]] = {}
         for patch_root, patches in patches_by_root.items():
             for patch in patches:
-                ops = patch_declared_ops(Path(patch_root), [patch])
-                if ops:
-                    patch_targets[str(patch)] = ops
+                # Proven against the tree, not read off the headers and
+                # believed. A patch whose presence cannot be shown declares
+                # nothing here, which the decision refuses as
+                # ``patch_targets_unknown`` -- the alternative is a step that
+                # claims a file the capture holds in its unmodified form.
+                ops = verified_patch_ops(
+                    Path(patch_root), patch, base_sha=str(base_sha_by_root.get(patch_root) or "")
+                )
+                if not ops:
+                    log.warning(
+                        "integrate_patch: enablement KEEP cannot verify patch %s against %s; "
+                        "its targets are left undeclared and the recipe is refused",
+                        patch,
+                        patch_root,
+                    )
+                    continue
+                patch_targets[str(patch)] = ops
                 targets.setdefault(patch_root, {}).update(ops)
         for declared_root, ops in declared_targets(
             framework_root=root,

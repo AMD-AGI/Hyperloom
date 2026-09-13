@@ -576,10 +576,23 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
 # --------------------------------------------------------------------------
 
 
-def _closing_round():
-    """The durable state a boot-origin KEEP leaves behind, one patch deep."""
+def _closing_round(*, captured=True):
+    """The durable state a boot-origin KEEP leaves behind, one patch deep.
+
+    ``captured=False`` removes only the capture, so the difference between the
+    two is exactly the stack evidence the verdict is supposed to judge.
+    """
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
+    root = {
+        "id": "r1",
+        "path": "/fr",
+        "kind": "framework_checkout",
+        "contributions": ["patch_apply"],
+        "is_git": True,
+        "base_sha": "a" * 40,
+        "replay_target": {"anchor": "framework_root", "rel": ""},
+    }
     return EnablementRound(
         succeeded=True,
         framework_root="/fr",
@@ -587,7 +600,36 @@ def _closing_round():
         patch_roots={"/p/1.patch": "/fr"},
         patch_targets={"/p/1.patch": {"srt/a.py": "upsert"}},
         last_specialist_task_id="spec-1",
+        roots=[root] if captured else [],
+        accepted_stack_targets={"r1": {"srt/a.py": "upsert"}} if captured else {},
+        source_snapshots=(
+            [
+                {
+                    "root_id": "r1",
+                    "complete": True,
+                    "snapshot_ref": "optimization_stack/enablement/r1",
+                    "files": [{"rel": "srt/a.py", "op": "upsert"}],
+                }
+            ]
+            if captured
+            else []
+        ),
     )
+
+
+#: Every code that says something about the accepted STACK, as opposed to the
+#: launch, the closure or the setup ledger. One of these standing is what shows
+#: the stack was actually judged.
+_STACK_CODES = frozenset(
+    {
+        "accepted_stack_not_launched",
+        "patch_targets_unknown",
+        "patch_step_not_captured",
+        "source_snapshot_missing",
+        "source_snapshot_incomplete",
+        "root_unidentified",
+    }
+)
 
 
 def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
@@ -602,7 +644,12 @@ def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
 
     recipe = _ext(_bound_session)["recipe"]
     assert recipe is not None, "a closed lane with no verdict is read as never judged"
-    assert recipe["replay_sufficiency"]["status"] in ("sufficient", "insufficient")
+    codes = [r["code"] for r in recipe["replay_sufficiency"]["reasons"]]
+    # ``not_evaluated`` is the fallback a projection that could not run records.
+    # Accepting it would let this pass with the projection gone entirely.
+    assert "not_evaluated" not in codes, recipe["replay_sufficiency"]
+    # The capture is present and complete, so no stack rule may stand.
+    assert not (_STACK_CODES & set(codes)), codes
     # The steps the verdict was reached over travel with it, so a consumer can
     # re-derive the decision rather than only trust it.
     assert [step["kind"] for step in recipe["recipe_steps"]] == ["patch"]
@@ -612,10 +659,11 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
     """Fail closed, both ways: nothing was captured for the patch this recipe
     replays, so the verdict says so rather than the key going missing.
 
-    The outcome is what this test owns -- a KEEP whose stack was never captured
-    closes ``insufficient`` and names why. Which rule catches it is settled in
-    :mod:`test_enablement_replay_sufficiency`, and pinning a specific code here
-    would restate that instead of testing the recorder.
+    This is the counterpart of the sufficient control above: the two fixtures
+    differ only in whether the capture is there, so a pass here and a pass there
+    together show that judgement actually ran over the stack. Which particular
+    rule catches it is settled in :mod:`test_enablement_replay_sufficiency`;
+    pinning one code here would restate that instead of testing the recorder.
     """
     from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS
 
@@ -623,7 +671,7 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,
         reason="kept",
-        enablement=_closing_round(),
+        enablement=_closing_round(captured=False),
         session_dir=str(_bound_session),
         mode="all",
     )
@@ -631,7 +679,9 @@ def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
     decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
     assert decision["status"] == "insufficient"
     codes = [r["code"] for r in decision["reasons"]]
-    assert codes, "an insufficient verdict that names no reason cannot be acted on"
+    # Not the projection giving up -- the stack rules actually firing.
+    assert "not_evaluated" not in codes, decision
+    assert _STACK_CODES & set(codes), codes
     # The vocabulary is closed; an unrecognized code is itself insufficient.
     assert set(codes) <= set(REASON_BLOCKS)
 
@@ -651,3 +701,28 @@ def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_
     recipe = _ext(_bound_session)["recipe"]
     assert recipe is None
     assert read_status(recipe or {})["status"] == "insufficient"
+
+
+def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, monkeypatch):
+    """Nothing else on this path bounds the block, and truncating it would be
+    the wrong bound: a shortened closure is indistinguishable from a narrow one,
+    while the verdict was computed over the full payload. The pair would then
+    contradict each other, so the recipe is replaced by the explicit
+    ``not_evaluated`` decision, which every consumer reads as insufficient."""
+    monkeypatch.setattr(enablement_event, "_MAX_RECIPE_BYTES", 8)
+
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    decision = recipe["replay_sufficiency"]
+    assert decision["status"] == "insufficient"
+    assert [r["code"] for r in decision["reasons"]] == ["not_evaluated"]
+    # Nothing of the oversized payload survives to be read as partial evidence.
+    assert set(recipe) == {"replay_sufficiency"}

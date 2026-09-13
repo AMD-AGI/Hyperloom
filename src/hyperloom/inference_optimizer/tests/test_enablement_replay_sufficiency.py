@@ -1726,13 +1726,60 @@ def test_a_recipe_replaying_a_round_the_capture_missed_is_refused():
     ]
 
 
-def test_a_patch_step_named_under_a_different_operation_is_refused():
-    """Named is not enough: the stack says delete, the step declares upsert."""
-    section = {
-        **_sufficient_section(),
-        "accepted_stack_targets": {"r1": {"srt/a.py": "delete"}},
-        "source_snapshots": [_snapshot(files=(("srt/a.py", "delete"),))],
+def _delete_then_recreate_state():
+    """Round one deletes a file; round two recreates it. End state: it exists."""
+    return {
+        **_sufficient_state(),
+        "kept_patches": ["/p/1.patch", "/p/2.patch"],
+        "patch_targets": {
+            "/p/1.patch": {"srt/a.py": "delete"},
+            "/p/2.patch": {"srt/a.py": "upsert"},
+        },
     }
+
+
+def test_a_round_that_deletes_what_a_later_round_recreates_is_sufficient():
+    """A step's operation is an INTERMEDIATE state; the snapshot is the final
+    one. Comparing them directly refuses a legitimate stack, and a verdict that
+    cannot certify a correct recipe is as useless as one that certifies a
+    broken one."""
+    decision = _decide(_delete_then_recreate_state(), _sufficient_section())
+    assert decision["status"] == "sufficient", decision["reasons"]
+
+
+def test_the_recreated_file_must_still_be_covered_by_the_capture():
+    """Accepting the intermediate delete does not relax coverage."""
+    section = {**_sufficient_section(), "source_snapshots": [_snapshot(files=(("srt/other.py", "upsert"),))]}
+    assert "patch_step_not_captured" in _codes(_decide(_delete_then_recreate_state(), section))
+
+
+def test_the_last_step_to_touch_a_file_must_agree_with_the_accepted_stack():
+    """The stack summary is the ordered fold of the steps, so the final step's
+    operation and the stack's must be the same fact stated twice. When they are
+    not, the step list and the summary describe different end states."""
+    state = {
+        **_sufficient_state(),
+        "kept_patches": ["/p/1.patch", "/p/2.patch"],
+        # The last step to touch the file says delete; the stack says upsert.
+        "patch_targets": {
+            "/p/1.patch": {"srt/a.py": "upsert"},
+            "/p/2.patch": {"srt/a.py": "delete"},
+        },
+    }
+    codes = _codes(_decide(state, _sufficient_section()))
+    assert "patch_step_not_captured" in codes
+
+
+def test_an_earlier_step_disagreeing_with_the_end_state_is_not_faulted():
+    """Only the last declaring step states the end state; an earlier one that
+    differs is the ordinary case of a file edited twice."""
+    decision = _decide(_delete_then_recreate_state(), _sufficient_section())
+    assert [r for r in decision["reasons"] if r["scope"] == "step[0]"] == []
+
+
+def test_a_target_the_capture_could_not_read_is_not_coverage():
+    """``missing`` is the capture reporting failure, not a captured file."""
+    section = {**_sufficient_section(), "source_snapshots": [_snapshot(files=(("srt/a.py", "missing"),))]}
     assert "patch_step_not_captured" in _codes(_decide(_sufficient_state(), section))
 
 
