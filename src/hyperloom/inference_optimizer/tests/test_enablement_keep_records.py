@@ -1151,12 +1151,15 @@ def test_a_deletion_whose_twin_also_exists_at_base_resolves_to_the_right_path(re
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone": "delete"}}
 
 
-def test_a_mixed_diff_whose_metadata_block_cannot_be_read_declares_nothing(repo: Path, tmp_path: Path):
+def test_a_mixed_diff_declares_its_metadata_only_block_too(repo: Path, tmp_path: Path):
     """A pure rename, a mode-only change and a binary block carry no
-    ``---``/``+++`` pair. A patch made only of those already declares nothing;
-    one that ALSO carries a text hunk declared a non-empty but PARTIAL map, and
-    the accepted stack then omitted exactly the same files, so nothing
-    downstream could see the omission."""
+    ``---``/``+++`` pair, so a header parse declared a non-empty but PARTIAL
+    map and the accepted stack omitted exactly the same files -- nothing
+    downstream could see the omission.
+
+    The inventory is now git's own, so the mode-only block is declared rather
+    than missed, and the patch is certified on ALL of its targets instead of
+    being refused for a gap in the reader."""
     (repo / "srt" / "exec.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     _commit_all(repo, "add the script whose mode the patch changes")
     base_sha = _git_head_sha(repo)
@@ -1169,10 +1172,12 @@ def test_a_mixed_diff_whose_metadata_block_cannot_be_read_declares_nothing(repo:
     )
     _git(repo, "apply", str(mixed))
     _commit_all(repo, "mixed applied")
-    # The text half alone would have passed; the announced block count is what
-    # makes the partial case indistinguishable from the empty one.
+    # The header parse still sees only the text half...
     assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
-    assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) is None
+    # ...while git reports both entries the apply actually touched.
+    assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) == {
+        str(mixed): {TARGET: "upsert", "srt/exec.sh": "upsert"}
+    }
 
 
 def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: Path, tmp_path: Path):
@@ -1312,6 +1317,11 @@ def test_a_non_git_root_is_still_declarable_without_a_base(tmp_path: Path):
 
     # No base commit exists, so the replay cannot run at all...
     assert replayed_stack_ops(plain, [patch], base_sha="") is None
+    # ...but the overlay must still list EVERY target, so the inventory is
+    # git's own reading of the patch rather than a header parse.
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
+
+    assert declared_inventory_without_base(plain, patch) == {"mod.py": "upsert"}
 
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(plain)))
@@ -1331,3 +1341,127 @@ def test_a_non_git_root_is_still_declarable_without_a_base(tmp_path: Path):
     assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
     record = out["enablement_roots"][0]
     assert record["is_git"] is False and record["base_sha"] == ""
+
+
+# --------------------------------------------------------------------------
+# Entry kinds the snapshot contract cannot represent, and the ones it can only
+# represent if it is asked the right question.
+# --------------------------------------------------------------------------
+
+
+def test_a_hunk_body_cannot_pass_itself_off_as_a_file_header(repo: Path, tmp_path: Path):
+    """A removed line beginning ``-- `` followed by an added line beginning
+    ``++ `` reads as another file header to a text parse -- enough to make a
+    block count agree while a mode-only block goes undeclared. The inventory is
+    git's, so the real entries are the ones reported."""
+    (repo / "srt" / "f").write_text("-- a/fake\n", encoding="utf-8")
+    (repo / "srt" / "fake").write_text("untouched\n", encoding="utf-8")
+    (repo / "srt" / "script").write_text("#!/bin/sh\n", encoding="utf-8")
+    _commit_all(repo, "decoy base")
+    base_sha = _git_head_sha(repo)
+    (repo / "srt" / "f").write_text("++ b/fake\n", encoding="utf-8")
+    (repo / "srt" / "script").chmod(0o755)
+    _commit_all(repo, "content that looks like a header, plus a mode change")
+    patch = _patch(tmp_path, "decoy.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+
+    ops = replayed_stack_ops(repo, [patch], base_sha=base_sha)
+    assert ops is not None
+    declared = ops[str(patch)]
+    # The decoy is NOT declared; the mode-only block IS.
+    assert "srt/fake" not in declared
+    assert declared == {"srt/f": "upsert", "srt/script": "upsert"}
+
+
+def test_a_stack_touching_a_symlink_is_refused(repo: Path, tmp_path: Path):
+    """``shutil.copy2`` follows a link and writes a REGULAR FILE, so a recipe
+    certified over one restores the wrong kind of entry. Until the snapshot can
+    represent a link, refusing is the fail-closed answer."""
+    base_sha = _git_head_sha(repo)
+    _git(repo, "-c", "core.symlinks=true", "--version")
+    (repo / "srt" / "link").symlink_to("module.py")
+    _commit_all(repo, "add a symlink")
+    patch = _patch(tmp_path, "link.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_deletion_is_not_satisfied_by_a_populated_directory(repo: Path, tmp_path: Path):
+    """Treating "neither is a regular file" as agreement let a directory stand
+    in for a deleted path. A deletion has to be actual absence."""
+    victim = repo / "srt" / "victim.py"
+    victim.write_text("bye\n", encoding="utf-8")
+    _commit_all(repo, "add the file the patch deletes")
+    base_sha = _git_head_sha(repo)
+    victim.unlink()
+    _commit_all(repo, "deleted")
+    patch = _patch(tmp_path, "del.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/victim.py": "delete"}}
+
+    # A directory left at the deleted path is not a reproduced deletion.
+    victim.mkdir()
+    (victim / "live.py").write_text("still here\n", encoding="utf-8")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_export_attributes_cannot_move_the_base_the_replay_compares_against(repo: Path, tmp_path: Path):
+    """``git archive`` honours ``export-subst``, so it can hand the replay bytes
+    a checkout of that commit would never produce -- accepting an unrecorded
+    substitution as if the patch had made it. A real checkout cannot."""
+    (repo / ".gitattributes").write_text("srt/tpl.py export-subst\n", encoding="utf-8")
+    (repo / "srt" / "tpl.py").write_text("SHA = $Format:%H$\nvalue = 1\n", encoding="utf-8")
+    _commit_all(repo, "a template tracked with export-subst")
+    base_sha = _git_head_sha(repo)
+    (repo / "srt" / "tpl.py").write_text("SHA = $Format:%H$\nvalue = 2\n", encoding="utf-8")
+    _commit_all(repo, "the accepted change, away from the placeholder")
+    patch = _patch(tmp_path, "tpl.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/tpl.py": "upsert"}}
+
+    # An unrecorded substitution no patch made must NOT verify.
+    (repo / "srt" / "tpl.py").write_text(f"SHA = {base_sha}\nvalue = 2\n", encoding="utf-8")
+    _commit_all(repo, "an unrecorded substitution")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_the_execute_bit_compared_is_the_one_git_records(repo: Path, tmp_path: Path):
+    """``mode & 0o111`` asks whether ANY execute bit is set, which accepts 0645
+    -- a mode git classifies as non-executable and whose owner cannot run it."""
+    script = repo / "srt" / "run.sh"
+    script.write_text("#!/bin/sh\necho one\n", encoding="utf-8")
+    _commit_all(repo, "add the script")
+    base_sha = _git_head_sha(repo)
+    script.write_text("#!/bin/sh\necho two\n", encoding="utf-8")
+    script.chmod(0o755)
+    _commit_all(repo, "content and mode")
+    patch = _patch(tmp_path, "x.patch", _git(repo, "diff", "HEAD~1", "HEAD") + "\n")
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/run.sh": "upsert"}}
+
+    script.chmod(0o645)
+    assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
+
+
+def test_a_non_git_overlay_lists_a_mode_only_block_too(tmp_path: Path):
+    """Restoring the old header parse for non-git roots would restore exactly
+    its omissions, for the one class of root the replay cannot check."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
+
+    plain = tmp_path / "site-packages" / "pkg"
+    plain.mkdir(parents=True)
+    (plain / "a.py").write_text(PATCHED_TEXT, encoding="utf-8")
+    (plain / "script").write_text("#!/bin/sh\n", encoding="utf-8")
+    (plain / "script").chmod(0o755)
+    mixed = _patch(
+        tmp_path,
+        "ngmix.patch",
+        f"diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}"
+        "diff --git a/script b/script\nold mode 100644\nnew mode 100755\n",
+    )
+    assert declared_inventory_without_base(plain, mixed) == {"a.py": "upsert", "script": "upsert"}
+
+
+def test_a_non_git_patch_whose_targets_do_not_resolve_declares_nothing(tmp_path: Path):
+    """An unresolvable level is refused rather than guessed at."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import declared_inventory_without_base
+
+    plain = tmp_path / "pkg"
+    plain.mkdir(parents=True)
+    patch = _patch(tmp_path, "absent.patch", "--- a/nowhere.py\n+++ b/nowhere.py\n@@ -1 +1 @@\n-a\n+b\n")
+    assert declared_inventory_without_base(plain, patch) is None

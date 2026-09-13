@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import tempfile
@@ -128,96 +129,166 @@ def patch_declared_ops(framework_root: Path, patches: list[Path]) -> dict[str, s
 _GIT_DIFF_BLOCK_RE = re.compile(r"^diff --git ", re.MULTILINE)
 
 
-def _declares_every_block(text: str, pairs: list[tuple[str, str]]) -> bool:
-    """Whether every file block a git diff announces reached ``pairs``.
+#: Git's own identity for the throwaway replay commits; the source repository's
+#: config is never read or written.
+_REPLAY_IDENTITY: tuple[str, ...] = ("-c", "user.email=replay@hyperloom.invalid", "-c", "user.name=hyperloom")
 
-    ``patch_file_targets`` reads adjacent ``---``/``+++`` lines, which a pure
-    rename, a mode-only change and a ``GIT binary patch`` block need not carry.
-    A patch made only of those declares nothing and is refused for it; one that
-    ALSO carries an ordinary text hunk declares a non-empty but partial map, and
-    both the per-patch map and the accepted stack then omit the same files -- so
-    nothing downstream can see the omission. Counting the announced blocks is
-    what makes the partial case indistinguishable from the empty one.
-    """
-    blocks = len(_GIT_DIFF_BLOCK_RE.findall(text))
-    return blocks == 0 or blocks == len(pairs)
+#: Tree entry modes the snapshot contract cannot represent. A symlink is
+#: captured by ``shutil.copy2``, which follows it and writes a REGULAR FILE, so
+#: a recipe certified over one restores the wrong kind of entry; a gitlink names
+#: a submodule whose checked-out content no archive or apply reconstructs.
+#: Neither can be shipped honestly, so a stack touching one is refused.
+_UNREPRESENTABLE_MODES: frozenset[str] = frozenset({"120000", "160000"})
 
 
-def _extract_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool:
-    """Materialise ``base_sha``'s tree into ``dest``. Never mutates the source."""
+def _git(tree: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess[bytes] | None:
+    """Run git inside ``tree``; ``None`` when it could not be run at all."""
     try:
-        archive = subprocess.run(
-            ["git", *safe_directory_args(["archive", base_sha], cwd=str(framework_root))],
-            cwd=str(framework_root),
-            capture_output=True,
-            timeout=300,
-            check=False,
-        )
-        if archive.returncode != 0:
-            return False
-        done = subprocess.run(["tar", "-x", "-C", str(dest)], input=archive.stdout, capture_output=True, timeout=300)
+        return subprocess.run(["git", *args], cwd=str(tree), capture_output=True, timeout=timeout, check=False)
     except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _checkout_base_tree(framework_root: Path, base_sha: str, dest: Path) -> bool:
+    """Check ``base_sha`` out into ``dest``, byte for byte.
+
+    A real checkout rather than ``git archive``: archive honours
+    ``export-ignore`` and ``export-subst``, so it can drop a tracked file the
+    stack patches, or substitute a ``$Format:...$`` placeholder the recorded
+    commit actually contains. Either makes the replay compare against bytes a
+    consumer checking out that commit would never see -- once refusing a valid
+    stack, once accepting an invalid one.
+
+    ``--shared`` reads the source object database through an alternate and
+    ``-n`` skips the checkout until the detached one below, so the captured
+    repository is never written to.
+    """
+    clone = _git(Path("."), "clone", "--shared", "-n", "-q", str(framework_root), str(dest), timeout=600)
+    if clone is None or clone.returncode != 0:
         return False
-    return done.returncode == 0
+    done = _git(dest, "checkout", "-q", "--detach", base_sha, timeout=600)
+    return done is not None and done.returncode == 0
 
 
-def _apply_at_some_level(tree: Path, patch: Path) -> int | None:
-    """Apply ``patch`` inside ``tree`` at the first level that takes it."""
-    for level in _P_LEVELS:
-        try:
-            check = subprocess.run(
-                ["git", "apply", "--check", f"-p{level}", str(patch)],
-                cwd=str(tree),
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-            if check.returncode != 0:
-                continue
-            done = subprocess.run(
-                ["git", "apply", f"-p{level}", str(patch)],
-                cwd=str(tree),
-                capture_output=True,
-                timeout=60,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if done.returncode == 0:
-            return level
-    return None
+def _commit_replay_step(tree: Path) -> bool:
+    """Commit whatever the last apply left, so its inventory can be read back."""
+    added = _git(tree, "add", "-A")
+    if added is None or added.returncode != 0:
+        return False
+    done = _git(tree, *_REPLAY_IDENTITY, "commit", "--allow-empty", "-q", "-m", "replay step")
+    return done is not None and done.returncode == 0
 
 
-def _ops_at_level(text: str, level: int) -> dict[str, str]:
-    """The ops a diff declares once the strip level is known to be right."""
+def _step_inventory(tree: Path) -> dict[str, str] | None:
+    """What the last replay commit changed, as git itself reports it.
+
+    Read from ``git diff --raw`` rather than parsed out of the diff text.
+    ``patch_file_targets`` cannot tell a file header from a hunk body, so a
+    removed line beginning ``-- `` followed by an added line beginning ``++ ``
+    reads as another header pair -- which is enough to make a block count agree
+    while a mode-only or binary block goes undeclared. Git knows exactly which
+    entries the apply touched, and their modes, so nothing is inferred here.
+
+    Returns ``None`` when a touched entry is of a kind the snapshot cannot
+    represent, which the caller treats as an unverifiable stack.
+    """
+    done = _git(tree, "diff", "--raw", "--no-renames", "-z", "HEAD~1", "HEAD")
+    if done is None or done.returncode != 0:
+        return None
+    fields = done.stdout.decode("utf-8", errors="replace").split("\0")
     ops: dict[str, str] = {}
-    for old, new in patch_file_targets(text):
-        rel_new = _strip_path_prefix(new, level) if new and new != _PATCH_DEV_NULL else None
-        rel_old = _strip_path_prefix(old, level) if old and old != _PATCH_DEV_NULL else None
-        if rel_new:
-            ops[rel_new] = "upsert"
-            if rel_old and rel_old != rel_new:
-                ops[rel_old] = "delete"
-        elif rel_old:
-            ops[rel_old] = "delete"
+    index = 0
+    while index + 1 < len(fields):
+        meta, rel = fields[index], fields[index + 1]
+        index += 2
+        if not meta.startswith(":") or not rel:
+            continue
+        parts = meta[1:].split()
+        if len(parts) < 5:
+            return None
+        src_mode, dst_mode, status = parts[0], parts[1], parts[4]
+        if src_mode in _UNREPRESENTABLE_MODES or dst_mode in _UNREPRESENTABLE_MODES:
+            return None
+        ops[rel] = "delete" if status.startswith("D") else "upsert"
     return ops
 
 
-def _same_file(replayed: Path, captured: Path) -> bool:
-    """Whether two paths hold the same bytes AND the same executability."""
-    try:
-        if replayed.is_file() != captured.is_file():
-            return False
-        if not replayed.is_file():
+def _apply_at_some_level(tree: Path, patch: Path) -> bool:
+    """Apply ``patch`` inside ``tree`` at the first level that takes it."""
+    for level in _P_LEVELS:
+        check = _git(tree, "apply", "--check", f"-p{level}", str(patch), timeout=60)
+        if check is None or check.returncode != 0:
+            continue
+        done = _git(tree, "apply", f"-p{level}", str(patch), timeout=60)
+        if done is not None and done.returncode == 0:
             return True
+    return False
+
+
+def _same_entry(replayed: Path, captured: Path, *, op: str) -> bool:
+    """Whether the replayed entry and the captured one are the same thing.
+
+    Type-aware on purpose. ``is_file``/``read_bytes``/``stat`` all follow
+    symlinks, so comparing through them establishes neither the kind of entry
+    nor a link's target; and treating "neither is a regular file" as agreement
+    lets a populated directory stand in for a deletion.
+    """
+    if op == "delete":
+        # Absence, not merely "not a regular file": a directory or a dangling
+        # link left where the stack deleted a path is not a reproduced deletion.
+        return not os.path.lexists(replayed) and not os.path.lexists(captured)
+    if replayed.is_symlink() or captured.is_symlink():
+        return False
+    try:
+        if not (replayed.is_file() and captured.is_file()):
+            return False
         if replayed.read_bytes() != captured.read_bytes():
             return False
-        # A recipe that restores a script without its execute bit does not
-        # reproduce the accepted stack, and git treats a mode disagreement as a
-        # warning rather than a failure, so it has to be compared here.
-        return bool(replayed.stat().st_mode & 0o111) == bool(captured.stat().st_mode & 0o111)
+        # The OWNER execute bit, which is the one git records as 100755. Asking
+        # whether ANY execute bit is set accepts 0645, which git classifies as
+        # non-executable and whose owner cannot run it.
+        return (replayed.stat().st_mode & 0o100) == (captured.stat().st_mode & 0o100)
     except OSError:
         return False
+
+
+def declared_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | None:
+    """The complete target set of ``patch``, for a root with no base commit.
+
+    Still git's own reading rather than a hand parse: ``--numstat`` lists every
+    file the patch touches, mode-only and binary blocks included, and
+    ``--summary`` says which of them are creations, deletions and renames. The
+    strip level is then the one whose resulting paths agree with the tree --
+    every upsert present, every deletion absent -- and an ambiguous or
+    unsatisfiable level is refused rather than guessed at.
+    """
+    for level in _P_LEVELS:
+        numstat = _git(tree, "apply", "--numstat", f"-p{level}", str(patch), timeout=60)
+        summary = _git(tree, "apply", "--summary", f"-p{level}", str(patch), timeout=60)
+        if numstat is None or summary is None or numstat.returncode != 0 or summary.returncode != 0:
+            continue
+        ops: dict[str, str] = {}
+        for row in numstat.stdout.decode("utf-8", errors="replace").splitlines():
+            parts = row.split("\t")
+            if len(parts) >= 3 and parts[2]:
+                ops[parts[2]] = "upsert"
+        for row in summary.stdout.decode("utf-8", errors="replace").splitlines():
+            row = row.strip()
+            if row.startswith("delete mode "):
+                ops[row.split(" ", 3)[-1]] = "delete"
+            elif row.startswith("rename "):
+                # ``rename old => new (NN%)`` -- the source is gone either way.
+                body = row[len("rename ") :].split(" (")[0]
+                if " => " in body:
+                    ops[body.split(" => ")[0]] = "delete"
+        if not ops:
+            continue
+        if all(
+            (not os.path.lexists(tree / rel)) if op == "delete" else (tree / rel).is_file()
+            for rel, op in ops.items()
+        ):
+            return ops
+    return None
 
 
 def replayed_stack_ops(
@@ -229,24 +300,24 @@ def replayed_stack_ops(
     """Replay the ordered stack from ``base_sha`` and prove it rebuilds the tree.
 
     This is the only question worth asking of a replay contract: does
-    ``base_sha`` plus these patches, in this order, produce the files the
+    ``base_sha`` plus these patches, in this order, produce the entries the
     capture is about to ship? Everything cheaper answers a different question
     and gets it wrong in both directions.
 
     Reading the diff headers says what a patch DECLARES and nothing about the
     tree. Reverse-applying each patch against the FINAL tree is worse than it
-    looks: git searches for the postimage with an offset, so a patch that was
-    never applied can reverse against a similar block elsewhere in the file; a
-    deletion reverses by creating a file, which succeeds whatever it writes; a
+    looks: git locates a postimage with an offset, so a patch that was never
+    applied reverses against a similar block elsewhere in the file; a deletion
+    reverses by creating a file, whatever it writes and at whatever level; a
     mode disagreement is only a warning; and it is simultaneously too strict,
     because an earlier round's patch cannot reverse once a later round has
-    rewritten the same region, and because a patch that edits a file an earlier
-    round created has no preimage in the stack's base at all.
+    rewritten the same region, and a patch editing a file an earlier round
+    created has no preimage in the base at all.
 
-    Replaying forward has none of those problems, because every patch meets
-    exactly the tree it was authored against: the level that applies is the
-    level that was used, the ops it declares are then trustworthy, and the
-    final comparison covers content and mode for every declared path.
+    Replaying forward has none of those problems: every patch meets exactly the
+    tree it was authored against, the inventory comes from git rather than from
+    a text parse, and the final comparison covers existence, kind, bytes and
+    the executable bit for every entry the stack touched.
 
     Args:
         framework_root: The captured tree, compared against the replay.
@@ -254,34 +325,27 @@ def replayed_stack_ops(
         base_sha: The commit the stack applies to.
 
     Returns:
-        ``{patch_path: {rel: op}}`` when the replay reproduces every declared
-        path, else ``None`` -- which the caller must treat as an undeclared
+        ``{patch_path: {rel: op}}`` when the replay reproduces every touched
+        entry, else ``None`` -- which the caller must treat as an undeclared
         step rather than a satisfied one.
     """
-    # No explicit git-tree probe: ``git archive`` below fails on a root that is
-    # not one, which is the same answer for one fewer subprocess.
     if not base_sha or not patches:
         return None
     tmp = Path(tempfile.mkdtemp(prefix="hl-replay-"))
     try:
-        if not _extract_base_tree(framework_root, base_sha, tmp):
+        if not _checkout_base_tree(framework_root, base_sha, tmp):
             return None
         by_patch: dict[str, dict[str, str]] = {}
         for patch in patches:
-            try:
-                text = patch.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            if not _apply_at_some_level(tmp, patch) or not _commit_replay_step(tmp):
                 return None
-            pairs = patch_file_targets(text)
-            if not pairs or not _declares_every_block(text, pairs):
+            ops = _step_inventory(tmp)
+            if ops is None:
                 return None
-            level = _apply_at_some_level(tmp, patch)
-            if level is None:
-                return None
-            by_patch[str(patch)] = _ops_at_level(text, level)
+            by_patch[str(patch)] = ops
         for ops in by_patch.values():
-            for rel in ops:
-                if not _same_file(tmp / rel, framework_root / rel):
+            for rel, op in ops.items():
+                if not _same_entry(tmp / rel, framework_root / rel, op=op):
                     return None
         return by_patch
     finally:
@@ -504,6 +568,7 @@ __all__ = [
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
     "patch_declared_ops",
+    "declared_inventory_without_base",
     "replayed_stack_ops",
     "harvest_realized_diff",
 ]

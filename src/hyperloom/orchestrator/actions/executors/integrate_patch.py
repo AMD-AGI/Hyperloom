@@ -3547,7 +3547,7 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import patch_declared_ops, replayed_stack_ops
+        from ._patch_snapshot import declared_inventory_without_base, replayed_stack_ops
 
         root = str(framework_root or "")
         # Read as an attribute, not with a default: the durable round state IS
@@ -3646,10 +3646,24 @@ class IntegratePatchExecutor:
             if replayed is None:
                 # No base commit, so there is no "checkout and apply" replay to
                 # prove: a non-git root is restored by overlaying the snapshot,
-                # which the declared-op rules certify on their own. Falling back
-                # to the headers keeps that path exactly as it was rather than
-                # making a supported contract unsatisfiable by construction.
-                replayed = {str(p): patch_declared_ops(Path(patch_root), [p]) for p in patches}
+                # which the declared-op rules certify on their own. The overlay
+                # still has to contain EVERY target, so the inventory is git's
+                # own -- falling back to a header parse would restore exactly
+                # the omissions this replaces, for the roots nothing else
+                # checks. A patch whose targets cannot be resolved against the
+                # tree declares nothing and the recipe is refused.
+                replayed = {}
+                for patch in patches:
+                    ops = declared_inventory_without_base(Path(patch_root), patch)
+                    if ops is None:
+                        log.warning(
+                            "integrate_patch: enablement KEEP cannot resolve %s against the "
+                            "non-git root %s; its targets are left undeclared",
+                            patch,
+                            patch_root,
+                        )
+                        continue
+                    replayed[str(patch)] = ops
             for patch_path, ops in replayed.items():
                 if not ops:
                     continue
