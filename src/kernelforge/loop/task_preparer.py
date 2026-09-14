@@ -1950,6 +1950,12 @@ async def prepare_task(
             )
         _, commit_out = _git(
             workspace,
+            # ``-c`` lasts one command, so the baseline commit's identity is not
+            # still here; a workspace git cannot name an author for is common.
+            "-c",
+            "user.name=KernelForge",
+            "-c",
+            "user.email=kernel-forge@localhost",
             "commit",
             "-m",
             "forge prepass: prepared measurement driver",
