@@ -217,10 +217,12 @@ def _record_source_attempt(
     params: Mapping[str, Any],
     specialist_task_id: str = "",
 ) -> None:
-    """Record one authored patch's measured attempt on the framework event.
+    """Record one authored patch's measured attempt on the framework timeline event.
 
-    The row keeps the same shape the configuration arm writes, which is what
-    lets the adoption ledger walk both arms with one reader.
+    This function is a pure timeline recorder.  The control-plane ledger write
+    (``SharedState.attempts``) is handled unconditionally at the dispatcher seam
+    in ``attempt_ledger.record_patch_attempt``, independent of the recorder's
+    availability.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -296,26 +298,6 @@ def _record_source_attempt(
         )
     except Exception:  # noqa: BLE001 — observability cannot change write-back
         log.debug("framework timeline: source attempt record failed", exc_info=True)
-    # Write to the unified attempts ledger (C5).
-    try:
-        shared_state = getattr(coord, "shared_state", None)
-        if shared_state is not None:
-            shared_state.record_attempt({
-                "arm": "source",
-                "lever_kind": str(params.get("lever_kind") or ""),
-                "task_id": task_id,
-                "candidate_id": candidate_id,
-                "outcome": status,
-                "verdict": status,
-                "adopted": _is_kept(status),
-                "gain_pct": float(result["delta_pct"]) if result.get("delta_pct") is not None else None,
-                "before_tput": base,
-                "after_tput": result.get("output_throughput"),
-                "error_class": str(result.get("error_class") or ""),
-                "specialist_task_id": specialist_task_id,
-            })
-    except Exception:  # noqa: BLE001 — unified ledger write cannot change the phase
-        log.debug("_record_source_attempt: unified ledger write failed", exc_info=True)
 
 
 def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict[str, Any]]) -> None:
@@ -384,7 +366,7 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 
 
 class FrameworkPhase(CoordinatorCollaborator):
-    """The source arm of the OPTIMIZE phase: upstream candidates, authored patches, and the enablement hand-off."""
+    """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
     def _framework_timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
@@ -443,34 +425,12 @@ class FrameworkPhase(CoordinatorCollaborator):
                 ),
             },
             "source": {
-                "no_keep_streak_threshold": _phase_state.framework_agent_plateau_streak_threshold(),
+                "no_keep_streak_threshold": overrides.get(
+                    "framework_no_keep_streak",
+                    _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
+                ),
                 "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
                 "authoring_enabled": bool(getattr(state, "framework_agent_authoring_enabled", False)),
-            },
-            # Per-lever thresholds (C6) alongside the legacy arm sub-objects.
-            "per_lever": {
-                "config": {
-                    "keep_gain_threshold_pct": overrides.get(
-                        "config_lever_keep_gain_pct",
-                        _phase_state.DEFAULT_PLATEAU_CONFIG_LEVER_KEEP_GAIN_PCT,
-                    ),
-                    "empty_streak_threshold": overrides.get(
-                        "config_lever_empty_streak",
-                        _phase_state.DEFAULT_PLATEAU_CONFIG_LEVER_EMPTY_STREAK,
-                    ),
-                },
-                "source_patch": {
-                    "no_keep_streak_threshold": overrides.get(
-                        "source-patch_no_keep_streak",
-                        _phase_state.DEFAULT_PLATEAU_SOURCE_PATCH_NO_KEEP_STREAK,
-                    ),
-                },
-                "upstream_pr": {
-                    "no_keep_streak_threshold": overrides.get(
-                        "upstream-pr_no_keep_streak",
-                        _phase_state.DEFAULT_PLATEAU_UPSTREAM_PR_NO_KEEP_STREAK,
-                    ),
-                },
             },
         }
 
@@ -2824,16 +2784,12 @@ class FrameworkPhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
-        # If the deliverable also carries config levers, fold them into the same
-        # integrate_patch proposal so the patch and its companion flag are benched
-        # together — the coupled-deliverable fix that closes D1.
-        try:
-            config_levers = _framework_config_levers_from_done(done_payload)
-            if config_levers:
-                integrate_params["extra_server_args"] = str(config_levers.get("extra_server_args") or "")
-                integrate_params["extra_envs"] = dict(config_levers.get("extra_envs") or {})
-        except Exception:  # noqa: BLE001 — best-effort; never drop the patch for a lever failure
-            log.debug("FRAMEWORK: config-lever merge into patch proposal failed task=%s", sid, exc_info=True)
+        # A deliverable carrying both a patch and config levers is one proposal:
+        # the specialist asserted they belong together, so they bench together.
+        config_levers = _framework_config_levers_from_done(done_payload)
+        if config_levers:
+            integrate_params["extra_server_args"] = str(config_levers.get("extra_server_args") or "")
+            integrate_params["extra_envs"] = dict(config_levers.get("extra_envs") or {})
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
         # authored-outcome bridge keys the progress row on the real candidate id.

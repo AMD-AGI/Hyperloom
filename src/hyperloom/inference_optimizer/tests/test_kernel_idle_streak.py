@@ -38,7 +38,7 @@ def kernel_coordinator(tmp_path, monkeypatch):
         return None
 
     c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.phase_explore._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
     c.phase_machine._on_phase_entered = _noop  # type: ignore[method-assign]
     yield c

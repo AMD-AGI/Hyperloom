@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -30,12 +31,10 @@ def _plateaued_explore_state(
         max_minutes=max_minutes,
         macro_cycle=macro_cycle,
     )
-    # No winners → recent_keep_gain 0 < threshold.
-    st.explore_search = {"schema_version": 1, "winners_history": []}
-    # Enough trailing empty specialist rounds → empty_streak >= threshold.
-    st.specialist_rounds = [
-        {"proposals_total": 0, "proposals_kept": 0} for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
-    ]
+    # Enough config attempts that adopted nothing: no recent gain, and a
+    # trailing no-keep run at the threshold.
+    for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
+        st.record_attempt({"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False})
     st.framework_agent_phase_done = True
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]
@@ -98,8 +97,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     st.phase_started_unix = src.phase_started_unix
     st.max_minutes = src.max_minutes
     st.macro_cycle = src.macro_cycle
-    st.explore_search = src.explore_search
-    st.specialist_rounds = src.specialist_rounds
+    st.attempts = src.attempts
     st.framework_agent_phase_done = src.framework_agent_phase_done
     st.roofline_snapshots = src.roofline_snapshots
 

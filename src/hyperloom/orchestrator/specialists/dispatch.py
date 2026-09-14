@@ -700,5 +700,5 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if not source:
             return ""
         if source.startswith(SPECIALIST_FROM_AGENT_PREFIX):
-            return source[len(SPECIALIST_FROM_AGENT_PREFIX):]
+            return source[len(SPECIALIST_FROM_AGENT_PREFIX) :]
         return ""

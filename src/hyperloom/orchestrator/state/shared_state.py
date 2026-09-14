@@ -676,11 +676,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     framework_agent_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # Unified attempt ledger: one entry per measured proposal, both arms.
-    # Written exclusively by writeback; dryness predicates read from here in C6.
+    # One row per measured attempt on any lever; the per-lever dryness judgment
+    # reads it. Writeback is the sole writer.
     attempts: list[dict[str, Any]] = field(default_factory=list)
-    # Pre-seeded negatives from warm recipes; dryness predicates consult this in C6.
-    known_bad_fingerprints: list[str] = field(default_factory=list)
     # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(
         default_factory=list,

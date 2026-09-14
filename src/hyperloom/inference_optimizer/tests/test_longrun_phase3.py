@@ -215,7 +215,7 @@ async def test_soft_restart_invokes_server_deep_clean(cyclic_coordinator):
     # Enable the server-restart step but stub the real /proc kill.
     c._cycle_restart_servers = True
     calls: list[int] = []
-    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
+    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
     summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert calls == [1]
     assert summary["servers_restarted"] is True
@@ -226,7 +226,7 @@ async def test_soft_restart_skips_server_clean_when_disabled(cyclic_coordinator)
     c = cyclic_coordinator
     assert c._cycle_restart_servers is False
     calls: list[int] = []
-    c.phase_explore._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
+    c.phase_macro_cycle._restart_inference_servers = lambda: calls.append(1)  # type: ignore[method-assign]
     summary = await c._run_cycle_soft_restart(prior_cycle=0, new_cycle=1)
     assert calls == []
     assert "servers_restarted" not in summary
@@ -237,7 +237,7 @@ async def _noop_phase_side_effects(c):
         return None
 
     c.phase_internal._maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
-    c.phase_explore._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    c.specialist_dispatch._maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
     c.phase_internal._maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
 
 

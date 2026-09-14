@@ -1100,9 +1100,25 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 0,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": False,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (False, {}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
@@ -1113,11 +1129,25 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
-    monkeypatch.setattr(ps, "compute_plateau_explore", lambda *a, **k: (False, {}))
     monkeypatch.setattr(
         ps,
-        "source_arm_plateaued",
-        lambda *a, **k: (True, {"source_consecutive_no_keep": 3, "source_candidates_exhausted": True}),
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 5.0,
+                "empty_streak": 0,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": True,
+                "config_arm_plateaued": False,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
@@ -1131,9 +1161,25 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            True,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (True, {"source_consecutive_no_keep": 3}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out

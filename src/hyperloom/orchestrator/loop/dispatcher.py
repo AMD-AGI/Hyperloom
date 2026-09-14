@@ -47,6 +47,7 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
+from ..state.attempt_ledger import record_patch_attempt
 from ..state.task_registry import Task
 from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
@@ -132,19 +133,6 @@ class _InflightAction(NamedTuple):
     kind: str
     atask: asyncio.Task[Any]
     scope: CancelScope
-
-
-def _lanes_for_delta_shape(done_payload: dict[str, Any] | None) -> tuple[str, ...]:
-    """Return the extra lanes required by the delta shape a specialist returned.
-
-    A config-only deliverable needs no workspace mutation lane. A patch or
-    artifact deliverable writes into the framework tree, so it does.
-    """
-    if not isinstance(done_payload, dict):
-        return ()
-    if done_payload.get("patches_written") or done_payload.get("artifacts_written"):
-        return ("workspace_mutation",)
-    return ()
 
 
 class DispatcherCollaborator:
@@ -1334,6 +1322,26 @@ class DispatcherCollaborator:
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
                         )
+                # The ledger row, recorded for every patch outcome rather than only
+                # the authored ones: which levers it tracks is the ledger's decision.
+                patch_result = result.result if isinstance(result.result, dict) else {}
+                patch_params = getattr(task, "params", None) or {}
+                status = str(patch_result.get("status") or "")
+                if status:
+                    base = patch_result.get("base_tput")
+                    record_patch_attempt(
+                        self.shared_state,
+                        task_id=str(task.task_id or ""),
+                        specialist_task_id=str(patch_params.get("specialist_task_id") or ""),
+                        outcome=status,
+                        gain_pct=patch_result.get("delta_pct"),
+                        before_tput=base if base is not None else patch_params.get("base_tput"),
+                        after_tput=patch_result.get("output_throughput"),
+                        error_class=str(patch_result.get("error_class") or ""),
+                        # The deliverable names the lever when the dispatch did not,
+                        # but a dispatch that named one outranks it.
+                        evidence={**patch_result, **patch_params},
+                    )
                 # Unified rearm: handles enablement and apply_failed perf-lane
                 # results (schedules retry or stamps terminal).
                 res_dict = getattr(result, "result", None)

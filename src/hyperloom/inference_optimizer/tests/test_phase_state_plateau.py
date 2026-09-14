@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
@@ -22,9 +23,9 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     STOP_REASON_VOCAB,
+    _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
-    compute_plateau_explore,
     compute_plateau_kernel,
     exit_normal_optimize,
     exit_normal_kernel,
@@ -54,95 +55,90 @@ def test_is_valid_escalate_hint_accepts_vocab():
     assert not is_valid_escalate_hint("")
 
 
-def test_plateau_explore_empty_state_returns_false():
-    state = SimpleNamespace()
-    triggered, ev = compute_plateau_explore(state)
+def test_config_lever_dry_empty_attempts_returns_false():
+    state = SimpleNamespace(attempts=[], macro_cycle=0)
+    triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
     assert ev["recent_keep_gain_pct"] == 0.0
 
 
-def test_plateau_explore_AND_low_gain_AND_streak_triggers():
+def test_config_lever_dry_low_gain_and_streak_triggers():
     state = SimpleNamespace(
-        explore_search={
-            "winners_history": [
-                {"gain_pct": 0.1},
-                {"gain_pct": 0.05},
+        macro_cycle=0,
+        attempts=(
+            [{"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 0.1, "cycle": 0}]
+            + [
+                {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0}
+                for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
             ]
-        },
-        specialist_rounds=(
-            [{"proposals_total": 1, "proposals_kept": 1}]
-            + [{"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)]
         ),
     )
-    triggered, ev = compute_plateau_explore(state)
+    triggered, ev = _config_lever_dry(state, {})
     assert triggered is True
     assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
     assert ev["recent_keep_gain_pct"] < DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT
 
 
-def test_plateau_explore_high_gain_blocks_trigger():
+def test_config_lever_dry_high_gain_blocks_trigger():
     """Even with empty streak, large recent KEEP gain blocks plateau."""
     state = SimpleNamespace(
-        explore_search={
-            "winners_history": [
-                {"gain_pct": 3.0},
-                {"gain_pct": 2.0},
-            ]
-        },
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
+        macro_cycle=0,
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 3.0, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 2.0, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
     )
-    triggered, _ev = compute_plateau_explore(state)
+    triggered, _ev = _config_lever_dry(state, {})
     assert triggered is False
 
 
-def test_plateau_explore_short_empty_streak_blocks_trigger():
+def test_config_lever_dry_short_empty_streak_blocks_trigger():
     """Low gain alone (without empty streak) does not trigger plateau."""
     state = SimpleNamespace(
-        explore_search={"winners_history": [{"gain_pct": 0.1}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
-            # newest round produced something → streak resets to 0.
-            {"proposals_total": 5, "proposals_kept": 2},
+        macro_cycle=0,
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
+            # newest attempt adopted → streak resets to 0.
+            {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 0.1, "cycle": 0},
         ],
     )
-    triggered, ev = compute_plateau_explore(state)
+    triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
 
-def test_plateau_explore_ignores_prior_macro_cycle_rows():
+def test_config_lever_dry_ignores_prior_macro_cycle_rows():
     state = SimpleNamespace(
         macro_cycle=1,
-        explore_search={"winners_history": [{"gain_pct": 0.0, "cycle": 0}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
     )
-    triggered, ev = compute_plateau_explore(state)
+    triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
 
 
-def test_plateau_explore_supports_threshold_overrides():
+def test_config_lever_dry_supports_threshold_overrides():
     state = SimpleNamespace(
-        explore_search={"winners_history": [{"gain_pct": 1.5}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
+        macro_cycle=0,
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 1.5, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
     )
-    # Defaults → not triggered (gain too high).
-    triggered, _ = compute_plateau_explore(state)
+    # Defaults → not triggered (gain too high and streak too short).
+    triggered, _ = _config_lever_dry(state, {})
     assert triggered is False
     # Raise threshold above the gain and drop streak to 1 → triggers.
-    triggered, _ = compute_plateau_explore(
+    triggered, _ = _config_lever_dry(
         state,
-        keep_gain_threshold_pct=3.0,
-        empty_streak_threshold=1,
+        {"explore_keep_gain_pct": 3.0, "explore_empty_streak": 1},
     )
     assert triggered is True
 
@@ -292,14 +288,16 @@ def test_exit_normal_optimize_exits_on_plateau():
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={"winners_history": [{"gain_pct": 0.1}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+        macro_cycle=0,
+        # Config arm: low gain + streak at threshold.
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
         pending_escalate_hint="",
         stop_reason="",
         plateau_overrides={},
-        # Both arms must be dry before the merged phase may leave.
+        # Patch arm: discovery exhausted.
         framework_agent_phase_done=True,
     )
     out = exit_normal_optimize(state)
@@ -314,10 +312,14 @@ def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={"winners_history": [{"gain_pct": 5.0}]},
-        specialist_rounds=[{"proposals_total": 10, "proposals_kept": 8}],
+        macro_cycle=0,
+        # One attempt recorded so the phase has "done work" this cycle.
+        attempts=[{"lever_kind": LEVER_CONFIG, "outcome": "KEEP", "adopted": True, "gain_pct": 5.0, "cycle": 0}],
+        specialist_rounds=[],
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_KERNEL,
         stop_reason="",
+        plateau_overrides={},
+        framework_agent_phase_done=False,
     )
     out = exit_normal_optimize(state)
     assert out is not None and out[0] == "optimize_no_more_leverage"
@@ -393,7 +395,8 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={},
+        macro_cycle=0,
+        attempts=[],
         specialist_rounds=[],
         params_no_promote_streak=0,
         backends_search={},
@@ -402,6 +405,7 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_SWEEP,
         stop_reason="",
         plateau_overrides={},
+        framework_agent_phase_done=False,
     )
 
 
@@ -654,10 +658,13 @@ def test_compute_next_phase_advances_on_plateau():
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={"winners_history": [{"gain_pct": 0.1}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0} for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
+        macro_cycle=0,
+        # Config arm: trailing no-keeps at threshold, gain below floor.
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0}
+            for _ in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
         ],
+        specialist_rounds=[],
         params_no_promote_streak=0,
         backends_search={},
         optimization_stack=[],
@@ -669,7 +676,7 @@ def test_compute_next_phase_advances_on_plateau():
     target, reason, _ = compute_next_phase(state, kernel_enabled=True)
     assert target == "KERNEL_AGENT"
     assert reason == "optimize_no_more_leverage"
-    triggered, _ = compute_plateau_explore(state)
+    triggered, _ = _config_lever_dry(state, {})
     assert triggered is True
 
 
@@ -680,12 +687,14 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        explore_search={"winners_history": [{"gain_pct": 0.1}]},
-        specialist_rounds=[
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
-            {"proposals_total": 0, "proposals_kept": 0},
+        macro_cycle=0,
+        # Config arm: 3 trailing no-keeps, which matches the override threshold of 3.
+        attempts=[
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
+            {"lever_kind": LEVER_CONFIG, "outcome": "REVERT", "adopted": False, "cycle": 0},
         ],
+        specialist_rounds=[],
         params_no_promote_streak=0,
         backends_search={},
         optimization_stack=[],

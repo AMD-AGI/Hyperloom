@@ -102,21 +102,6 @@ log = logging.getLogger(__name__)
 _now_iso = functools.partial(now_iso, "auto")
 
 
-def _initial_explore_search_state() -> dict[str, Any]:
-    """Empty :attr:`SharedState.explore_search` ledger."""
-    return {
-        "schema_version": 1,
-        "tested": {},
-        "accepted": [],
-        "rejected": [],
-        "winners_history": [],
-        "domains_round_summary": [],
-        "name_index": {},
-        "cursor": 0,
-        "last_round": {},
-    }
-
-
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
@@ -744,25 +729,6 @@ class ExploreExecutor:
                 "workspace": output_root.as_posix(),
             }
 
-        # ----- explore_search ledger (history seed) -------------------------
-        # C5: dedup history no longer threaded via params; start from a fresh
-        # round-local state so the executor is stateless across rounds.
-        search = _initial_explore_search_state()
-        # Defensive default fill (resume / first-run guards).
-        for key, default in (
-            ("schema_version", 1),
-            ("tested", {}),
-            ("rejected", []),
-            ("name_index", {}),
-            ("cursor", 0),
-            ("winners_history", []),
-            ("domains_round_summary", []),
-        ):
-            search.setdefault(key, default)
-
-        tested_dict = search.get("tested") or {}
-        inherited_name_index: dict[str, Any] = dict(search.get("name_index") or {})
-
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
@@ -792,16 +758,11 @@ class ExploreExecutor:
 
         runnable: list[GridVariant] = list(unique_in_round.values())
 
-        # Re-proposals are still benchmarked; the tested ledger already carries
-        # each prior outcome and is rendered in full, so this only counts them.
-        re_proposed = sum(1 for fp in unique_in_round if isinstance(tested_dict.get(fp), dict))
-
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d)",
             len(grid),
             len(runnable),
             len(skipped_dup),
-            re_proposed,
         )
 
         # Multi-node grid shaping.
@@ -834,18 +795,19 @@ class ExploreExecutor:
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
 
-        round_id_seed = int(search.get("cursor") or 0) + 1
+        # Seeded by the Coordinator from the durable cursor: this executor holds no
+        # history of its own, so it cannot count the rounds before this one.
+        round_id_seed = int(params.get("explore_search_cursor") or 0) + 1
         round_id = f"explore-{round_id_seed:03d}"
 
         # ----- Per-variant serial run loop ---------------------------------
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
-        # This round's own ledger writes, kept apart from the ledger it inherited and merged over it once the loop is
-        # done.
-        round_tested: dict[str, dict[str, Any]] = {}
-        round_name_index: dict[str, Any] = {}
-        rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
-        winners_history_update: list[dict[str, Any]] = list(search.get("winners_history") or [])
+        # This round's ledger writes; the Coordinator merges them over the durable ledger.
+        tested_update: dict[str, dict[str, Any]] = {}
+        name_index: dict[str, Any] = {}
+        rejected_update: list[dict[str, Any]] = []
+        winners_history_update: list[dict[str, Any]] = []
 
         # ``stack_extra_args`` / ``stack_extra_envs`` carry the running accumulation; after a KEEP they extend with
         # the KEEP'd variant.
@@ -1044,7 +1006,7 @@ class ExploreExecutor:
                                 gv.name,
                                 werr,
                             )
-                            round_tested[fp] = {
+                            tested_update[fp] = {
                                 "fingerprint": fp,
                                 "name": gv.name,
                                 "extra_server_args": gv.extra_server_args,
@@ -1076,7 +1038,7 @@ class ExploreExecutor:
                                 "measured_against": _measured_against(),
                             }
                             if gv.name:
-                                round_name_index[gv.name] = fp
+                                name_index[gv.name] = fp
                             rejected_update.append(
                                 {
                                     "fingerprint": fp,
@@ -1155,7 +1117,7 @@ class ExploreExecutor:
                         )
                         # Rough output tok/s salvaged from partial server.log.
                         est_tput = getattr(r, "estimated_output_throughput", None)
-                        round_tested[fp] = {
+                        tested_update[fp] = {
                             "fingerprint": fp,
                             "name": gv.name,
                             "extra_server_args": gv.extra_server_args,
@@ -1194,7 +1156,7 @@ class ExploreExecutor:
                             "error_class": "killed_overtime",
                         }
                         if gv.name:
-                            round_name_index[gv.name] = fp
+                            name_index[gv.name] = fp
                         rejected_update.append(
                             {
                                 "fingerprint": fp,
@@ -1370,7 +1332,7 @@ class ExploreExecutor:
                             outcome = "KEEP"
 
                     decision_tput = r.output_throughput
-                    round_tested[fp] = {
+                    tested_update[fp] = {
                         "fingerprint": fp,
                         "name": gv.name,
                         "extra_server_args": gv.extra_server_args,
@@ -1417,7 +1379,7 @@ class ExploreExecutor:
                         ),
                     }
                     if gv.name:
-                        round_name_index[gv.name] = fp
+                        name_index[gv.name] = fp
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
@@ -1589,11 +1551,7 @@ class ExploreExecutor:
             if round_serving_lease is not None:
                 round_serving_lease.close()
 
-        # ----- Ledger compaction (per-fingerprint last-wins) ---------------- This round's writes over the ledger it
-        # inherited: a re-run fingerprint replaces its earlier row, which is what a fresh measurement means, and a
-        # variant this round rolled back leaves the earlier row standing.
-        tested_update: dict[str, dict[str, Any]] = {**tested_dict, **round_tested}
-        name_index: dict[str, Any] = {**inherited_name_index, **round_name_index}
+        # ----- Ledger compaction --------------------------------------------
         rejected_dedup: dict[str, dict[str, Any]] = {}
         for entry in rejected_update:
             fp = str(entry.get("fingerprint") or "")
@@ -1601,16 +1559,12 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook (this round's outcomes).
+        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook.
         reasons_by_fp: dict[str, str] = {
-            str(r.get("fingerprint") or ""): str(r.get("reason") or "")
-            for r in rejected_update
-            if r.get("round_id") == round_id
+            str(r.get("fingerprint") or ""): str(r.get("reason") or "") for r in rejected_update
         }
         per_variant_outcomes: list[dict[str, Any]] = []
         for fp_key, te in tested_update.items():
-            if te.get("round_id") != round_id:
-                continue
             outcome = str(te.get("outcome") or "")
             if outcome not in (
                 "KEEP",
@@ -1709,7 +1663,7 @@ class ExploreExecutor:
         killed_overtime_fps = [
             str(te.get("fingerprint") or "")
             for te in tested_update.values()
-            if te.get("round_id") == round_id and te.get("outcome") == TS_KILLED_OVERTIME
+            if te.get("outcome") == TS_KILLED_OVERTIME
         ]
         last_round_summary = {
             "round_id": round_id,
@@ -1729,7 +1683,7 @@ class ExploreExecutor:
             "name_index": name_index,
             "cursor": len(tested_update),
             "winners_history": winners_history_update,
-            "domains_round_summary": list(search.get("domains_round_summary") or []),
+            "domains_round_summary": [],
             "last_round": last_round_summary,
         }
 
@@ -1747,14 +1701,7 @@ class ExploreExecutor:
         # Successful = at least one bench produced a measurement or was reaped by the overtime gate (KILLED_OVERTIME
         # is a real signal).
         produced_measurement = any(
-            t.get("outcome")
-            in (
-                "KEEP",
-                "REVERT",
-                TS_KILLED_OVERTIME,
-            )
-            for t in tested_update.values()
-            if t.get("round_id") == round_id
+            t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
         status = "succeeded" if produced_measurement or winners else "failed"
         # A round that measured nothing because the run stopped it is not the same as one whose variants failed, and

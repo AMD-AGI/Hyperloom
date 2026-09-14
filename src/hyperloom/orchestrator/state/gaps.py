@@ -62,7 +62,7 @@ class GapsStateMixin:
                 "attempts": list(entry.get("attempts") or []),
             }
             if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY:]
+                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY :]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
@@ -77,7 +77,7 @@ class GapsStateMixin:
                 merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
                 # Capped tail; callers supply newest-last lists (convention).
                 if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
+                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
                 existing["attempts"] = merged_attempts
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
@@ -107,7 +107,7 @@ class GapsStateMixin:
         ss = _shared_state_module()
         attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
         if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY:]
+            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
         gap["attempts"] = attempts
         gap["last_updated_ts"] = ss._now_iso()
         return gap

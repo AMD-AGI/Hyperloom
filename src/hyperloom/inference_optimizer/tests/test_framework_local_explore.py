@@ -487,3 +487,34 @@ async def test_the_retry_drain_carries_the_batch_the_failure_belonged_to(tmp_pat
 
     keys = [c["idempotency_key"] for c in stub.tasks.created]
     assert any("batch-7" in k for k in keys), keys
+
+
+def test_the_arms_deliverable_decides_its_lever():
+    """This arm dispatches without a lever_kind, so the row's lever is derived.
+
+    A config proposal and a diff are both valid returns from the same dispatch,
+    and a row left with an empty lever is invisible to the dryness judgment.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_CONFIG,
+        LEVER_SOURCE_PATCH,
+    )
+    from hyperloom.orchestrator.state.attempt_ledger import record_patch_attempt
+
+    def _lever(**deliverable: Any) -> str:
+        state = SharedState()
+        record_patch_attempt(
+            state,
+            task_id="t-1",
+            specialist_task_id="spec-1",
+            outcome="reverted",
+            gain_pct=None,
+            before_tput=5000.0,
+            after_tput=4900.0,
+            error_class="",
+            evidence={"framework_agent_candidate_id": "local_explore:0", **deliverable},
+        )
+        return str(state.attempts[0]["lever_kind"])
+
+    assert _lever(patches_applied=["001_fix.patch"]) == LEVER_SOURCE_PATCH
+    assert _lever() == LEVER_CONFIG

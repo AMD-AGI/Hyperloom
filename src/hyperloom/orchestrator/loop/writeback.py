@@ -52,6 +52,7 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..state.attempt_ledger import record_config_attempt
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -327,10 +328,10 @@ def _record_config_attempts(
 ) -> None:
     """Record the configuration arm's measured attempts on the framework event.
 
-    The executor has no recorder to reach; this is the first coordinator-side
-    seam that sees the full per-variant outcome. The outcome is recorded
-    verbatim, unlike the journal beside it, which collapses ``KEEP_UNSTABLE``
-    and ``KILLED_OVERTIME`` into a plain revert.
+    Timeline only: the ledger row is written by ``_fact_write_hook``, which does
+    not depend on a recorder being open. The outcome is recorded verbatim here,
+    unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
+    ``KILLED_OVERTIME`` into a plain revert.
     """
     getter = getattr(coord, "_framework_timeline", None)
     recorder = getter() if callable(getter) else None
@@ -420,28 +421,6 @@ def _record_config_attempts(
                 )
         except Exception:  # noqa: BLE001 — observability cannot change write-back
             log.debug("framework timeline: config attempt record failed", exc_info=True)
-        # Write to the unified attempts ledger (C5).
-        try:
-            shared_state = getattr(coord, "shared_state", None)
-            if shared_state is not None:
-                shared_state.record_attempt({
-                    "arm": "config",
-                    "lever_kind": "config",
-                    "round_id": round_id,
-                    "task_id": task_id,
-                    "fingerprint": fingerprint,
-                    "variant_name": str(row.get("variant_name") or ""),
-                    "outcome": outcome,
-                    "verdict": outcome,
-                    "adopted": _is_kept(outcome),
-                    "gain_pct": float(metrics["gain_pct"]) if metrics.get("gain_pct") is not None else None,
-                    "before_tput": metrics.get("base_tput"),
-                    "after_tput": metrics.get("tput"),
-                    "error_class": str(row.get("error_class") or ""),
-                    "provenance": str(row.get("provenance") or ""),
-                })
-        except Exception:  # noqa: BLE001 — unified ledger write cannot change write-back
-            log.debug("unified attempts ledger: config attempt write failed", exc_info=True)
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")
     if not (recorded and proposal_ref):
@@ -1568,7 +1547,24 @@ class WritebackCollaborator:
         per_variant = result_dict.get("per_variant_outcomes")
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
+            round_id = str(result_dict.get("round_id") or "")
             for vo in per_variant:
+                outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
+                if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
+                    metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
+                    record_config_attempt(
+                        self.shared_state,
+                        task_id=str(task.task_id or ""),
+                        round_id=round_id,
+                        fingerprint=str(vo.get("fingerprint") or ""),
+                        variant_name=str(vo.get("variant_name") or ""),
+                        outcome=outcome,
+                        gain_pct=metrics.get("gain_pct"),
+                        before_tput=metrics.get("base_tput"),
+                        after_tput=metrics.get("tput"),
+                        error_class=str(vo.get("error_class") or ""),
+                        provenance=str(vo.get("provenance") or ""),
+                    )
                 try:
                     self._record_fact_per_variant(
                         task=task,
