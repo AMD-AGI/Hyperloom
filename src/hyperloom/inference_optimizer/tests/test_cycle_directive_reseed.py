@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.phases.explore import ExplorePhase
+from hyperloom.orchestrator.loop.cycle_memory import CycleMemoryCollaborator as ExplorePhase
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 

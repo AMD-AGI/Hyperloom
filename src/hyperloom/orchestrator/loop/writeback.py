@@ -4185,7 +4185,6 @@ class WritebackCollaborator:
         # failed/empty rebench leaves the flag set and reports keep warning.
         is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
             "resume_stack_revalidate",
-            "resume_reverify_best",
         }
         if is_revalidation_task:
             measured = result.get("output_throughput")

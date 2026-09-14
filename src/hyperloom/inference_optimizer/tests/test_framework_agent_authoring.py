@@ -227,7 +227,7 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
 
 def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     stub = _Stub(tmp_path, authoring=True)
 

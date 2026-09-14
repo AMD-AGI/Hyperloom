@@ -283,7 +283,7 @@ def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
 
 
 def test_forward_enablement_carriers_eval_origin():
-    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     src = {
         "enablement_origin": "eval",
@@ -303,7 +303,7 @@ def test_forward_enablement_carriers_eval_origin():
 
 
 def test_forward_enablement_carriers_boot_origin_noop():
-    from hyperloom.orchestrator.phases.explore import _forward_enablement_carriers
+    from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     dst: dict[str, Any] = {}
     _forward_enablement_carriers({}, dst)
