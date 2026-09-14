@@ -145,7 +145,7 @@ async def test_pump_stamp_carries_the_current_tick(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_pump_survives_an_unwritable_stamp(tmp_path, monkeypatch):
     """Liveness reporting is best-effort: a failing stamp cannot break dispatch."""
-    from hyperloom.orchestrator.loop import dispatcher as dispatcher_mod
+    from hyperloom.orchestrator.bringup import reconcile as reconcile_mod
 
     release = asyncio.Event()
     counts = _pump_joins_one_task(monkeypatch, release=release)
@@ -155,7 +155,7 @@ async def test_pump_survives_an_unwritable_stamp(tmp_path, monkeypatch):
     def _explode(*_args, **_kwargs):
         raise OSError("read-only session dir")
 
-    monkeypatch.setattr(dispatcher_mod.supervisor_store, "stamp_tick", _explode)
+    monkeypatch.setattr(reconcile_mod.supervisor_store, "stamp_tick", _explode)
 
     pump = asyncio.create_task(coord._pump_dispatcher_once())
     try:
