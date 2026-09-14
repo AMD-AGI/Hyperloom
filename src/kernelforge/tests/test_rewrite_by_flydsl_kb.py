@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -662,6 +663,81 @@ def test_a_port_is_admitted_on_what_it_is_not_on_which_revision_wrote_it(tmp_pat
     assert adopted.applied is True
     assert adopted.attempts[-1]["reason"] == "applied"
     assert Path(spec.flydsl_kernel).read_text() == port
+
+
+def test_a_port_whose_implementation_signature_disagrees_is_measured_not_refused(tmp_path, monkeypatch):
+    """A second kernel in the source moves the signature while leaving the recorded port perfectly usable."""
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    port = Path(spec.flydsl_kernel).read_text()
+    assert kb.write_flydsl_kb_solution(
+        spec,
+        str(driver),
+        config,
+        source_ms=10.0,
+        flydsl_best_ms=5.0,
+        speedup=2,
+        framework="vllm",
+    )["written"] is True
+
+    source = Path(spec.source_kernel)
+    before = kb.resolve_identity(spec, framework="vllm", gpu="mi355x", source_text=source.read_text())[2]
+    source.write_text(source.read_text() + "\n@triton.jit\ndef unrelated_kernel(y):\n    return y\n")
+    after = kb.resolve_identity(spec, framework="vllm", gpu="mi355x", source_text=source.read_text())[2]
+    # Guard the premise: this edit is exactly what used to retire the record.
+    assert before != after
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+    _passing_validation(monkeypatch, best_ms=5.0)
+
+    adopted = asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            spec,
+            str(driver),
+            config,
+            source_case_ms={_CASE: 10.0},
+            framework="vllm",
+        )
+    )
+
+    assert adopted.applied is True
+    assert Path(spec.flydsl_kernel).read_text() == port
+
+
+def test_a_port_that_does_not_expose_the_builder_the_driver_imports_is_refused(tmp_path, monkeypatch):
+    """The one thing measurement cannot settle cheaply: the driver would fail to import the entry point."""
+    _use_in_memory_kb_store(monkeypatch)
+    spec, driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    assert kb.write_flydsl_kb_solution(
+        spec,
+        str(driver),
+        config,
+        source_ms=10.0,
+        flydsl_best_ms=5.0,
+        speedup=2,
+        framework="vllm",
+    )["written"] is True
+
+    seed = "def skeleton():\n    pass\n"
+    Path(spec.flydsl_kernel).write_text(seed)
+    # Same logical operator, so the same identity, but `softmax_kernel` slugs to a different builder than `softmax`.
+    renamed = replace(spec, op_name="softmax_kernel")
+    assert renamed.builder_symbol != spec.builder_symbol
+
+    restored = asyncio.run(
+        kb.try_flydsl_kb_warmstart(
+            renamed,
+            str(driver),
+            config,
+            source_case_ms={_CASE: 10.0},
+            framework="vllm",
+        )
+    )
+
+    assert restored.applied is False
+    assert restored.attempts[-1]["reason"] == "builder_contract_changed"
+    assert Path(spec.flydsl_kernel).read_text() == seed
 
 
 def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatch):

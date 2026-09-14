@@ -122,7 +122,7 @@ def _read_top_candidates(
     if not gpu_type:
         return _ReadPlan(None, [], "missing_gpu_type", "")
     try:
-        _, canonical_id, signature, implementation = resolve_identity(
+        _, canonical_id, _signature, _implementation = resolve_identity(
             spec,
             framework=framework,
             gpu=gpu_type,
@@ -133,15 +133,12 @@ def _read_top_candidates(
             value = candidate.knowledge.get("value")
             if not isinstance(value, dict):
                 continue
-            recorded = str(value.get("implementation_signature") or "")
             candidates.append(
                 {
                     "canonical_id": canonical_id,
                     "session_id": candidate.session_id,
                     "solution_slug": f"{canonical_id}/{candidate.session_id}",
                     "speedup": candidate.speedup,
-                    "implementation_match": bool(recorded and recorded == signature),
-                    "consumer_implementation_identity": implementation,
                     "attrs": value,
                 }
             )
@@ -245,12 +242,12 @@ async def try_flydsl_kb_warmstart(
     The measurement is scored the way the arena scores, so the candidate adopted here is the one the run is graded on.
     ``warmstart_policy`` bounds the search on both the claim floor and wall time.
 
-    Admission asks what a candidate IS, never where it came from. A record is kept out when it ports a different
-    implementation, when this code cannot read its shape, or when it does not expose the builder the driver imports.
-    It is not kept out because the source or driver file has changed since it was written: both are re-run here, the
-    current driver compares the candidate against the current source, and a port that survives that is reusable no
-    matter which revision produced it. Gating on their hashes only ever rejected ports this run went on to prove,
-    and it rejected every one of them the first time a comment moved.
+    Admission is one question a measurement cannot answer for itself: does the artifact expose the builder symbol
+    this task's driver imports. Everything else is settled by running it. The current driver validates the candidate
+    against the current source and then times it, so a port that survives is reusable whatever revision, source
+    layout or implementation signature produced it -- and one that does not is rejected on evidence rather than on
+    a guess about its provenance. This matches the loop-layer warm start, which has always measured a candidate
+    whose implementation signature disagreed instead of refusing it.
     """
     plan = _read_top_candidates(
         spec,
@@ -304,11 +301,7 @@ async def try_flydsl_kb_warmstart(
             "speedup": candidate["speedup"],
         }
         reason = ""
-        if candidate.get("implementation_match") is not True:
-            reason = "implementation_mismatch"
-        elif attrs.get("schema_version") != _SCHEMA_VERSION or attrs.get("rewrite_kind") != _REWRITE_KIND:
-            reason = "wrong_solution_kind"
-        elif attrs.get("builder_symbol") != spec.builder_symbol:
+        if attrs.get("builder_symbol") != spec.builder_symbol:
             reason = "builder_contract_changed"
         content = _candidate_content(plan, candidate)
         if not reason and not content.strip():
