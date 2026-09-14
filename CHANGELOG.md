@@ -903,6 +903,20 @@ for the user-facing summary.
   a context-window suffix -- bracketed ids remain rejected by this gateway,
   which is why no window suffix is applied at all.
 
+- **`--framework atom` defaults the kernel backend to forge.** The kernel phase
+  runs on atom, but GEAK -- the backend every framework gets unless the
+  environment opts into forge -- does not produce candidates there: its
+  extraction step declines to guess a rewrite seam for a quantized, non-vLLM
+  backend. The default phase split gives that phase half the session, so
+  defaulting to GEAK on atom meant defaulting to half a session of nothing,
+  while the CLI printed that kernel-agent was "wired for atom". On atom an unset
+  `KERNEL_OPT_BACKEND_ORDER` is now filled in with `forge` before the session
+  records its backend, and the choice is reported at launch. A value the
+  operator set is kept, so running GEAK on atom deliberately stays possible; the
+  CLI warns that it is expected to return no candidates. `--no-kernel` skips the
+  defaulting entirely. Only the `framework == "atom"` branch is touched; SGLang
+  and vLLM keep GEAK.
+
 - **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
   The serving-process checks now accept `atom.entrypoints`. Recovery records
   the members of a recognized ATOM process group before sending TERM, then

@@ -367,7 +367,9 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: sole job is the ``--nodes>=2`` fail-fast guard (IR-8)."""
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
+    from hyperloom.common.env import forge_explicitly_enabled
+
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -378,10 +380,36 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         )
         sys.exit(2)
     print(
-        "  framework=atom: no auto-disable applied (kernel-agent + "
-        "framework-agent + profile / roofline / TraceLens all wired "
-        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+        "  framework=atom: no auto-disable applied (framework-agent + "
+        "profile / roofline / TraceLens all wired for atom); "
+        "--nodes>=2 guard active — see SKILL.md IR-8"
     )
+    # The kernel phase runs on atom, but GEAK -- the backend everything else
+    # defaults to -- does not produce kernel candidates there: its extraction step
+    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
+    # default phase split gives the kernel phase half the session, defaulting to
+    # GEAK on atom means defaulting to half a session of nothing. forge is the
+    # backend that works here, so on atom it is the default rather than an opt-in
+    # the operator has to know about.
+    #
+    # Only an unset value is filled in. An operator who named a backend keeps it:
+    # running GEAK on atom on purpose, to measure exactly this, stays possible.
+    if not getattr(args, "no_kernel", False):
+        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
+            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
+            print(
+                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
+                "(GEAK does not drive kernel rewrites on atom)"
+            )
+        elif not forge_explicitly_enabled():
+            print(
+                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
+                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
+                "phase runs GEAK. GEAK does not drive kernel rewrites on atom and "
+                "is expected to return no candidates. Unset it to get 'forge', or "
+                "pass --no-kernel to skip the phase.",
+                file=sys.stderr,
+            )
     return auto_disabled
 
 
