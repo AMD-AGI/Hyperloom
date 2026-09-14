@@ -222,10 +222,7 @@ def _run_export_rocm_sdk_toolchain_root(
     fake_py.write_text('#!/usr/bin/env bash\nprintf "%s" "$FAKE_ROOT"\nexit "$FAKE_CLI_RC"\n')
     fake_py.chmod(0o755)
     stub = (
-        'log() { echo "LOG: $*"; }\n'
-        f'export FAKE_ROOT="{root}"\n'
-        f"export FAKE_CLI_RC={cli_rc}\n"
-        f'export PATH="{path}"\n'
+        f'log() {{ echo "LOG: $*"; }}\nexport FAKE_ROOT="{root}"\nexport FAKE_CLI_RC={cli_rc}\nexport PATH="{path}"\n'
     )
     script = (
         f"set -euo pipefail\n{stub}\n{fn_src}\n"
