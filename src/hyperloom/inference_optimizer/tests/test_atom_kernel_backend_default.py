@@ -3,11 +3,12 @@
 
 """``--framework atom`` defaults the kernel phase to the forge backend.
 
-GEAK's extraction declines to guess a rewrite seam for a quantized, non-vLLM
-backend, so on atom it returns no candidates -- and the default phase split
-hands that phase half the session. forge is the backend that works there, so it
-is the default rather than an opt-in the operator has to know about. A value the
-operator named is kept: running GEAK on atom on purpose stays possible.
+GEAK's extractor may not guess a rewrite seam on a quantized, non-vLLM backend --
+it has to resolve one from the live server, a path unproven on atom -- and the
+default phase split hands that phase half the session. forge needs no seam
+discovery at all, so it is the default rather than an opt-in the operator has to
+know about. A value the operator named is kept: running GEAK on atom on purpose
+stays possible.
 """
 
 from __future__ import annotations
@@ -153,9 +154,7 @@ def test_the_call_site_stays_behind_the_atom_guard():
         )
 
     guarded = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If) and calls_it(node) and guards_on_atom(node.test)
+        node for node in ast.walk(tree) if isinstance(node, ast.If) and calls_it(node) and guards_on_atom(node.test)
     ]
     assert guarded, "the _apply_atom_auto_tighten call is no longer behind a framework == 'atom' test"
 
