@@ -6238,6 +6238,14 @@ async def integrate_handler(
                 "error": f"invalid pre-applied manifest: {manifest_path}",
             }
         )
+    elif payload.get("_preapplied_git_patch"):
+        # A controller publication is git-applied to the worktree before the
+        # validator runs; its unified diff cannot re-enter the whole-file apply.
+        apply_result = {
+            "status": "ok",
+            "reason": "preapplied_git_patch",
+            "kernel_id": kernel_id,
+        }
     else:
         apply_result = _maybe_apply_kernel_patch(
             payload,
