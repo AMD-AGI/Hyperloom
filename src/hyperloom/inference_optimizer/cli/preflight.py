@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -246,6 +247,25 @@ def _prepend_path(var: str, entry: str) -> None:
     os.environ[var] = os.pathsep.join(parts)
 
 
+def _rocm_sdk_wheel_lib_dirs() -> list[str]:
+    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_core``/``_rocm_sdk_devel``).
+
+    That layout splits libraries across two namespace packages, with host-math
+    under a subdir the dynamic loader does not search by default. Returns []
+    on a standard ``/opt/rocm`` image, where neither package is importable.
+    """
+    dirs: list[str] = []
+    for pkg in ("_rocm_sdk_core", "_rocm_sdk_devel"):
+        spec = importlib.util.find_spec(pkg)
+        if not spec or not spec.origin:
+            continue
+        root = Path(spec.origin).resolve().parent
+        for candidate in (root / "lib", root / "lib" / "host-math" / "lib"):
+            if candidate.is_dir():
+                dirs.append(str(candidate))
+    return dirs
+
+
 def _derive_runtime_paths() -> None:
     """Rebuild PATH / LD_LIBRARY_PATH from .env-loaded roots (replaces hyperloom.env.sh)."""
     venv = os.environ.get("VIRTUAL_ENV", "")
@@ -255,6 +275,8 @@ def _derive_runtime_paths() -> None:
     if rocm:
         _prepend_path("PATH", str(Path(rocm) / "bin"))
         _prepend_path("LD_LIBRARY_PATH", str(Path(rocm) / "lib"))
+    for lib_dir in reversed(_rocm_sdk_wheel_lib_dirs()):
+        _prepend_path("LD_LIBRARY_PATH", lib_dir)
     vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
     if vllm_root:
         _prepend_path("PATH", str(Path(vllm_root) / "bin"))

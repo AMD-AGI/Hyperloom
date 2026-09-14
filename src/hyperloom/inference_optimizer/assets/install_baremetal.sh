@@ -261,8 +261,31 @@ export_virtualenv_for_python() {
   fi
 }
 
+# TheRock's pip-packaged ROCm splits libraries across two namespace packages,
+# with host-math under a subdir the dynamic loader does not search by
+# default. Mirrors _rocm_sdk_wheel_lib_dirs() in cli/preflight.py, which
+# applies this at actual launch; done here too so this check does not
+# false-negative on a stack that will resolve correctly at runtime. No-ops
+# (prints nothing) on a standard /opt/rocm image, where neither package
+# exists.
+rocm_sdk_wheel_lib_dirs() {
+  local py="$1"
+  "$py" - <<'PY' 2>/dev/null
+import importlib.util
+from pathlib import Path
+for pkg in ("_rocm_sdk_core", "_rocm_sdk_devel"):
+    spec = importlib.util.find_spec(pkg)
+    if not spec or not spec.origin:
+        continue
+    root = Path(spec.origin).resolve().parent
+    for candidate in (root / "lib", root / "lib" / "host-math" / "lib"):
+        if candidate.is_dir():
+            print(candidate)
+PY
+}
+
 check_torch_rocm_shared_libs() {
-  local py="$1" lib missing
+  local py="$1" lib missing extra_dir
   command -v ldd >/dev/null 2>&1 || return 0
   lib="$("$py" - <<'PY' 2>/dev/null || true
 from pathlib import Path
@@ -279,6 +302,16 @@ except Exception:
 PY
 )"
   [ -n "$lib" ] || return 0
+  while IFS= read -r extra_dir; do
+    [ -n "$extra_dir" ] || continue
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":${extra_dir}:"*) ;;
+      *)
+        export LD_LIBRARY_PATH="${extra_dir}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        log "extended LD_LIBRARY_PATH for TheRock ROCm SDK wheel: ${extra_dir}"
+        ;;
+    esac
+  done < <(rocm_sdk_wheel_lib_dirs "$py")
   missing="$(ldd "$lib" 2>/dev/null | grep 'not found' || true)"
   if [ -n "$missing" ]; then
     warn "ROCm torch shared libraries are missing for ${lib}:"
