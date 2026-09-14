@@ -46,9 +46,10 @@ but launcher integration is a separate step.
 explicit typed arguments (`ptr`, signed/unsigned 32/64-bit integers, FP32/FP64),
 device binding, stream forwarding, error propagation, and explicit unloading.
 The caller must match metadata and validate the tensor/launch contract below.
-The minimal `examples/triton2asm-attnres/` score example demonstrates this
-route at its documented epsilon and shape. Broader model integration still
-needs the separately described numerical/address corrections.
+The historical AttnRes score reproduction used this standalone route. The current
+minimal example, `examples/flydsl2asm-vector-add/`, instead preserves the FlyDSL
+launcher. Broader model integration still needs the separately described
+numerical/address corrections.
 
 Create modules before capture, rebuild after source edits, and retain them
 until captured graphs are retired. `close()` requires completed GPU work;

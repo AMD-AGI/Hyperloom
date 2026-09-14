@@ -703,9 +703,9 @@ def _fresh_command(workspace, kernel, driver):
     ]
 
 
-@pytest.mark.parametrize("port_ok", [True, False])
-def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(tmp_path, monkeypatch, port_ok):
-    from kernelforge.assembly import port
+@pytest.mark.parametrize("prepare_ok", [True, False])
+def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(tmp_path, monkeypatch, prepare_ok):
+    from kernelforge.assembly import prepare as preparation
 
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
@@ -715,20 +715,21 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
         assert captured["loops"] == []
         assert kwargs["base_commit"] == original
         assert kwargs["kernel"] == str(kernel)
-        if not port_ok:
-            raise port.AssemblyPreparationError("injected port failure")
+        if not prepare_ok:
+            raise preparation.AssemblyPreparationError("injected preparation failure")
         return {
             "assembly": "kernel.s",
-            "port_commit": original,
+            "preparation_commit": original,
+            "source_base_commit": original,
             "source_benchmark": {"median_ms": 1.0, "case_times": {"case": 1.0}},
             "initial_assembly_benchmark": {"median_ms": 2.0, "case_times": {"case": 2.0}},
         }
 
-    monkeypatch.setattr(port, "prepare_assembly", prepare)
+    monkeypatch.setattr(preparation, "prepare_assembly", prepare)
     result = CliRunner().invoke(main, _fresh_command(workspace, kernel, driver) + ["--kernel-backend", "assembly"])
-    if not port_ok:
+    if not prepare_ok:
         assert result.exit_code != 0
-        assert "injected port failure" in result.output
+        assert "injected preparation failure" in result.output
         assert not captured["loops"]
         return
     assert result.exit_code == 0, result.output
@@ -736,7 +737,8 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
     assert loop.ic.campaign_base_commit == original
     assert loop.ic.kernel_file == str(kernel)
     assert loop.ic.source_files == [str(workspace / "kernel.s")]
-    assert loop.ic.warm_start_mean_case_speedup == 0.5
+    assert loop.ic.warm_start_mean_case_speedup is None
+    assert loop.ic.baseline_case_times == {"case": 1.0}
     assert loop.ic.commit_new_paths == []
     assert captured["warmstarts"] == []
     assert captured["agent_fn_kwargs"]["source_files"] == [str(workspace / "kernel.s")]

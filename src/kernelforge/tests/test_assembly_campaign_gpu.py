@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Real Triton-to-ASM preparation with the attributed AttnRes seed, without an LLM."""
+"""Compiler-output campaign, wrong-result rejection and clean export replay."""
 
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import subprocess
 import time
@@ -17,18 +18,17 @@ torch = pytest.importorskip("torch")
 if not torch.version.hip or not torch.cuda.is_available():
     pytest.skip("requires ROCm PyTorch", allow_module_level=True)
 if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName.startswith("gfx950"):
-    pytest.skip("AttnRes assembly example specializes gfx950", allow_module_level=True)
-pytest.importorskip("triton")
+    pytest.skip("vector-add campaign test targets gfx950", allow_module_level=True)
+pytest.importorskip("flydsl.compiler")
 
-from kernelforge.assembly.port import prepare_assembly
+from kernelforge.assembly.prepare import prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import bench_wallclock
-from kernelforge.orchestrator import agent
 
 
-def test_attnres_port_graph_rebinding_wrong_result_and_clean_export(tmp_path, monkeypatch):
-    example = Path(__file__).resolve().parents[3] / "examples/triton2asm-attnres"
+def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
+    example = Path(__file__).resolve().parents[3] / "examples/flydsl2asm-vector-add"
     workspace = tmp_path / "campaign"
     shutil.copytree(example, workspace)
 
@@ -42,16 +42,6 @@ def test_attnres_port_graph_rebinding_wrong_result_and_clean_export(tmp_path, mo
     git("commit", "-m", "source")
     base = git("rev-parse", "HEAD")
 
-    def seed_port(**kwargs):
-        assert kwargs["correctness_only"]
-
-        async def run(*args, **kwargs):
-            shutil.copyfile(workspace / "seed/launcher.py", workspace / "kernel.py")
-            shutil.copyfile(workspace / "seed/score.s", workspace / "kernel.s")
-
-        return run
-
-    monkeypatch.setattr(agent, "make_agent_fn", seed_port)
     driver = str(workspace / "driver.py")
     record = asyncio.run(
         prepare_assembly(
@@ -65,24 +55,24 @@ def test_attnres_port_graph_rebinding_wrong_result_and_clean_export(tmp_path, mo
         )
     )
     assert record["build_failure_probe_passed"]
-    assert record["port_attempts"] == 1
+    assert record["origin"] == "flydsl_compiler"
 
     source = workspace / "kernel.s"
     original = source.read_text()
-    entry = "kimik3_attnres_score:\n"
-    assert original.count(entry) == 1
-    source.write_text(original.replace(entry, entry + "s_endpgm\n"))
+    edited, count = re.subn(r"\bv_add_f32(?P<encoding>_e32|_e64)?\b", r"v_sub_f32\g<encoding>", original)
+    assert count == 1
+    source.write_text(edited)
     try:
         report = asyncio.run(run_validation_pipeline(driver))
-        assert not report.all_passed, "independent oracle accepted a no-op kernel"
+        assert not report.all_passed, "independent oracle accepted subtraction"
     finally:
         source.write_text(original)
 
     replay = tmp_path / "replay"
     git("clone", str(workspace), str(replay))
     git("checkout", base, cwd=replay)
-    patch = tmp_path / "port.patch"
-    patch.write_text(git("diff", "--binary", base, record["port_commit"]) + "\n")
+    patch = tmp_path / "roundtrip.patch"
+    patch.write_text(git("diff", "--binary", base, record["preparation_commit"]) + "\n")
     git("apply", str(patch), cwd=replay)
     assert (replay / "kernel.s").read_text() == original
     assert not (replay / "forge_experiments").exists()

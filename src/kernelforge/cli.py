@@ -1452,12 +1452,12 @@ def forge_loop(
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
-    assembly_port = None
+    assembly_preparation = None
     if kernel_backend == "assembly":
-        from kernelforge.assembly.port import prepare_assembly, seed_port_baseline
+        from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
 
         try:
-            assembly_port = asyncio.run(
+            assembly_preparation = asyncio.run(
                 prepare_assembly(
                     config=config,
                     kernel=kernel,
@@ -1467,23 +1467,20 @@ def forge_loop(
                     threshold=snr_threshold,
                     deadline=deadline_unix - finalize_reserve_sec,
                     resume=resume,
-                    program=program_md,
-                    permission_mode=permission_mode,
-                    usage=usage,
                 )
             )
             if not resume:
-                seed_port_baseline(iter_config, assembly_port)
+                seed_source_baseline(iter_config, assembly_preparation)
         except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
-            raise click.ClickException(f"assembly PORT failed; optimization was not started: {error}") from error
-        source_files_list = [str(workspace / assembly_port["assembly"])]
+            raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
+        source_files_list = [str(workspace / assembly_preparation["assembly"])]
         iter_config.source_files = source_files_list
         iter_config.commit_new_paths = []
         commit_new_paths = []
-        # A cached whole-implementation patch could replace the launcher PORT just verified.
+        # A cached whole-implementation patch could replace the launcher preparation just verified.
         kb_warmstart_enabled = False
         program_md += (
-            "\n\nAssembly PORT is complete. Optimize only "
+            "\n\nAssembly preparation is complete. Optimize only "
             + source_files_list[0]
             + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
         )
@@ -1947,8 +1944,10 @@ def forge_loop(
             "agent_model": effective_implementer_model,
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
-        if assembly_port is not None:
-            result["assembly_port"] = assembly_port
+        if assembly_preparation is not None:
+            from kernelforge.assembly.prepare import select_result
+
+            select_result(result, assembly_preparation)
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
@@ -1977,6 +1976,8 @@ def forge_loop(
         snr_db_override: float | None = None,
     ) -> dict:
         """Publish the current durable best idempotently within this process."""
+        if assembly_preparation is not None and not _build_result(None)["improved"]:
+            return {"written": False, "reason": "no_assembly_source_win"}
         if not experience_kb:
             return {"written": False, "reason": "disabled"}
         if _warm_start_publication_covers(remote_publication, commit):

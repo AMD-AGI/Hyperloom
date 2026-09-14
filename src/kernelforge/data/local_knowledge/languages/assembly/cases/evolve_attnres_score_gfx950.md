@@ -93,7 +93,8 @@ Prove dispatch and compare the complete caller before making an E2E claim.
 
 ## Verified Forge instruction-only campaign
 
-The minimal `examples/triton2asm-attnres/` was run with Forge revision
+The historical `examples/triton2asm-attnres/` (since replaced by the compiler-output
+vector-add example) was run with Forge revision
 `48bd5d730` (the `191d4c7f0` snapshot plus its GPU-verified example-driver fix),
 `--kernel-backend assembly`, one lane, and Codex `gpt-5.6-sol`. PORT copied
 the attributed seed and standalone launcher, passed correctness and the

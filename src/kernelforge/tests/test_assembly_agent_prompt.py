@@ -76,16 +76,24 @@ def test_gated_implementer_allows_backend_language_moves_subject_to_task_contrac
 
 @pytest.mark.parametrize("gate_enabled", [True, False])
 @pytest.mark.parametrize(
-    "changed", ["kernel.s", "kernel.py", "unrelated.s", "driver.py", "forge_experiments/assembly_port/source.py"]
+    "changed",
+    [
+        "kernel.s",
+        "kernel.py",
+        "kernel.s.json",
+        "unrelated.s",
+        "driver.py",
+        "forge_experiments/assembly_preparation/source.py",
+    ],
 )
 def test_assembly_optimizer_enforces_only_selected_asm(tmp_path, monkeypatch, gate_enabled, changed):
     def git(*args):
         subprocess.run(["git", "-C", str(tmp_path), *args], check=True, capture_output=True)
 
-    for name in ("kernel.py", "kernel.s", "unrelated.s", "driver.py"):
+    for name in ("kernel.py", "kernel.s", "kernel.s.json", "unrelated.s", "driver.py"):
         (tmp_path / name).write_text("# original\n")
     (tmp_path / ".gitignore").write_text("forge_experiments/\n")
-    artifacts = tmp_path / "forge_experiments/assembly_port"
+    artifacts = tmp_path / "forge_experiments/assembly_preparation"
     artifacts.mkdir(parents=True)
     (artifacts / "source.py").write_text("# source oracle\n")
     git("init")
@@ -113,7 +121,7 @@ def test_assembly_optimizer_enforces_only_selected_asm(tmp_path, monkeypatch, ga
     monkeypatch.setattr(agent, "create_registered_backend", lambda runtime, **kw: RecordingBackend(runtime))
     run = agent.make_agent_fn(
         config=Config(workspace=str(tmp_path), gpu_target="gfx950", agent_backend="claude", agent_precheck=False),
-        program_md="Optimize only kernel.s after PORT.",
+        program_md="Optimize only kernel.s after preparation.",
         kernel_backend_name="assembly",
         insession_gate=gate_enabled,
         driver_script=str(tmp_path / "driver.py"),
