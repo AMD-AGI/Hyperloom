@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -17,8 +18,10 @@ from .event_fields import (
     as_list as _as_list,
     clip as _clip,
     failure_row as _failure_row,
+    float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
+    text_or_none as _text_or_none,
     worst_status as _worst_status,
 )
 from .event_ids import event_id
@@ -48,9 +51,17 @@ SECTION_ACTION = "roofline_action"
 SECTION_PROFILE_RUN = "roofline_profile_run"
 SECTION_ANALYSIS_RUN = "roofline_analysis_run"
 
+#: One row per kernel in the analysis's own roofline table, read back from the
+#: sidecar the analyzer wrote. A section of its own rather than a list on the
+#: action row because the table is the widest thing the action produces and it
+#: is per-kernel, not per-action: folding it into the action row would make the
+#: row's size scale with the model's operator count.
+SECTION_KERNEL = "roofline_kernel"
+
 ROW_ACTION = "action"
 ROW_PROFILE_RUN = "profile_run"
 ROW_ANALYSIS_RUN = "analysis_run"
+ROW_KERNEL = "kernel"
 
 # ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2), which would be ~85 KiB of paths per
 # profile run.
@@ -60,8 +71,21 @@ _MAX_SAMPLE_TRACE_FILES = 4
 # the count carries the rest.
 _MAX_TRACE_ISSUES = 8
 
-# Every profile run row names why it ran, so a multi-attempt roofline can be read without re-deriving the retry reason
-# from log text.
+# The roofline table names every kernel the trace attributed, which on a large
+# MoE reaches the low hundreds. Kept generous rather than top-N: the table is
+# what a reader consults to find the one kernel worth optimizing, and a cutoff
+# by GPU share is exactly the wrong filter for "which cheap kernel is
+# memory-bound at 3% efficiency". The cap only exists so a pathological trace
+# cannot write an unbounded fragment.
+_MAX_ROOFLINE_KERNELS = 512
+
+# ``perfmodel_breakdown.ops`` is a per-operator analytical model, one row per op
+# in the decode path. A few dozen covers the model; the rest are tail ops whose
+# individual times round to nothing.
+_MAX_PERFMODEL_OPS = 64
+
+# Every profile run row names why it ran, so a multi-attempt roofline can be read
+# without re-deriving the retry reason from log text.
 PROFILE_ATTEMPT_INITIAL = "initial"
 PROFILE_ATTEMPT_AFTER_EXCEPTION = "retry_after_exception"
 PROFILE_ATTEMPT_AFTER_BAD_RETURN = "retry_after_bad_return"
@@ -102,6 +126,7 @@ __all__ = [
     "SECTION_ACTION",
     "SECTION_ANALYSIS_RUN",
     "SECTION_EVENT",
+    "SECTION_KERNEL",
     "SECTION_PROFILE_RUN",
     "SUBSTEP_ANALYSIS",
     "SUBSTEP_PROFILE",
@@ -109,22 +134,178 @@ __all__ = [
     "assemble_roofline_action",
     "assemble_roofline_ext",
     "make_roofline_recorder",
+    "read_kernel_roofline",
     "roofline_event_id",
 ]
 
 
 def roofline_event_id(phase: str, macro_cycle: Any) -> str:
-    """Build the event id of the rooflines one phase dispatched in one cycle."""
+    """Build ``{phase}:{macro_cycle}:roofline``, the id of one phase's rooflines in one cycle.
+
+    Raises:
+        ValueError: If either segment is malformed.
+    """
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
 
 
 def _rank_of(path: str) -> str:
-    """Extract the rank token from a per-rank trace filename."""
+    """Extract the rank token from a per-rank trace filename.
+
+    xDiT tensor/sequence-parallel profiles write one trace per rank, named with
+    a ``rank<N>`` / ``_<N>.pt.trace.json.gz`` suffix. Grouping by rank turns a
+    424-entry path list into a histogram that shows whether every rank reported.
+    A filename with no rank encoded in it yields ``"unknown"``.
+    """
     name = Path(str(path)).name
     for token in name.replace("-", "_").split("_"):
         if token.startswith("rank") and token[4:].isdigit():
             return token[4:]
     return "unknown"
+
+
+def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize one row of the analyzer's kernel-roofline table.
+
+    The TraceLens and bypass routes agree on the identity and cost fields and
+    diverge in the tail: bypass measures attainment against a real rocprof
+    ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
+    TraceLens has only its analytical model. Both spellings are kept, because
+    the absent one is itself the answer to "was this number measured". A row
+    carrying no kernel identity cannot be joined to anything and yields
+    ``None``.
+    """
+    kernel_id = _text_or_none(entry.get("kernel_id"))
+    name = _text_or_none(entry.get("name"))
+    if not kernel_id and not name:
+        return None
+    intensity = entry.get("arithmetic_intensity")
+    if intensity is None:
+        intensity = entry.get("flops_per_byte")
+    return {
+        "kernel_id": kernel_id or "",
+        "name": _clip(name or ""),
+        "kernel_category": str(entry.get("kernel_category") or ""),
+        "source_file": _text_or_none(entry.get("source_file")),
+        "gpu_pct": _float_or_none(entry.get("gpu_pct")),
+        "duration_us": _float_or_none(entry.get("duration_us")),
+        "call_count": _int_or_none(entry.get("call_count")),
+        "bottleneck": _text_or_none(entry.get("bottleneck")),
+        "bound_type": _text_or_none(entry.get("bound_type")),
+        "arithmetic_intensity": _float_or_none(intensity),
+        "flops_per_byte": _float_or_none(entry.get("flops_per_byte")),
+        "efficiency_percent": _float_or_none(entry.get("efficiency_percent")),
+        "compute_utilization_pct": _float_or_none(entry.get("compute_utilization_pct")),
+        "bandwidth_utilization_pct": _float_or_none(entry.get("bandwidth_utilization_pct")),
+        "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
+        "roofline_name": _text_or_none(entry.get("roofline_name")),
+        "roofline_source": str(entry.get("roofline_source") or ""),
+        "roofline_measured": bool(entry.get("roofline_measured")),
+        "suggestion": _clip(entry.get("suggestion") or ""),
+        "recommended_actions": [str(item) for item in _as_list(entry.get("recommended_actions"))],
+        "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+        "rocprof_roofline": _as_dict(entry.get("rocprof_roofline")) or None,
+    }
+
+
+def read_kernel_roofline(path: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Read the kernel-roofline sidecar the analyzer wrote for one run.
+
+    The analyzer runs in a subprocess and cannot hold a recorder, so it leaves
+    the table on disk. Reading it here -- in the orchestrator, at the moment the
+    action that produced it settles -- is what makes the table a recorded fact
+    rather than something the exporter re-derives from whatever files survived
+    to the end of the session.
+
+    The rows come back ordered by descending GPU share, behind the table's own
+    provenance header. An unreadable or malformed sidecar gives ``({}, [])``:
+    the table is a detail of a run that already succeeded, so losing it must
+    not turn that run into a failure.
+    """
+    text = str(path or "")
+    if not text:
+        return {}, []
+    try:
+        payload = json.loads(Path(text).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.debug("roofline: kernel roofline sidecar unreadable at %s", text, exc_info=True)
+        return {}, []
+    if not isinstance(payload, Mapping):
+        return {}, []
+    rows: list[dict[str, Any]] = []
+    for entry in _as_list(payload.get("kernels")):
+        if not isinstance(entry, Mapping):
+            continue
+        row = _kernel_roofline_row(entry)
+        if row is not None:
+            rows.append(row)
+    rows.sort(key=lambda row: (-(row.get("gpu_pct") or 0.0), row.get("kernel_id") or ""))
+    header = {
+        "schema_version": _text_or_none(payload.get("schema_version")),
+        "source": str(payload.get("source") or ""),
+        "trace_input": str(payload.get("trace_input") or ""),
+        "trace_input_type": str(payload.get("trace_input_type") or ""),
+        "analysis_md_path": str(payload.get("analysis_md_path") or ""),
+        "kernel_candidates_path": str(payload.get("kernel_candidates_path") or ""),
+        "path": text,
+        # The table's own size, not the recorded row count: with ``truncated``
+        # it says how much the cap dropped, which a count of what survived
+        # cannot.
+        "kernel_count": len(rows),
+        "truncated": len(rows) > _MAX_ROOFLINE_KERNELS,
+    }
+    return header, rows[:_MAX_ROOFLINE_KERNELS]
+
+
+def _snapshot_row(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a roofline snapshot into the shape the event carries.
+
+    The snapshot is the run's quantitative conclusion -- where the achieved
+    throughput sits against the memory and compute ceilings, and which of the
+    two binds -- carried in full rather than by id, because session state is
+    overwritten by later runs.
+    """
+    top_kernel = _as_dict(snapshot.get("top_kernel"))
+    row = {
+        "snapshot_id": _int_or_none(snapshot.get("snapshot_id")),
+        "ts": str(snapshot.get("ts") or ""),
+        "framework": str(snapshot.get("framework") or ""),
+        "macro_cycle": _int_or_none(snapshot.get("macro_cycle")),
+        "throughput_unit": str(snapshot.get("throughput_unit") or ""),
+        "achieved_tok_per_sec": _float_or_none(snapshot.get("achieved_tok_per_sec")),
+        "theoretical_peak_tok_per_sec": _float_or_none(snapshot.get("theoretical_peak_tok_per_sec")),
+        "roofline_mem_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_mem_ceiling_tok_per_sec")),
+        "roofline_cmp_ceiling_tok_per_sec": _float_or_none(snapshot.get("roofline_cmp_ceiling_tok_per_sec")),
+        "roofline_bound_kind": str(snapshot.get("roofline_bound_kind") or ""),
+        "e2e_mean_ms": _float_or_none(snapshot.get("e2e_mean_ms")),
+        "roofline_ideal_ms": _float_or_none(snapshot.get("roofline_ideal_ms")),
+        "within_roofline_pct": _float_or_none(snapshot.get("within_roofline_pct")),
+        "within_roofline_pct_uncapped": _float_or_none(snapshot.get("within_roofline_pct_uncapped")),
+        "gap_to_roofline_pct": _float_or_none(snapshot.get("gap_to_roofline_pct")),
+        "roofline_ceiling_exceeded": bool(snapshot.get("roofline_ceiling_exceeded")),
+        "ceiling_arm": str(snapshot.get("ceiling_arm") or ""),
+        "compute_pct": _float_or_none(snapshot.get("compute_pct")),
+        "idle_pct": _float_or_none(snapshot.get("idle_pct")),
+        "comm_pct": _float_or_none(snapshot.get("comm_pct")),
+        "top_bottleneck": str(snapshot.get("top_bottleneck") or ""),
+        "top_kernel": {
+            "name": _clip(top_kernel.get("name") or ""),
+            "gpu_pct": _float_or_none(top_kernel.get("gpu_pct")),
+            "efficiency_pct": _float_or_none(top_kernel.get("efficiency_pct")),
+            "bound_type": str(top_kernel.get("bound_type") or ""),
+        }
+        if top_kernel
+        else None,
+        "roofline_provenance": _as_dict(snapshot.get("roofline_provenance")) or None,
+    }
+    breakdown = _as_dict(snapshot.get("perfmodel_breakdown"))
+    if breakdown:
+        ops = [_as_dict(op) for op in _as_list(breakdown.get("ops"))]
+        row["perfmodel_breakdown"] = {
+            **{key: value for key, value in breakdown.items() if key != "ops"},
+            "op_count": len(ops),
+            "ops": [op for op in ops if op][:_MAX_PERFMODEL_OPS],
+        }
+    return row
 
 
 def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
@@ -146,7 +327,12 @@ def _summarize_trace_files(profile_result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_trace_health(profile_result: dict[str, Any]) -> dict[str, Any]:
-    """Project ``trace_health`` into the action's bounded health block."""
+    """Project ``trace_health`` into the action's bounded health block.
+
+    Carries the three booleans the executor branches on, the structured
+    per-check rows the profile validator emits, and a clipped slice of the
+    operator-facing issue prose.
+    """
     health = _as_dict(profile_result.get("trace_health"))
     issues = [_clip(row) for row in _as_list(health.get("issues"))]
     return {
@@ -159,7 +345,14 @@ def _summarize_trace_health(profile_result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
-    """Project the structured profile-trace validation into the run row."""
+    """Project the structured profile-trace validation into the run row.
+
+    The validator runs per profile attempt, so its verdict is stored on the run
+    row rather than on the effective-run summary: "attempt 1 recorded no graph
+    launches, attempt 2 did" is only answerable when each attempt keeps the
+    verdict computed against the trace it produced. Empty when the validator
+    did not run.
+    """
     validate = _as_dict(profile_result.get("trace_validate"))
     if not validate:
         return {}
@@ -422,11 +615,33 @@ class RooflineEventRecorder:
         kernel_attribution_degraded: bool,
         cached: dict[str, Any] | None,
         trace_path: str,
+        snapshot: Mapping[str, Any] | None = None,
     ) -> None:
-        """Close the action as succeeded and record the promoted artifacts."""
+        """Close the action as succeeded and record the promoted artifacts.
+
+        Also records the two things the run concluded: the snapshot's own
+        numbers, and the per-kernel roofline table read back from the sidecar.
+        ``kernel_attribution_degraded`` says that zero hot kernels are an
+        attribution artifact rather than a real absence, and ``snapshot`` is
+        passed in rather than looked up because the recorder holds no reference
+        to session state.
+        """
         promoted = _as_dict(cached)
-        # Zero routable candidates is a completed roofline that cannot advance kernel work, which is a different
-        # operational state from a clean run.
+        roofline_path = str(promoted.get("kernel_roofline_path") or "")
+        table, kernels = read_kernel_roofline(roofline_path)
+        for rank, kernel in enumerate(kernels):
+            self._sink.record(
+                SECTION_KERNEL,
+                {"task_id": self._task_id, "rank": rank, **kernel},
+                row_type=ROW_KERNEL,
+                # Ranked by GPU share rather than keyed by kernel id alone: a
+                # re-profile within the same action rewrites the table, and the
+                # rank is what keeps the rewritten rows in the reader's order
+                # instead of interleaving them with the ones they replaced.
+                natural_ids=(self._action_id, f"{rank:04d}"),
+            )
+        # Zero routable candidates is a completed roofline that cannot advance
+        # kernel work, which is a different operational state from a clean run.
         self._close(
             status="degraded" if kernel_attribution_degraded else "succeeded",
             payload={
@@ -438,8 +653,10 @@ class RooflineEventRecorder:
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),
                     "candidates_path": str(promoted.get("candidates_path") or ""),
-                    "kernel_roofline_path": str(promoted.get("kernel_roofline_path") or ""),
-                }
+                    "kernel_roofline_path": roofline_path,
+                    "snapshot": _snapshot_row(snapshot) if isinstance(snapshot, Mapping) and snapshot else None,
+                },
+                "kernel_roofline_table": table or None,
             },
         )
 
@@ -463,7 +680,12 @@ class RooflineEventRecorder:
         )
 
     def finish_crashed(self, exc: BaseException) -> None:
-        """Close an action whose executor raised instead of returning a result."""
+        """Close an action whose executor raised instead of returning a result.
+
+        Distinguishes "the executor blew up" from "the session was killed
+        mid-roofline", which would otherwise both read as a dangling
+        ``status="running"`` event.
+        """
         if self._closed:
             return
         self.finish_failed(
@@ -491,7 +713,7 @@ class RooflineEventRecorder:
             return
         from .assembler import roofline_event_parts
 
-        ext, derived = assemble_roofline_ext(roofline_event_parts(), event=self.event_id)
+        ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
         finish_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -537,6 +759,10 @@ def assemble_roofline_actions(
         sort_rows(rows_for_event(parts.get(SECTION_ANALYSIS_RUN) or [], event), keys=("run_index",)),
         "task_id",
     )
+    kernels = group_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_KERNEL) or [], event), keys=("rank",)),
+        "task_id",
+    )
 
     actions: list[dict[str, Any]] = []
     for row in action_rows:
@@ -574,10 +800,29 @@ def assemble_roofline_actions(
                     "effective_run": _as_dict(row.get("analysis_effective_run")),
                 },
                 "outcome": _as_dict(row.get("outcome")),
+                "kernel_roofline": _kernel_roofline_block(row, kernels.get(task, [])),
                 "failure": _as_dict(row.get("failure")) or None,
             }
         )
     return actions
+
+
+def _kernel_roofline_block(
+    action_row: Mapping[str, Any],
+    kernel_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Assemble the action's per-kernel roofline table.
+
+    ``None`` when the action recorded none -- a failed action, or one whose
+    analyzer wrote no sidecar.
+    """
+    header = _as_dict(action_row.get("kernel_roofline_table"))
+    if not header and not kernel_rows:
+        return None
+    return {
+        **header,
+        "kernels": wire_rows(kernel_rows, drop=("event_id", "task_id", "rank")),
+    }
 
 
 def assemble_roofline_ext(
@@ -585,7 +830,13 @@ def assemble_roofline_ext(
     *,
     event: str,
 ) -> tuple[dict[str, Any], str]:
-    """Assemble one roofline event's ``ext`` out of its recorded rows."""
+    """Assemble one roofline event's ``ext`` out of its recorded rows.
+
+    The ``ext`` holds one entry per action the event owns, and the derived
+    status is the worst of theirs: a phase can dispatch roofline more than once
+    in a macro cycle, and an event reading ``succeeded`` while one of its
+    actions failed would hide the failure behind the retry that recovered.
+    """
     actions = assemble_roofline_actions(parts, event=event)
     return {"actions": actions}, _worst_status([str(action.get("status") or "") for action in actions])
 

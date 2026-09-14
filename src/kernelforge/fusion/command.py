@@ -82,48 +82,19 @@ EXIT_INFRASTRUCTURE_FAILURE = 4
 _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
 
 
-def _credential_shape() -> tuple[bool, bool]:
-    """Return whether OpenAI-side and Anthropic-side credentials are configured."""
-    openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
-    anthropic = any(
-        os.environ.get(name, "").strip()
-        # A subscription token carries its own endpoint, so it is a complete
-        # Anthropic side on its own -- which is what Hyperloom's own credential
-        # preflight (agents/kernel/scripts/install.sh) already counts it as.
-        # Leaving it out here meant a box configured only that way was told it
-        # had "no OpenAI or Anthropic credentials" while the Claude CLI on it
-        # would have authenticated fine.
-        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
-    ) or any(
-        os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-        for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
-    )
-    return bool(openai), bool(anthropic)
-
-
 def _resolve_agent_choice(
     agent_backend: str,
     llm_model: Optional[str],
 ) -> tuple[str, str]:
-    """Resolve provider from credentials, then model from provider precedence."""
+    """Resolve provider from the registry's auto rule, then model from provider precedence."""
     requested = (agent_backend or "auto").strip().lower()
     if requested == "auto":
-        has_openai, has_anthropic = _credential_shape()
-        if has_openai and not has_anthropic:
-            provider = "codex"
-        elif has_anthropic and not has_openai:
-            provider = "claude"
-        elif has_openai and has_anthropic:
-            # Use the project's existing first-available default without passing a model, so dual-provider selection
-            # never guesses from model prefixes.
-            provider = select_default_agent_provider().name
-        else:
-            raise click.UsageError(
-                "--agent-backend auto found no OpenAI or Anthropic credentials; "
-                "configure OPENAI_API_KEY for Codex, ANTHROPIC_API_KEY/"
-                "ANTHROPIC_AUTH_TOKEN for Claude, or pass an explicit backend "
-                "with its provider configuration"
-            )
+        # No credential test of its own: credentials-then-SDK with Claude ahead
+        # of Codex is the registry's single rule, and a second copy here is how
+        # forge-fusion and forge-loop came to disagree about the same box. No
+        # model is passed, so dual-configured selection never guesses from a
+        # model prefix.
+        provider = select_default_agent_provider().name
     else:
         provider = get_agent_provider(requested).name
 

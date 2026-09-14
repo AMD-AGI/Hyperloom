@@ -1185,6 +1185,7 @@ def test_degraded_kb_skips_remote_close_writer(
         "status": "skipped",
         "reason": "degraded_kb",
         "backend": "disabled",
+        "result_type": "kb_disabled",
     }
 
 
@@ -1220,6 +1221,7 @@ def test_local_close_ignores_ambient_kb_store(
         "status": "skipped",
         "reason": "no_recipe_backend",
         "backend": "local",
+        "result_type": "kb_disabled",
     }
     assert calls == []
 
@@ -1278,6 +1280,7 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
+        "result_type": "written",
     }
     assert calls == [
         (
@@ -1331,6 +1334,11 @@ def test_remote_close_transport_failure_is_nonfatal(
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
+        # The publisher reports the failure as a bare exception class name, so
+        # the class is carried in a field of its own rather than left for a
+        # reader to recover from ``reason``.
+        "result_type": "transport_failed",
+        "error_class": "OSError",
     }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,

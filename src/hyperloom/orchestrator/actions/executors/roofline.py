@@ -1175,12 +1175,18 @@ class RooflineExecutor:
             result["profile_recovered"] = True
             result["profile_warning"] = profile_warning
         if recorder is not None:
+            snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(
                 snapshot_id=cached.get("roofline_snapshot_id"),
                 hot_kernel_count=len(hot),
                 kernel_attribution_degraded=attribution_degraded,
                 cached=cached,
                 trace_path=str(trace_path),
+                # The snapshot this run just appended. Read here rather than in
+                # the recorder because the history is capped and later runs
+                # evict entries, so the numbers have to be taken while the run
+                # that produced them is still the latest.
+                snapshot=snapshots[-1] if isinstance(snapshots, list) and snapshots else None,
             )
         return result
 

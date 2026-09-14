@@ -5,6 +5,127 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **One rule now picks the agent backend, in both packages: a configured
+  credential first, then an installed SDK, with Claude ahead of Codex.** Four
+  places answered this question and three of them disagreed.
+  `select_default_agent_provider` read only whether `claude_agent_sdk` or
+  `openai_codex` was importable, so `forge-loop` on an OpenAI-only box resolved
+  to Claude whenever both extras happened to be installed and then failed to
+  authenticate. `forge-fuse` read only keys, through a credential set of its
+  own. The Hyperloom roles each re-derived "OpenAI-only means Codex" locally.
+
+  The credential shape is now `llm_config.preferred_agent_backend`'s for the
+  whole repository, and a provider declares its own side through the new
+  `AgentProvider.credentialed`, so the ranking is derived from registration
+  rather than restated as a chain of provider names. An explicitly named model
+  narrows the candidates instead of joining that ranking: ownership says which
+  provider the model belongs to, which no credential shape should overrule,
+  while an owner that cannot run is worse than a fallback that can.
+
+  What each side accepts as a credential is a question of its own, answered by
+  `anthropic_agent_credentialed` / `openai_agent_credentialed` rather than by
+  widening the predicates the credential preflight already uses. A bare
+  `OPENAI_BASE_URL` is an endpoint hint, not a Codex credential, so it no longer
+  selects an unauthenticated Codex run. `CLAUDE_CODE_USE_BEDROCK` and
+  `CLAUDE_CODE_USE_VERTEX` do authenticate the Claude CLI, so they hold the
+  Anthropic side for selection — and only for selection, because they hand no
+  key to the callers that need one.
+
+  One behaviour change follows: a deployment with no credential either package
+  can see is no longer refused up front — `forge-fuse` dropped its
+  `--agent-backend auto` usage error and forge-fusion dropped the
+  `llm_provider_unconfigured` result, because a runtime logged in by other means
+  carries no credential these can read, and its own preflight is what reports a
+  genuine authentication failure. A provider missing both a credential and its
+  SDK is still refused, now naming both.
+
+- **The Robustness Agent's RCA engine follows the same precedence.** It checked
+  the OpenAI side first unconditionally — the only place in the repository that
+  preferred Codex — so a dual-configured deployment ran RCA on GPT while every
+  other role ran on Claude. It now asks the configured side first and falls
+  through to the other one when that side carries no usable key: a subscription
+  token whose CLI transport is unavailable no longer claims the run, and a host
+  with no credential at all reports the OpenAI side it will not reach rather
+  than an Anthropic side it was never configured for. Whether that credential
+  can authenticate a call now follows the key rather than the provider name:
+  only the keyless Anthropic shape depends on the CLI transport, so an Anthropic
+  side that did resolve one — what a normalized `DEEPSEEK_API_KEY` produces —
+  keeps its RCA engine instead of being dropped to a silent `NoopRcaEngine` by
+  a probe for the CLI its HTTP engine never uses.
+
+### Fixed
+
+- **The `=== Warm start ===` block told the model it was starting cold on top of
+  a matched recipe.** `to_warm_start_summary` read three fields no writer
+  produces — `recipe.get("raw")`, and `raw`/`symptom` on each pitfall — so an
+  exact hit carrying a full config printed
+  `(no recipe text — first session for this workload/hw)`, and a `pitfalls (N):`
+  header could appear with nothing under it. That is not a silent omission; it
+  asserts the opposite of what the KB found, on the line the model reads to
+  decide whether it has prior work to build on.
+
+  The block now renders `warm_start_context`, the model-facing view
+  `recipe_kb_t0` already builds and persists on every anchor, instead of
+  re-deriving a second one from the raw row. That view answers what this block
+  exists to answer and the row cannot: `status` distinguishes a hit from a
+  seed-only first session, `match.tier`/`confidence` qualify the match, and
+  `recommended_replay` carries the config already split into server args and
+  envs with its donor attached. A borrowed config is now labelled with the model
+  it came from, so another workload's throughput can no longer read as this
+  session's own history, and the pitfall header counts the rows it prints.<br/>
+  **Operator note**: affects the conversation warm-start block and the
+  `warm_start` MCP context tool, in both local and remote Recipe modes.
+
+- **Lessons and pitfalls recorded by the Recipe KB reach the specialist again —
+  every one of them was rendering as `(none)`.** Sections 5b and 5c read
+  `point["attrs"]["statement"]` / `point["attrs"]["description"]`, but nothing in
+  the system writes an `attrs`-wrapped experience row. `Recipe.to_dict`,
+  `_normalise_lessons` and `_normalise_str_dicts` all write flat rows, `writeback`
+  appends `{statement, measured_impact}` flat, and
+  `test_t0_anchor_surfaces_pitfalls_and_lessons_from_existing_row` already
+  asserted `state.warm_start_lessons[0]["statement"]`. A flat row therefore
+  resolved `attrs` to `{}`, produced an empty statement, and hit the
+  `if not statement: continue` guard, so both sections fell through to their
+  `(none)` placeholder no matter how much a prior session had learned.
+
+  The wrapped form survived only in hand-written test fixtures, so it is deleted
+  rather than accommodated: the renderers read the flat fields directly, and the
+  one place a legacy wrapped row is unwrapped is `recipe_kb_t0._experience_rows`,
+  where `warm_start_lessons` / `warm_start_pitfalls` are assigned. No reader
+  downstream knows about two shapes.
+
+  That normalisation is also where an unusable row is now dropped, with a
+  warning naming the field and the count. The silence is what let this run for so
+  long: a non-empty list could render as `(none)` with no log and no error, so
+  neither the prompt nor the operator had any signal. Rejecting at the boundary
+  puts the complaint where the shape is known, instead of adding a warning to a
+  renderer that should not be inspecting shapes at all.
+
+  The contract docs that caused the drift are corrected too — the section
+  docstrings ("KB `kind=lesson` points"), `_render_measured_impact`
+  ("`attrs.measured_impact`"), `_format_version_note`'s `lesson_attrs`
+  parameter, and the `SharedState.warm_start_pitfalls` / `warm_start_lessons`
+  field comments ("list of KB point dicts") all described a wrapped row.
+  Fixtures are flat, and two of them are built by calling the writer so the
+  reader and the stored shape cannot drift apart again.<br/>
+  **Operator note**: sessions lost no recorded knowledge, but until now none of
+  it was being shown to the agent.
+
+### Changed
+
+- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
+  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
+  `docs/install/install.md`, the example `SKILL.md` recipes, and
+  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
+  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
+  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
+  (`git apply --check`), so the TraceLens profiler-config patch path is
+  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
+  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
+  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
+
 ### Removed
 
 - **The `learning/` tuning database, the tracker's scoring layer, and the
@@ -46,6 +167,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `kernel_agents.agent_providers` entry-point group stays: it is how
   third-party provider plugins published before the rename are still
   discovered, and it is not a CLI surface.
+
+### Fixed
+
+- **Supervisor watchdog restarts are resumable and bounded.** A wedged
+  coordinator receives SIGHUP, preserving the interrupted phase segment without
+  creating a session outcome; repeated wedges become terminal after three
+  restart attempts, counted durably before the signal goes out. Inline role
+  turns now share an explicit total wall-clock timeout, independent of backend
+  streamed-message idle timeouts and retries. Reactor-stage boundaries refresh
+  supervisor progress, while a stage cancelled at the total timeout counts toward
+  the crash emergency stop. A failed restart-counter write refuses the resumable
+  restart and sends SIGTERM, and a cleanly ended leg can resume as soon as its
+  owner pid is gone instead of being held alive by the final state write.
+- **The robustness monitor reads the real stop-reason vocabulary.** It imported
+  a module that does not exist and silently fell back to a subset missing 16
+  terminal reasons, so a finished session could be relaunched.
 
 ## [v1.1.0] - 2026-09-09
 Current packaged version (`pyproject.toml`). See

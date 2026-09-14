@@ -226,6 +226,7 @@ class TestKeepGoingAsymmetry:
             )
 
     def test_rc0_invalid_measurement_continues_despite_keep_going_false(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)

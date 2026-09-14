@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -560,6 +561,65 @@ async def test_executor_multi_node_skips_neutrally(tmp_path: Path, monkeypatch):
     assert result["patches_applied"] == []
     # The sandbox framework tree must be untouched — no silent apply.
     assert (repo / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_unrelated_patch_root_cannot_redirect_selected_patch(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    intended = tmp_path / "sglang"
+    unrelated = tmp_path / "aiter"
+    init_git_repo(intended)
+    init_git_repo(unrelated)
+    _write_specialist_workspace(
+        session_dir,
+        "partial-roots",
+        done_payload_override={"patch_roots": {"unselected-harvest.patch": str(unrelated)}},
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx(
+        "integrate-partial-roots",
+        {"specialist_task_id": "partial-roots", "framework_source_root": str(intended), "apply_only": True},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench"
+    assert (intended / "src.py").read_text().endswith("return 2\n")
+    assert (unrelated / "src.py").read_text().endswith("return 1\n")
+
+
+@pytest.mark.asyncio
+async def test_recorded_patch_root_survives_symlinked_session(tmp_path: Path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    alias = tmp_path / "session-alias"
+    alias.symlink_to(session_dir, target_is_directory=True)
+    intended = tmp_path / "aiter"
+    unrelated = tmp_path / "sglang"
+    init_git_repo(intended)
+    init_git_repo(unrelated)
+    patch = alias / "runs" / "specialist" / "complete-roots" / "worktree" / "patches" / "001_test.patch"
+    _write_specialist_workspace(
+        alias,
+        "complete-roots",
+        patch_contents=[
+            "diff --git a/new.py b/new.py\nnew file mode 100644\nindex 0000000..3e75765\n"
+            "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
+        ],
+        done_payload_override={"patches_written": [str(patch)], "patch_roots": {str(patch): str(intended)}},
+    )
+    executor = IntegratePatchExecutor(session_dir=alias)
+    ctx = _make_ctx(
+        "integrate-complete-roots",
+        {"specialist_task_id": "complete-roots", "framework_source_root": str(unrelated), "apply_only": True},
+    )
+
+    result = await executor(ctx)
+
+    assert result["status"] == "applied_no_bench", result
+    assert (intended / "new.py").read_text() == "new\n"
+    assert not (unrelated / "new.py").exists()
 
 
 @pytest.mark.asyncio
@@ -1298,6 +1358,30 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
     assert (tmp_path / "logs" / "enablement_setup.log").exists()
 
 
+def test_run_setup_commands_stops_between_commands_on_cancel(tmp_path: Path, monkeypatch):
+    """Cancel is cooperative between commands; an in-flight subprocess.run is not killed."""
+    from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+
+    ran: list[str] = []
+    scope = CancelScope()
+
+    def _fake_run(cmd, *args, **kwargs):
+        ran.append(cmd)
+        scope.cancel(reason="test")
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    with use_cancel_scope(scope):
+        out = _run_setup_commands(
+            ["pip install -U transformers", "pip install -U torch"],
+            cwd=tmp_path,
+            log_dir=tmp_path / "logs",
+        )
+    assert ran == ["pip install -U transformers"]
+    assert out["applied"] == ["pip install -U transformers"]
+    assert out["failed"] == []
+
+
 def test_skipped_setup_commands_are_named_in_the_round_reason():
     """A rejected command must reach the conclusion, not just a log line.
 
@@ -1433,6 +1517,51 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     assert result["status"] == "kept"
     assert result["setup_commands_applied"] == ["pip install -U transformers"]
     assert replayed["commands"] == ["pip install -U transformers"]
+
+
+@pytest.mark.asyncio
+async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monkeypatch):
+    """Enablement setup replay must not occupy the coordinator event-loop thread.
+
+    ``_run_setup_commands`` is a blocking ``subprocess.run`` loop. If it ran on
+    the loop thread, concurrent in-flight LLM streams, the dispatcher's re-scan
+    poll, and cancel grace would freeze until the installs finished.
+    """
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+
+    def _spy_run_setup(commands, *, cwd, log_dir):
+        seen["ident"] = threading.get_ident()
+        return {"applied": [], "skipped": [], "failed": []}
+
+    monkeypatch.setattr(ip_mod, "_run_setup_commands", _spy_run_setup)
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    ctx = _make_ctx("t-int-setup-thread", {"enablement": True})
+    ctx._ip_specialist_workspace = workspace  # type: ignore[attr-defined]
+
+    result = await executor._stage_apply(
+        ctx,
+        {
+            "enablement": True,
+            "enablement_setup_commands": ["pip install -U transformers"],
+        },
+        {},
+        "t-spec-setup-thread",
+        None,
+        None,
+    )
+
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
+    assert result is not None
+    assert result["status"] == "no_patches"
 
 
 def test_integrate_patch_executor_imports_clean():

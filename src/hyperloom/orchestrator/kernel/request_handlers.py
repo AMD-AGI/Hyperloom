@@ -53,6 +53,7 @@ from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.task_progress import heartbeat_while_output_flows
 
+
 from ._recorder_trace import trace_recording_skipped
 
 # Re-exported: callers patch these at ``request_handlers.<name>``.
@@ -4602,15 +4603,6 @@ async def run_gemm_tuning_handler(
     """
     backend = _resolve_gemm_tuning_backend(payload)
     log.info("run_gemm_tuning: backend=%s", backend)
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            session_dir,
-            payload={**payload, "gemm_tuning_backend": backend},
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("gemm v4 start recording failed", exc_info=True)
 
     if backend == "forge":
         result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
@@ -4619,16 +4611,6 @@ async def run_gemm_tuning_handler(
     result.setdefault("task_id", payload.get("task_id"))
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_gemm_tuning_operation(
-            session_dir,
-            payload={**payload, "gemm_tuning_backend": backend},
-            result=result,
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("gemm v4 result recording failed", exc_info=True)
     return result
 
 
@@ -4725,13 +4707,11 @@ def _resolve_forge_agent(
     """Resolve the Forge agent backend and model as one decision.
 
     Shared by forge-fusion and the rewrite lane, which uses the same model
-    ladder via :func:`llm_config.resolve_forge_llm_model`. The canonical
-    provider-shape predicates decide the default backend: OpenAI-only uses
-    Codex, while Anthropic-only and dual-configured deployments use Claude, the
-    established default for this agentic role. A valid explicit
-    ``agent_backend`` or ``llm_model`` in the request wins. With no configured
-    provider, the request fails instead of silently spawning an unauthenticated
-    Claude process.
+    ladder via :func:`llm_config.resolve_forge_llm_model`. A valid explicit
+    ``agent_backend`` or ``llm_model`` in the request wins; otherwise
+    :func:`llm_config.preferred_agent_backend` decides, so this role cannot
+    disagree with the specialists, the TraceLens runner or the Forge registry
+    about which backend a box is configured for.
 
     Model id precedence (after the backend is chosen) is owned by
     :func:`llm_config.resolve_forge_llm_model`.
@@ -4744,32 +4724,16 @@ def _resolve_forge_agent(
         The canonical ``(agent_backend, llm_model)`` pair.
 
     Raises:
-        RuntimeError: If neither provider side is configured.
         ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
     """
     source = env if env is not None else os.environ
-    openai_only = llm_config.is_openai_only(source)
-    anthropic_only = llm_config.is_anthropic_only(source)
-    has_openai = llm_config.has_openai_side(source)
-    has_anthropic = llm_config.has_anthropic_side(source)
-    if not has_openai and not has_anthropic:
-        raise RuntimeError("no LLM provider is configured for forge")
-
+    known_backends = {llm_config.AGENT_BACKEND_CLAUDE, llm_config.AGENT_BACKEND_CODEX}
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
-    if explicit_backend and explicit_backend not in {"claude", "codex"}:
+    if explicit_backend and explicit_backend not in known_backends:
         raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
 
-    if explicit_backend:
-        agent_backend = explicit_backend
-    elif openai_only:
-        agent_backend = "codex"
-    elif anthropic_only:
-        agent_backend = "claude"
-    else:
-        # Dual-configured deployments retain this agentic role's Claude default.
-        agent_backend = "claude"
-
-    default_model = DEFAULT_CODEX_MODEL if agent_backend == "codex" else DEFAULT_CLAUDE_MODEL
+    agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
+    default_model = DEFAULT_CODEX_MODEL if agent_backend == llm_config.AGENT_BACKEND_CODEX else DEFAULT_CLAUDE_MODEL
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,
@@ -4888,12 +4852,12 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
     gpu = str(payload.get("gpu") or "0").strip()
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
-    except (RuntimeError, ValueError) as exc:
+    except ValueError as exc:
         return {
             "status": "failed",
             "backend": "forge",
             "engine": "forge_fusion",
-            "error_class": ("llm_provider_unconfigured" if isinstance(exc, RuntimeError) else "invalid_agent_backend"),
+            "error_class": "invalid_agent_backend",
             "error": str(exc),
             "decision": "REVERT",
             "kept": False,
@@ -5522,33 +5486,22 @@ async def trace_analyze_handler(
             trace_input=str(trace_input),
             duration_sec=_disc_duration_sec,
         )
-
-        # Record hot-kernel discovery provenance (best-effort).
+        # This run is the only place the build of the reader that produced the
+        # session's hot kernels is in scope. Nothing downstream can recover it,
+        # so it is recorded here even though the rest of the discovery run is
+        # already on the roofline event.
         try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
 
-            _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            instrument.record_kernel_discovery(
-                session_dir,
-                source=_disc_tool,
-                status=str(result.get("status") or ""),
-                hot_kernels=_hot if isinstance(_hot, list) else [],
-                scan={
-                    "splitter_mode": steady_state_mode,
-                    "trace_dir": str(trace_input),
-                    "candidates_path": str(result.get("candidates_path") or ""),
-                    "trace_report_path": str(result.get("trace_report_path") or ""),
-                    "analysis_route": _disc_route,
-                },
-                duration_sec=_disc_duration_sec,
-                error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),
-            )
+            tool_versions.record_tool_version(session_dir, tool=_disc_tool)
         except Exception as exc:  # noqa: BLE001
             trace_recording_skipped(
-                "kernel_discovery",
+                "versions",
                 reason="caller raised before the recorder",
+                entity=_disc_tool,
                 error=exc,
             )
+
     return result
 
 
@@ -6718,24 +6671,6 @@ async def integrate_handler(
         if decision == "KEEP":
             result["integration_validation_status"] = "passed"
             result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-        instrument.record_kernel_e2e(
-            session_dir,
-            kernel_id=str(kernel_id or ""),
-            integrated=decision == "KEEP",
-            e2e_gain_pct=gain_pct,
-            validated=True if decision == "KEEP" else False,
-            decision=decision,
-            patch_path=str(patch_path or "") or None,
-            target_file=str(payload.get("target_file") or payload.get("source_file") or "") or None,
-            extra_server_args=extra_args,
-            result=result,
-            validation_tier=str(result.get("validation_tier") or "integrate_e2e"),
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("kernel integrate v4 result recording failed", exc_info=True)
     return result
 
 

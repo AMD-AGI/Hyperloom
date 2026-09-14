@@ -326,6 +326,12 @@ def write_manifest(
         encoding="utf-8",
     )
     os.replace(tmp_path, target)
+    # The manifest stamp is where the spawn-time image, host and pid are
+    # resolved; record them now so the exporter reads a fact instead of
+    # re-probing the environment of whichever process happens to export.
+    from ..breakdown.recorder import record_metadata_identity
+
+    record_metadata_identity(sd, manifest)
     return manifest
 
 

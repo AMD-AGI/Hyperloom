@@ -13,7 +13,6 @@ import subprocess
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 
 @dataclass
@@ -57,8 +56,26 @@ class _StubSharedState:
     max_model_len: int = 0
     last_action_failures: list = field(default_factory=list)
 
-    def save(self, *args, **kwargs):  # noqa: D401 — stub
-        pass
+    def save(self, session_dir=None, *args, **kwargs):
+        """Persist the one-shot guard so a resume can be tested against disk.
+
+        The guard only does its job if it survives a restart, so the stub
+        writes it rather than dropping it: a branch that forgets to save is
+        then a failing resume test instead of a silent replay.
+        """
+        if session_dir is None:
+            return
+        path = Path(session_dir) / "state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "warm_replay_attempted": bool(self.warm_replay_attempted),
+                    "warm_replay_outcome": dict(self.warm_replay_outcome or {}),
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def record_action_failure(self, *, action, task_id, result, **kwargs):
         self.last_action_failures.append(
@@ -118,7 +135,11 @@ def _make_coord(
     warm_replay_min_confidence: float = 0.7,
     warm_replay_min_reproduce_pct: float = 0.8,
     warm_replay_attempted: bool = False,
+    resume_from_disk: bool = False,
 ) -> Coordinator:
+    if resume_from_disk:
+        persisted = json.loads((Path(tmp_path) / "state.json").read_text(encoding="utf-8"))
+        warm_replay_attempted = bool(persisted.get("warm_replay_attempted"))
     coord = Coordinator.__new__(Coordinator)
     coord.session_dir = tmp_path
     coord.shared_state = _StubSharedState(
@@ -667,7 +688,11 @@ async def test_warm_replay_skips_when_disabled_by_flag(tmp_path):
 async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
     tmp_path,
 ):
-    """Resume safety: after a disabled launch flips warm_replay_attempted, a flag-less resume still short-circuits."""
+    """Resume safety: after a disabled launch flips warm_replay_attempted, a flag-less resume still short-circuits.
+
+    The second coordinator reads the guard back off disk rather than being
+    handed it, so a refusal that never persisted fails here.
+    """
     coord1 = _make_coord(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(),
@@ -679,7 +704,7 @@ async def test_warm_replay_resume_with_lost_disable_flag_is_still_blocked(
         tmp_path,
         warm_start_recipe=_warm_recipe_t1(),
         warm_replay_enabled=True,
-        warm_replay_attempted=True,  # restored from state.json
+        resume_from_disk=True,
     )
     task = await coord2._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is None
@@ -735,6 +760,33 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     task = await coord._maybe_enqueue_warm_replay(baseline_tput=600.0)
     assert task is None
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"warm_start_recipe": {}}, id="no_warm_start_recipe"),
+        pytest.param({"warm_start_recipe": _warm_recipe_t1(), "warm_replay_enabled": False}, id="disabled_by_flag"),
+        pytest.param(
+            {"warm_start_recipe": _warm_recipe_t1(confidence=0.55, tier="T3_same_family")},
+            id="confidence_below_threshold",
+        ),
+        pytest.param(
+            {"warm_start_recipe": _warm_recipe_t1(extra_server_args="", extra_envs={})},
+            id="best_config_empty",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_refusal_persists_the_one_shot_guard(tmp_path, kwargs):
+    """A refusal that stays in memory would replay after a restart."""
+    coord = _make_coord(tmp_path, **kwargs)
+
+    assert await coord._maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["warm_replay_attempted"] is True
+    assert persisted["warm_replay_outcome"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -2460,173 +2512,6 @@ def test_dirty_worktree_required_patch_is_republished(tmp_path):
     assert coord.shared_state.optimization_stack[-1]["replayed_patch_refs"] == ["old.patch"]
 
 
-def _warm_replay_ledger(session_dir):
-    """Assemble the recorded parts plus the baseline reading gains are measured against."""
-    from hyperloom.inference_optimizer.breakdown.collectors import (
-        collect_recorded_optimizations,
-    )
-    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts
-
-    parts = assemble_parts(session_dir)
-    operations = list(parts.get("operations") or [])
-    measurements = list(parts.get("measurements") or [])
-    operations.append({"operation_id": "op-base", "kind": "baseline", "measurement_refs": ["m-base"]})
-    measurements.append({"measurement_id": "m-base", "name": "throughput", "value": 600.0})
-    return collect_recorded_optimizations(
-        "s1",
-        operations,
-        measurements,
-        list(parts.get("adoptions") or []),
-        list(parts.get("artifacts") or []),
-        [],
-        [],
-        [],
-    )
-
-
-def test_reproduced_replay_reaches_the_canonical_ledger(tmp_path):
-    """A promoted warm replay must be an adopted step in the recorded ledger."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_outcome = {
-        "status": "in_flight",
-        "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "exact",
-    }
-    task = _StubTask(
-        params={
-            "extra_server_args": "--attention-backend AITER",
-            "baseline_tput_anchor": 600.0,
-        }
-    )
-    result = {"status": "succeeded", "output_throughput": 660.0}
-    coord._promote_warm_replay(result, task=task)
-    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-
-    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
-
-    ledger = _warm_replay_ledger(tmp_path)
-    entry = ledger["entries"][0]
-    assert entry["source"] == "warm_replay"
-    assert entry["optimization_kind"] == "replay_warm_recipe"
-    # The gain chains from the recorded session baseline, not the enqueue anchor.
-    assert entry["gain_pct"] == pytest.approx(10.0, abs=0.01)
-    assert ledger["validation"]["ledger_total_gain_pct"] == pytest.approx(10.0, abs=0.01)
-    assert ledger["validation"]["keep_count"] == 1
-    # The executor's real status survives; the keep rides on the decision.
-    assert ledger["attempts"][0]["status"] == "succeeded"
-
-
-def test_drifted_replay_stays_out_of_the_canonical_ledger(tmp_path):
-    """A replay that missed the bar must not be credited any gain."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_outcome = {
-        "status": "in_flight",
-        "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "exact",
-    }
-    task = _StubTask(
-        params={
-            "extra_server_args": "--attention-backend AITER",
-            "baseline_tput_anchor": 600.0,
-        }
-    )
-    result = {"status": "succeeded", "output_throughput": 600.0}
-    coord._promote_warm_replay(result, task=task)
-    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
-
-    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
-
-    ledger = _warm_replay_ledger(tmp_path)
-    assert ledger["entries"] == []
-    assert ledger["validation"]["ledger_total_gain_pct"] == 0.0
-    attempt = ledger["attempts"][0]
-    assert attempt["adopted"] is False
-    # The rejected replay carries why it was dropped: the measured gain, the bar it missed, and the reason -- not a
-    # blank row.
-    assert attempt["local_gain_pct"] == pytest.approx(0.0, abs=0.01)
-    assert attempt["keep_threshold_pct"] == pytest.approx(0.0, abs=0.01)
-    assert "below keep threshold" in attempt["decision_reason"]
-    # Its status is normalized outside the executor-adoption verdict set.
-    assert attempt["status"] not in ("kept", "kept_inert", "promoted", "adopted")
-
-
-def test_replay_admitted_without_a_score_is_unscored_not_validated(tmp_path):
-    """An eval that ran but returned no score is adopted, not accuracy-validated."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    # Reproduced, but the accuracy eval ran without yielding a score.
-    coord.shared_state.warm_replay_outcome = {
-        "status": "reproduced",
-        "actual_gain_pct": 10.0,
-        "throughput_after": 660.0,
-        "keep_threshold_pct": 0.0,
-        "eval_ran": True,
-        "replay_accuracy": None,
-    }
-    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
-    result = {"status": "succeeded", "output_throughput": 660.0}
-
-    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
-
-    ledger = _warm_replay_ledger(tmp_path)
-    attempt = ledger["attempts"][0]
-    assert attempt["adopted"] is True
-    assert attempt["validation_basis"] == "keep_verdict_unscored"
-    assert ledger["entries"][0]["gain_pct"] == pytest.approx(10.0, abs=0.01)
-    assert ledger["validation"]["unscored_keep_count"] == 1
-
-
-def test_replay_with_a_passing_score_is_accuracy_validated(tmp_path):
-    """A scored, passing replay records ``accuracy_pass`` -- the counterpart."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_outcome = {
-        "status": "reproduced",
-        "actual_gain_pct": 10.0,
-        "throughput_after": 660.0,
-        "keep_threshold_pct": 0.0,
-        "eval_ran": True,
-        "replay_accuracy": 0.87,
-    }
-    task = _StubTask(params={"extra_server_args": "--attention-backend AITER"})
-    result = {"status": "succeeded", "output_throughput": 660.0}
-
-    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
-
-    ledger = _warm_replay_ledger(tmp_path)
-    attempt = ledger["attempts"][0]
-    assert attempt["adopted"] is True
-    assert attempt["validation_basis"] == "accuracy_pass"
-    assert ledger["validation"]["unscored_keep_count"] == 0
-
-
-def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_path):
-    """The accuracy provenance must ride on what the run actually stamped."""
-    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
-    coord.shared_state.warm_replay_outcome = {
-        "status": "in_flight",
-        "expected_gain_pct": 25.0,
-        "warm_recipe_tier": "exact",
-    }
-    task = _StubTask(
-        params={
-            "extra_server_args": "--attention-backend AITER",
-            "baseline_tput_anchor": 600.0,
-        }
-    )
-    # A numeric accuracy makes _warm_replay_accuracy_ok stamp replay_accuracy.
-    result = {"status": "succeeded", "output_throughput": 660.0, "accuracy": 0.9}
-    coord._promote_warm_replay(result, task=task)
-    assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
-    assert coord.shared_state.warm_replay_outcome["replay_accuracy"] == 0.9
-
-    WritebackCollaborator(coord)._mirror_warm_replay_verdict(result, task)
-
-    ledger = _warm_replay_ledger(tmp_path)
-    attempt = ledger["attempts"][0]
-    assert attempt["adopted"] is True
-    assert attempt["validation_basis"] == "accuracy_pass"
-    assert ledger["validation"]["unscored_keep_count"] == 0
-
-
 # ---- each overlay is placed against the checkout it was taken from ---------
 def test_each_overlay_carries_the_checkout_it_was_applied_into(tmp_path, monkeypatch):
     """Two KEEPs from two trees must each replay against their own tree."""
@@ -2708,3 +2593,154 @@ def test_overlay_provenance_summary_tolerates_unusable_counts():
     )
 
     assert summary["artifacts_outside_root"] == 0
+
+
+# ---- the replay's own timeline event, recorded as the arc runs -------------
+#
+# These drive the real settling seams rather than the recorder directly, so
+# they pin the wiring: that each gate writes its verdict where it rules, and
+# that a refusal before dispatch closes an event of its own instead of leaving
+# the timeline silent about a replay the session considered and declined.
+
+
+def _replay_events(session_dir: Path) -> list[dict]:
+    from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+
+    return [event for event in read_timeline_events(session_dir) if event.get("type") == "warm_replay"]
+
+
+def _replay_ext(session_dir: Path) -> dict:
+    events = _replay_events(session_dir)
+    assert len(events) == 1, f"expected one warm_replay event, got {len(events)}"
+    return events[0]["ext"]
+
+
+def _in_flight_outcome() -> dict:
+    return {
+        "status": "in_flight",
+        "warm_recipe_tier": "exact",
+        "warm_recipe_conf": 0.85,
+        "config_source": "recipe-abc",
+        "config_donor_tier": "self",
+        "expected_gain_pct": 25.0,
+        "replay_task_id": "task-warm-replay-prelude",
+    }
+
+
+def _replay_task() -> "_StubTask":
+    return _StubTask(
+        params={
+            "extra_server_args": "--attention-backend AITER",
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+
+
+def test_a_reproduced_replay_records_the_arc_it_actually_ran(tmp_path):
+    """Every gate that ruled is on record, in the order it ruled."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=_replay_task())
+        ext = _replay_ext(tmp_path)
+
+    assert [row["gate"] for row in ext["gates"]] == [
+        "tput_valid",
+        "accuracy",
+        "keep_threshold",
+        "promotion",
+        "params_present",
+    ]
+    # The eval found no round directory to read, so accuracy ran and could not
+    # rule. That admits the replay rather than rejecting it, which is why the
+    # arc still succeeded and nothing is named as having blocked it.
+    assert [row["passed"] for row in ext["gates"]] == [True, None, True, True, True]
+    assert ext["blocked_by"] is None
+    assert ext["verdict"]["outcome_status"] == "reproduced"
+
+
+def test_the_anchor_the_replay_was_judged_against_is_recorded_not_back_solved(tmp_path):
+    """The enqueue anchor is written where it is used, so a re-baseline cannot rewrite it."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["baseline_tput_anchor"] = 600.0
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 738.0}, task=task)
+        measurement = _replay_ext(tmp_path)["measurement"]
+
+    assert measurement["before_tput"] == 600.0
+    assert measurement["after_tput"] == 738.0
+    assert measurement["gain_pct"] == pytest.approx(23.0)
+
+
+def test_a_replay_that_measured_and_lost_is_rejected_rather_than_failed(tmp_path):
+    """Drift is a judged rejection: the number was real and it lost."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    with session_scope(tmp_path):
+        # 600 -> 606 is +1%, under the 5% keep threshold.
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        events = _replay_events(tmp_path)
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "drift"
+    assert events[0]["status"] == "rejected"
+    assert events[0]["ext"]["blocked_by"] == "keep_threshold"
+
+
+def test_a_replay_that_lost_still_records_the_config_that_lost(tmp_path):
+    """The config is recorded when it is measured, not when it is promoted."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    with session_scope(tmp_path):
+        coord._promote_warm_replay({"status": "succeeded", "output_throughput": 606.0}, task=task)
+        applied = _replay_ext(tmp_path)["applied"]
+
+    assert applied["extra_server_args"] == "--attention-backend AITER"
+    assert applied["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_a_replay_the_session_declined_is_on_the_timeline_with_a_stable_code(tmp_path):
+    """A skip is a decision, and its code is recorded rather than parsed back out of prose."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_replay_enabled=False)
+    with session_scope(tmp_path):
+        assert asyncio.run(coord._maybe_enqueue_warm_replay(baseline_tput=600.0)) is None
+        events = _replay_events(tmp_path)
+
+    assert len(events) == 1
+    assert events[0]["status"] == "skipped"
+    assert events[0]["ext"]["skip"]["code"] == "disabled_by_flag"
+
+
+def test_a_skip_that_resolved_no_recipe_states_an_empty_request_not_an_invented_one(tmp_path):
+    """The earliest refusals happen before the identity is read, and say so."""
+    import asyncio
+
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path)
+    with session_scope(tmp_path):
+        assert asyncio.run(coord._maybe_enqueue_warm_replay(baseline_tput=600.0)) is None
+        ext = _replay_ext(tmp_path)
+
+    assert ext["skip"]["code"] == "no_warm_start_recipe"
+    assert ext["request"]["tier"] == ""
+    assert ext["request"]["donor"] is None

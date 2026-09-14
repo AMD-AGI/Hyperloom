@@ -1766,8 +1766,12 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
 
 # Section 5b — Related lessons (positive priors from prior KEEPs)
 def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=lesson`` points from prior KEEPs, compactly
+    """Render the recipe row's ``lessons`` from prior KEEPs, compactly
     (statement + measured_impact).
+
+    Rows are the flat shape ``Recipe.to_dict`` / ``_normalise_lessons`` write —
+    ``{statement, measured_impact, ...}`` — normalised by ``recipe_kb_t0``
+    before they land on ``warm_start_lessons``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_lessons``).
@@ -1789,29 +1793,28 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        statement = str(attrs.get("statement") or "").strip()
+        statement = str(point.get("statement") or "").strip()
         if not statement:
             continue
-        impact_str = _render_measured_impact(attrs.get("measured_impact"))
+        impact_str = _render_measured_impact(point.get("measured_impact"))
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
         # validated_count is the strongest cross-session signal; fall back to source_session_id.
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"validated={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
         # Version-mismatch annotation; the LLM gets the final call.
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{defang_prompt_structure(statement)}**{meta}{version_note}")
         if impact_str:
             rows.append(f"    impact: {impact_str}")
@@ -1822,21 +1825,21 @@ def _section_lessons(inp: SpecialistPromptInputs) -> list[str]:
 
 def _format_version_note(
     inp: SpecialistPromptInputs,
-    lesson_attrs: dict[str, Any],
+    row: dict[str, Any],
 ) -> str:
     """Render a ``[from sglang@X.Y, you're on A.B]`` annotation when
-    the lesson's framework_version differs; empty when either side is
+    the row's framework_version differs; empty when either side is
     unknown or they match.
 
     Args:
         inp: The specialist prompt inputs (reads ``framework`` /
             ``framework_version``).
-        lesson_attrs: The lesson's attrs (reads ``framework_version``).
+        row: The lesson or pitfall row (reads ``framework_version``).
 
     Returns:
         The version-mismatch annotation, or "" when unknown or matching.
     """
-    lesson_fv = str(lesson_attrs.get("framework_version") or "").strip()
+    lesson_fv = str(row.get("framework_version") or "").strip()
     current_fv = (inp.framework_version or "").strip()
     if not lesson_fv or not current_fv:
         return ""
@@ -1847,7 +1850,7 @@ def _format_version_note(
 
 
 def _render_measured_impact(raw: Any) -> str:
-    """Back-compat renderer for ``attrs.measured_impact`` (dict, legacy
+    """Back-compat renderer for a row's ``measured_impact`` (dict, legacy
     string, or other).
 
     Args:
@@ -1880,8 +1883,11 @@ def _render_measured_impact(raw: Any) -> str:
 
 # Section 5c — Known pitfalls (anti-priors from prior REVERTs)
 def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
-    """Render KB ``kind=pitfall`` points from prior REVERTs (description +
+    """Render the recipe row's ``pitfalls`` from prior REVERTs (description +
     severity); framed as forbidden paths, not suggestions.
+
+    Rows are the flat ``{description, severity, ...}`` shape ``Recipe.to_dict`` /
+    ``_normalise_str_dicts`` write, normalised by ``recipe_kb_t0``.
 
     Args:
         inp: The specialist prompt inputs (reads ``warm_start_pitfalls``).
@@ -1902,29 +1908,28 @@ def _section_pitfalls(inp: SpecialistPromptInputs) -> list[str]:
             continue
         if not isinstance(point, dict):
             continue
-        attrs = point.get("attrs") or {}
-        description = str(attrs.get("description") or "").strip()
+        description = str(point.get("description") or "").strip()
         if not description:
             continue
-        severity = str(attrs.get("severity") or "").strip()
+        severity = str(point.get("severity") or "").strip()
         conf = point.get("confidence")
         meta_bits: list[str] = []
         if severity:
             meta_bits.append(f"severity={severity}")
         if isinstance(conf, (int, float)) and conf > 0:
             meta_bits.append(f"conf={float(conf):.2f}")
-        vc = attrs.get("validated_count")
+        vc = point.get("validated_count")
         if isinstance(vc, int) and vc > 1:
             meta_bits.append(f"observed={vc}")
-        recent_ids = attrs.get("source_session_ids")
+        recent_ids = point.get("source_session_ids")
         if isinstance(recent_ids, list) and recent_ids:
             meta_bits.append(f"recent={recent_ids[-1]}")
         else:
-            src_sid = str(attrs.get("source_session_id") or "").strip()
+            src_sid = str(point.get("source_session_id") or "").strip()
             if src_sid:
                 meta_bits.append(f"src={src_sid}")
         meta = f" ({', '.join(meta_bits)})" if meta_bits else ""
-        version_note = _format_version_note(inp, attrs)
+        version_note = _format_version_note(inp, point)
         rows.append(f"- **{description}**{meta}{version_note}")
     if len(rows) == 2:  # only the header + blank line, all pitfalls filtered out
         rows.append(_NONE_PLACEHOLDER)

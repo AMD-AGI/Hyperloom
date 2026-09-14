@@ -163,17 +163,32 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
     assert spec.resolved(runtime).reasoning_effort == "high"
 
 
-def test_the_width_repair_is_the_only_capped_call_site() -> None:
+#: The two places a call site is allowed to cap its own effort, and why.
+#:
+#: ``plan_critic`` -- the width repair is a parse, not reasoning work, and it is
+#: the round's only conditional call; the ceiling is what keeps it a small
+#: fraction of the review it follows.
+#:
+#: ``orchestration`` -- the round partition divides ground the analyses already
+#: name, which is a reading task rather than the deepest reasoning the round
+#: does, while the plans behind it keep the maximum. Named here as one file
+#: rather than one call because reaching the spec from the call site is three
+#: keyword pass-throughs (``_run`` -> ``_run_result`` -> ``_run_spec``); the
+#: cap is still written in exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
+_CAPPED_CALL_SITES = {"orchestrator/plan_critic.py", "orchestrator/orchestration.py"}
+
+
+def test_effort_ceilings_are_confined_to_the_two_argued_call_sites() -> None:
     """A ceiling is an exception; new ones have to be argued for here."""
-    offenders: list[str] = []
+    offenders: set[str] = set()
     for path in _python_sources():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 for keyword in node.keywords:
                     if keyword.arg == "max_reasoning_effort":
-                        offenders.append(str(path.relative_to(_SRC)))
-    assert offenders == ["orchestrator/plan_critic.py"], offenders
+                        offenders.add(str(path.relative_to(_SRC)))
+    assert offenders == _CAPPED_CALL_SITES, sorted(offenders)
 
 
 def test_every_runtime_names_a_model_it_resolved_for_that_provider() -> None:

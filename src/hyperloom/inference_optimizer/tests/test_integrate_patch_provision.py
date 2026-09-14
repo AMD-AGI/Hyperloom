@@ -129,6 +129,30 @@ async def test_provision_ok_sets_ctx(_executor, monkeypatch):
     assert ctx._ip_attempt_venv_root == venv
 
 
+@pytest.mark.asyncio
+async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
+    """Adapter provision (venv/pip, 1800s) must not occupy the event-loop thread."""
+    import threading
+
+    seen: dict[str, int] = {}
+    loop_ident = threading.get_ident()
+    venv = str(_executor.session_dir / "enablement" / "stacks" / "vllm" / "t-1" / "venv")
+    adapter = _FakeAdapter(_ok_result(venv))
+    orig = adapter.provision
+
+    def _spy_provision(action, attempt_dir):
+        seen["ident"] = threading.get_ident()
+        return orig(action, attempt_dir)
+
+    adapter.provision = _spy_provision
+    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
+    ctx = _ctx()
+    out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
+    assert out is None
+    assert "ident" in seen
+    assert seen["ident"] != loop_ident
+
+
 async def test_provision_fail_returns_reverted_and_gcs(_executor, monkeypatch):
     adapter = _FakeAdapter(ProvisionResult(ok=False, error="pip failed"))
     monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
@@ -228,7 +252,12 @@ async def test_kept_stack_action_survives_rearm(monkeypatch):
     async def _no_round(*_a, **_k):
         """No round is open, so the rearm's settle is a no-op."""
 
+    async def _no_stalls(*_a, **_k):
+        """An empty ledger, which the rearm reads to stamp the round's row."""
+        return 0
+
     coord._settle_enablement_round = _no_round
+    coord.rounds = types.SimpleNamespace(consecutive_stalled=_no_stalls)
 
     action_state = _candidate()
     runtime_state = FrameworkRuntime(bin_path="/a/bin", venv_root="/a").to_state()

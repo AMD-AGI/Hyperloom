@@ -18,7 +18,14 @@ INCOMPARABLE_REVALIDATION = "incomparable"
 
 # Verdict annotations are not candidate identity.
 _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
-    {"revalidation_status", "revalidation_error", "revalidation_error_class", "revalidation_blocked_overlay"}
+    {
+        "kernel_event_id",
+        "final_validation",
+        "revalidation_status",
+        "revalidation_error",
+        "revalidation_error_class",
+        "revalidation_blocked_overlay",
+    }
 )
 
 # Failed measurements remain retryable.
@@ -102,6 +109,12 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
 
         if _geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False
+    return geak_candidate_matches(prev, recovered)
+
+
+def geak_candidate_matches(persisted: Any, recovered: Any) -> bool:
+    """Whether a raw GEAK result is the same product, ignoring coordinator annotations."""
+    prev = persisted if isinstance(persisted, dict) else {}
     raw = recovered if isinstance(recovered, dict) else {}
     # The phase stamps the runner's exit code onto state with ``setdefault``, so
     # ``returncode`` is an annotation only where the file carries none: it is a

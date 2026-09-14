@@ -11,8 +11,11 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
+from ..loop.coordinator_helpers import baseline_benchmark_script
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor
 from .params import _enablement_carrier_params
 
@@ -56,6 +59,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
+        benchmark_script = baseline_benchmark_script(state)
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         accepted_cfg = str(state.enablement.accepted_config_path or "").strip()
         probe_cfg = str(state.enablement.probe_config_path or "").strip()
         cfg = accepted_cfg or probe_cfg
@@ -78,6 +84,11 @@ class EnablementRevalidation(CoordinatorCollaborator):
         task_id = await self._open_revalidation_row(params)
         if not task_id:
             return ""
+        enablement_event.record_revalidation(
+            generation=int(state.enablement.revalidation_generation or 0),
+            task_id=task_id,
+            config_path=cfg,
+        )
         # Persist the task_id so _promote_baseline can verify identity.
         if task_id and task_id != str(state.enablement.revalidation_task_id or ""):
             state.enablement.revalidation_task_id = task_id

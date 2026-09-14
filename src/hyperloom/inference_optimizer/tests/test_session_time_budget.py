@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import socket
 import sys
 import threading
 import time
@@ -18,6 +21,7 @@ from hyperloom.common.deadline import Deadline
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.session_paths import optimizer_lock_path
 from hyperloom.orchestrator.actions.cancel_channel import (
     CancelScope,
     current_cancel_scope,
@@ -46,6 +50,8 @@ from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.supervisor import store as supervisor_store
+from hyperloom.orchestrator.supervisor.watch import ALIVE, WEDGED, Supervisor
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
 _EXPENSIVE_ACTION = "conc_sweep"
@@ -91,6 +97,15 @@ def _set_budget(coord: Coordinator, *, minutes: float, elapsed_min: float = 0.0)
     """Give the session a finite budget with ``elapsed_min`` already spent."""
     coord.shared_state.max_minutes = int(minutes)
     coord.shared_state.elapsed_minutes = lambda **_kw: elapsed_min  # type: ignore[method-assign]
+
+
+def _record_current_owner(session_dir) -> None:
+    path = optimizer_lock_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"pid": os.getpid(), "hostname": socket.gethostname()}),
+        encoding="utf-8",
+    )
 
 
 class TestTheCostTheGateJudgesOn:
@@ -1267,6 +1282,194 @@ class TestATickCannotOutliveTheSessionBound:
 
         await coord._await_within_session_bound(_ok, stage="test")
         assert started == [True]
+
+    @pytest.mark.asyncio
+    async def test_a_reactor_turn_outlives_the_backends_idle_budget(self, coord: Coordinator):
+        """``call_timeout_s`` bounds the silence between streamed messages, not the turn.
+
+        A turn that keeps streaming is healthy however long it runs, so reading
+        that field as a wall-clock cap cancels working agents mid-flight.
+        """
+        coord._run_deadline = Deadline.after(60.0)
+        coord.backends["orchestration"].call_timeout_s = 0.01
+        finished: list[bool] = []
+
+        async def _slower_than_the_idle_budget() -> None:
+            await asyncio.sleep(0.2)
+            finished.append(True)
+
+        await coord._await_within_session_bound(
+            _slower_than_the_idle_budget,
+            stage="reactor:orchestration",
+        )
+
+        assert finished == [True]
+
+    @pytest.mark.asyncio
+    async def test_an_active_reactor_turn_is_cancelled_at_its_total_timeout(self, coord: Coordinator):
+        coord.reactor_turn_timeout_sec = 0.03
+        coord._run_deadline = Deadline.after(60.0)
+        activity: list[float] = []
+        cancelled = asyncio.Event()
+
+        async def _stay_active() -> None:
+            try:
+                while True:
+                    activity.append(time.monotonic())
+                    await asyncio.sleep(0.005)
+            finally:
+                cancelled.set()
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(
+                _stay_active,
+                stage="reactor:orchestration",
+            ),
+            timeout=0.2,
+        )
+
+        assert cancelled.is_set()
+        assert len(activity) >= 2
+
+    @pytest.mark.asyncio
+    async def test_a_turn_cancelled_at_its_total_timeout_counts_as_a_crash(self, coord: Coordinator):
+        """Cancelling the turn lets the tick advance, which hides the wedge from the watchdog.
+
+        Nothing downstream would otherwise see it, and the session would spend
+        the rest of its budget re-cancelling the same turn.
+        """
+        coord.reactor_turn_timeout_sec = 0.01
+        coord._run_deadline = Deadline.after(60.0)
+        before = coord.shared_state.recent_crash_count(window_sec=3600.0)
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            timeout=0.5,
+        )
+
+        assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before + 1
+
+    @pytest.mark.asyncio
+    async def test_a_step_the_session_bound_cut_short_is_not_a_crash(self, coord: Coordinator):
+        """A session running out is how a run ends, not a fault the emergency stop should count."""
+        coord._run_deadline = Deadline.after(0.01)
+        before = coord.shared_state.recent_crash_count(window_sec=3600.0)
+
+        await asyncio.wait_for(
+            coord._await_within_session_bound(_hang_forever, stage="reactor:orchestration"),
+            timeout=0.5,
+        )
+
+        assert coord.shared_state.recent_crash_count(window_sec=3600.0) == before
+
+    def test_all_reactor_steps_share_one_total_timeout(self, coord: Coordinator):
+        coord.reactor_turn_timeout_sec = 777.0
+        assert coord._stage_timeout_sec("advance_phase") is None
+        assert coord._stage_timeout_sec("reactor:orchestration") == 777.0
+        assert coord._stage_timeout_sec("reactor:critic") == 777.0
+        assert coord._stage_timeout_sec("reactor:robustness") == 777.0
+
+    def test_total_timeout_reads_the_coordinator_environment(self, session_dir, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC", "42.5")
+        configured = Coordinator(session_dir / "configured", backends=_backends())
+        try:
+            assert configured.reactor_turn_timeout_sec == 42.5
+        finally:
+            configured.db.close()
+
+    @pytest.mark.asyncio
+    async def test_non_reactor_steps_are_not_capped(self, coord: Coordinator):
+        coord.reactor_turn_timeout_sec = 0.01
+        finished: list[bool] = []
+
+        async def _finish_after_the_reactor_cap() -> None:
+            await asyncio.sleep(0.03)
+            finished.append(True)
+
+        await coord._await_within_session_bound(_finish_after_the_reactor_cap, stage="advance_phase")
+
+        assert finished == [True]
+
+    @pytest.mark.asyncio
+    async def test_pre_stage_progress_write_failure_does_not_block_the_reactor(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        calls: list[str] = []
+
+        def _fail_stamp(*_args, **_kwargs) -> None:
+            calls.append("stamp")
+            raise OSError("network filesystem unavailable")
+
+        async def _factory() -> None:
+            calls.append("factory")
+
+        monkeypatch.setattr(supervisor_store, "stamp_tick", _fail_stamp)
+
+        await coord._await_within_session_bound(_factory, stage="reactor:orchestration")
+
+        assert calls == ["stamp", "factory", "stamp"]
+
+    @pytest.mark.asyncio
+    async def test_post_stage_progress_write_failure_does_not_override_success(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        calls: list[str] = []
+
+        def _fail_second_stamp(*_args, **_kwargs) -> None:
+            calls.append("stamp")
+            if calls == ["stamp", "factory", "stamp"]:
+                raise OSError("network filesystem unavailable")
+
+        async def _factory() -> None:
+            calls.append("factory")
+
+        monkeypatch.setattr(supervisor_store, "stamp_tick", _fail_second_stamp)
+
+        await coord._await_within_session_bound(_factory, stage="reactor:orchestration")
+
+        assert calls == ["stamp", "factory", "stamp"]
+
+    @pytest.mark.asyncio
+    async def test_three_near_budget_reactors_refresh_progress_between_stages(
+        self,
+        coord: Coordinator,
+        monkeypatch,
+    ):
+        now = [1_000_000.0]
+        monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator.time.time", lambda: now[0])
+        _record_current_owner(coord.session_dir)
+        supervisor_store.stamp_tick(coord.session_dir, tick=1, now_unix=now[0])
+        coord.reactor_turn_timeout_sec = 0.1
+        supervisor = Supervisor(coord.session_dir, tick_stall_sec=0.11, now=lambda: now[0])
+        verdicts: list[str] = []
+
+        async def _near_budget() -> None:
+            now[0] += 0.09
+            verdicts.append(supervisor.observe().verdict)
+
+        for role in ("orchestration", "critic", "robustness"):
+            await coord._await_within_session_bound(_near_budget, stage=f"reactor:{role}")
+
+        assert verdicts == [ALIVE, ALIVE, ALIVE]
+
+    @pytest.mark.asyncio
+    async def test_one_reactor_without_progress_becomes_wedged(self, coord: Coordinator):
+        _record_current_owner(coord.session_dir)
+        coord.reactor_turn_timeout_sec = 0.2
+        supervisor = Supervisor(coord.session_dir, tick_stall_sec=0.03, now=time.time)
+        verdicts: list[str] = []
+
+        async def _outlive_stall_window() -> None:
+            await asyncio.sleep(0.05)
+            verdicts.append(supervisor.observe().verdict)
+
+        await coord._await_within_session_bound(_outlive_stall_window, stage="reactor:orchestration")
+
+        assert verdicts == [WEDGED]
 
     @pytest.mark.asyncio
     async def test_closing_uses_the_grace_bound_not_the_session_deadline(self, coord: Coordinator):

@@ -147,7 +147,11 @@ class BaseAdapter:
         return None
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Provision ``action`` into an attempt-local venv under ``attempt_dir``."""
+        """Provision ``action`` into an attempt-local venv under ``attempt_dir``.
+
+        Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
+        Cancel of the await is fire-and-forget for an in-flight pip install.
+        """
         return ProvisionResult(ok=False, error=f"{self.framework or 'null'} adapter does not provision")
 
     def probe(self, result: ProvisionResult, action: EnablementStackAction) -> bool:
@@ -341,7 +345,10 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         )
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Create an attempt venv, pip-install the vLLM wheel, verify ROCm."""
+        """Create an attempt venv, pip-install the vLLM wheel, verify ROCm.
+
+        Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
+        """
         log_path = str(attempt_dir / "provision.log")
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -474,7 +481,10 @@ class SglangAdapter(_VenvProvisionMixin):
         )
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Create an attempt venv, install SGLang (editable ref or wheel)."""
+        """Create an attempt venv, install SGLang (editable ref or wheel).
+
+        Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
+        """
         log_path = str(attempt_dir / "provision.log")
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)

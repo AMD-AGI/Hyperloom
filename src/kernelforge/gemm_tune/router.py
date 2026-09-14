@@ -53,6 +53,10 @@ _GFX_TO_CANONICAL_GPU = {
 }
 
 # Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
+# How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
+# tier3's DEFAULT_MIN_MISSES, read off the same demand report.
+DEMAND_MIN_MISSES = 25
+
 _FP4_UNSUPPORTED_GFX = {"gfx942"}
 
 _FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
@@ -330,6 +334,22 @@ def _tuners_the_demand_says_are_needed(
         # A demand with no registered owner is a coverage gap, not a selection: tier3 handles those, and inventing a
         # TunerSpec here would shadow it.
         if not name or name in have:
+            continue
+        try:
+            misses = int(entry.get("miss_count") or 0)
+        except (TypeError, ValueError):
+            misses = 0
+        if misses < DEMAND_MIN_MISSES:
+            # Widening the selection costs real tuning time -- fmoe_ck alone books a quarter of an hour at the head of
+            # the queue -- so a handful of lookups is not enough to order it. The floor matches the one tier3's gate
+            # applies to the same evidence, for the same reason.
+            log.info(
+                "Serving log consulted %s but only %s times, below the floor of %s; not adding %s",
+                entry.get("table"),
+                misses,
+                DEMAND_MIN_MISSES,
+                name,
+            )
             continue
         have.add(name)
         added.append(

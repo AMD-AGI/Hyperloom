@@ -86,6 +86,7 @@ def _register_owning_fake(
     *,
     owns_prefix: str,
     unavailable: bool = False,
+    credentialed: bool = False,
 ) -> AgentProvider:
     """Register a fake provider that claims one model-name prefix."""
 
@@ -98,6 +99,7 @@ def _register_owning_fake(
         factory=factory,
         default_model=f"{name}-model",
         availability=(lambda: False) if unavailable else (lambda: True),
+        credentialed=lambda _env: credentialed,
         owns_model=lambda model, prefix=owns_prefix: model.strip().lower().startswith(prefix),
     )
     register_agent_provider(provider)
@@ -253,6 +255,36 @@ def test_select_skips_unavailable_model_owner(only_registered_providers) -> None
     result = registry.select_default_agent_provider("gamma-1")
     assert result.name == "deltacli"
     assert result.availability() is True
+
+
+def test_a_credential_does_not_take_another_provider_s_named_model(
+    only_registered_providers,
+) -> None:
+    """A named model states the caller's routing, which no credential shape may overrule."""
+    _register_owning_fake("alphacli", owns_prefix="alpha")
+    _register_owning_fake("betacli", owns_prefix="beta", credentialed=True)
+    assert registry.select_default_agent_provider("alpha-9").name == "alphacli"
+
+
+def test_a_plugin_does_not_outrank_a_provider_whose_credential_is_absent(
+    only_registered_providers,
+) -> None:
+    """A plugin declares no credential, so it must not take an unconfigured box.
+
+    The credential key leads the ranking, so answering it optimistically for a
+    provider that cannot be asked would hand ``auto`` to whichever plugin
+    happens to be installed on every box without a first-party key.
+    """
+    register_agent_provider(
+        AgentProvider(
+            name="firstparty",
+            factory=lambda runtime: _FakeBackend(name=runtime.provider),
+            default_model="firstparty-model",
+            credentialed=lambda env: False,
+        )
+    )
+    _register_fake("vendorcli")
+    assert registry.select_default_agent_provider().name == "firstparty"
 
 
 def test_select_unknown_model_uses_registration_order(

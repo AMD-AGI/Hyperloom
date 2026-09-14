@@ -17,28 +17,6 @@ from .collectors._common import (
 )
 
 
-FRAMEWORK_REVIEW_FIELDS = (
-    "proposal_msg_id",
-    "candidate_id",
-    "variant_name",
-    "arm",
-    "target_action",
-    "source",
-    "verdict",
-    "effective_verdict",
-    "reasoning",
-    "confidence",
-    "failure_reason_code",
-    "required_evidence",
-    "risks",
-    "advice_text",
-    "alternative_action",
-    "followup_task_ids",
-    "ts",
-    "review_path",
-)
-
-
 def _candidate_id(value: Any) -> str:
     candidate = _mapping(value)
     return str(
@@ -192,4 +170,4 @@ def normalize_framework_reviews(
     return rows
 
 
-__all__ = ["FRAMEWORK_REVIEW_FIELDS", "normalize_framework_reviews"]
+__all__ = ["normalize_framework_reviews"]

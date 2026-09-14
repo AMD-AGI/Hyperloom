@@ -530,13 +530,82 @@ def _merge_raw_result(
         )
 
 
+#: The latency fields whose origin is tracked. A measurement can fill each of
+#: them from a different place, and which place answered is not recoverable
+#: from the number afterwards -- every source writes the same key.
+_LATENCY_FIELDS = ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms")
+
+#: Stable labels naming where a latency number was read from. Reported by the
+#: extraction itself because this is the only frame that knows: by the time the
+#: measurement is on a result dict, a value the report supplied and one salvaged
+#: out of a leaked raw JSON are indistinguishable.
+LATENCY_FROM_REPORT = "benchmark_report"
+LATENCY_FROM_RAW = "raw_result"
+LATENCY_FROM_RESCUED_RAW = "rescued_raw_result"
+LATENCY_DERIVED = "derived_from_e2el_ttft"
+LATENCY_UNAVAILABLE = "unavailable"
+
+
+def _latency_snapshot(measurement: dict[str, Any]) -> dict[str, Any]:
+    """The latency fields as they stand, for comparing across a fill pass.
+
+    Args:
+        measurement: The measurement dict to read.
+
+    Returns:
+        The tracked latency fields and their current values.
+    """
+    return {field: measurement.get(field) for field in _LATENCY_FIELDS}
+
+
+def _tag_latency_origins(
+    measurement: dict[str, Any],
+    origins: dict[str, str],
+    *,
+    label: str,
+    before: dict[str, Any],
+) -> None:
+    """Attribute to ``label`` the latency fields this pass filled.
+
+    Only fields that were absent and are now present are attributed: every
+    fill pass leaves what it found intact, so a field it did not fill belongs
+    to whichever pass did.
+
+    Args:
+        measurement: The measurement dict after the pass ran.
+        origins: The origin map to record into, mutated in place.
+        label: The source label for this pass.
+        before: The :func:`_latency_snapshot` taken before the pass ran.
+    """
+    for field in _LATENCY_FIELDS:
+        if before.get(field) is None and measurement.get(field) is not None:
+            origins[field] = label
+
+
 def extract_benchmark_measurement(
     report: dict[str, Any] | None,
     *,
     workspace: Path | None = None,
     subprocess_started_unix: float | None = None,
 ) -> dict[str, Any]:
-    """Extract a normalized measurement from Magpie and InferenceX outputs."""
+    """Extract a normalized measurement from Magpie and InferenceX outputs.
+
+    ``subprocess_started_unix`` enables an opt-in salvage pass over the
+    Magpie leak destinations (see :func:`_rescue_candidate_paths`) when the
+    in-workspace search fails; only leaks written after this run are adopted.
+
+    Args:
+        report: The Magpie ``benchmark_report.json`` mapping, or ``None``.
+        workspace: Optional task workspace scanned for raw InferenceX results
+            and (as a fallback) salvageable leaks.
+        subprocess_started_unix: Optional launch time enabling the mtime-gated
+            leak salvage pass.
+
+    Returns:
+        A normalized measurement dict (including ``valid_measurement``, any
+        ``nonfatal_warnings``, and the ``ttft_e2el_source`` / ``tpot_source``
+        provenance labels).
+    """
     report = report or {}
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
@@ -574,12 +643,22 @@ def extract_benchmark_measurement(
         "nonfatal_warnings": [],
     }
 
+    origins: dict[str, str] = {}
+    _tag_latency_origins(
+        measurement,
+        origins,
+        label=LATENCY_FROM_REPORT,
+        before=dict.fromkeys(_LATENCY_FIELDS),
+    )
+
     if workspace is not None:
         for raw_path in _candidate_raw_jsons(workspace):
             raw = read_json(raw_path, default=None, require_dict=True)
             if not raw or to_float(raw.get("output_throughput")) is None:
                 continue
+            before = _latency_snapshot(measurement)
             _merge_raw_result(measurement, raw, source_path=raw_path)
+            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RAW, before=before)
             if is_valid_measurement(measurement):
                 break
 
@@ -589,7 +668,9 @@ def extract_benchmark_measurement(
     if workspace is not None and measurement.get("raw_result_path"):
         warnings.append("raw_inferencex_result_used")
 
+    before = _latency_snapshot(measurement)
     _derive_tpot_if_missing(measurement, report)
+    _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # Second-chance salvage from Magpie leak destinations when the in-workspace search found no usable measurement
@@ -608,14 +689,28 @@ def extract_benchmark_measurement(
                 workspace,
             )
             recorded_path = materialized if materialized is not None else rescue_path
+            before = _latency_snapshot(measurement)
             _merge_raw_result(measurement, raw, source_path=recorded_path)
+            _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
             if is_valid_measurement(measurement):
                 warnings.append(f"rescued_from_leaked_path:{rescue_path}")
                 if materialized is None:
                     warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
                 break
+        before = _latency_snapshot(measurement)
         _derive_tpot_if_missing(measurement, report)
+        _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
         measurement["valid_measurement"] = is_valid_measurement(measurement)
+
+    # One label for the pair, keyed on TTFT and falling back to E2EL, because
+    # that is the question a reader asks of it: the two are read from the same
+    # place in every path that supplies either, and TTFT is the one a latency
+    # reference is anchored on.
+    measurement["ttft_e2el_source"] = origins.get("ttft_mean_ms") or origins.get("e2el_mean_ms") or LATENCY_UNAVAILABLE
+    # Separate from the pair: TPOT is the one latency figure that can be
+    # computed rather than measured, and a derived value must not be read as
+    # one the benchmark reported.
+    measurement["tpot_source"] = origins.get("tpot_mean_ms") or LATENCY_UNAVAILABLE
     return measurement
 
 
@@ -793,6 +888,11 @@ def estimate_killed_variant_throughput(
 
 
 __all__ = [
+    "LATENCY_DERIVED",
+    "LATENCY_FROM_RAW",
+    "LATENCY_FROM_REPORT",
+    "LATENCY_FROM_RESCUED_RAW",
+    "LATENCY_UNAVAILABLE",
     "harvest_mn_gpu_metrics",
     "estimate_killed_variant_throughput",
     "estimate_output_throughput_from_server_log",

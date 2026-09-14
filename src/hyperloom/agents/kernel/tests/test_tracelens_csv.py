@@ -2199,6 +2199,15 @@ def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
     assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "graph_capture_profile"
 
 
+def test_discover_capture_folder_preserves_legacy_priority(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    for name in ("graph_capture", "graph_capture_profile", "capture_traces"):
+        (trace_dir / name).mkdir(parents=True)
+    real = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=4)
+
+    assert tlr.discover_capture_folder(trace_dir, [real]) == trace_dir / "capture_traces"
+
+
 def test_discover_capture_folder_ignores_a_descriptive_sibling(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     (trace_dir / "torch_profiler_with_graph_capture").mkdir(parents=True)

@@ -1684,7 +1684,6 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1723,7 +1722,6 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1774,7 +1772,6 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
         baseline_tput: float = 1000.0
         recipe_kb_session_id: str = "sid-test"
         save_count: int = 0
-        synergy_attempted: list[str] = field(default_factory=list)
         backends_search: dict = field(default_factory=dict)
         params_search: dict = field(default_factory=dict)
         current_best: dict = field(default_factory=dict)
@@ -1979,81 +1976,6 @@ def test_specialist_prompt_renders_proposal_target_and_ceiling():
     assert "reviews each surviving variant" in text
 
 
-# critic_robustness breakdown renderer (formerly test_critic_robustness_renderer_units.py)
-class TestCriticRobustnessRenderer:
-    """Exercises the four observable shapes of the collector input."""
-
-    @staticmethod
-    def _render(payload):
-        from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-            critic_robustness as cr_mod,
-        )
-
-        return cr_mod.render({"critic_robustness": payload})
-
-    def test_empty_returns_skipped(self):
-        from hyperloom.inference_optimizer.breakdown.reporters.base import RenderedSection
-
-        out = self._render([])
-        assert isinstance(out, RenderedSection)
-        assert out.section_id == "critic_robustness"
-        assert out.skipped is True
-        assert any("no critic robustness" in s.lower() for s in out.key_facts)
-
-    def test_prompt_only_v1_payload_is_skipped(self):
-        out = self._render(["raw prompt"])
-        assert out.skipped is True
-        assert any("prompt-only" in w for w in out.warnings)
-
-    def test_empty_payloads_v2_is_skipped(self):
-        out = self._render(
-            [
-                {"prompt": "x", "response": None, "decision": "", "rationale": ""},
-            ]
-        )
-        assert out.skipped is True
-        assert any("non-actionable" in w for w in out.warnings)
-
-    def test_populated_payload_renders_markdown_table(self):
-        out = self._render(
-            [
-                {
-                    "ts": "2026-05-13T01:01:01Z",
-                    "action": "kernel_opt",
-                    "decision": "KEEP",
-                    "pass_count": 3,
-                    "fail_count": 1,
-                    "rationale": "Improved attention kernel reduces decode latency by 4%.",
-                },
-                {
-                    "prompt": "raw fallback",
-                },
-            ]
-        )
-        assert out.skipped is False
-        assert "decision" in out.markdown_block
-        assert "kernel_opt" in out.markdown_block
-
-    def test_excess_rows_truncated_with_banner(self):
-        from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
-            critic_robustness as cr_mod,
-        )
-
-        rows = [
-            {
-                "decision": "KEEP",
-                "pass_count": 1,
-                "fail_count": 0,
-                "ts": f"t{i}",
-            }
-            for i in range(cr_mod._MAX_ROWS + 5)
-        ]
-        out = self._render(rows)
-        assert out.skipped is False
-        assert "Showing first" in out.markdown_block
-
-
-# per-action verdict_class metadata (formerly test_n38_action_verdict_class.py)
 class TestN38ActionVerdictClass:
     """Per-action ``verdict_class`` metadata so new actions don't reintroduce prior deadlocks."""
 

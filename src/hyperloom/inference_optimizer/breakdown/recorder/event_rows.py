@@ -22,9 +22,8 @@ __all__ = [
 #: The field every row payload repeats so assembly can select by it.
 EVENT_ID_FIELD = "event_id"
 
-#: Recording-side bookkeeping that never reaches the wire: the event id has
-#: done its job once the rows are filtered, and ``ordinal`` is superseded by
-#: the row's position once the array is sorted.
+#: Recording-side bookkeeping that never reaches the wire: the event id has done
+#: its job once the rows are filtered, and ``ordinal`` once the array is sorted.
 SCOPE_FIELDS: tuple[str, ...] = (EVENT_ID_FIELD, "ordinal")
 
 
@@ -37,7 +36,11 @@ def rows_for_event(rows: Iterable[Any], event: str) -> list[dict[str, Any]]:
 
 
 def _sort_token(value: Any) -> tuple[int, float, str]:
-    """Render one field value as a totally-ordered, type-safe sort token."""
+    """Render one field value as ``(is_empty, numeric, text)``.
+
+    Empty sorts last, and numbers and strings both compare without raising, so
+    one malformed fragment off disk cannot take the whole assembly down.
+    """
     if value is None or value == "":
         return (1, 0.0, "")
     if isinstance(value, bool):

@@ -477,6 +477,7 @@ class OpportunityAnalysisAgent:
         progress: list[str] = []
         usage = UsageAccumulator()
         spec = AgentRunSpec(
+            role="rewrite opportunity",
             system_prompt=_system_prompt(),
             user_prompt=_user_prompt(handoff, layout.agent_staging_root),
             cwd=str(layout.agent_staging_root),

@@ -1187,17 +1187,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "``state.json.preReset.<unix_ts>`` and start the session "
         "from a blank SharedState. Recipe KB is NOT touched.",
     )
-    # observability
-    opt.add_argument(
-        "--breakdown-include-transcripts",
-        dest="breakdown_include_transcripts",
-        type=str,
-        choices=("true", "false"),
-        default="false",
-        help="Inline specialist transcript bodies into "
-        "``specialist_runs`` (true) or reference them by path "
-        "only (false, default). KB_design §3.12 §7.",
-    )
     # plateau threshold tuning: override defaults; locked at session start.
     opt.add_argument(
         "--plateau-explore-keep-gain",

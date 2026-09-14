@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from . import machine_state as _phase_state
@@ -39,12 +40,414 @@ _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 FRAMEWORK_CRITIC_DENIED_STATUS: str = "critic_denied"
 
 
+# These helpers are module-level because the phase's methods get borrowed onto
+# lightweight test stand-ins, where a ``self._record_*`` call would break every
+# stand-in that does not implement it.
+def _recorder(coord: Any):
+    """Return the framework recorder for this phase entry, or ``None``."""
+    return getattr(coord, "_framework_timeline_recorder", None)
+
+
+def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
+    """Record one specialist dispatch, or its completion.
+
+    ``role`` is one of ``discovery``, ``authoring`` or ``config`` -- not
+    derivable from the arm, since the source arm dispatches twice per
+    candidate. Dispatch and terminal status land on one row keyed by the task
+    id; a falsy id records nothing rather than keying a row on the empty
+    string.
+    """
+    recorder = _recorder(coord)
+    if recorder is None:
+        return
+    from hyperloom.common.timeutil import now_iso
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        ARM_SOURCE,
+        ROLE_CONFIG,
+    )
+
+    task_id = str(task if isinstance(task, str) else getattr(task, "task_id", "") or "")
+    if not task_id:
+        return
+    fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
+    try:
+        recorder.record_run(
+            task_id,
+            role=role,
+            arm=ARM_CONFIG if role == ROLE_CONFIG else ARM_SOURCE,
+            status=status,
+            **fields,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change dispatch
+        log.debug("framework timeline: run record failed", exc_info=True)
+
+
+def _record_step(
+    coord: Any,
+    proposal_id: str,
+    *,
+    step: str,
+    run_ref: str = "",
+    outcome: str = "",
+    reason: str = "",
+) -> None:
+    """Record one step of a candidate's lifecycle, keyed by ``STEP_*`` value.
+
+    Steps are recorded as they happen rather than derived from counters: a
+    candidate re-authored twice then retried once is three rows a reader can
+    follow.
+    """
+    recorder = _recorder(coord)
+    if recorder is None or not proposal_id:
+        return
+    try:
+        recorder.record_proposal_step(
+            proposal_id,
+            step=step,
+            run_ref=run_ref,
+            outcome=outcome,
+            reason=reason,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change the phase
+        log.debug("framework timeline: proposal step record failed", exc_info=True)
+
+
+def _record_review_outcome(
+    coord: Any,
+    proposal_id: str,
+    *,
+    verdict: str = "",
+    reason: str = "",
+    **outcome: Any,
+) -> None:
+    """Record what the phase did with the Critic's ruling on a candidate.
+
+    The consequence is recorded onto the ruling because on its own a routed
+    candidate does not say what let it through. ``verdict`` is only passed on
+    the deny path, which is the only one carrying the rationale.
+    """
+    recorder = _recorder(coord)
+    if recorder is None or not proposal_id:
+        return
+    try:
+        if verdict:
+            recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
+            recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
+        recorder.record_proposal_review_outcome(proposal_id, **outcome)
+    except Exception:  # noqa: BLE001 — observability cannot change the phase
+        log.debug("framework timeline: review outcome record failed", exc_info=True)
+
+
+def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
+    """Record where a candidate ended up: ``attempted``, ``dropped`` or ``pending``."""
+    recorder = _recorder(coord)
+    if recorder is None or not proposal_id:
+        return
+    try:
+        recorder.settle_proposal(proposal_id, disposition=disposition, reason=reason)
+    except Exception:  # noqa: BLE001 — observability cannot change the phase
+        log.debug("framework timeline: settle record failed", exc_info=True)
+
+
+def _record_source_attempt(
+    coord: Any,
+    *,
+    task: Any,
+    candidate_id: str,
+    status: str,
+    result: Mapping[str, Any],
+    params: Mapping[str, Any],
+    specialist_task_id: str = "",
+) -> None:
+    """Record one authored patch's measured attempt on the framework event.
+
+    The row keeps the same shape the configuration arm writes, which is what
+    lets the adoption ledger walk both arms with one reader.
+    """
+    recorder = _recorder(coord)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
+
+    task_id = str(getattr(task, "task_id", "") or "")
+    if not task_id:
+        return
+    base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
+    accuracy_pass = result.get("accuracy_pass")
+    try:
+        recorder.record_attempt(
+            task_id,
+            arm=ARM_SOURCE,
+            task_id=task_id,
+            proposal_ref=candidate_id,
+            candidate_id=candidate_id,
+            provenance=str(params.get("lever_kind") or ""),
+            outcome=status,
+            reason=str(result.get("reason") or ""),
+            stage=str(result.get("stage") or ""),
+            route=str(params.get("audit_step") or ""),
+            patch_source=specialist_task_id,
+            patch_path=str(result.get("patch_path") or ""),
+            # An attempt can apply several patches, and which ones landed is
+            # not recoverable from the single primary path.
+            patches_applied=result.get("patches_applied") or [],
+            target_files=result.get("target_files") or [],
+            source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
+            measurement={
+                "before_tput": base,
+                "after_tput": result.get("output_throughput"),
+                "gain_pct": result.get("delta_pct"),
+                "runtime_sec": result.get("runtime_sec"),
+            },
+            accuracy={
+                # ``None`` is an accuracy gate that did not run, which is not
+                # the same as one that ran and failed.
+                "required": None if accuracy_pass is None else True,
+                "value": result.get("accuracy_value"),
+                "reference": result.get("accuracy_reference"),
+                "passed": accuracy_pass,
+            },
+            failure={
+                "error_class": str(result.get("error_class") or ""),
+                "error_excerpt": str(result.get("error") or "")[:600],
+            },
+            artifacts={
+                "workspace": str(result.get("workspace") or ""),
+                "server_log_path": str(result.get("server_log_path") or ""),
+            },
+            decision=status,
+            adopted=status == "kept",
+            attribution_eligible=(
+                status == "kept" and base is not None and result.get("output_throughput") is not None
+            ),
+        )
+        if accuracy_pass is not None:
+            recorder.record_attempt_gate(
+                task_id,
+                "accuracy",
+                passed=bool(accuracy_pass),
+                observed=result.get("accuracy_value"),
+                threshold=result.get("accuracy_reference"),
+            )
+        _record_step(
+            coord,
+            candidate_id,
+            step="attempted",
+            run_ref=specialist_task_id,
+            outcome=status,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change write-back
+        log.debug("framework timeline: source attempt record failed", exc_info=True)
+
+
+def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict[str, Any]]) -> None:
+    """Record what one discovery round produced, including what it dropped.
+
+    Walks ``raw`` -- the specialist's ``proposal_set`` before auditing --
+    rather than only the surviving ``candidates``: a round that found five
+    upstream PRs and judged all five already landed is a very different result
+    from one that found nothing.
+    """
+    recorder = _recorder(coord)
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_SOURCE,
+        DISPOSITION_DROPPED,
+        PRODUCER_SPECIALIST,
+        STEP_PROPOSED,
+    )
+
+    run_id = str(getattr(task, "task_id", "") or "")
+    domain = str((getattr(task, "params", None) or {}).get("domain") or "")
+    try:
+        kept = {coord._framework_candidate_key(cand): cand for cand in candidates}
+        for cand_id, cand in kept.items():
+            if not cand_id:
+                continue
+            recorder.record_proposal(
+                cand_id,
+                arm=ARM_SOURCE,
+                producer=PRODUCER_SPECIALIST,
+                producer_ref=domain,
+                run_ref=run_id,
+                source_ref=str(cand.get("pr_url") or cand.get("head_sha") or ""),
+                repo=str(cand.get("repo") or ""),
+                title=str(cand.get("title") or ""),
+                changed_files=cand.get("changed_files") or [],
+                gap_canonical_id=str(cand.get("gap_canonical_id") or ""),
+                route=str(cand.get("route") or ""),
+                verdict=str((cand.get("audit") or {}).get("verdict") or ""),
+            )
+            recorder.record_proposal_step(cand_id, step=STEP_PROPOSED, run_ref=run_id)
+        for entry in raw if isinstance(raw, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            verdict = str(entry.get("verdict") or "").strip().lower()
+            if verdict not in {"already_present", "not_applicable"}:
+                continue
+            ref = str(entry.get("pr_url") or entry.get("url") or entry.get("head_sha") or "").strip()
+            if not ref or ref in kept:
+                continue
+            recorder.record_proposal(
+                ref,
+                arm=ARM_SOURCE,
+                producer=PRODUCER_SPECIALIST,
+                producer_ref=domain,
+                run_ref=run_id,
+                source_ref=ref,
+                repo=str(entry.get("repo") or ""),
+                title=str(entry.get("title") or ""),
+                verdict=verdict,
+            )
+            recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
+    except Exception:  # noqa: BLE001 — observability cannot change the harvest
+        log.debug("framework timeline: discovered proposals record failed", exc_info=True)
+
+
 class FrameworkPhase(CoordinatorCollaborator):
     """The source arm of the OPTIMIZE phase: upstream candidates, authored patches, and the enablement hand-off."""
 
     # Marker for the candidate-free local-exploration arm (a synthetic "candidate" whose id is ``local_explore:<n>``):
     # the ranker may pick it, and it routes to a write-capable authoring specialist instead of a PR.
     _LOCAL_EXPLORE_KIND = "local_explore"
+
+    def _framework_timeline(self):
+        """Return the recorder for this FRAMEWORK entry, or ``None``.
+
+        Read through ``getattr`` because the handler delegates unknown
+        attributes to its Coordinator, so an unset recorder must not raise.
+        """
+        return getattr(self, "_framework_timeline_recorder", None)
+
+    def _open_framework_timeline(self) -> None:
+        """Open the timeline event for this FRAMEWORK entry and record its policy.
+
+        The policy is recorded here because this is the first point at which
+        every threshold the entry will run under is resolvable: the reprofile
+        has settled the anchor and the macro cycle is fixed.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import make_framework_recorder
+
+        state = self.shared_state
+        recorder = make_framework_recorder(macro_cycle=int(getattr(state, "macro_cycle", 0) or 0))
+        self._framework_timeline_recorder = recorder
+        if recorder is None:
+            return
+        try:
+            recorder.record_policy(**self._framework_policy_fields())
+        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+            log.debug("framework timeline: policy record failed", exc_info=True)
+
+    def _framework_policy_fields(self) -> dict:
+        """Resolve the ``record_policy`` fields this entry runs under.
+
+        ``force_exit_budget_pct`` is deliberately absent: no runtime path
+        resolves it today, so reporting a default would fabricate a threshold
+        the phase never applied.
+        """
+        from ..framework.client import DISCOVER_FAILURE_RETRY_LIMIT
+
+        state = self.shared_state
+        overrides = getattr(state, "plateau_overrides", None) or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+        return {
+            "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
+            "variant_timeout_sec": getattr(state, "explore_variant_timeout_sec_override", None),
+            "overtime_kill_ratio": getattr(state, "explore_overtime_kill_ratio", None),
+            "config": {
+                "keep_gain_threshold_pct": overrides.get(
+                    "explore_keep_gain_pct",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
+                ),
+                "empty_streak_threshold": overrides.get(
+                    "explore_empty_streak",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
+                ),
+                "lookback": overrides.get(
+                    "explore_lookback",
+                    _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
+                ),
+            },
+            "source": {
+                "no_keep_streak_threshold": _phase_state.framework_agent_plateau_streak_threshold(),
+                "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
+                "authoring_enabled": bool(getattr(state, "framework_agent_authoring_enabled", False)),
+            },
+        }
+
+    def _close_framework_timeline(self, *, exit_reason: str = "", evidence: dict | None = None) -> None:
+        """Close the FRAMEWORK timeline event when the phase is left.
+
+        The phase machine has entry hooks only, so the seam in
+        ``_on_phase_entered`` calls this before dispatching the next phase's
+        hook. Plateau rows are written from ``evidence`` rather than
+        recomputed: re-reading both arms here would report counts over a
+        history that kept growing.
+        """
+        recorder = self._framework_timeline()
+        if recorder is None:
+            return
+        self._framework_timeline_recorder = None
+        facts = dict(evidence or {})
+        try:
+            self._record_framework_exit_plateau(recorder, facts)
+        except Exception:  # noqa: BLE001 — observability cannot change the transition
+            log.debug("framework timeline: exit plateau record failed", exc_info=True)
+        try:
+            recorder.finish(
+                exit_reason=exit_reason,
+                trigger=str(facts.get("evidence") or ""),
+                hint=str(facts.get("hint") or ""),
+                switch_bottleneck=facts.get("switch_bottleneck"),
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the transition
+            log.debug("framework timeline: finish failed", exc_info=True)
+
+    @staticmethod
+    def _record_framework_exit_plateau(recorder, evidence: dict) -> None:
+        """Record both arms' plateau readings as the exit rule saw them.
+
+        Skipped when the evidence carries no plateau reading -- a transition
+        that did not come from the optimize exit rule -- since writing rows
+        then would report an evaluation that never ran.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+            ARM_CONFIG,
+            ARM_SOURCE,
+            PLATEAU_PATH_EXIT,
+        )
+
+        if "config_arm_plateaued" not in evidence and "source_arm_plateaued" not in evidence:
+            return
+        recorder.record_plateau(
+            arm=ARM_CONFIG,
+            path=PLATEAU_PATH_EXIT,
+            triggered=evidence.get("config_arm_plateaued"),
+            inputs={
+                "recent_keep_gain_pct": evidence.get("recent_keep_gain_pct"),
+                "empty_streak": evidence.get("empty_streak"),
+                "winners_seen": evidence.get("winners_seen"),
+                "specialist_rounds_seen": evidence.get("specialist_rounds_seen"),
+            },
+            thresholds={
+                "keep_gain_threshold_pct": evidence.get("keep_gain_threshold_pct"),
+                "empty_streak_threshold": evidence.get("empty_streak_threshold"),
+                "lookback": evidence.get("lookback"),
+            },
+        )
+        recorder.record_plateau(
+            arm=ARM_SOURCE,
+            path=PLATEAU_PATH_EXIT,
+            triggered=evidence.get("source_arm_plateaued"),
+            inputs={
+                "consecutive_no_keep": evidence.get("source_consecutive_no_keep"),
+                "candidates_exhausted": evidence.get("source_candidates_exhausted"),
+            },
+            thresholds={"no_keep_streak_threshold": evidence.get("source_threshold")},
+        )
 
     async def _on_enter_framework(self, *, from_phase: str) -> None:
         """FRAMEWORK entry hook: trigger the per-batch pump once on entry (best-effort; later batches driven from the main tick)."""
@@ -54,6 +457,12 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         # A reopened macro-cycle re-measures before either arm spends anything.
         await self._on_cycle_start_reprofile(from_phase=from_phase)
+        # Opened after the reprofile so the policy reads the settled anchor,
+        # and before the pump so the entry's first dispatch is inside the event.
+        try:
+            self._open_framework_timeline()
+        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+            log.debug("framework timeline: open failed", exc_info=True)
         try:
             await self._pump_framework_agent_phase()
         except Exception as exc:  # noqa: BLE001 — defensive
@@ -326,6 +735,24 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "FRAMEWORK authoring: specialist->candidate map write failed",
                 exc_info=True,
             )
+        _record_run(
+            self,
+            spec_tid,
+            role="authoring",
+            status="dispatched",
+            domain=str(params.get("domain") or ""),
+            gap_canonical_id=gap_cid,
+            parallelism=len(lanes or ()),
+        )
+        # A re-author is the same lifecycle step again rather than a counter on
+        # the proposal: discovery already produced the candidate.
+        _record_step(
+            self,
+            cand_id,
+            step="reauthored" if int(reauthor_attempt) > 0 else "authored",
+            run_ref=spec_tid,
+            outcome="dispatched",
+        )
         log.info(
             "FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s",
             cand_id,
@@ -1282,6 +1709,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             predicted_gain_pct=0.0,
             payload=dict(propose_payload),
         )
+        # The review-bus message id is a field, not a second identity: the
+        # candidate is keyed by its own id throughout the phase.
+        _record_step(
+            self,
+            cand_id,
+            step="routed",
+            outcome=str(audit_step or ""),
+            reason=f"submitted_for_review:{msg.msg_id}",
+        )
         log.info(
             "FRAMEWORK: candidate submitted for Critic review msg_id=%s candidate=%s batch=%s audit_step=%s",
             msg.msg_id,
@@ -1319,6 +1755,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         audit_step = str(payload.get("audit_step") or "")
         cand_id = str(payload.get("framework_agent_candidate_id") or self._framework_candidate_key(candidate))
         batch_id = str(payload.get("batch_id") or candidate.get("batch_id") or "")
+        _record_review_outcome(self, cand_id, materialized=True)
         authoring_enabled = bool(getattr(self.shared_state, "framework_agent_authoring_enabled", False))
         want_raw = audit_step == "direct_framework"
         want_author = audit_step == "author_via_specialist"
@@ -1404,6 +1841,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             for k, v in extra.items():
                 row.setdefault(str(k), v)
         progress.append(row)
+        # The single idempotent terminal-row writer for every path that ends a
+        # candidate without a benched result: settling here rather than at each
+        # caller keeps a new dead end from leaving its proposal ``pending``.
+        _settle(
+            self,
+            cand_id,
+            disposition="attempted" if (kept or str(status or "") in {"kept", "reverted"}) else "dropped",
+            reason=str(status or ""),
+        )
         try:
             state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
@@ -1441,6 +1887,13 @@ class FrameworkPhase(CoordinatorCollaborator):
             kept=False,
             rationale=str(reasoning or ""),
             provenance="critic",
+        )
+        _record_review_outcome(
+            self,
+            cand_id,
+            verdict="reject",
+            reason=str(reasoning or ""),
+            denied=True,
         )
         log.info(
             "FRAMEWORK: critic rejected candidate=%s batch=%s rationale=%r",
@@ -1681,6 +2134,15 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         if not recorded:
             return
+        _record_source_attempt(
+            self,
+            task=task,
+            candidate_id=cand_id,
+            status=status,
+            result=res,
+            params=params,
+            specialist_task_id=spec_tid,
+        )
         log.info(
             "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
@@ -1903,7 +2365,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         }
         await self._warm_specialist_params(params)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
-        await self.tasks.create_or_return_existing(
+        task = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
             # The round count is part of the key: the registry returns the row a key already names, so a fixed key
@@ -1912,6 +2374,16 @@ class FrameworkPhase(CoordinatorCollaborator):
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
+        )
+        _record_run(
+            self,
+            task,
+            role="discovery",
+            status="dispatched",
+            domain=str(params.get("domain") or ""),
+            gap_canonical_id=str(params.get("gap_canonical_id") or ""),
+            reason=reason,
+            parallelism=len(lanes or ()),
         )
         log.info("FRAMEWORK: dispatched candidate discovery (reason=%s)", reason)
         return True
@@ -1931,6 +2403,13 @@ class FrameworkPhase(CoordinatorCollaborator):
         if run_error:
             failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
             state.framework_agent_discover_failures = failures
+            _record_run(
+                self,
+                task,
+                role="discovery",
+                status="failed",
+                reason=run_error[:200],
+            )
             log.warning(
                 "FRAMEWORK: discovery task=%s failed (streak=%d): %s",
                 getattr(task, "task_id", ""),
@@ -1941,6 +2420,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
         candidates = self._candidates_from_discovery_proposals(proposals or [])
+        _record_run(
+            self,
+            task,
+            role="discovery",
+            status="succeeded",
+            reason="" if candidates else "no_usable_candidates",
+        )
+        _record_discovered(self, task, raw=proposals or [], candidates=candidates)
         # A round that ran is proof the lane works, whatever it came back with.
         state.framework_agent_discover_failures = 0
         if not candidates:

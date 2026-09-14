@@ -32,6 +32,7 @@ class RewriteResult:
     flydsl_best_ms: float | None
     speedup: float | None
     experiment_id: str | None
+    llm_usage: dict
     port_attempts: int
     # Forge-loop-compatible result view consumed by Hyperloom.
     success: bool
@@ -78,6 +79,7 @@ def build_result(
     optimize_result: dict,
     applyback_result: dict | None = None,
     applyback_required: bool = False,
+    llm_usage: dict | None = None,
     kb_experience: dict | None = None,
     failure_class: str = "",
     failure_detail: str = "",
@@ -111,6 +113,7 @@ def build_result(
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         experiment_id=experiment_id,
+        llm_usage=dict(llm_usage if llm_usage is not None else (optimize_result.get("llm_usage") or {})),
         port_attempts=port_attempts,
         success=bool(
             port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
