@@ -671,15 +671,18 @@ def test_a_port_whose_implementation_signature_disagrees_is_measured_not_refused
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
     port = Path(spec.flydsl_kernel).read_text()
-    assert kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        framework="vllm",
-    )["written"] is True
+    assert (
+        kb.write_flydsl_kb_solution(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            flydsl_best_ms=5.0,
+            speedup=2,
+            framework="vllm",
+        )["written"]
+        is True
+    )
 
     source = Path(spec.source_kernel)
     before = kb.resolve_identity(spec, framework="vllm", gpu="mi355x", source_text=source.read_text())[2]
@@ -709,15 +712,18 @@ def test_a_port_that_does_not_expose_the_builder_the_driver_imports_is_refused(t
     _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
-    assert kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        framework="vllm",
-    )["written"] is True
+    assert (
+        kb.write_flydsl_kb_solution(
+            spec,
+            str(driver),
+            config,
+            source_ms=10.0,
+            flydsl_best_ms=5.0,
+            speedup=2,
+            framework="vllm",
+        )["written"]
+        is True
+    )
 
     seed = "def skeleton():\n    pass\n"
     Path(spec.flydsl_kernel).write_text(seed)
