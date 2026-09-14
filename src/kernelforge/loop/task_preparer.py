@@ -31,7 +31,7 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.llm.git import git
+from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
@@ -1219,19 +1219,17 @@ def _ensure_agent_git_workspace(workspace: Path) -> None:
     """Create a private baseline commit when a backend requires a git cwd."""
     code, _ = _git(workspace, "rev-parse", "--show-toplevel")
     if code == 0:
+        ensure_commit_identity(workspace)
         return
     code, output = _git(workspace, "init")
     if code != 0:
         raise RuntimeError(f"could not initialize preparation workspace: {output}")
+    ensure_commit_identity(workspace)
     code, output = _git(workspace, "add", "-A")
     if code != 0:
         raise RuntimeError(f"could not stage preparation workspace: {output}")
     code, output = _git(
         workspace,
-        "-c",
-        "user.name=KernelForge",
-        "-c",
-        "user.email=kernel-forge@localhost",
         "commit",
         "--allow-empty",
         "-m",

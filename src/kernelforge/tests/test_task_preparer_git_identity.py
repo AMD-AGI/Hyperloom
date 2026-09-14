@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Commits into a campaign workspace must carry their own git identity.
+"""Commits into a campaign workspace must carry a git identity.
 
-The workspace git holds no persistent ``user.name``/``user.email`` and a
-container host has no domain for git to guess an address from, so a commit
-there names no author and fails. ``git()`` supplies one for every site rather
-than each site naming its own, which is what these cover: preparation's prepass
-commit, and a later commit into the same repo through a different site.
+A container host has no domain for git to guess an address from, so a commit
+into a workspace holding no ``user.name``/``user.email`` names no author and
+fails. The identity is written repo-locally once, and only as a fallback: the
+workspace is the operator's own repository, so an identity it already carries
+must survive.
 """
 
 from __future__ import annotations
@@ -148,8 +148,8 @@ def test_prepass_commit_is_attributed_to_forge(tmp_path, monkeypatch):
     assert _last_author(workspace) == FORGE_IDENTITY
 
 
-def test_forge_identity_wins_over_a_repo_configured_one(tmp_path, monkeypatch):
-    """Preparation's own commits are attributed to preparation, as every other lane does."""
+def test_a_configured_identity_is_not_rewritten(tmp_path, monkeypatch):
+    """The campaign workspace is the operator's own repository, so its identity stands."""
     _no_identity_to_borrow(monkeypatch)
     workspace, kernel, driver = _workspace_without_an_identity(tmp_path)
     task_preparer._git(workspace, "config", "user.name", "operator")
@@ -159,7 +159,7 @@ def test_forge_identity_wins_over_a_repo_configured_one(tmp_path, monkeypatch):
     result = _prepare(tmp_path, workspace, kernel, driver)
 
     assert result.ok is True, result.message
-    assert _last_author(workspace) == FORGE_IDENTITY
+    assert _last_author(workspace) == "operator <operator@example.com>"
 
 
 def test_a_later_commit_into_the_same_repo_also_lands(tmp_path, monkeypatch):

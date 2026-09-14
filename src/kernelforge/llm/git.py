@@ -33,24 +33,6 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
 
 
-# Machine commits into a working copy: a workspace holds no identity and a container
-# host has no domain to auto-detect one from, so the helper names it for every site.
-_COMMIT_IDENTITY = {
-    "GIT_AUTHOR_NAME": "KernelForge",
-    "GIT_AUTHOR_EMAIL": "kernel-forge@localhost",
-    "GIT_COMMITTER_NAME": "KernelForge",
-    "GIT_COMMITTER_EMAIL": "kernel-forge@localhost",
-}
-
-
-def _run_env(overrides: dict[str, str] | None) -> dict[str, str]:
-    """The environment for one git run; an ambient or caller identity still wins."""
-    merged = {**os.environ, **(overrides or {})}
-    for key, value in _COMMIT_IDENTITY.items():
-        merged.setdefault(key, value)
-    return merged
-
-
 def _checked(
     completed: subprocess.CompletedProcess,
     check: bool,
@@ -83,7 +65,7 @@ def git(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
-        env=_run_env(env),
+        env=None if env is None else {**os.environ, **env},
         start_new_session=True,
     ) as process:
         try:
@@ -97,6 +79,31 @@ def git(
         subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr),
         check,
     )
+
+
+FALLBACK_COMMIT_IDENTITY = ("KernelForge", "kernel-forge@localhost")
+
+
+def ensure_commit_identity(cwd: str | Path) -> str:
+    """Name a committer for a repository that has none to auto-detect.
+
+    Written repo-locally and only when git can resolve no identity at all, so a
+    workspace already carrying the operator's own identity keeps it.
+
+    Args:
+        cwd: The repository to configure.
+
+    Returns:
+        The identity written, or an empty string when one was already available
+        or the directory is not a repository.
+    """
+    if git("var", "GIT_AUTHOR_IDENT", cwd=cwd, check=False).returncode == 0:
+        return ""
+    name, email = FALLBACK_COMMIT_IDENTITY
+    for key, value in (("user.name", name), ("user.email", email)):
+        if git("config", key, value, cwd=cwd, check=False).returncode != 0:
+            return ""
+    return f"{name} <{email}>"
 
 
 async def git_async(

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.knowledge.experience_integration import git_checkout_branch
+from kernelforge.llm.git import ensure_commit_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -66,6 +67,11 @@ def resolve_campaign(
     campaign_store = CampaignConfigStore(str(workspace))
     campaign_root = campaign_store.root
     state_path = campaign_root / "run_state.json"
+
+    # Before the resume branch: a resumed campaign commits into this workspace too.
+    written_identity = ensure_commit_identity(workspace)
+    if written_identity:
+        print(f"  [git] workspace had no commit identity; using {written_identity}")
 
     campaign_inputs_supplied = any(
         value not in (None, "") for value in (kernel, driver, source_files, program_md_file, operator_name)
