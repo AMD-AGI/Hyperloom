@@ -346,9 +346,7 @@ def _maybe_activate_kernel_shape_tool(sub_env: dict[str, str]) -> None:
         return
     tool = Path(root).joinpath(*_KERNEL_SHAPE_TOOL_REL)
     if not tool.is_dir():
-        sys.stderr.write(
-            f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled\n"
-        )
+        sys.stderr.write(f"WARN kernel_shape_tool not found at {tool}; SGLang shape discovery disabled\n")
         return
     existing = sub_env.get("PYTHONPATH", "").strip()
     sub_env["PYTHONPATH"] = f"{tool}{os.pathsep}{existing}" if existing else str(tool)

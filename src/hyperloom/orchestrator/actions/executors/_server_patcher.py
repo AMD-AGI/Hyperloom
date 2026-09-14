@@ -273,9 +273,7 @@ def resolve_sglang_shape_mode() -> str:
     importable in the controller (multi-node), ``HYPERLOOM_SGLANG_VERSION_PIN``.
     Falls back to ``"patched"`` (legacy) when the version cannot be determined.
     """
-    version = _detect_installed_sglang_version() or os.environ.get(
-        "HYPERLOOM_SGLANG_VERSION_PIN", ""
-    ).strip()
+    version = _detect_installed_sglang_version() or os.environ.get("HYPERLOOM_SGLANG_VERSION_PIN", "").strip()
     return sglang_shape_mode(version)
 
 

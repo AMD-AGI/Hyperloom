@@ -1421,11 +1421,7 @@ def materialize_config_with_envs(
                 _tool_dir = kernel_shape_tool_dir()
                 if _shape_disc and _tool_dir is not None:
                     _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
-                    envs["PYTHONPATH"] = (
-                        f"{_tool_dir}{os.pathsep}{_existing_pp}"
-                        if _existing_pp
-                        else str(_tool_dir)
-                    )
+                    envs["PYTHONPATH"] = f"{_tool_dir}{os.pathsep}{_existing_pp}" if _existing_pp else str(_tool_dir)
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
                 else:
                     envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
