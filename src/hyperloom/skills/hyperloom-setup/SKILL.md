@@ -383,11 +383,17 @@ The choice selects which demo skill to load and sets
   the same backend.
 
 `KERNEL_OPT_BACKEND_ORDER` is the only switch, and the opt-in is an **exact**
-match on `forge`. There is no CLI flag for it; do not invent one. Nothing else
-needs installing for `forge` — KernelForge is vendored into Hyperloom, the
-runtime installer already installs the `claude` CLI it drives, and it reuses the
-LLM credentials written above. Do not ask the user for any other `FORGE_*`
-value.
+match on `forge`. There is no CLI flag for it; do not invent one. KernelForge is
+vendored into Hyperloom and reuses the LLM credentials written above, so do not
+ask the user for any other `FORGE_*` value. One thing does have to be present
+though: the runtime installer ensures the `claude_agent_sdk` Python package, but
+not the `claude` CLI binary that the SDK drives. A missing binary makes the SDK
+hang until the caller's timeout instead of failing loudly, so check it before
+launching and install it when absent:
+
+```bash
+command -v claude || npm install -g @anthropic-ai/claude-code
+```
 
 If `.env` was already written before this question, update it with the selected
 value rather than re-running the whole setup backend.

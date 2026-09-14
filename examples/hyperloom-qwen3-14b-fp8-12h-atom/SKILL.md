@@ -84,8 +84,18 @@ Nothing else has to be installed or configured for the forge backend:
 
 - KernelForge is vendored into Hyperloom. There is no repository to clone and
   no `FORGE_PATH` to point anywhere.
-- The runtime installer already installs the `claude` CLI that the forge
-  backend drives, unconditionally — the backend is chosen per session, later.
+- The runtime installer ensures the `claude_agent_sdk` Python package the forge
+  backend imports. It does **not** install the `claude` CLI binary that the SDK
+  drives. On an image that ships neither Node nor that binary, the SDK call
+  hangs until the caller's timeout rather than failing loudly, so check for it
+  before launching and install it if missing:
+
+  ```bash
+  command -v claude || npm install -g @anthropic-ai/claude-code
+  ```
+
+  Measured on `rocm/atom-dev:v0.1.7-rc0`: neither `node` nor `claude` is
+  present, and `install.sh` leaves it that way.
 - Forge reuses the LLM credentials setup already wrote. It reads
   `CLAUDE_MODEL` / `CODEX_MODEL`, the same pair every other Hyperloom
   component reads, so no separate key or model id is needed.
