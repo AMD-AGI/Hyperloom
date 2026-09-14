@@ -29,8 +29,8 @@ diff --git a/{KERNEL_REL} b/{KERNEL_REL}
 @@ -1,4 +1,4 @@
 -BLOCK_N = 16
 +BLOCK_N = 32
- 
- 
+\x20
+\x20
  def _fwd_grouped_kernel_stage1():
 """
 
