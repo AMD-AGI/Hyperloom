@@ -399,15 +399,16 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
             os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
             print(
                 "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
-                "(GEAK does not drive kernel rewrites on atom)"
+                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
             )
         elif not forge_explicitly_enabled():
             print(
                 "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
                 f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
-                "phase runs GEAK. GEAK does not drive kernel rewrites on atom and "
-                "is expected to return no candidates. Unset it to get 'forge', or "
-                "pass --no-kernel to skip the phase.",
+                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
+                "a rewrite seam -- it has to resolve one from the live server, which "
+                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
+                "to skip the phase.",
                 file=sys.stderr,
             )
     return auto_disabled

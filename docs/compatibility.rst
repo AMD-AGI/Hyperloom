@@ -127,7 +127,7 @@ The following inference frameworks are supported:
      - Do not mix frameworks within one session
    * - Atom
      - 7.2.4
-     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset); GEAK does not drive kernel rewrites on Atom.
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset); On a quantized non-vLLM backend GEAK must resolve a live rewrite seam rather than guess one, which forge does not require.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.

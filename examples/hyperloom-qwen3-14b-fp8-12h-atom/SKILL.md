@@ -17,7 +17,7 @@ Two things are pinned by this demo rather than inherited from `.env`:
 - `FRAMEWORK=atom` — the whole point of this variant. The other 12h demos read
   whatever framework `.env` carries; this one does not.
 - `KERNEL_OPT_BACKEND_ORDER` — left unset. On ATOM the CLI defaults it to
-  `forge`, because GEAK does not currently drive kernel rewrites there.
+  `forge`, because GEAK's seam resolution is unproven on this backend.
 
 ## Framework
 
@@ -69,18 +69,19 @@ choice at launch:
 
 ```
 framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge'
-  (GEAK does not drive kernel rewrites on atom)
+  (on atom GEAK must resolve a live rewrite seam; forge needs none)
 ```
 
-This is not a preference — it is a capability boundary. GEAK's kernel extraction
-refuses to guess a rewrite seam for quantized, non-vLLM backends, so a GEAK
-kernel phase on ATOM spends its budget without producing kernel candidates, and
-the default phase split gives that phase half the session. Forge works per
-kernel and does not depend on that seam.
+This is not a preference. GEAK's own extraction rules forbid *guessing* a
+rewrite seam on a quantized, non-vLLM backend: it must grep the live server for
+the actual quant-apply or backend forward and use that verbatim. That path is
+sound in principle but unproven on ATOM, and the default phase split gives the
+kernel phase half the session — a poor place to find out. Forge works per kernel
+and needs no seam discovery at all, so it is the safer default here.
 
 Only a value you set yourself is kept. Setting anything other than `forge`
 (the opt-in is an **exact** match) hands the phase back to GEAK, and the CLI
-warns that it is expected to return no candidates. Do not set it for this demo.
+warns that its seam resolution is unproven here. Do not set it for this demo.
 
 Nothing else has to be installed or configured for the forge backend:
 
