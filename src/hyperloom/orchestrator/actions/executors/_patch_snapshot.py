@@ -525,6 +525,77 @@ def _same_entry(replayed: Path, captured: Path, *, op: str) -> bool:
         return False
 
 
+def overlay_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | None:
+    """The targets a patch contributes to a root that has no base commit.
+
+    Such a root -- a framework installed from a wheel, which is the ordinary
+    production shape -- cannot be replayed by "check out the base and apply
+    these patches", because there is no base to check out. It is replayed by
+    OVERLAYING the captured files, and that is exactly what building an image
+    from the recipe does. Refusing to declare the targets removes those files
+    from the capture and with them the only replay path that applies here.
+
+    What this does NOT claim is that the patch was proven applied. There is no
+    preimage to prove it against; the decision still refuses to certify the
+    application, and the ``op`` recorded states what the overlay must contain.
+
+    Paths come from ``--numstat -z``, which is authoritative and NUL-separated
+    so an unusual name cannot be mis-split. Deletions come from ``--summary``,
+    which names them explicitly -- inferring "absent, so deleted" invents a
+    deletion at every strip level deep enough to land the path inside the root,
+    which is a second plausible inventory and would make every patch look
+    ambiguous. A rename is refused outright: git abbreviates it as
+    ``dir/{old => new}`` and no reliable path can be recovered from that.
+    """
+    inventories: list[dict[str, str]] = []
+    for level in _P_LEVELS:
+        numstat = _git(tree, "apply", "--numstat", "-z", f"-p{level}", str(patch), timeout=60)
+        summary = _git(tree, "apply", "--summary", f"-p{level}", str(patch), timeout=60)
+        if numstat is None or summary is None or numstat.returncode != 0 or summary.returncode != 0:
+            continue
+        summary_text = summary.stdout.decode("utf-8", errors="replace")
+        if any(row.strip().startswith("rename ") for row in summary_text.splitlines()):
+            return None
+        deleted = {
+            row.strip()[len("delete mode ") :].split(" ", 1)[-1]
+            for row in summary_text.splitlines()
+            if row.strip().startswith("delete mode ")
+        }
+        fields = [f for f in numstat.stdout.decode("utf-8", errors="replace").split("\0") if f]
+        rels: list[str] = []
+        for chunk in fields:
+            parts = chunk.split("\t")
+            if len(parts) >= 3 and parts[2]:
+                rels.append(parts[2])
+            elif len(parts) == 2:
+                # ``-z`` splits the path into its own field for unusual names.
+                rels.append("")
+        rels = [r for r in rels if r]
+        if not rels:
+            continue
+        ops: dict[str, str] = {}
+        resolved = True
+        for rel in rels:
+            target = tree / rel
+            if target.is_symlink():
+                # ``shutil.copy2`` would capture a link as a regular file.
+                return None
+            if rel in deleted:
+                ops[rel] = "delete"
+                resolved = resolved and not os.path.lexists(target)
+            elif target.is_file():
+                ops[rel] = "upsert"
+            else:
+                resolved = False
+            if not resolved:
+                break
+        if resolved and ops and ops not in inventories:
+            inventories.append(ops)
+    # More than one level producing a different, equally plausible answer means
+    # there is no reading of this patch the capture can stand behind.
+    return inventories[0] if len(inventories) == 1 else None
+
+
 def replayed_stack_ops(
     framework_root: Path,
     patches: Sequence[Path],
@@ -824,6 +895,7 @@ __all__ = [
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
     "patch_declared_ops",
+    "overlay_inventory_without_base",
     "replayed_stack_ops",
     "harvest_realized_diff",
 ]

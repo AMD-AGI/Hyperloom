@@ -301,3 +301,76 @@ def test_sglang_model_path_still_passes_the_gate(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert launch_argv_from_log(str(log), "sglang") == "--chunked-prefill-size 2048"
+
+
+# ── vLLM: the record it actually writes ───────────────────────────────────
+
+
+_VLLM_NON_DEFAULT = (
+    "(APIServer pid=1) INFO 09-14 07:03:07 [utils.py:233] non-default args: "
+    "{'model_tag': '/models/m', 'port': 38035, 'model': '/models/m', "
+    "'trust_remote_code': True, 'max_model_len': 4096, 'tensor_parallel_size': 4, "
+    "'kv_cache_dtype': 'fp8', 'gpu_memory_utilization': 0.95, "
+    "'compilation_config': CompilationConfig(level=3, backend='inductor')}\n"
+)
+
+
+def test_vllm_identity_is_read_from_the_record_vllm_actually_writes(tmp_path: Path) -> None:
+    """vLLM prints no argv line in any log, successful or failed. It prints the
+    RESOLVED argument dict, which is a better observed record than a command
+    line -- it is what the parser produced rather than what was typed.
+
+    Without this reader ``observed_server_launch_flags`` and
+    ``observed_model_binding`` are empty for every vLLM session, every requested
+    setting is judged unconfirmed, and the replay verdict is insufficient by
+    construction rather than by evidence.
+    """
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    identity = observed_vllm_server_identity_from_log(str(log))
+
+    assert identity["model"] == "/models/m"
+    assert identity["tensor_parallel_size"] == 4
+    assert identity["max_model_len"] == 4096
+    assert identity["kv_cache_dtype"] == "fp8"
+    # There is no argv line to find, and the argv reader must not invent one.
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_a_non_literal_value_skips_its_key_rather_than_the_whole_record(tmp_path: Path) -> None:
+    """vLLM prints object reprs inside that dict -- ``CompilationConfig(...)``.
+    A single ``literal_eval`` of the dict raises on the first one and yields
+    nothing, which is what makes the whole record look unreadable."""
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    identity = observed_vllm_server_identity_from_log(str(log))
+
+    assert "compilation_config" not in identity
+    assert identity["model"] == "/models/m", "the literal keys must survive the non-literal one"
+
+
+def test_the_vllm_binding_carries_the_width_and_digests_the_model(tmp_path: Path) -> None:
+    import hashlib
+
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.orchestrator.actions.executors._launch_evidence import _binding_from_vllm_identity
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    binding = _binding_from_vllm_identity(observed_vllm_server_identity_from_log(str(log)))
+
+    assert binding["tp"] == "4"
+    assert binding["model_digest"] == "sha256:" + hashlib.sha256(b"/models/m").hexdigest()
+    assert "/models/m" not in str(binding), "a host model path must not travel in the binding"
+
+
+def test_a_log_with_no_such_record_yields_no_vllm_identity(tmp_path: Path) -> None:
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text("(APIServer pid=1) INFO starting up\n", encoding="utf-8")
+    assert observed_vllm_server_identity_from_log(str(log)) == {}

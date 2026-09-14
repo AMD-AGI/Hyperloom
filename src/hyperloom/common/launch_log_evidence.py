@@ -263,6 +263,114 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
 )
 
 
+#: vLLM never echoes an argv line. It prints the RESOLVED argument dict under
+#: this header instead, which is the authoritative record of what the server was
+#: launched with -- more so than a command line, because it is what the parser
+#: produced rather than what was typed. A reader that only looks for a command
+#: line therefore finds nothing in ANY vLLM log, successful or failed, and every
+#: requested setting is judged unconfirmed for want of an observed side.
+_VLLM_NON_DEFAULT_ARGS_RE = re.compile(r"non[-_]default args:\s*\{", re.IGNORECASE)
+
+#: The vLLM spellings of the settings the decision compares. Names differ from
+#: SGLang's, so the two identity readers cannot share one table.
+_VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
+    {
+        "model",
+        "tokenizer",
+        "served_model_name",
+        "tensor_parallel_size",
+        "pipeline_parallel_size",
+        "data_parallel_size",
+        "max_model_len",
+        "gpu_memory_utilization",
+        "quantization",
+        "dtype",
+        "kv_cache_dtype",
+        "block_size",
+        "max_num_seqs",
+        "max_num_batched_tokens",
+        "enable_chunked_prefill",
+        "enable_expert_parallel",
+        "enforce_eager",
+        "trust_remote_code",
+        "swap_space",
+        "cpu_offload_gb",
+    }
+)
+
+
+def _extract_balanced_braces(text: str) -> str:
+    """Return the first balanced ``{...}`` span in ``text``, else ``""``."""
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    for index in range(start, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return ""
+
+
+def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
+    """Parse vLLM's ``non-default args: {...}`` record into an identity.
+
+    The dict's values are not all literals -- vLLM prints object reprs such as
+    ``CompilationConfig(...)`` inside it -- so it is walked key by key and a key
+    whose value is not a literal is skipped rather than failing the whole parse.
+    A single ``literal_eval`` of the dict raises on the first such value and
+    yields nothing, which is what makes the whole record look unreadable.
+    """
+    chunks: list[str] = []
+    remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
+    parsed = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
+                line = handle.readline()
+                if not line:
+                    break
+                if len(line) > remaining:
+                    line = line[:remaining]
+                remaining -= len(line)
+                if chunks or _VLLM_NON_DEFAULT_ARGS_RE.search(line):
+                    chunks.append(line)
+                    parsed = _extract_balanced_braces("".join(chunks))
+                    if parsed:
+                        break
+                if remaining <= 0:
+                    break
+    except OSError:
+        return {}
+    content = parsed or _extract_balanced_braces("".join(chunks))
+    if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
+        return {}
+    values: dict[str, Any] = {}
+    try:
+        node = ast.parse(content, mode="eval").body
+        if not isinstance(node, ast.Dict):
+            return {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if not isinstance(key_node, ast.Constant) or not isinstance(key_node.value, str):
+                continue
+            key = key_node.value
+            if key not in _VLLM_OBSERVED_IDENTITY_FIELDS:
+                continue
+            try:
+                values[key] = _safe_server_args_value(value_node)
+            except (ValueError, TypeError):
+                # A non-literal value (an object repr) is skipped; the rest of
+                # the record is still the observed truth.
+                continue
+    except (SyntaxError, ValueError, TypeError):
+        return {}
+    return {key: values[key] for key in sorted(values)}
+
+
 def _extract_balanced_server_args(text: str) -> str:
     """Return the balanced ``ServerArgs(...)`` argument text."""
     match = _SGLANG_SERVER_ARGS_LOG_RE.search(text)

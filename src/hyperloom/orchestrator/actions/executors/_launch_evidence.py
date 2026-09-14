@@ -17,6 +17,7 @@ from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
     observed_model_binding_from_log,
     observed_sglang_server_identity_from_log,
+    observed_vllm_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
@@ -27,6 +28,25 @@ def _digest_operand(value: str) -> str:
     """Digest a model operand: two digests compare, the paths could not travel."""
     text = str(value or "").strip()
     return f"sha256:{hashlib.sha256(text.encode('utf-8')).hexdigest()}" if text else ""
+
+
+def _binding_from_vllm_identity(identity: dict[str, Any]) -> dict[str, Any]:
+    """Derive the binding from a vLLM ``non-default args`` parse.
+
+    Separate from the SGLang one because the field names differ; sharing a table
+    would silently read ``{}`` for one of the two frameworks.
+    """
+    model = str(identity.get("model") or "")
+    if not model:
+        return {}
+    return {
+        "model_digest": _digest_operand(model),
+        "tokenizer_digest": _digest_operand(str(identity.get("tokenizer") or "")),
+        "served_model_digest": _digest_operand(str(identity.get("served_model_name") or "")),
+        "tp": str(identity.get("tensor_parallel_size") or ""),
+        "dp": str(identity.get("data_parallel_size") or ""),
+        "pp": str(identity.get("pipeline_parallel_size") or ""),
+    }
 
 
 def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +111,15 @@ def build_launch_evidence(
                 observed_server_identity = observed_sglang_server_identity_from_log(actual_server_log)
                 if not observed_model_binding:
                     observed_model_binding = _binding_from_identity(observed_server_identity)
+            elif not observed_flags and resolved_framework == "vllm":
+                # vLLM prints no argv line at all -- not in any log, successful
+                # or failed -- so the argv reader above is empty for every vLLM
+                # session and every requested setting would be judged
+                # unconfirmed. The resolved argument dict it DOES print is the
+                # observed side.
+                observed_server_identity = observed_vllm_server_identity_from_log(actual_server_log)
+                if not observed_model_binding:
+                    observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
         except Exception:  # noqa: BLE001 - evidence collection must not alter a measurement
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 

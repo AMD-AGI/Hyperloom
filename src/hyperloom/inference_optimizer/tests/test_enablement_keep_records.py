@@ -1373,16 +1373,17 @@ def test_export_attributes_cannot_move_the_base_the_replay_compares_against(repo
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
 
 
-def test_a_patch_on_a_root_with_no_base_commit_declares_nothing(tmp_path: Path):
-    """A tree with no identity has no preimage to replay from.
+def test_a_patch_on_a_root_with_no_base_commit_declares_its_overlay(tmp_path: Path):
+    """A framework installed from a wheel is the ordinary production shape, and
+    it has no base commit. There is no "check out the base and apply" to prove
+    there -- but that is not how such a root is replayed. It is replayed by
+    OVERLAYING the captured files, which is exactly what building an image from
+    the recipe does.
 
-    Three successive attempts to certify such a root from the patch text alone
-    each left a different hole -- a hunk body posing as a file header, an
-    ambiguous strip level resolved to the wrong path, git's abbreviated
-    ``dir/{old => new}`` rename summary inventing a source, and a declared
-    symlink certified into a regular file. A patch step bound to a tree that
-    names no base cannot be certified, so it declares nothing and the decision
-    refuses it.
+    An earlier revision of this branch refused to declare anything for such a
+    root. That removed the touched files from the capture and with them the
+    only replay path that applies, which a live run against a wheel-installed
+    vLLM showed produces a recipe that can never be used.
     """
     plain = tmp_path / "site-packages" / "pkg"
     plain.mkdir(parents=True)
@@ -1402,7 +1403,44 @@ def test_a_patch_on_a_root_with_no_base_commit_declares_nothing(tmp_path: Path):
         provision_result=None,
         bench_result={},
     )
-    assert out["enablement_patch_targets"] == {}
+    assert out["enablement_patch_targets"] == {str(patch): {"mod.py": "upsert"}}
+    root_id = out["enablement_roots"][0]["id"]
+    assert out["enablement_accepted_stack_targets"][root_id] == {"mod.py": "upsert"}
+    # The file is actually captured, which is what an overlay needs.
+    snapshot = out["enablement_source_snapshots"][0]
+    assert {f["rel"] for f in snapshot["files"]} == {"mod.py"}
+    assert (executor.session_dir / snapshot["snapshot_ref"] / "files" / "mod.py").read_text() == PATCHED_TEXT
+    # ...and the root still names no base commit, so nothing claims the patch
+    # application itself was verified.
+    assert out["enablement_base_sha"] == ""
+
+
+def test_a_base_less_root_refuses_an_ambiguous_strip_level(tmp_path: Path):
+    """Two levels producing different, equally plausible inventories means there
+    is no reading of the patch the capture can stand behind."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = tmp_path / "amb"
+    (plain / "pkg").mkdir(parents=True)
+    # Both ``pkg/dup.py`` and ``dup.py`` exist, so -p0 and -p1 both resolve.
+    (plain / "pkg" / "dup.py").write_text("inner\n", encoding="utf-8")
+    (plain / "dup.py").write_text("outer\n", encoding="utf-8")
+    patch = _patch(tmp_path, "amb.patch", "--- a/pkg/dup.py\n+++ b/pkg/dup.py\n@@ -1 +1 @@\n-x\n+y\n")
+    assert overlay_inventory_without_base(plain, patch) is None
+
+
+def test_a_base_less_root_refuses_a_symlink_target(tmp_path: Path):
+    """``shutil.copy2`` captures a link as a regular file, so the snapshot
+    cannot represent one honestly -- the same refusal the git-backed path makes
+    from the tree mode."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = tmp_path / "lnk"
+    plain.mkdir()
+    (plain / "real.py").write_text("x = 1\n", encoding="utf-8")
+    (plain / "mod.py").symlink_to("real.py")
+    patch = _patch(tmp_path, "lnk.patch", "--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-x = 0\n+x = 1\n")
+    assert overlay_inventory_without_base(plain, patch) is None
 
 
 def test_an_artifact_on_a_root_with_no_base_commit_is_unaffected(tmp_path: Path):

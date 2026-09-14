@@ -3547,7 +3547,7 @@ class IntegratePatchExecutor:
             declared_targets,
         )
         from ...framework.paths import resolve_session_framework_root
-        from ._patch_snapshot import replayed_stack_ops
+        from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
 
         root = str(framework_root or "")
         # Read as an attribute, not with a default: the durable round state IS
@@ -3641,29 +3641,34 @@ class IntegratePatchExecutor:
                     root_base,
                 )
                 continue
-            if replayed is None:
-                # A root with no base commit has no preimage to replay from, so
-                # nothing here can establish what its patches did. Three
-                # successive attempts to certify it from the patch text alone --
-                # a header parse, a block count, and git's own --numstat plus
-                # --summary -- each left a different hole: a hunk body posing as
-                # a file header, an ambiguous strip level silently resolved to
-                # the wrong path, git's abbreviated `dir/{old => new}` rename
-                # summary inventing a source, and a declared symlink certified
-                # into a regular file. The honest answer is that a patch step
-                # bound to a tree with no identity cannot be certified at all;
-                # it declares nothing and the decision refuses it.
-                #
-                # This narrows what a non-git root may claim, and deliberately.
-                # Artifacts on such a root are unaffected -- they are judged by
-                # ``_artifact_reasons`` against their own captured payload.
-                log.warning(
-                    "integrate_patch: enablement KEEP cannot replay %d patch(es) on %s: "
-                    "the root names no base commit, so its patch steps are left undeclared",
-                    len(patches),
-                    patch_root,
-                )
+            if replayed is None and root_base:
                 continue
+            if replayed is None:
+                # No base commit: a framework installed from a wheel, which is
+                # the ordinary production shape. There is no "check out the base
+                # and apply" to prove, but that is not how such a root is
+                # replayed -- it is replayed by OVERLAYING the captured files,
+                # which is exactly what building an image from this recipe does.
+                # Declaring nothing here removes those files from the capture
+                # and with them the only replay path that applies, leaving the
+                # recipe unusable in the case it is most needed for.
+                #
+                # What is NOT claimed is that the patch was proven applied:
+                # there is no preimage to prove it against, and the decision
+                # still refuses to certify the application. The targets are
+                # what the overlay must contain.
+                replayed = {}
+                for patch in patches:
+                    ops = overlay_inventory_without_base(Path(patch_root), patch)
+                    if ops is None:
+                        log.warning(
+                            "integrate_patch: enablement KEEP cannot resolve %s against the "
+                            "base-less root %s; its targets are left undeclared",
+                            patch,
+                            patch_root,
+                        )
+                        continue
+                    replayed[str(patch)] = ops
             for patch_path, ops in replayed.items():
                 if not ops:
                     continue
