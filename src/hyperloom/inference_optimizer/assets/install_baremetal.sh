@@ -838,7 +838,7 @@ PY
   if [ -z "$SGLANG_ROCM_EXTRA" ]; then
     SGLANG_ROCM_EXTRA="$(sglang_rocm_extra_for_torch "$py")"
   fi
-  if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
+  if [ -z "${_SGLANG_ROCM_PYPI_VERSION_WAS_SET:-}" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
     SGLANG_ROCM_PYPI_VERSION="$(sglang_pypi_version_for_extra "$SGLANG_ROCM_EXTRA")"
   fi
   if [ -n "$SGLANG_ROCM_EXTRA" ]; then

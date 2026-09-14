@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 KERNEL_ROOT = Path(__file__).resolve().parent.parent
