@@ -484,7 +484,7 @@ def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_p
 
 
 def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
-    we._atom_tracelens_caps_cache = None
+    we._atom_tracelens_caps.cache_clear()
     monkeypatch.setattr(we, "_resolve_probe_python", lambda fw: "python3")
     monkeypatch.setattr(
         we.subprocess,
@@ -492,10 +492,10 @@ def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
         lambda *a, **k: SimpleNamespace(returncode=0, stdout="1\n1\n0\n"),
     )
     assert we._atom_tracelens_caps() == we._AtomTracelensCaps(True, True, False)
-    we._atom_tracelens_caps_cache = None
+    we._atom_tracelens_caps.cache_clear()
     monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
     assert we._atom_tracelens_caps() == we._ATOM_CAPS_NONE
-    we._atom_tracelens_caps_cache = None
+    we._atom_tracelens_caps.cache_clear()
 
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):

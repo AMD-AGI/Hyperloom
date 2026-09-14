@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple
 
@@ -141,18 +142,15 @@ class _AtomTracelensCaps(NamedTuple):
 
 
 _ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
-_atom_tracelens_caps_cache: _AtomTracelensCaps | None = None
 
 
+@cache
 def _atom_tracelens_caps() -> _AtomTracelensCaps:
     """Probe the installed atom for ``--mark-trace`` and annotation envs.
 
     Fail-soft: import / help / parse errors return all-false so an older ATOM
     argparse never sees ``--mark-trace``. Cached after the first call.
     """
-    global _atom_tracelens_caps_cache
-    if _atom_tracelens_caps_cache is not None:
-        return _atom_tracelens_caps_cache
     try:
         proc = subprocess.run(
             [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
@@ -160,12 +158,11 @@ def _atom_tracelens_caps() -> _AtomTracelensCaps:
             text=True,
             timeout=10,
         )
-    except Exception as exc:  # noqa: BLE001 — fail-soft like the help probe
+    except (OSError, subprocess.SubprocessError) as exc:
         log.warning(
             "atom TraceLens caps probe failed (%s); omitting --mark-trace / annotation envs",
             exc,
         )
-        _atom_tracelens_caps_cache = _ATOM_CAPS_NONE
         return _ATOM_CAPS_NONE
     lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
     if proc.returncode != 0 or len(lines) < 3 or any(ln not in {"0", "1"} for ln in lines[:3]):
@@ -173,14 +170,12 @@ def _atom_tracelens_caps() -> _AtomTracelensCaps:
             "atom TraceLens caps probe unavailable (exit=%s); omitting --mark-trace / annotation envs",
             proc.returncode,
         )
-        _atom_tracelens_caps_cache = _ATOM_CAPS_NONE
         return _ATOM_CAPS_NONE
-    _atom_tracelens_caps_cache = _AtomTracelensCaps(
+    return _AtomTracelensCaps(
         mark_trace=lines[0] == "1",
         detailed_annotation=lines[1] == "1",
         profiler_more=lines[2] == "1",
     )
-    return _atom_tracelens_caps_cache
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
