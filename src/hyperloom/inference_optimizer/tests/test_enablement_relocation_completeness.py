@@ -29,6 +29,9 @@ _OLD_PATH_PATTERN = re.compile(
     r"|phases/_enablement_artifacts"
     r"|orchestrator\.framework\.(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)"
     r"|orchestrator/framework/(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)\.py"
+    # Relative imports carry no package prefix, and a function-local one raises
+    # only on the branch that runs it.
+    r"|from \.\.framework\.(adapters|stack_actions|localization|build_actions|build_utils|targeted_build|client)"
 )
 
 #: ``(path glob, line regex, why)``. An entry that stops matching is a dead
