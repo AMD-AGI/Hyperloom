@@ -102,6 +102,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     default_enabled_actions,
 )
 from hyperloom.orchestrator.supervisor import spawn_supervisor, stop_supervisor
+from hyperloom.orchestrator.supervisor.watch import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
@@ -1304,6 +1305,65 @@ def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
     return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
 
 
+def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
+    """Write the session's terminal artifacts in their established order.
+
+    A watchdog restart ends a leg, not the session, so it produces none of them
+    -- including the close-out package, which speaks for a finished run.
+    """
+    if stop_reason == SUPERVISOR_RESTART_REASON:
+        return
+    try:
+        from ..breakdown import write_minimal_final_json
+
+        with timed_teardown_step(state, "final_json"):
+            final_json = write_minimal_final_json(session_dir)
+        print(f"Final summary     : {final_json}")
+    except Exception:  # noqa: BLE001
+        log.exception("crash-safe final.json write failed (non-fatal)")
+    if state.close_sequence_done:
+        print("Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)")
+    else:
+        try:
+            from ..breakdown import write_breakdown_json
+
+            with timed_teardown_step(state, "session_breakdown"):
+                breakdown_path = write_breakdown_json(session_dir)
+            print(f"Session breakdown : {breakdown_path}")
+        except Exception:  # noqa: BLE001
+            log.exception("session_breakdown finalize failed (non-fatal)")
+        try:
+            from ..breakdown import write_minimal_final_report
+
+            with timed_teardown_step(state, "final_md"):
+                final_md = write_minimal_final_report(session_dir)
+            print(f"Final report      : {final_md}")
+        except Exception:  # noqa: BLE001
+            log.exception("emergency final report write failed (non-fatal)")
+    try:
+        from hyperloom.orchestrator.trace.langfuse_emitter import flush_session, record_session_breakdown
+
+        with timed_teardown_step(state, "langfuse"):
+            flush_session(session_dir)
+            from ..breakdown import patch_breakdown_langfuse
+
+            patch_breakdown_langfuse(session_dir)
+            record_session_breakdown(session_dir)
+    except Exception:  # noqa: BLE001
+        log.debug("langfuse flush_session failed", exc_info=True)
+    # Safety net for paths that leave close_sequence_done False and never run
+    # the sequencer; ordered after langfuse so the package carries its patch.
+    try:
+        from ..breakdown import package_session_artifacts
+
+        with timed_teardown_step(state, "artifact_package"):
+            pkg_path = package_session_artifacts(session_dir, session_id=str(getattr(state, "session_id", "") or ""))
+        if pkg_path is not None:
+            print(f"Artifact package  : {pkg_path}")
+    except Exception:  # noqa: BLE001
+        log.exception("session artifact package failed (non-fatal)")
+
+
 def _new_preflight_failure_session_dir(
     args: argparse.Namespace,
     *,
@@ -2306,6 +2366,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         log.warning("supervisor: could not start (%s); the run proceeds unwatched", exc)
         print(f"[supervisor] could not start ({exc}); the run proceeds unwatched", file=sys.stderr)
 
+    stop_reason: str | None = None
     try:
         stop_reason = await coordinator.run(
             objective=objective,
@@ -2317,6 +2378,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
     finally:
         state = coordinator.shared_state
+        effective_stop_reason = stop_reason or coordinator.stop_classification
         # Stopping the leases and the agent subprocesses is itself a step that
         # can hang, so it happens while the supervisor is still watching; the
         # supervisor is stood down only once it has returned.
@@ -2329,89 +2391,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # exit anyway; this just frees it promptly for an intentional resume.
         with timed_teardown_step(state, "session_lock"):
             session_lock.release()
-        # Crash-safe reports/final.json.
-        try:
-            from ..breakdown import write_minimal_final_json
-
-            with timed_teardown_step(state, "final_json"):
-                final_json = write_minimal_final_json(session_dir)
-            print(f"Final summary     : {final_json}")
-        except Exception:  # noqa: BLE001 — safety net must never mask stop_reason
-            log.exception("crash-safe final.json write failed (non-fatal)")
-        # End-of-session safety net: always materialize session_breakdown.json (best-effort; never mask stop_reason).
-        sequencer_done = getattr(state, "close_sequence_done", False)
-        if sequencer_done:
-            print(
-                "Session breakdown : (already written by CLOSE phase sequencer; skipping cli.finally safety-net write)"
-            )
-            # Re-run the Langfuse flush idempotently as a safety net.
-            try:
-                from hyperloom.orchestrator.trace.langfuse_emitter import (
-                    flush_session,
-                    record_session_breakdown,
-                )
-
-                with timed_teardown_step(state, "langfuse"):
-                    flush_session(session_dir)
-                    from ..breakdown import patch_breakdown_langfuse
-
-                    patch_breakdown_langfuse(session_dir)
-                    record_session_breakdown(session_dir)
-            except Exception:  # noqa: BLE001
-                log.debug("langfuse flush_session (post-sequencer) failed", exc_info=True)
-        else:
-            try:
-                from ..breakdown import write_breakdown_json
-
-                with timed_teardown_step(state, "session_breakdown"):
-                    breakdown_path = write_breakdown_json(session_dir)
-                print(f"Session breakdown : {breakdown_path}")
-            except Exception:  # noqa: BLE001
-                log.exception("session_breakdown finalize failed (non-fatal)")
-            # Safety-net reports/final.md write (no-op when the sequencer's final.md already exists).
-            try:
-                from ..breakdown import write_minimal_final_report
-
-                with timed_teardown_step(state, "final_md"):
-                    final_md = write_minimal_final_report(session_dir)
-                print(f"Final report      : {final_md}")
-            except Exception:  # noqa: BLE001
-                log.exception("emergency final report write failed (non-fatal)")
-            # Live Langfuse push (opt-in, default off): reconcile + flush, then splice the post-flush receipt into the
-            # session_breakdown.json langfuse section.
-            try:
-                from hyperloom.orchestrator.trace.langfuse_emitter import (
-                    flush_session,
-                    record_session_breakdown,
-                )
-
-                with timed_teardown_step(state, "langfuse"):
-                    flush_session(session_dir)
-                    from ..breakdown import patch_breakdown_langfuse
-
-                    patch_breakdown_langfuse(session_dir)
-                    record_session_breakdown(session_dir)
-            except Exception:  # noqa: BLE001
-                log.debug("langfuse flush_session failed (non-fatal)", exc_info=True)
-
-        # Safety-net artifact package -> /workspace, for paths that leave close_sequence_done False and never run the
-        # sequencer.
-        try:
-            from ..breakdown import package_session_artifacts
-
-            with timed_teardown_step(state, "artifact_package"):
-                pkg_path = package_session_artifacts(
-                    session_dir,
-                    session_id=str(getattr(state, "session_id", "") or ""),
-                )
-            if pkg_path is not None:
-                print(f"Artifact package  : {pkg_path}")
-        except Exception:  # noqa: BLE001
-            log.exception("session artifact package failed (non-fatal)")
+        _write_cli_terminal_artifacts(session_dir, state, effective_stop_reason)
         try:
             state.save(session_dir)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist teardown timings (non-fatal)")
+
+    if stop_reason == SUPERVISOR_RESTART_REASON:
+        # The leg is over, the session is not: the monitor resumes it, and a
+        # final summary here would speak for a run that has not ended.
+        print(f"Leg stopped for a supervisor restart; session {session_dir} stays resumable.")
+        return _exit_code_for_stop_reason(stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

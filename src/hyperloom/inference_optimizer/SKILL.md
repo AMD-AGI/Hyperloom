@@ -656,7 +656,8 @@ and the operator's stated value is lost:
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
 | Budget | `--max-hours` | Pass the prompt's time budget. Default `2.0`. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
-| External reference GPU | `--compare-against-gpu` | Coordinator *always* hard-gates `target_analysis` to run first so `$SESSION_DIR/target_analysis/target_baseline.json` exists before `baseline` runs. When this flag is set the JSON carries the InferenceX reference (`reason="ok"`); when unset the JSON carries a structured `reason="no_target_gpu_configured"` marker. The report renders the "External baseline" section from this JSON in both cases (heading switches to "(not requested)" for the marker variant) |
+| External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
+| Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
 
@@ -760,6 +761,11 @@ or `curl /v1/models` — `_preflight()` owns these. See `docs/reference/kernel-e
 for the kernel dispatch and artifact layout.
 
 ### Recovery
+
+The out-of-band supervisor uses SIGHUP for a resumable watchdog restart. This
+records the interrupted leg boundary without producing a stop reason or final
+report; the monitor resumes the same session with `--resume-from`. After three
+watchdog restarts, the next watchdog stop is terminal instead.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
@@ -1217,10 +1223,10 @@ Three exceptions:
 
 For runs > 5 min, start a monitor in its own `setsid nohup` process. It polls
 `state.json` every 5 min, exits without resuming when the session is terminal
-(any `stop_reason` in `STOP_REASON_VOCAB`, `phase=CLOSE`, or
-`reports/final.md` present — including failure sentinels like
-`baseline_failed`), and resumes via `--resume-from` only when the optimizer
-dies without those markers (unexpected crash).
+(any `stop_reason` in `STOP_REASON_VOCAB`, a completed CLOSE sequence, or a
+`reports/final.json` / `final.md` artifact — including failure sentinels like
+`baseline_failed`), and resumes via `--resume-from` when the optimizer dies
+without those markers, including a resumable watchdog restart.
 
 ```bash
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"

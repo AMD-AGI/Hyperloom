@@ -429,6 +429,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # without the other lets an update_state move the session's end time
         # away from the reason it was stamped for.
         "stop_ts",
+        # Where the stopped leg's phase segment ends; the next leg banks time up
+        # to it, so a forged value bills a phase for time it never ran.
+        "leg_ended_ts",
         "last_tick_exception",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",

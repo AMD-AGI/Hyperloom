@@ -34,11 +34,8 @@ DEAD = "dead"
 #: Nothing about the coordinator could be established. Never escalated on.
 UNKNOWN = "unknown"
 
-#: How long a tick may go without advancing before it counts as wedged. Well
-#: above a legitimately slow tick -- role turns are capped at five minutes each
-#: and long actions run as dispatched tasks the tick does not wait on -- and
-#: well inside the default session, which a window it cannot fit in would make
-#: unreachable.
+#: Base stall window when the reactor timeout does not require a larger one.
+#: The launcher enforces one reactor turn plus one supervisor poll.
 DEFAULT_TICK_STALL_SEC: float = 3600.0
 
 #: How long the coordinator is given to act on the stop it was asked for before
@@ -49,8 +46,14 @@ DEFAULT_STOP_GRACE_SEC: float = 300.0
 #: How often the watcher looks.
 DEFAULT_POLL_SEC: float = 30.0
 
+#: Maximum resumable watchdog restarts before the session becomes terminal.
+DEFAULT_MAX_RESTARTS: int = 3
+
 #: The stop reason recorded for a coordinator that stopped running its loop.
 WEDGED_STOP_REASON = "supervisor_tick_stalled"
+
+#: Internal handoff telling the launcher that the session remains resumable.
+SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
 
 #: The stop reason recorded in the terminal artifact for a dead coordinator.
 DIED_STOP_REASON = "supervisor_coordinator_died"
@@ -58,9 +61,11 @@ DIED_STOP_REASON = "supervisor_coordinator_died"
 __all__ = [
     "ALIVE",
     "DEAD",
+    "DEFAULT_MAX_RESTARTS",
     "DEFAULT_POLL_SEC",
     "DEFAULT_TICK_STALL_SEC",
     "DIED_STOP_REASON",
+    "SUPERVISOR_RESTART_REASON",
     "UNKNOWN",
     "WEDGED",
     "WEDGED_STOP_REASON",
@@ -120,6 +125,7 @@ class Supervisor:
         tick_stall_sec: float = DEFAULT_TICK_STALL_SEC,
         stop_grace_sec: float = DEFAULT_STOP_GRACE_SEC,
         poll_sec: float = DEFAULT_POLL_SEC,
+        max_restarts: int = DEFAULT_MAX_RESTARTS,
         reaper: ReapBackend | None = None,
         now: Callable[[], float] | None = None,
     ):
@@ -130,6 +136,7 @@ class Supervisor:
             tick_stall_sec: How long a tick may go without advancing.
             stop_grace_sec: How long the coordinator is given to act on a stop.
             poll_sec: Seconds between readings.
+            max_restarts: Resumable restart attempts allowed for this session.
             reaper: The reap unit; defaults to whatever this host selects.
             now: Wall-clock source, for tests.
         """
@@ -137,12 +144,24 @@ class Supervisor:
         self.tick_stall_sec = max(0.0, tick_stall_sec)
         self.stop_grace_sec = max(0.0, stop_grace_sec)
         self.poll_sec = max(0.1, poll_sec)
+        self.max_restarts = max(0, max_restarts)
         self._reaper: ReapBackend = reaper if reaper is not None else select_reaper()
         self._now: Callable[[], float] = now if now is not None else time.time
         self._report = SupervisorReport()
         self._ask_attempted = False
         self._asked_unix = 0.0
         self._end_attempted = False
+        self._terminal_stop = False
+        self._restart_count = self._load_restart_count()
+
+    def _load_restart_count(self) -> int:
+        """Load the durable restart count, failing closed on corrupt status."""
+        try:
+            status = store.read_status(self.session_dir)
+            return max(0, int((status or {}).get("restart_count") or 0))
+        except (OSError, TypeError, ValueError):
+            log.error("SUPERVISOR: restart count is unreadable; refusing another resumable restart")
+            return self.max_restarts
 
     @property
     def unit(self) -> ReapBackend:
@@ -208,7 +227,11 @@ class Supervisor:
         if observation.verdict == WEDGED:
             over = await self._escalate_wedged(observation)
         elif observation.verdict == DEAD:
-            over = await self._end(observation, DIED_STOP_REASON)
+            if self._asked_unix and not self._terminal_stop:
+                over = True
+            else:
+                reason = WEDGED_STOP_REASON if self._asked_unix else DIED_STOP_REASON
+                over = await self._end(observation, reason)
         self._write_status(observation)
         return over
 
@@ -239,8 +262,25 @@ class Supervisor:
     def _ask_to_stop(self, observation: Observation) -> None:
         """Send the coordinator the stop signal its drain thread is waiting on."""
         reason = f"{WEDGED_STOP_REASON}: {observation.detail}"
+        resumable = self._restart_count < self.max_restarts
+        self._terminal_stop = not resumable
+        if resumable:
+            # Banked before the signal, not after: the coordinator's stop path
+            # can outlive this supervisor, and a restart spent only afterwards
+            # is one the next leg reads as never spent. A signal that then fails
+            # leaves the budget short, which is the side to be wrong on.
+            self._restart_count += 1
+            try:
+                self._write_status(observation)
+            except OSError as exc:
+                self._restart_count -= 1
+                resumable = False
+                self._terminal_stop = True
+                refusal = f"restart counter write failed; resumable restart refused: {exc}"
+                self._report.refusals.append(refusal)
+                log.error("SUPERVISOR: %s", refusal)
         try:
-            os.kill(observation.pid, signal.SIGTERM)
+            os.kill(observation.pid, signal.SIGHUP if resumable else signal.SIGTERM)
         except ProcessLookupError:
             # It exited between the reading and the signal; the next reading
             # sees a dead coordinator and ends the session on that.
@@ -294,6 +334,7 @@ class Supervisor:
                     "coordinator_pid": observation.pid,
                     "last_tick": observation.tick,
                     "tick_age_sec": observation.tick_age_sec,
+                    "restart_count": self._restart_count,
                     "refused": list(self._report.refusals),
                 },
             },
@@ -313,6 +354,8 @@ class Supervisor:
                 "tick_age_sec": observation.tick_age_sec,
                 "observed_unix": self._now(),
                 "tick_stall_sec": self.tick_stall_sec,
+                "restart_count": self._restart_count,
+                "max_restarts": self.max_restarts,
                 "stop_asked": list(self._report.asked),
                 "refused": list(self._report.refusals),
                 "terminal_path": self._report.terminal_path,

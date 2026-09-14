@@ -1256,11 +1256,13 @@ def test_baremetal_next_steps_names_the_detected_framework(tmp_path: Path):
 
 def test_baremetal_profiler_hotfix_accepts_an_atom_only_host(tmp_path: Path):
     """The hotfix patches ROCm profiler libs, which torch.profiler uses on any engine."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
     res = _drive_installer(
         tmp_path,
         importable={"atom"},
-        dotenv=tmp_path / ".env",
-        body="rocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE",
+        dotenv=dotenv,
+        body=("running_in_container() { return 1; }\nrocm_profiler_hotfix_compatible && echo HOTFIX_ELIGIBLE"),
     )
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
@@ -2004,6 +2006,47 @@ def test_docker_run_mode_applies_the_hotfix_for_an_sglang_image(tmp_path: Path):
     res = _drive_hotfix_gate(tmp_path, run_mode="docker", importable={"sglang"})
 
     assert "HOTFIX_ELIGIBLE" in res.stdout, res.stderr
+
+
+def _drive_vllm_glibc_gate(
+    tmp_path: Path,
+    *,
+    glibc: str,
+    vllm_version: str = "0.28.0",
+    check_only: bool = True,
+) -> subprocess.CompletedProcess:
+    return _drive_installer(
+        tmp_path,
+        importable=set(),
+        dotenv=tmp_path / ".env",
+        body="\n".join(
+            [
+                f'host_glibc_version() {{ echo "{glibc}"; }}',
+                f'VLLM_VERSION="{vllm_version}"',
+                f"CHECK_ONLY={1 if check_only else 0}",
+                "install_vllm_framework",
+            ]
+        ),
+    )
+
+
+def test_vllm_install_rejects_glibc_235_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.28.0")
+
+    assert res.returncode != 0
+    assert "glibc >= 2.39" in res.stderr
+
+
+def test_vllm_install_accepts_glibc_239_for_028(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.28.0")
+
+    assert res.returncode == 0, res.stderr
+
+
+def test_vllm_install_allows_pre_028_override_on_glibc_235(tmp_path: Path):
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.27.1")
+
+    assert res.returncode == 0, res.stderr
 
 
 def test_baremetal_run_mode_keeps_the_hotfix_for_vllm(tmp_path: Path):

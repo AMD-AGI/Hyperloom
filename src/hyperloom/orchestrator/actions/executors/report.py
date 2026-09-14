@@ -520,7 +520,7 @@ def _build_summary_dict(
         "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
     }
     if external_baseline:
-        summary["external_baseline"] = external_baseline
+        summary["external_baseline"] = _external_baseline_with_comparison(state, external_baseline, session_dir)
     # Roofline comparison: emit only when at least one snapshot exists.
     from ...kernel.roofline_snapshot import build_roofline_comparison_from_history
 
@@ -925,6 +925,26 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _external_baseline_with_comparison(
+    state: SharedState, external: dict[str, Any], session_dir: Path | None
+) -> dict[str, Any]:
+    """Use the same persisted target as prompt advisory, never reconstructing missing evidence."""
+    from hyperloom.common.perf_metric import agentx_active
+    from ...knowledge.research_hints import ComparisonReason, gap_for_state, load_competitor_target
+
+    if not agentx_active(benchmark_mode=state.benchmark_mode):
+        return external
+    target = load_competitor_target(session_dir) if session_dir and external.get("status") == "ok" else None
+    gap = gap_for_state(target, state)
+    reason: ComparisonReason = "target_unavailable"
+    if gap is None:
+        log.warning("AgentX report: reason=%s session_dir=%s requested_conc=%s", reason, session_dir, state.conc)
+    return {
+        **external,
+        "comparison": gap or {"benchmark_mode": "agentx", "status": "unavailable", "reason": reason},
+    }
+
+
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     """Render the advisory external-baseline section (report-only)."""
     lines: list[str] = []
@@ -968,6 +988,14 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     warning = ext.get("warning") or ""
     if warning:
         lines.append(f"- Warning: {warning}")
+
+    comparison = ext.get("comparison")
+    if isinstance(comparison, dict) and comparison.get("benchmark_mode") == "agentx":
+        from ...knowledge.research_hints import full_gap_summary
+
+        lines.extend(["", full_gap_summary(comparison)])
+        lines.append("")
+        return lines
 
     best = ext.get("best")
     if status == "ok" and isinstance(best, dict):
