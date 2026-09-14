@@ -182,24 +182,39 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
     return hits or None
 
 
+#: Distribution names each stack component can be installed under, in preference order. AITER ships under two, and
+#: probing only one recorded ``"unknown"`` on a host using the other -- losing the component entirely rather than
+#: degrading it to a version. ``kernelforge``'s aiter preflight already probes both.
+_COMPONENT_DISTS: dict[str, tuple[str, ...]] = {
+    "sglang": ("sglang",),
+    "vllm": ("vllm",),
+    "aiter": ("amd-aiter", "aiter"),
+}
+
+
 def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> str:
     """Best-effort installed-package version for a stack component."""
-    dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "aiter"}.get(component)
-    if not dist:
+    dists = _COMPONENT_DISTS.get(component)
+    if not dists:
         return ""
     if venv_path is not None:
         try:
-            for found in _im.distributions(path=list(venv_path)):
-                name = (found.metadata["Name"] or "").strip().lower().replace("_", "-")
-                if name == dist:
-                    return (found.version or "").strip()
+            installed = {
+                (found.metadata["Name"] or "").strip().lower().replace("_", "-"): (found.version or "").strip()
+                for found in _im.distributions(path=list(venv_path))
+            }
         except Exception:  # noqa: BLE001 — an unreadable venv is not a failure.
             return ""
-        return ""
-    try:
-        return (_im.version(dist) or "").strip()
-    except Exception:  # noqa: BLE001 — a missing package is normal.
-        return ""
+        # Preference follows ``dists``, not whatever order the venv happens to enumerate in.
+        return next((installed[dist] for dist in dists if installed.get(dist)), "")
+    for dist in dists:
+        try:
+            resolved = (_im.version(dist) or "").strip()
+        except Exception:  # noqa: BLE001 — a missing package is normal; try the next name.
+            continue
+        if resolved:
+            return resolved
+    return ""
 
 
 def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:

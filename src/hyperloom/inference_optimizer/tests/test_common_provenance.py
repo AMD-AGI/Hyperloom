@@ -345,6 +345,34 @@ def test_a_real_venv_without_the_distribution_is_authoritative(tmp_path):
     assert fp["vllm"] == "unknown"
 
 
+def test_aiter_installed_under_the_amd_prefixed_name_is_still_versioned(monkeypatch):
+    """Probing one distribution name recorded "unknown" on a host using the other, losing the field entirely."""
+    from importlib.metadata import PackageNotFoundError
+
+    def _version(dist: str) -> str:
+        if dist == "amd-aiter":
+            return "0.1.4"
+        raise PackageNotFoundError(dist)
+
+    monkeypatch.setattr(_prov._im, "version", _version)
+
+    assert _prov.detect_stack_fingerprint({}, probe=True)["aiter"] == "0.1.4"
+
+
+def test_a_host_with_both_aiter_distributions_records_one_of_them_deterministically(monkeypatch):
+    """Preference must come from the declared order, not from whichever name is looked up first by accident."""
+    monkeypatch.setattr(_prov._im, "version", lambda dist: {"amd-aiter": "0.1.4", "aiter": "0.0.9"}[dist])
+
+    assert _prov.detect_stack_fingerprint({}, probe=True)["aiter"] == "0.1.4"
+
+
+def test_an_operator_aiter_pin_still_outranks_the_installed_distribution(monkeypatch):
+    """A commit is a finer pin than a published version, so the env var must not be overridden by the probe."""
+    monkeypatch.setattr(_prov._im, "version", lambda dist: "0.1.4")
+
+    assert _prov.detect_stack_fingerprint({"AITER_COMMIT": "abc123"}, probe=True)["aiter"] == "abc123"
+
+
 def test_an_installer_venv_root_is_not_consulted(tmp_path):
     """Provenance records a resolution, it does not perform one."""
     root = tmp_path / "installer-venv"
