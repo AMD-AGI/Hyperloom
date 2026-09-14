@@ -20,7 +20,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -252,8 +252,16 @@ _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
 #: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
-#: ends are needed: the boot milestones are at the head, the wall at the tail.
+#: ends are needed: the earliest boot milestones are at the head, the wall at
+#: the tail. The milestones are NOT all within the head — a build whose kernel
+#: layer logs per-shape (aiter on ROCm emits a line per GEMM/MoE shape) pushes
+#: ``application startup complete`` megabytes in, so the middle is scanned for
+#: milestone lines too. See :func:`read_bringup_log`.
 _BRINGUP_LOG_EDGE_BYTES = 65_536
+
+#: Cap on milestone lines carried out of the unread middle. The ladder only
+#: needs one witness per milestone, so this is far above what any boot needs.
+_BRINGUP_MIDDLE_MARKER_LINES = 200
 
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
@@ -288,8 +296,42 @@ class BringupLog:
     degraded: str = ""
 
 
+def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
+    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
+    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+
+    handle.seek(start)
+    remaining = max(0, stop - start)
+    kept: list[str] = []
+    carry = b""
+    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
+        chunk = handle.read(min(1 << 20, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        lines = (carry + chunk).split(b"\n")
+        carry = lines.pop()
+        for raw in lines:
+            text = raw.decode("utf-8", "replace")
+            lowered = text.lower()
+            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
+                kept.append(text)
+                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
+                    break
+    return kept
+
+
 def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log's head and tail for bring-up classification.
+    """Read a server log for bring-up classification: both edges, plus milestones.
+
+    The head and tail are what the failure excerpt needs. The ladder needs
+    something else — a witness for every milestone the boot passed — and those
+    are not all near an edge: on a build that logs per-kernel-shape, the head
+    window ends around engine init and ``application startup complete`` lands
+    megabytes further in. Reading only the edges therefore reports a fully
+    served boot as ``stage_reached=ENGINE_INIT``, hence ``booted=False``, which
+    is indistinguishable from a server that hung. So the middle is streamed for
+    milestone lines and those are carried into the text between the edges.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -315,6 +357,7 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
                 return BringupLog(handle.read().decode("utf-8", "replace"))
             handle.seek(0)
             head = handle.read(edge_bytes)
+            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
             handle.seek(size - edge_bytes)
             tail = handle.read(edge_bytes)
     except FileNotFoundError:
@@ -322,7 +365,8 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    return BringupLog(head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace"))
+    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
+    return BringupLog("\n".join(segments))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:
