@@ -26,7 +26,7 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
@@ -207,6 +207,10 @@ class RunState:
     # Scoring state that decides keep/revert.
     best_case_times: dict = field(default_factory=dict)
     unscored_cases: list[str] = field(default_factory=list)
+    # What the kernel this campaign started from scored against the anchor above. 1.0 whenever that kernel IS the
+    # anchor, and more when a caller supplied one it was already ahead of, which a resume cannot re-measure because
+    # the workspace has moved on.
+    search_start_mean_case_speedup: float | None = None
     best: BestRecord = field(default_factory=BestRecord)
     stall: StallState = field(default_factory=StallState)
     analysis: AnalysisRefreshState = field(default_factory=AnalysisRefreshState)
@@ -272,6 +276,13 @@ class RunState:
                     "unresolved_stall_iters",
                     int(stall.get("no_improvement_iters", 0) or 0),
                 )
+            version = 19
+        if version == 19:
+            # v19 had no caller-supplied scoring anchor, so the kernel a campaign started from was always the anchor
+            # and always scored 1.0 against it. Left absent rather than backfilled to 1.0: a checkpoint that never
+            # recorded the score did not measure one, and the KEEP bar does not read this field -- it is derived from
+            # the incumbent's own per-case times -- so only incremental reporting sees the difference.
+            payload.setdefault("search_start_mean_case_speedup", None)
             version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
             raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")

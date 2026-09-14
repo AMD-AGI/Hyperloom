@@ -415,6 +415,10 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    # An ambient PRECISION deliberately outranks the session's own, so this test has to clear it to read the state
+    # it sets below. The CLI exports PRECISION straight into os.environ, where monkeypatch cannot undo it, so it
+    # arrives here from whichever earlier test in this process ran the CLI.
+    monkeypatch.delenv("PRECISION", raising=False)
     state = SharedState(
         session_id=session_dir.name,
         benchmark_mode="agentx",

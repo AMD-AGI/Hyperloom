@@ -168,6 +168,84 @@ def _fake_popen(lines, returncode=0):
     return _popen
 
 
+def test_optimize_anchors_the_loop_on_the_source_when_given_its_timings(tmp_path, monkeypatch):
+    """The loop grades on what it is anchored to, and a rewrite is graded against the kernel it replaced."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-ANCHOR\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        source_ms=101.0,
+        source_case_ms={"small": 1.0, "big": 100.0},
+    )
+
+    command = captured["command"]
+    baseline_path = Path(command[command.index("--baseline-json") + 1])
+    assert json.loads(baseline_path.read_text()) == {
+        "wall_ms": 101.0,
+        "case_times": {"small": 1.0, "big": 100.0},
+    }
+
+
+def test_optimize_leaves_the_loop_on_its_own_baseline_when_not_given_one(tmp_path, monkeypatch):
+    """The anchor is optional: without it the loop keeps measuring its own, as every other caller expects."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-NOANCHOR\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+    )
+
+    assert "--baseline-json" not in captured["command"]
+    assert not (tmp_path / "forge_loop_baseline.json").exists()
+
+
+def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):
+    """Without them every score the loop reports would divide by the port instead of the source."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen = {}
+
+    def capture_optimize(*_args, **kwargs):
+        seen.update(kwargs)
+        return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
+
+    monkeypatch.setattr(runner, "run_optimize", capture_optimize)
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert seen["source_ms"] == pytest.approx(1.0)
+    assert seen["source_case_ms"] == {"case0": 1.0}
+    # Anchored on the source, the loop's own score is what the run publishes.
+    assert out["speedup"] == pytest.approx(2.5)
+
+
 def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
     s = _spec(tmp_path)
     rj = tmp_path / "res.json"
@@ -927,7 +1005,11 @@ def _stub_preflight(monkeypatch, *, source_ms=1.0, best_ms=0.5, case_ids=("case0
         runner.driver_contract,
         "preflight_reference",
         lambda *a, **k: driver_contract.PreflightReport(
-            ok=True, timing_ms=source_ms, timing_metric="median_ms", case_ids=case_ids
+            ok=True,
+            timing_ms=source_ms,
+            timing_metric="median_ms",
+            case_ids=case_ids,
+            case_ms=dict.fromkeys(case_ids, source_ms),
         ),
     )
     monkeypatch.setattr(
@@ -939,7 +1021,11 @@ def _stub_preflight(monkeypatch, *, source_ms=1.0, best_ms=0.5, case_ids=("case0
         runner.driver_contract,
         "preflight_candidate",
         lambda *a, **k: driver_contract.PreflightReport(
-            ok=True, timing_ms=best_ms, timing_metric="median_ms", case_ids=case_ids
+            ok=True,
+            timing_ms=best_ms,
+            timing_metric="median_ms",
+            case_ids=case_ids,
+            case_ms=dict.fromkeys(case_ids, best_ms),
         ),
     )
 
@@ -1349,6 +1435,64 @@ def test_run_rewrite_interim_result_claims_no_framework_best(tmp_path, monkeypat
     assert interim["success"] is False
     assert interim["best_commit"] == ""
     assert interim["patch_path"] == ""
+
+
+def test_run_rewrite_interim_result_claims_the_mean_of_case_ratios(tmp_path, monkeypatch):
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    # Shapes two orders of magnitude apart, where the equal-weight mean and the ratio of aggregates disagree.
+    source_case_ms = {"small": 1.0, "big": 100.0}
+    candidate_case_ms = {"small": 0.25, "big": 90.0}
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=90.25, source_ms=101.0)
+    monkeypatch.setattr(
+        runner.driver_contract,
+        "preflight_reference",
+        lambda *a, **k: driver_contract.PreflightReport(
+            ok=True,
+            timing_ms=101.0,
+            timing_metric="median_ms",
+            case_ids=tuple(source_case_ms),
+            case_ms=dict(source_case_ms),
+        ),
+    )
+    monkeypatch.setattr(
+        runner.driver_contract,
+        "preflight_candidate",
+        lambda *a, **k: driver_contract.PreflightReport(
+            ok=True,
+            timing_ms=90.25,
+            timing_metric="median_ms",
+            case_ids=tuple(candidate_case_ms),
+            case_ms=dict(candidate_case_ms),
+        ),
+    )
+    result_json = tmp_path / "result.json"
+    interim: dict = {}
+
+    def capture_interim(*args, **kwargs):
+        interim.update(json.loads(result_json.read_text()))
+        return {"best_ms": 80.0, "mean_case_speedup": 3.0, "best_commit": "flydsl-best"}
+
+    monkeypatch.setattr(runner, "run_optimize", capture_interim)
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+        result_json=str(result_json),
+    )
+
+    # A kill during OPTIMIZE leaves this file as the run's whole claim, so it states the metric the run is graded
+    # on. The two wall times travel with it as evidence, and their ratio is a different number.
+    assert interim["speedup"] == pytest.approx((1.0 / 0.25 + 100.0 / 90.0) / 2)
+    assert interim["speedup"] != pytest.approx(101.0 / 90.25)
+    assert interim["source_ms"] == pytest.approx(101.0)
+    assert interim["flydsl_best_ms"] == pytest.approx(90.25)
 
 
 def test_run_rewrite_publishes_correct_port_before_optimize(
