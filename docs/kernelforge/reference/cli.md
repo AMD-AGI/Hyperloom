@@ -76,7 +76,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--workspace <dir>` | required | Git workspace the campaign runs in. |
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
-| `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
+| `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits, and its own first bench is the baseline every speedup the run reports divides by. |
 | `--driver <file>` | none | The validation/bench driver. |
 | `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
 | `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
