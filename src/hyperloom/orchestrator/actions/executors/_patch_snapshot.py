@@ -525,6 +525,69 @@ def _same_entry(replayed: Path, captured: Path, *, op: str) -> bool:
         return False
 
 
+def _summary_facts(summary_text: str) -> tuple[set[str], set[str], bool]:
+    """Deletions, declared symlinks, and whether a rename is present.
+
+    Read off ``git apply --summary``, which is the patch's OWN declaration of
+    what it does. Two spellings of a deletion reach us: a git-format patch says
+    ``delete mode 100644 p``, a plain unified one says ``delete p``. Matching
+    only the first silently loses every deletion in a plain unified patch.
+
+    ``create mode 120000`` / ``mode change ... => 120000`` are how a patch
+    declares it writes a SYMLINK. The live entry cannot answer this: a regular
+    file may currently sit at that path, and capturing it would record a
+    regular file for a patch that creates a link.
+    """
+    deleted: set[str] = set()
+    symlinks: set[str] = set()
+    rename = False
+    for raw in summary_text.splitlines():
+        row = raw.strip()
+        if row.startswith("rename "):
+            rename = True
+        elif row.startswith("delete mode "):
+            deleted.add(row[len("delete mode ") :].split(" ", 1)[-1])
+        elif row.startswith("delete "):
+            deleted.add(row[len("delete ") :])
+        elif row.startswith("create mode "):
+            mode, _, path = row[len("create mode ") :].partition(" ")
+            if mode == "120000" and path:
+                symlinks.add(path)
+        elif row.startswith("mode change ") and "=>" in row:
+            _, _, rhs = row[len("mode change ") :].partition("=>")
+            mode, _, path = rhs.strip().partition(" ")
+            if mode == "120000" and path:
+                symlinks.add(path)
+    return deleted, symlinks, rename
+
+
+def _numstat_paths(raw: bytes) -> list[str] | None:
+    """Paths from ``--numstat -z``, or None when one cannot be trusted.
+
+    ``-z`` makes NUL the RECORD separator; inside a record the three fields are
+    still tab-separated, and a filename may itself contain a tab. Splitting on
+    every tab and taking field 2 truncates such a name to its first segment,
+    which can then match a DIFFERENT, unrelated file that does exist. Split
+    twice and the remainder is the whole name.
+
+    The name is decoded strictly: ``errors="replace"`` turns an undecodable
+    byte into U+FFFD, and a real file whose name happens to contain U+FFFD
+    would then be captured in place of the patch's actual target.
+    """
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    out: list[str] = []
+    for chunk in (f for f in text.split("\0") if f):
+        parts = chunk.split("\t", 2)
+        if len(parts) != 3 or not parts[2]:
+            # The rename form splits the two names into their own records.
+            return None
+        out.append(parts[2])
+    return out
+
+
 def overlay_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | None:
     """The targets a patch contributes to a root that has no base commit.
 
@@ -532,68 +595,62 @@ def overlay_inventory_without_base(tree: Path, patch: Path) -> dict[str, str] | 
     production shape -- cannot be replayed by "check out the base and apply
     these patches", because there is no base to check out. It is replayed by
     OVERLAYING the captured files, and that is exactly what building an image
-    from the recipe does. Refusing to declare the targets removes those files
-    from the capture and with them the only replay path that applies here.
+    from the recipe does.
 
-    What this does NOT claim is that the patch was proven applied. There is no
-    preimage to prove it against; the decision still refuses to certify the
-    application, and the ``op`` recorded states what the overlay must contain.
+    The strip level is PROVEN, not guessed. ``git apply -R --check -pN``
+    succeeds only when the tree already holds this patch's postimage at N, so
+    a level that survives it is positive evidence about the tree in hand.
+    Earlier this was inferred from whether each named path happened to exist,
+    which is not evidence of a level at all: a patch touching ``a/gone`` reads
+    equally well at ``-p0`` against an unrelated ``gone``.
 
-    Paths come from ``--numstat -z``, which is authoritative and NUL-separated
-    so an unusual name cannot be mis-split. Deletions come from ``--summary``,
-    which names them explicitly -- inferring "absent, so deleted" invents a
-    deletion at every strip level deep enough to land the path inside the root,
-    which is a second plausible inventory and would make every patch look
-    ambiguous. A rename is refused outright: git abbreviates it as
-    ``dir/{old => new}`` and no reliable path can be recovered from that.
+    Absence carries no level information, so a patch whose every entry is a
+    deletion is refused: reversing a deletion only has to CREATE the path, and
+    that succeeds at every level whose path is free. Only an upsert, whose
+    content must match byte for byte, can pin the level -- so without one this
+    returns None and the judge reports the targets as unknown.
+
+    Returns None -- refusing to declare targets -- for a rename (git prints it
+    as ``dir/{old => new}`` and no reliable path survives), a declared or live
+    symlink (``shutil.copy2`` would capture a link's target as a regular file),
+    an untrustworthy path, or any ambiguity about which reading applies.
     """
-    inventories: list[dict[str, str]] = []
+    proven: list[int] = []
     for level in _P_LEVELS:
-        numstat = _git(tree, "apply", "--numstat", "-z", f"-p{level}", str(patch), timeout=60)
-        summary = _git(tree, "apply", "--summary", f"-p{level}", str(patch), timeout=60)
-        if numstat is None or summary is None or numstat.returncode != 0 or summary.returncode != 0:
-            continue
-        summary_text = summary.stdout.decode("utf-8", errors="replace")
-        if any(row.strip().startswith("rename ") for row in summary_text.splitlines()):
+        reverses = _git(tree, "apply", "-R", "--check", f"-p{level}", str(patch), timeout=60)
+        if reverses is not None and reverses.returncode == 0:
+            proven.append(level)
+    if len(proven) != 1:
+        return None
+    level = proven[0]
+
+    numstat = _git(tree, "apply", "--numstat", "-z", f"-p{level}", str(patch), timeout=60)
+    summary = _git(tree, "apply", "--summary", f"-p{level}", str(patch), timeout=60)
+    if numstat is None or summary is None or numstat.returncode != 0 or summary.returncode != 0:
+        return None
+
+    deleted, declared_links, rename = _summary_facts(summary.stdout.decode("utf-8", errors="replace"))
+    if rename:
+        return None
+    rels = _numstat_paths(numstat.stdout)
+    if not rels:
+        return None
+
+    ops: dict[str, str] = {}
+    for rel in rels:
+        if rel in declared_links or (tree / rel).is_symlink():
             return None
-        deleted = {
-            row.strip()[len("delete mode ") :].split(" ", 1)[-1]
-            for row in summary_text.splitlines()
-            if row.strip().startswith("delete mode ")
-        }
-        fields = [f for f in numstat.stdout.decode("utf-8", errors="replace").split("\0") if f]
-        rels: list[str] = []
-        for chunk in fields:
-            parts = chunk.split("\t")
-            if len(parts) >= 3 and parts[2]:
-                rels.append(parts[2])
-            elif len(parts) == 2:
-                # ``-z`` splits the path into its own field for unusual names.
-                rels.append("")
-        rels = [r for r in rels if r]
-        if not rels:
-            continue
-        ops: dict[str, str] = {}
-        resolved = True
-        for rel in rels:
-            target = tree / rel
-            if target.is_symlink():
-                # ``shutil.copy2`` would capture a link as a regular file.
+        if rel in deleted:
+            if os.path.lexists(tree / rel):
                 return None
-            if rel in deleted:
-                ops[rel] = "delete"
-                resolved = resolved and not os.path.lexists(target)
-            elif target.is_file():
-                ops[rel] = "upsert"
-            else:
-                resolved = False
-            if not resolved:
-                break
-        if resolved and ops and ops not in inventories:
-            inventories.append(ops)
-    # More than one level producing a different, equally plausible answer means
-    # there is no reading of this patch the capture can stand behind.
-    return inventories[0] if len(inventories) == 1 else None
+            ops[rel] = "delete"
+        elif (tree / rel).is_file():
+            ops[rel] = "upsert"
+        else:
+            return None
+    if not ops or all(op == "delete" for op in ops.values()):
+        return None
+    return ops
 
 
 def replayed_stack_ops(

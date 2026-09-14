@@ -1443,6 +1443,107 @@ def test_a_base_less_root_refuses_a_symlink_target(tmp_path: Path):
     assert overlay_inventory_without_base(plain, patch) is None
 
 
+def _git_tree(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    for key, value in (("user.email", "t@example.com"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(root), "config", key, value], check=True)
+    return root
+
+
+def test_a_base_less_root_refuses_a_delete_only_patch(tmp_path: Path):
+    """Absence carries no strip level, so a deletion cannot pin one.
+
+    Reversing a deletion only has to CREATE the path, which succeeds at every
+    level whose path happens to be free. With no upsert -- whose content must
+    match byte for byte -- there is nothing that identifies which reading of
+    the patch applies, so the targets stay unknown rather than guessed.
+    """
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = _git_tree(tmp_path / "delonly")
+    patch = _patch(tmp_path, "d.patch", "--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+    assert overlay_inventory_without_base(plain, patch) is None
+
+
+def test_a_base_less_root_never_certifies_deleting_an_unrelated_path(tmp_path: Path):
+    """The patch removes ``a/gone``; an unrelated ``gone`` is what exists.
+
+    Inferring the level from "which named path is absent" reads this patch at
+    -p0 and reports ``a/gone`` deleted -- a path that never existed -- while
+    leaving the real ``gone`` untouched.
+    """
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = _git_tree(tmp_path / "wrongpath")
+    (plain / "gone").write_text("x\n", encoding="utf-8")
+    patch = _patch(tmp_path, "w.patch", "--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+    assert overlay_inventory_without_base(plain, patch) is None
+
+
+def test_a_base_less_root_records_a_plain_unified_deletion(tmp_path: Path):
+    """A git-format patch says ``delete mode 100644 p``; a plain unified one
+    says ``delete p``. Matching only the first loses the deletion entirely and
+    the overlay would then leave the file in place on replay."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = _git_tree(tmp_path / "plaindel")
+    (plain / "mod.py").write_text("a = 2\n", encoding="utf-8")
+    patch = _patch(
+        tmp_path,
+        "mixed.patch",
+        "--- a/gone\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n--- a/mod.py\n+++ b/mod.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n",
+    )
+    assert overlay_inventory_without_base(plain, patch) == {"gone": "delete", "mod.py": "upsert"}
+
+
+def test_a_base_less_root_keeps_a_tab_bearing_name_whole(tmp_path: Path):
+    """``-z`` makes NUL the RECORD separator; the three fields inside a record
+    are still tab-separated and a name may contain a tab. Splitting on every
+    tab truncates ``real<TAB>part`` to ``real`` -- which is a different file
+    that also exists here, so the capture would take the wrong one."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = _git_tree(tmp_path / "tabname")
+    (plain / "real").write_text("decoy\n", encoding="utf-8")
+    (plain / "real\tpart").write_text("z = 2\n", encoding="utf-8")
+    patch = _patch(tmp_path, "t.patch", "--- a/real\tpart\n+++ b/real\tpart\n@@ -1 +1 @@\n-z = 1\n+z = 2\n")
+    got = overlay_inventory_without_base(plain, patch)
+    assert got is None or got == {"real\tpart": "upsert"}
+    assert got is None or "real" not in got
+
+
+def test_a_base_less_root_refuses_an_undecodable_name(tmp_path: Path):
+    """``errors="replace"`` turns an undecodable byte into U+FFFD, which can
+    name a real, unrelated file instead of the patch's actual target."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import _numstat_paths
+
+    assert _numstat_paths(b"1\t0\tbad\xff\x00") is None
+    assert _numstat_paths(b"1\t0\tfine.py\x00") == ["fine.py"]
+
+
+def test_a_base_less_root_refuses_a_patch_that_declares_a_symlink(tmp_path: Path):
+    """``new file mode 120000`` is how a patch says it writes a LINK. The live
+    entry cannot answer this -- a regular file may sit at that path today --
+    and capturing it would record a regular file for a link-creating patch."""
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import overlay_inventory_without_base
+
+    plain = _git_tree(tmp_path / "declared")
+    (plain / "keep").write_text("k\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(plain), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(plain), "commit", "-qm", "base"], check=True)
+    (plain / "link").symlink_to("keep")
+    subprocess.run(["git", "-C", str(plain), "add", "link"], check=True)
+    patch = tmp_path / "link.patch"
+    patch.write_bytes(
+        subprocess.run(["git", "-C", str(plain), "diff", "--cached"], capture_output=True, check=True).stdout
+    )
+    assert "new file mode 120000" in patch.read_text(encoding="utf-8")
+    (plain / "link").unlink()
+    (plain / "link").write_text("a regular file now\n", encoding="utf-8")
+    assert overlay_inventory_without_base(plain, patch) is None
+
+
 def test_an_artifact_on_a_root_with_no_base_commit_is_unaffected(tmp_path: Path):
     """Narrowing what a PATCH step may claim does not touch artifacts, which
     are judged against their own captured payload."""

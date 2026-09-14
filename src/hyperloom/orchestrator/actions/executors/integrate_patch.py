@@ -18,6 +18,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Mapping
+from collections.abc import Callable
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
@@ -452,6 +453,7 @@ def _run_setup_commands(
     sources: dict[str, str] | None = None,
     round_task_id: str = "",
     seq_start: int = 0,
+    on_execution: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
@@ -499,17 +501,26 @@ def _run_setup_commands(
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
     def _record(cmd: str, index: int, outcome: str) -> None:
-        executions.append(
-            build_execution_row(
-                seq=int(seq_start) + len(executions) + 1,
-                round_task_id=round_task_id,
-                cmd_index=index,
-                cmd=cmd,
-                source=(sources or {}).get(str(cmd).strip(), "proposed"),
-                outcome=outcome,
-                env=env,
-            )
+        row = build_execution_row(
+            seq=int(seq_start) + len(executions) + 1,
+            round_task_id=round_task_id,
+            cmd_index=index,
+            cmd=cmd,
+            source=(sources or {}).get(str(cmd).strip(), "proposed"),
+            outcome=outcome,
+            env=env,
         )
+        executions.append(row)
+        if on_execution is not None:
+            # Persisted HERE, not after the await returns. Cancelling the await
+            # unwinds the caller while this thread and its in-flight subprocess
+            # carry on, so a row handed back through the return value is lost
+            # for a command that actually ran -- and the ledger is what says a
+            # round installed into the shared venv at all.
+            try:
+                on_execution(row)
+            except Exception:  # noqa: BLE001 - the ledger must not fail the install
+                log.debug("integrate_patch: durable setup ledger append failed", exc_info=True)
 
     with cancel_scope_listener():
         for cmd_index, cmd in enumerate(commands):
@@ -2564,12 +2575,16 @@ class IntegratePatchExecutor:
                     sources=_setup_command_sources(params=params, done_payload=done_payload),
                     round_task_id=specialist_task_id,
                     seq_start=_durable_execution_seq(shared_state),
+                    on_execution=lambda row: _append_setup_executions(
+                        shared_state, {"executions": [row]}, session_dir=self.session_dir
+                    ),
                 )
-                # Appended where the commands run, not where the round reports:
-                # several exits below return after setup has already mutated the
-                # shared venv, and one of them carries no enablement flag at all,
-                # so the rearm that would have recorded them never runs.
-                _append_setup_executions(shared_state, setup_result, session_dir=self.session_dir)
+                # Each row is already durable: it is appended by the callback
+                # above, inside the worker, as its command finishes. Several
+                # exits below return after setup has mutated the shared venv,
+                # and one carries no enablement flag at all, so the rearm that
+                # would have recorded them never runs -- and a cancelled await
+                # never returns this payload in the first place.
 
         specialist_workspace: Path = ctx._ip_specialist_workspace  # type: ignore[attr-defined]
         explicit_patches = params.get("patches") or None
@@ -3677,9 +3692,15 @@ class IntegratePatchExecutor:
                 # recipe unusable in the case it is most needed for.
                 #
                 # What is NOT claimed is that the patch was proven applied:
-                # there is no preimage to prove it against, and the decision
-                # still refuses to certify the application. The targets are
-                # what the overlay must contain.
+                # there is no preimage to prove it against. Do not read an
+                # empty base_sha as the thing that withholds that claim -- the
+                # judge's base_sha refusal is gated on ``is_git``, so it never
+                # fires for a wheel root and this path can and does reach
+                # ``sufficient``. The protection that does apply is the op map
+                # itself: ``overlay_inventory_without_base`` returns None for
+                # anything it cannot PROVE, and undeclared targets are what the
+                # judge blocks on. The targets are what the overlay must
+                # contain, not evidence that the patch applied cleanly.
                 replayed = {}
                 for patch in patches:
                     ops = overlay_inventory_without_base(Path(patch_root), patch)

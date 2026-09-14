@@ -44,7 +44,15 @@ _LAUNCH_EVIDENCE_KEYS: tuple[str, ...] = (
 #: Dropped from ``observed_server_identity`` under the rule that drops
 #: ``model_path``: ``served_model_name`` defaults to the model path on SGLang,
 #: so it is a path field wearing a name field's label.
-_IDENTITY_PATH_FIELDS: frozenset[str] = frozenset({"model_path", "tokenizer_path", "served_model_name"})
+#:
+#: ``model`` and ``tokenizer`` are the SAME two operands under vLLM's spelling.
+#: The set is keyed by field NAME, so a second framework naming the same thing
+#: differently walks straight through a filter that looks correct; both
+#: spellings belong here or the published recipe carries the operator's private
+#: model path.
+_IDENTITY_PATH_FIELDS: frozenset[str] = frozenset(
+    {"model_path", "tokenizer_path", "served_model_name", "model", "tokenizer"}
+)
 
 _BUILD_INPUT_KEYS: tuple[str, ...] = (
     "component",

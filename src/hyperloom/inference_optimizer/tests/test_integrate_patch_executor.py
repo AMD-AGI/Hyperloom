@@ -1562,7 +1562,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     init_git_repo(repo)
     _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=patch_contents or [_VALID_PATCH])
 
-    def _installed(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+    def _installed(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0, on_execution=None):
         row = build_execution_row(
             seq=seq_start + 1,
             round_task_id=round_task_id,
@@ -1572,6 +1572,10 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
             outcome="applied",
             env={},
         )
+        # Production persists each row through this callback as its command
+        # finishes, so a double that only returns it does not stand in for it.
+        if on_execution is not None:
+            on_execution(row)
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": [row]}
 
     monkeypatch.setattr(ip_mod, "_run_setup_commands", _installed)
@@ -1689,7 +1693,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0, on_execution=None):
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(repo, "install")
@@ -1750,7 +1754,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+    def _installing_commits(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0, on_execution=None):
         (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(explicit_root, "install")
         return {"applied": list(commands), "skipped": [], "failed": [], "executions": []}
@@ -1818,6 +1822,60 @@ def test_candidate_roots_cover_the_patch_and_artifact_bindings(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
+async def test_a_completed_setup_row_is_durable_even_when_the_await_is_cancelled(tmp_path: Path, monkeypatch):
+    """Cancelling the await unwinds the caller; the worker keeps running.
+
+    ``asyncio.to_thread`` cannot kill the thread, so a command already inside
+    ``subprocess.run`` runs to completion and installs into the shared venv.
+    A row handed back through the return value never arrives -- the await
+    raised -- so the only record that the round installed anything at all is
+    lost, and a later reader sees a round that never ran setup.
+    """
+    import asyncio
+    import threading
+
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+
+    reached_second = threading.Event()
+    release = threading.Event()
+    durable: list[dict] = []
+
+    def _executor(cmd, *, cwd, env, log_path):
+        if cmd.endswith("two"):
+            reached_second.set()
+            release.wait(timeout=30)
+        return True
+
+    monkeypatch.setattr(ip_mod, "_execute_setup_command", _executor)
+
+    pending = asyncio.ensure_future(
+        asyncio.to_thread(
+            ip_mod._run_setup_commands,
+            ["pip install one", "pip install two"],
+            cwd=tmp_path,
+            log_dir=tmp_path / "logs",
+            round_task_id="r-cancel",
+            seq_start=0,
+            on_execution=durable.append,
+        )
+    )
+    # The first command has finished and the second is in flight.
+    await asyncio.to_thread(reached_second.wait, 30)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    release.set()
+
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import command_digest
+
+    assert durable, "the row for the command that completed was discarded"
+    assert durable[0]["cmd_digest"] == command_digest("pip install one")
+    assert durable[0]["round_task_id"] == "r-cancel"
+    assert durable[0]["outcome"] == "applied"
+    assert durable[0]["cmd_index"] == 0
+
+
+@pytest.mark.asyncio
 async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monkeypatch):
     """Enablement setup replay must not occupy the coordinator event-loop thread.
 
@@ -1830,7 +1888,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
     seen: dict[str, int] = {}
     loop_ident = threading.get_ident()
 
-    def _spy_run_setup(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0):
+    def _spy_run_setup(commands, *, cwd, log_dir, sources=None, round_task_id="", seq_start=0, on_execution=None):
         seen["ident"] = threading.get_ident()
         return {"applied": [], "skipped": [], "failed": []}
 

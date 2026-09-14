@@ -374,3 +374,103 @@ def test_a_log_with_no_such_record_yields_no_vllm_identity(tmp_path: Path) -> No
     log = tmp_path / "server.log"
     log.write_text("(APIServer pid=1) INFO starting up\n", encoding="utf-8")
     assert observed_vllm_server_identity_from_log(str(log)) == {}
+
+
+def _vllm_slot(tmp_path, log_text: str):
+    """A minimal measured-launch slot with a vLLM server log."""
+    slot = tmp_path / "slot"
+    slot.mkdir(parents=True, exist_ok=True)
+    config = tmp_path / "bench.yaml"
+    config.write_text("benchmark: {}\n", encoding="utf-8")
+    log = slot / "server.log"
+    log.write_text(log_text, encoding="utf-8")
+    return config, slot, str(log)
+
+
+def test_a_vllm_launch_reaches_the_evidence_through_the_production_entry_point(tmp_path):
+    """Pins the WIRING, not just the reader.
+
+    The reader and the binding helper were each covered directly, so deleting
+    the whole vLLM branch out of ``build_launch_evidence`` left every one of
+    those tests passing while no vLLM launch was bound to anything. This goes
+    through the production entry point, which is the only thing that fails when
+    the branch is removed.
+    """
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] non-default args: "
+        "{'model': '/models/m', 'tensor_parallel_size': 4, 'quantization': 'fp8'}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/models/m",
+    )
+    identity = evidence["observed_server_identity"]
+    assert identity["tensor_parallel_size"] == 4
+    assert identity["quantization"] == "fp8"
+    assert evidence["observed_model_binding"]
+
+
+def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_point(tmp_path):
+    """User- or attacker-supplied text echoed into the log quotes the marker
+    but carries no launch record; binding to it reports settings the server
+    never ran with."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "WARNING 09-14 07:00:00 [x.py:1] ignored user text: "
+        "\"non-default args: {'model': '/wanted', 'tensor_parallel_size': 4}\"\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/wanted",
+    )
+    assert not evidence["observed_server_identity"]
+
+
+def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
+    """Extraction anchored at the line's first brace reads an unrelated dict
+    and ignores the actual record that follows it on the same line."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] context={'model': '/wanted', 'tensor_parallel_size': 8} "
+        "non-default args: {'model': '/actual', 'tensor_parallel_size': 2}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/actual",
+    )
+    assert evidence["observed_server_identity"]["tensor_parallel_size"] == 2
+
+
+def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path):
+    """A ``}`` inside a string is not structure; ending the payload there drops
+    every field after it, including the parallelism the decision compares."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] non-default args: {'model': '/models/m}', 'tensor_parallel_size': 4}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/models/m}",
+    )
+    assert evidence["observed_server_identity"]["tensor_parallel_size"] == 4

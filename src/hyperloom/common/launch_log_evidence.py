@@ -299,20 +299,73 @@ _VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
 )
 
 
-def _extract_balanced_braces(text: str) -> str:
-    """Return the first balanced ``{...}`` span in ``text``, else ``""``."""
-    start = text.find("{")
-    if start < 0:
+def _is_inside_string_literal(text: str, index: int) -> bool:
+    """Whether ``text[index]`` sits inside a quoted run earlier on the line.
+
+    A log line may QUOTE the marker while carrying no launch record at all --
+    ``WARNING ignored user text: "non-default args: {...}"`` is attacker- or
+    user-supplied text echoed into the log. Treating that as an observed launch
+    hands the decision an identity the server never ran with.
+    """
+    quote = ""
+    escaped = False
+    for char in text[:index]:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in "'\"":
+            quote = char
+    return bool(quote)
+
+
+def _vllm_record_marker_at(text: str) -> bool:
+    """Whether ``text`` carries the marker OUTSIDE any quoted run."""
+    return any(not _is_inside_string_literal(text, m.start()) for m in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text))
+
+
+def _vllm_record_payload(text: str) -> str:
+    """The balanced ``{...}`` belonging to a real vLLM launch record.
+
+    Anchored at the brace the MARKER matched, not at the first brace on the
+    line: a line may carry an unrelated dict before the record
+    (``context={...} non-default args: {...}``), and starting at the first
+    brace reads the unrelated one and silently ignores the actual record.
+
+    Braces inside string literals are not structure -- a model path may legally
+    contain ``}`` -- so quoting is tracked while balancing, exactly as the
+    SGLang ``ServerArgs`` extractor does.
+    """
+    for match in _VLLM_NON_DEFAULT_ARGS_RE.finditer(text):
+        if _is_inside_string_literal(text, match.start()):
+            continue
+        start = match.end() - 1
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in "'\"":
+                quote = char
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        # Unbalanced so far: the record continues on the next line.
         return ""
-    depth = 0
-    for index in range(start, len(text)):
-        char = text[index]
-        if char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0:
-                return text[start : index + 1]
     return ""
 
 
@@ -337,16 +390,16 @@ def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
                 if len(line) > remaining:
                     line = line[:remaining]
                 remaining -= len(line)
-                if chunks or _VLLM_NON_DEFAULT_ARGS_RE.search(line):
+                if chunks or _vllm_record_marker_at(line):
                     chunks.append(line)
-                    parsed = _extract_balanced_braces("".join(chunks))
+                    parsed = _vllm_record_payload("".join(chunks))
                     if parsed:
                         break
                 if remaining <= 0:
                     break
     except OSError:
         return {}
-    content = parsed or _extract_balanced_braces("".join(chunks))
+    content = parsed or _vllm_record_payload("".join(chunks))
     if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
         return {}
     values: dict[str, Any] = {}

@@ -582,6 +582,27 @@ def test_launch_evidence_projection_drops_paths_values_and_secret_env_names():
     assert projected["observed_server_identity"]["tp_size"] == 8
 
 
+def test_launch_evidence_projection_drops_the_vllm_spellings_of_the_path_fields():
+    """The filter is keyed by field NAME, and vLLM names the same two operands
+    ``model`` and ``tokenizer``. A set listing only SGLang's spellings looks
+    correct and publishes the operator's private model path verbatim."""
+    projected, refused = project_launch_evidence(
+        _evidence(
+            framework="vllm",
+            observed_server_identity={
+                "model": "/models/secret-model",
+                "tokenizer": "/models/secret-tokenizer",
+                "tensor_parallel_size": 4,
+            },
+        )
+    )
+    assert refused is False
+    identity = projected["observed_server_identity"]
+    assert not {"model", "tokenizer"}.intersection(identity)
+    assert identity["tensor_parallel_size"] == 4
+    assert "/models/secret-model" not in str(projected)
+
+
 def test_evidence_with_no_observed_model_binding_is_activation_incomplete():
     projected, _ = project_launch_evidence(_evidence(observed_model_binding={}))
     section = {"accepted_config": {"config_path": "c.yaml"}, "launch_evidence": projected}
