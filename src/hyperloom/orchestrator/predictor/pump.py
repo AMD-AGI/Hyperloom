@@ -465,6 +465,33 @@ def _next_value(tokens: list[str], index: int) -> tuple[str, int]:
     return chunk, index
 
 
+def _row_reason(extra_args: str, extra_envs: dict[str, str]) -> str:
+    """The ``why=`` a first-pass row carries into the untested-proposal block.
+
+    A constant string here made every predictor row read identically while the
+    specialist rows beside them carried a gap and a bespoke sentence, so the
+    block offered no way to tell one prediction from another -- and the rows
+    lost, from the top of the queue, to proposals that looked like they said
+    something. Naming the knobs the row moves is the honest answer to "why this
+    one": a prediction argues for a lever, not for a narrative.
+
+    Args:
+        extra_args (str): The proposal's launch flags.
+        extra_envs (dict[str, str]): The proposal's environment variables.
+
+    Returns:
+        str: ``first-pass: <knobs>``, or the bare label when the family is
+            empty (an all-removal proposal has nothing to name).
+    """
+    names = sorted(_family_key(extra_args, extra_envs))
+    if not names:
+        return "first-pass tuning prediction"
+    shown = ", ".join(names[:4])
+    if len(names) > 4:
+        shown += f" (+{len(names) - 4})"
+    return f"first-pass: {shown}"
+
+
 def _family_key(extra_args: str, extra_envs: dict[str, str]) -> frozenset[str]:
     """Which knobs a proposal moves, ignoring the values it moves them to.
 
@@ -583,7 +610,7 @@ def _proposal_rows(
             "extra_args": extra_args,
             "extra_envs": extra_envs,
             "provenance": PROVENANCE,
-            "reason": "first-pass tuning prediction",
+            "reason": _row_reason(extra_args, extra_envs),
             "votes": votes.get(_sample_key(action.server_args, action.envs, action.source_change), 0),
         }
         if samples is not None:
@@ -671,6 +698,26 @@ def find_mandate(state: Any, mandate_id: str) -> str:
     return ""
 
 
+def _round_bottleneck(request: dict[str, Any]) -> str:
+    """The bottleneck the request was built against, or ``""``.
+
+    Read off the request rather than the state so it names what the predictor
+    was actually shown; the two can drift if evidence lands between building
+    the body and filing the answer.
+
+    Args:
+        request (dict[str, Any]): The request body sent to the service.
+
+    Returns:
+        str: The top bottleneck category, empty when none was classified.
+    """
+    evidence = request.get("evidence")
+    operators = evidence.get("operators") if isinstance(evidence, dict) else None
+    if not isinstance(operators, dict):
+        return ""
+    return str(operators.get("top_bottleneck_category") or "").strip()
+
+
 def _record_round(
     phase: Any,
     *,
@@ -679,6 +726,7 @@ def _record_round(
     dropped: list[dict[str, Any]],
     patch: dict[str, str] | None,
     predict_meta: dict[str, Any],
+    request: dict[str, Any] | None = None,
 ) -> None:
     """File the answer as one round on the untested-proposal queue.
 
@@ -688,6 +736,10 @@ def _record_round(
         rows (list[dict[str, Any]]): Configuration proposals to surface.
         dropped (list[dict[str, Any]]): Proposals set aside, recorded only.
         patch (dict[str, str] | None): The source-change mandate, when present.
+        request (dict[str, Any] | None): The request body, read for the
+            bottleneck the round was predicted against. Optional so a replay
+            that re-files a round without its body records no label rather
+            than failing.
         predict_meta (dict[str, Any]): Request cost and shape, recorded only.
     """
     state = phase.shared_state
@@ -697,6 +749,11 @@ def _record_round(
         "domain": QUEUE_DOMAIN,
         "priority": QUEUE_PRIORITY,
         "task_id": key,
+        # The decision point's bottleneck, so the queue can label these rows
+        # with what they were predicted against instead of the `sev?` a
+        # gap-less round renders. It is a property of the round, not of one
+        # proposal: every row in the batch answers the same question.
+        "bottleneck": _round_bottleneck(request or {}),
         "proposal_set": rows,
         # Recorded, never rendered: the renderer reads cycle / domain /
         # gap_canonical_id / task_id / proposal_set and ignores the rest. These
@@ -809,6 +866,7 @@ async def pump(phase: Any, *, caller: str) -> None:
             rows=rows,
             dropped=dropped,
             patch=patch,
+            request=request,
             predict_meta={
                 "latency_ms": latency_ms,
                 "prompt_chars": answer.meta.get("prompt_chars"),

@@ -526,19 +526,77 @@ class TestQueueRow:
         specialist_at = block.index("--max-num-seqs 512")
         assert first_pass_at < specialist_at
 
+    def test_each_row_says_which_knobs_it_moves(self, active, monkeypatch):
+        """`why=` distinguishes the rows instead of repeating one constant.
+
+        Every prediction used to render `why=first-pass tuning prediction`, so
+        a batch was a wall of identical justifications next to specialist rows
+        carrying bespoke sentences -- top of the queue, nothing to choose
+        between them. The knobs a row moves are what it actually argues for.
+        """
+        _stub(monkeypatch, _sampled(
+            ({"--kv-cache-dtype": "fp8"}, {}, 5),
+            ({"--max-num-seqs": "512"}, {"VLLM_USE_V1": "1"}, 4),
+        ))
+        phase = _Phase()
+        _run(phase)
+        block = phase.shared_state.to_untested_proposals_summary()
+        assert "why=first-pass: --kv-cache-dtype" in block
+        assert "why=first-pass: --max-num-seqs, env:VLLM_USE_V1" in block
+        assert "why=first-pass tuning prediction" not in block
+
+    def test_a_gap_less_row_is_labelled_with_its_bottleneck(self, active, monkeypatch):
+        """The severity slot carries the bottleneck, not `sev?`.
+
+        A predictor round answers a decision point, not a gap, so the severity
+        lookup finds nothing. `sev?` reads as "unknown, probably low"; the
+        bottleneck the round was predicted against is the true label. Ranking
+        is unaffected -- it still sorts these rows on `priority` alone.
+        """
+        assert pp._round_bottleneck(
+            {"evidence": {"operators": {"top_bottleneck_category": "SDPA"}}}
+        ) == "SDPA"
+        # No profile yet, a profile that classified nothing, and a body with no
+        # evidence at all all mean "no label" rather than a crash.
+        assert pp._round_bottleneck({}) == ""
+        assert pp._round_bottleneck({"evidence": {"operators": None}}) == ""
+        assert pp._round_bottleneck({"evidence": {"operators": {}}}) == ""
+
+        _stub(monkeypatch, _sampled(({"--kv-cache-dtype": "fp8"}, {}, 5)))
+        phase = _Phase()
+        pp._record_round(
+            phase,
+            key="c0-s0-r0",
+            rows=[{"name": "pt-0", "extra_args": "--kv-cache-dtype fp8", "extra_envs": {}}],
+            dropped=[],
+            patch=None,
+            predict_meta={},
+            request={"evidence": {"operators": {"top_bottleneck_category": "SDPA"}}},
+        )
+        block = phase.shared_state.to_untested_proposals_summary()
+        assert "[primatune·SDPA]" in block
+        assert "sev?" not in block
+
     def test_the_block_states_the_batch_and_how_much_of_it_is_left(self, active, monkeypatch):
         """Orchestration is told the batch is a unit, and how far through it is.
 
         Without the count a half-worked batch is indistinguishable from a
         smaller one, because benched rows leave the queue.
+
+        The block offers the batch and states the cost of passing one over; it
+        no longer orders orchestration to bench it whole. An instruction that
+        strong hands the grid to the predictor -- a bad batch wastes all four
+        slots of a round -- and it was not obeyed anyway, which spends the
+        block's credibility for nothing.
         """
         _stub(monkeypatch, _sampled(*[({f"--f{i}": "1"}, {}, 4 - i) for i in range(4)]))
         phase = _Phase()
         _run(phase)
         block = phase.shared_state.to_untested_proposals_summary()
         assert "First-pass batch c0-s0-r0 (cycle 0): 4 rows, 0 benched so far." in block
-        assert "make the newest batch your next `explore` grid IN FULL" in block
+        assert "a batch is a ready-made grid if you want one" in block
         assert "very likely never measured in this cycle" in block
+        assert "IN FULL" not in block
 
     def test_overflow_rows_carry_no_batch_tag(self, active, monkeypatch):
         """Only the batch is a dispatchable unit; the rest are suggestions."""

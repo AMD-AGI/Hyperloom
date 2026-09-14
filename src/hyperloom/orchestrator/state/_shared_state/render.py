@@ -507,6 +507,12 @@ class _RenderMixin:
             if not first_pass and to_int(entry.get("cycle"), default=0) != cycle:
                 continue
             severity = severity_of.get(str(entry.get("gap_canonical_id") or ""), "")
+            # A gap-less round has no severity, and printing `sev?` for it
+            # reads as "unknown, probably low" when the truth is "not
+            # gap-anchored". The bottleneck it was predicted against is the
+            # label that slot should carry; it does not feed the ranking, which
+            # still sorts a severity-less round on `priority` alone.
+            label = severity or str(entry.get("bottleneck") or "").strip()
             task_id = str(entry.get("task_id") or "")[:8]
             # A proposer with no gap anchor would otherwise rank below every
             # gap-anchored proposal on severity alone. Default 0 leaves the
@@ -525,7 +531,7 @@ class _RenderMixin:
                 seen.add(fingerprint)
                 row["name"] = row["name"] or f"{domain or 'specialist'}-{task_id}-{index}"
                 row["domain"] = domain
-                row["severity"] = severity
+                row["severity"] = label
                 row["priority"] = priority
                 row["first_pass"] = first_pass
                 # Not part of the variant field set, so ``normalize_proposal``
@@ -692,9 +698,8 @@ class _RenderMixin:
                 "next `explore` grid from these; dispatch an ATOMIC entry verbatim as one variant —",
                 "never split or re-derive its flags.",
                 "A `[first-pass:<id>]` row belongs to one predictor batch, already sized to your",
-                "grid target: make the newest batch your next `explore` grid IN FULL and copy each",
-                "row's fields verbatim. Top up from other proposers only when a batch is short of",
-                "four rows. `votes=k/n` is how many of the predictor's own samples proposed it.",
+                "grid target, so a batch is a ready-made grid if you want one. `votes=k/n` is how",
+                "many of the predictor's own samples proposed that row.",
                 "The predictor is re-asked only when the optimization stack moves, so a first-pass",
                 "row you pass over now is very likely never measured in this cycle — that is the",
                 "cost of skipping one, and if you do skip one, say why in your rationale.",
