@@ -350,8 +350,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         resolves it today, so reporting a default would fabricate a threshold
         the phase never applied.
         """
-        from ..framework.client import DISCOVER_FAILURE_RETRY_LIMIT
-
         state = self.shared_state
         overrides = getattr(state, "plateau_overrides", None) or {}
         if not isinstance(overrides, dict):
