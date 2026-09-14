@@ -177,6 +177,7 @@ def _atom_tracelens_caps() -> _AtomTracelensCaps:
         profiler_more=lines[2] == "1",
     )
 
+
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
 # The ``XDIT_`` pair predates ``--framework custom`` and is still both read and
