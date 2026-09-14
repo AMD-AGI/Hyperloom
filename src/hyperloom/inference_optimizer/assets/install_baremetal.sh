@@ -66,20 +66,18 @@ SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
 SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
-SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm724}"
-if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
-  case "$SGLANG_ROCM_EXTRA" in
-    rocm700) SGLANG_ROCM_PYPI_VERSION="7.0.0" ;;
-    rocm724) SGLANG_ROCM_PYPI_VERSION="7.2.4" ;;
-    *)       SGLANG_ROCM_PYPI_VERSION="7.2.0" ;;
-  esac
-fi
-SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.4}"
+# Left unset so the wheel target is derived from the ROCm stack that is
+# actually installed; an explicitly exported value still wins.
+SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-}"
+SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.28.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+# Index publishing the TheRock ROCm SDK wheels these images are built from;
+# rocm-sdk-devel is pulled from here to supply source-build headers.
+ROCM_SDK_INDEX_URL="${ROCM_SDK_INDEX_URL:-https://stable.repo.amd.com/rocm/whl-next}"
 _VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
 VLLM_VENV_ROOT="${VLLM_VENV_ROOT:-/opt/hyperloom/vllm-venv}"
 REQUIRE_FRAMEWORKS=0
@@ -134,7 +132,7 @@ USER_DATA_PATH, HYPERLOOM_DEPS_ROOT / HYPERLOOM_CACHE_DIR,
 PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
-LD_LIBRARY_PATH, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
+LD_LIBRARY_PATH, ROCM_SDK_INDEX_URL, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
 VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
@@ -305,6 +303,58 @@ for pkg in ("_rocm_sdk_core", "_rocm_sdk_devel"):
         print(root)
         break
 PY
+}
+
+# True when the headers a framework source build compiles against are on disk,
+# either from a standard /opt/rocm tree or an expanded TheRock devel wheel.
+rocm_devel_headers_present() {
+  local py="$1"
+  "$py" - <<'PY' >/dev/null 2>&1
+import importlib.util, os, sys
+roots = [os.environ.get("ROCM_PATH") or "/opt/rocm"]
+for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core", "_rocm_sdk_libraries"):
+    spec = importlib.util.find_spec(pkg)
+    if spec and spec.origin:
+        roots.append(os.path.dirname(os.path.realpath(spec.origin)))
+sys.exit(0 if any(
+    os.path.exists(os.path.join(r, "include", "hipblas", "hipblas.h")) for r in roots
+) else 1)
+PY
+}
+
+# TheRock's wheel-packaged ROCm ships hipBLAS/hipSPARSE/thrust headers only in
+# rocm-sdk-devel, archived until `rocm-sdk init` expands them. Best-effort:
+# no-ops when headers are already present or ROCm is not wheel-based, and warns
+# instead of failing so the build itself reports the real error.
+ensure_rocm_devel_headers() {
+  local py="$1" core_ver
+  rocm_devel_headers_present "$py" && return 0
+  core_ver="$("$py" - <<'PY' 2>/dev/null
+try:
+    import importlib.metadata as meta
+    print(meta.version("rocm-sdk-core"))
+except Exception:
+    pass
+PY
+)"
+  if [ -z "$core_ver" ]; then
+    warn "hipBLAS headers not found and ROCm is not wheel-based; source builds need a ROCm devel package."
+    return 0
+  fi
+  log "installing rocm-sdk-devel==${core_ver} from ${ROCM_SDK_INDEX_URL} for source-build headers"
+  if ! "$py" -m pip install "rocm-sdk-devel==${core_ver}" --index-url "$ROCM_SDK_INDEX_URL"; then
+    warn "could not install rocm-sdk-devel==${core_ver}; source builds may fail on missing headers"
+    return 0
+  fi
+  if ! "$py" -m rocm_sdk init; then
+    warn "rocm-sdk init failed; devel headers stay archived"
+    return 0
+  fi
+  if rocm_devel_headers_present "$py"; then
+    log "ROCm devel headers ready"
+  else
+    warn "rocm-sdk-devel installed but hipBLAS headers still not found"
+  fi
 }
 
 check_torch_rocm_shared_libs() {
@@ -709,6 +759,33 @@ install_compatible_aiter() {
   die "no AITER tag installed and imported successfully with the current torch/triton constraints"
 }
 
+# Index version paired with each published amd-sglang wheel extra.
+sglang_pypi_version_for_extra() {
+  case "$1" in
+    rocm700) echo "7.0.0" ;;
+    rocm724) echo "7.2.4" ;;
+    *)       echo "7.2.0" ;;
+  esac
+}
+
+# amd-sglang wheel extra matching the installed ROCm torch. Prints nothing when
+# no published extra targets it, as with TheRock ROCm 10 (HIP 7.15) wheels.
+sglang_rocm_extra_for_torch() {
+  local py="$1" hip
+  hip="$("$py" - <<'PY' 2>/dev/null
+try:
+    import torch
+    print(getattr(torch.version, "hip", None) or "")
+except Exception:
+    pass
+PY
+)"
+  case "$hip" in
+    7.0*) echo "rocm700" ;;
+    7.2*) echo "rocm724" ;;
+  esac
+}
+
 # Install the AMD SGLang wheel only when its dependency set matches this Python.
 # ROCm target is overridable so hosts pinned to an older driver (e.g. amdgpu
 # 6.3.x, which supports up to ROCm 7.0 user space) can select a matching wheel.
@@ -742,15 +819,26 @@ PY
   else
     log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
   fi
-  log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
-  log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
+  if [ -z "$SGLANG_ROCM_EXTRA" ]; then
+    SGLANG_ROCM_EXTRA="$(sglang_rocm_extra_for_torch "$py")"
+  fi
+  if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
+    SGLANG_ROCM_PYPI_VERSION="$(sglang_pypi_version_for_extra "$SGLANG_ROCM_EXTRA")"
+  fi
+  if [ -n "$SGLANG_ROCM_EXTRA" ]; then
+    log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
+    log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
+  else
+    log "SGLANG_ROCM_EXTRA=none (no published amd-sglang wheel for the installed ROCm stack)"
+  fi
 
   if [ "$SGLANG_ROCM_EXTRA" = "rocm700" ] && [ "$py_mm" != "3.10" ]; then
     die "SGLANG_ROCM_EXTRA=rocm700 currently supports Python 3.10 AMD wheels only; Python ${py_mm} would use source install and can pull mismatched ROCm 7.2 Triton."
   fi
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
+    _py_has "$py" sglang && log "sglang import OK" \
+      || warn "sglang missing (check-only; would install ${SGLANG_ROCM_EXTRA:+amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]}${SGLANG_ROCM_EXTRA:-from source})"
     if _py_has "$py" aiter; then
       log "aiter import OK"
     elif [ -n "$AITER_REF" ]; then
@@ -763,10 +851,12 @@ PY
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    if [ "$py_mm" = "3.10" ]; then
+    if [ "$py_mm" = "3.10" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
       log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
       local sglang_root="${SGLANG_ROOT:-${deps_root}/sglang}" kernel_dir=""
+      rocm_devel_headers_present "$py" \
+        || log "would install rocm-sdk-devel from ${ROCM_SDK_INDEX_URL} and run rocm-sdk init for source-build headers"
       log "would clone/build SGLang source ${SGLANG_REPO}@${SGLANG_REF} under ${sglang_root}"
       if kernel_dir="$(sglang_kernel_rocm_build_dir "$sglang_root" 2>/dev/null)"; then
         log "would build in-tree ROCm kernel via ${kernel_dir}/setup_rocm.py"
@@ -785,10 +875,15 @@ PY
   fi
 
   if ! _py_has "$py" sglang || ! _py_has "$py" sgl_kernel; then
-    if [ "$py_mm" = "3.10" ]; then
+    if [ "$py_mm" = "3.10" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
       install_sglang_from_wheel "$py"
     else
-      warn "amd-sglang ROCm 7.2 wheel currently pulls cp310 torch; Python ${py_mm} uses source install instead"
+      if [ -z "$SGLANG_ROCM_EXTRA" ]; then
+        warn "no published amd-sglang wheel targets the installed ROCm stack; using source install"
+      else
+        warn "amd-sglang ROCm wheels currently pull cp310 torch; Python ${py_mm} uses source install instead"
+      fi
+      ensure_rocm_devel_headers "$py"
       install_sglang_from_source "$py" "$deps_root"
     fi
   else
@@ -796,6 +891,7 @@ PY
   fi
 
   if ! "$py" -c "import aiter" >/dev/null 2>&1; then
+    ensure_rocm_devel_headers "$py"
     install_compatible_aiter "$py" "$aiter_root"
   else
     log "aiter already importable; skipping AITER source install"

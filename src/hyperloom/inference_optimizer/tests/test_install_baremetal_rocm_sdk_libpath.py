@@ -164,3 +164,142 @@ def test_ensure_openmpi_runtime_warns_when_both_names_fail(tmp_path: Path) -> No
     result = _run_ensure_openmpi_runtime(tmp_path, ldconfig_has_mpi=False, uid=0, apt_outcomes=[False, False])
     assert result.returncode == 0, result.stderr
     assert "could not install" in result.stderr
+
+
+def _run_rocm_devel_headers_present(pythonpath: str, rocm_path: str) -> subprocess.CompletedProcess[str]:
+    fn_src = _extract_function("rocm_devel_headers_present")
+    assert fn_src.strip(), "rocm_devel_headers_present() not found in install_baremetal.sh"
+    script = f"set -uo pipefail\n{fn_src}\nrocm_devel_headers_present '{sys.executable}'\n"
+    env = {"PYTHONPATH": pythonpath, "ROCM_PATH": rocm_path, "PATH": "/usr/bin:/bin"}
+    return subprocess.run(["bash", "-lc", script], check=False, capture_output=True, text=True, env=env)
+
+
+def test_rocm_devel_headers_present_finds_expanded_devel_wheel(tmp_path: Path) -> None:
+    # Layout `rocm-sdk init` produces: headers under _rocm_sdk_devel/include.
+    site = tmp_path / "site"
+    hipblas = site / "_rocm_sdk_devel" / "include" / "hipblas"
+    hipblas.mkdir(parents=True)
+    (hipblas / "hipblas.h").write_text("")
+    (site / "_rocm_sdk_devel" / "__init__.py").write_text("")
+
+    result = _run_rocm_devel_headers_present(str(site), str(tmp_path / "no-rocm"))
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_rocm_devel_headers_present_finds_standard_rocm_tree(tmp_path: Path) -> None:
+    rocm = tmp_path / "opt-rocm"
+    hipblas = rocm / "include" / "hipblas"
+    hipblas.mkdir(parents=True)
+    (hipblas / "hipblas.h").write_text("")
+    empty_site = tmp_path / "empty"
+    empty_site.mkdir()
+
+    result = _run_rocm_devel_headers_present(str(empty_site), str(rocm))
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_rocm_devel_headers_absent_on_runtime_only_wheel_stack(tmp_path: Path) -> None:
+    # The failing rocm10 image: runtime packages installed, no devel headers.
+    site = tmp_path / "site"
+    (site / "_rocm_sdk_core" / "lib").mkdir(parents=True)
+    (site / "_rocm_sdk_core" / "__init__.py").write_text("")
+    (site / "_rocm_sdk_libraries" / "lib").mkdir(parents=True)
+    (site / "_rocm_sdk_libraries" / "__init__.py").write_text("")
+
+    result = _run_rocm_devel_headers_present(str(site), str(tmp_path / "no-rocm"))
+
+    assert result.returncode == 1, result.stdout
+
+
+def _run_ensure_rocm_devel_headers(
+    tmp_path: Path,
+    *,
+    headers_present_initially: bool,
+    core_version: str,
+    pip_ok: bool = True,
+    init_ok: bool = True,
+    headers_present_after: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    fn_src = _extract_function("ensure_rocm_devel_headers")
+    assert fn_src.strip(), "ensure_rocm_devel_headers() not found in install_baremetal.sh"
+    fake_py = tmp_path / "fake_python"
+    fake_py.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [ "$1" = "-" ]; then cat >/dev/null; printf "%s" "$FAKE_CORE_VERSION"; exit 0; fi\n'
+        'if [ "$2" = "pip" ]; then echo "PIP: $*"; exit "$FAKE_PIP_RC"; fi\n'
+        'if [ "$2" = "rocm_sdk" ]; then echo "INIT: $*"; exit "$FAKE_INIT_RC"; fi\n'
+        "exit 0\n"
+    )
+    fake_py.chmod(0o755)
+    call_file = tmp_path / "present_calls"
+    stub = f"""
+log() {{ echo "LOG: $*"; }}
+warn() {{ echo "WARN: $*" >&2; }}
+ROCM_SDK_INDEX_URL="https://index.example/whl"
+export FAKE_CORE_VERSION="{core_version}"
+export FAKE_PIP_RC={0 if pip_ok else 1}
+export FAKE_INIT_RC={0 if init_ok else 1}
+rocm_devel_headers_present() {{
+  _n=$(cat "{call_file}" 2>/dev/null || echo 0)
+  echo $((_n + 1)) > "{call_file}"
+  if [ "$_n" = "0" ]; then
+    {"return 0" if headers_present_initially else "return 1"}
+  fi
+  {"return 0" if headers_present_after else "return 1"}
+}}
+"""
+    script = f"set -uo pipefail\n{stub}\n{fn_src}\nensure_rocm_devel_headers '{fake_py}'\n"
+    return subprocess.run(["bash", "-lc", script], check=False, capture_output=True, text=True)
+
+
+def test_ensure_rocm_devel_headers_noop_when_headers_already_present(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(tmp_path, headers_present_initially=True, core_version="10.0.0")
+    assert result.returncode == 0, result.stderr
+    assert "PIP:" not in result.stdout
+    assert "INIT:" not in result.stdout
+
+
+def test_ensure_rocm_devel_headers_warns_when_rocm_is_not_wheel_based(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(tmp_path, headers_present_initially=False, core_version="")
+    assert result.returncode == 0, result.stderr
+    assert "not wheel-based" in result.stderr
+    assert "PIP:" not in result.stdout
+
+
+def test_ensure_rocm_devel_headers_pins_devel_to_installed_core_version(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(tmp_path, headers_present_initially=False, core_version="10.0.0")
+    assert result.returncode == 0, result.stderr
+    assert "rocm-sdk-devel==10.0.0" in result.stdout
+    assert "--index-url https://index.example/whl" in result.stdout
+    assert "INIT: -m rocm_sdk init" in result.stdout
+    assert "ROCm devel headers ready" in result.stdout
+
+
+def test_ensure_rocm_devel_headers_warns_and_continues_when_pip_fails(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(
+        tmp_path, headers_present_initially=False, core_version="10.0.0", pip_ok=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "could not install rocm-sdk-devel==10.0.0" in result.stderr
+    assert "INIT:" not in result.stdout
+
+
+def test_ensure_rocm_devel_headers_warns_and_continues_when_init_fails(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(
+        tmp_path, headers_present_initially=False, core_version="10.0.0", init_ok=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "rocm-sdk init failed" in result.stderr
+
+
+def test_ensure_rocm_devel_headers_warns_when_headers_still_missing_after_init(tmp_path: Path) -> None:
+    result = _run_ensure_rocm_devel_headers(
+        tmp_path,
+        headers_present_initially=False,
+        core_version="10.0.0",
+        headers_present_after=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "still not found" in result.stderr
