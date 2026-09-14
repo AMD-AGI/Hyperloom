@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The prepass commit must carry its own git identity.
+"""Commits into a campaign workspace must carry their own git identity.
 
-Preparation's baseline commit passes ``-c user.name``/``-c user.email``
-inline, but ``-c`` lasts exactly one command and nothing ever writes a
-persistent identity into the workspace. The prepass commit that publishes the
-prepared driver was bare, so it borrowed whatever the host happened to offer:
-on a container whose hostname carries no domain git refuses to guess at all,
-and every nominated operator came back as a preparation failure.
+The workspace git holds no persistent ``user.name``/``user.email`` and a
+container host has no domain for git to guess an address from, so a commit
+there names no author and fails. ``git()`` supplies one for every site rather
+than each site naming its own, which is what these cover: preparation's prepass
+commit, and a later commit into the same repo through a different site.
 """
 
 from __future__ import annotations
@@ -18,6 +17,7 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from kernelforge.knowledge import experience_integration
 from kernelforge.loop import task_preparer
 
 FORGE_IDENTITY = "KernelForge <kernel-forge@localhost>"
@@ -159,4 +159,22 @@ def test_forge_identity_wins_over_a_repo_configured_one(tmp_path, monkeypatch):
     result = _prepare(tmp_path, workspace, kernel, driver)
 
     assert result.ok is True, result.message
+    assert _last_author(workspace) == FORGE_IDENTITY
+
+
+def test_a_later_commit_into_the_same_repo_also_lands(tmp_path, monkeypatch):
+    """The identity must outlast preparation: the warm-start commit is a separate site."""
+    _no_identity_to_borrow(monkeypatch)
+    workspace, kernel, driver = _workspace_without_an_identity(tmp_path)
+    _conforming_preparation(monkeypatch, driver)
+    assert _prepare(tmp_path, workspace, kernel, driver).ok is True
+
+    (workspace / "warm.md").write_text("warm start\n", encoding="utf-8")
+    sha = experience_integration._git_commit_all(
+        str(workspace),
+        "warm-start",
+        allowed_paths={"warm.md"},
+    )
+
+    assert sha == task_preparer._git_head(workspace)
     assert _last_author(workspace) == FORGE_IDENTITY

@@ -33,6 +33,24 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
 
 
+# Machine commits into a working copy: a workspace holds no identity and a container
+# host has no domain to auto-detect one from, so the helper names it for every site.
+_COMMIT_IDENTITY = {
+    "GIT_AUTHOR_NAME": "KernelForge",
+    "GIT_AUTHOR_EMAIL": "kernel-forge@localhost",
+    "GIT_COMMITTER_NAME": "KernelForge",
+    "GIT_COMMITTER_EMAIL": "kernel-forge@localhost",
+}
+
+
+def _run_env(overrides: dict[str, str] | None) -> dict[str, str]:
+    """The environment for one git run; an ambient or caller identity still wins."""
+    merged = {**os.environ, **(overrides or {})}
+    for key, value in _COMMIT_IDENTITY.items():
+        merged.setdefault(key, value)
+    return merged
+
+
 def _checked(
     completed: subprocess.CompletedProcess,
     check: bool,
@@ -65,7 +83,7 @@ def git(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
-        env=None if env is None else {**os.environ, **env},
+        env=_run_env(env),
         start_new_session=True,
     ) as process:
         try:
