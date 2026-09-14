@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import threading
 import time
 from datetime import datetime, timezone
@@ -320,30 +321,35 @@ class TestOffloadedWorkCannotHoldTheTick:
 class TestAStopIsRecordedBeforeItIsDispatched:
     """A signal must land while the loop is busy, not once it is free."""
 
-    def test_the_drain_publishes_to_both_audiences(self):
+    @pytest.mark.parametrize("received_signal", [signal.SIGTERM, signal.SIGHUP])
+    def test_the_drain_publishes_the_received_signal_to_both_audiences(self, received_signal):
         import os
-        import signal as signal_module
 
         from hyperloom.orchestrator.loop.signals import SignalDrain
 
-        async def _exercise() -> tuple[bool, bool]:
+        async def _exercise() -> tuple[bool, bool, frozenset[int]]:
             stop = asyncio.Event()
-            drain = SignalDrain(loop=asyncio.get_running_loop(), stop_event=stop)
+            drain = SignalDrain(
+                loop=asyncio.get_running_loop(),
+                stop_event=stop,
+                signals=(received_signal,),
+            )
             if not drain.armed:  # pragma: no cover — no handlers off the main thread
                 pytest.skip("signal handlers are unavailable here")
             try:
-                os.kill(os.getpid(), signal_module.SIGTERM)
+                os.kill(os.getpid(), received_signal)
                 # The threading event is set by the reading thread; the asyncio
                 # one only once the loop runs, which is the ordering under test.
                 await asyncio.wait_for(stop.wait(), timeout=5.0)
-                return drain.requested.is_set(), stop.is_set()
+                return drain.requested.is_set(), stop.is_set(), drain.close()
             finally:
                 drain.close()
 
-        requested, stopped = asyncio.run(_exercise())
+        requested, stopped, received = asyncio.run(_exercise())
 
         assert requested is True
         assert stopped is True
+        assert received == {received_signal}
 
     def test_closing_restores_the_previous_handler(self):
         import signal as signal_module

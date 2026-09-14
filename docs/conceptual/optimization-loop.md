@@ -92,9 +92,14 @@ when the LLM is not allowed to propose them.
 
 PRELUDE establishes the session baseline:
 
-1. `target_analysis` writes the target comparison artifact. If no
-   external target GPU is configured, it writes a no-target marker rather
-   than pretending target data exists.
+1. `target_analysis` writes the reference summary and source-backed
+   `competitor_target.json`. With no external GPU configured, it writes a
+   no-target marker and clears the competitor target. Advisory and final-report
+   comparisons read the same target file; missing targets remain unavailable.
+   AgentX uses accepted `current_best` metrics, normalized by `state.tp` and
+   matched at `state.conc`, without rereading benchmark artifacts.
+   `--no-target-advisory` disables prompt hints, not the final comparison.
+   External references never change Objective, scoring, or KEEP/REVERT.
 2. `baseline` measures the starting throughput and records the benchmark
    invocation needed to reproduce it.
 3. `roofline` or `profile` captures the first performance analysis.
