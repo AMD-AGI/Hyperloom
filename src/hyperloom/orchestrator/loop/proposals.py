@@ -478,11 +478,6 @@ class ProposalsCollaborator:
                 "variant_timeout_safety_margin",
                 safety_margin_override,
             )
-        # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
-        # not an eligibility gate.
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and es.get("tested"):
-            params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
 

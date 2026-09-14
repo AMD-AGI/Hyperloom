@@ -296,6 +296,26 @@ def _record_source_attempt(
         )
     except Exception:  # noqa: BLE001 — observability cannot change write-back
         log.debug("framework timeline: source attempt record failed", exc_info=True)
+    # Write to the unified attempts ledger (C5).
+    try:
+        shared_state = getattr(coord, "shared_state", None)
+        if shared_state is not None:
+            shared_state.record_attempt({
+                "arm": "source",
+                "lever_kind": str(params.get("lever_kind") or ""),
+                "task_id": task_id,
+                "candidate_id": candidate_id,
+                "outcome": status,
+                "verdict": status,
+                "adopted": _is_kept(status),
+                "gain_pct": float(result["delta_pct"]) if result.get("delta_pct") is not None else None,
+                "before_tput": base,
+                "after_tput": result.get("output_throughput"),
+                "error_class": str(result.get("error_class") or ""),
+                "specialist_task_id": specialist_task_id,
+            })
+    except Exception:  # noqa: BLE001 — unified ledger write cannot change the phase
+        log.debug("_record_source_attempt: unified ledger write failed", exc_info=True)
 
 
 def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict[str, Any]]) -> None:

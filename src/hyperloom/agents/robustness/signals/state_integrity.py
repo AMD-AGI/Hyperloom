@@ -65,7 +65,7 @@ def _state_json_symptoms(si: dict[str, Any]) -> list[Symptom]:
             summary=(
                 f"state.json is unreadable: {error}; resume from this "
                 f"session would lose baseline / current_best / "
-                f"explore_search progress"
+                f"explore_search progress and the unified attempts ledger"
             ),
             evidence={
                 "path": state.get("path"),

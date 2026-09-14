@@ -157,6 +157,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # unified explore search ledger.
         "explore_search",
+        # unified attempt ledger (C5).
+        "attempts",
         # structured gaps ledger.
         "gaps",
         # Orchestration working-memory checkpoint (Coordinator-authored).
