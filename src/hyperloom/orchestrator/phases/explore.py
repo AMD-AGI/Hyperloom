@@ -1591,6 +1591,16 @@ class ExplorePhase(CoordinatorCollaborator):
             "provenance": "specialist",
             "patch_name": patch_name,
         }
+        # A lever the specialist marked ``atomic`` is inseparable from the patch it
+        # ships with: the patch clears a framework guard that the server then asserts
+        # on through a launch flag, so a round that applies the patch without the flag
+        # cannot boot and can never be kept. ``_framework_config_levers_from_done``
+        # yields only those atomic levers once ``patches_written`` is non-empty, so an
+        # ordinary companion lever still stays out of the patch's round.
+        atomic_levers = _framework_config_levers_from_done(done_payload)
+        if atomic_levers:
+            integrate_params["extra_server_args"] = str(atomic_levers.get("extra_server_args") or "")
+            integrate_params["extra_envs"] = dict(atomic_levers.get("extra_envs") or {})
         _forward_integrate_source(
             spec_params,
             integrate_params,

@@ -2083,3 +2083,62 @@ async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator
 
     assert any("run_action_now:" in r.getMessage() for r in caplog.records)
     assert "stubbed inline result" in out
+
+
+# -- atomic config levers ride with the patch they are inseparable from -----
+def _autosubmitted_integrate_params(coord: Coordinator) -> dict:
+    """Return the params of the integrate_patch proposal the bridge just queued."""
+    rows = [p for p in coord.state.pending_proposals.values() if getattr(p, "action_name", "") == "integrate_patch"]
+    assert rows, "the bridge queued no integrate_patch proposal"
+    return dict((getattr(rows[-1], "payload", {}) or {}).get("params") or {})
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) -> None:
+    """A lever the specialist marked ``atomic`` reaches integrate_patch with its patch.
+
+    The patch clears a framework guard that the server then asserts on through the
+    flag, so a round that applies one without the other cannot boot.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-atomic-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [
+                {
+                    "name": "deepseek-v4-rocm-enable",
+                    "atomic": True,
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "extra_envs": {"VLLM_MHC_TORCH_FALLBACK": "1"},
+                }
+            ],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert params["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert params["extra_envs"] == {"VLLM_MHC_TORCH_FALLBACK": "1"}
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator) -> None:
+    """An ordinary companion lever stays the config bridge's business, not the patch's."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-plain-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "opt-only", "extra_args": "--speculative-num-steps 3"}],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert "extra_server_args" not in params
+    assert "extra_envs" not in params

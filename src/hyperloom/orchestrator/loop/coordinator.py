@@ -165,13 +165,20 @@ def _framework_config_levers_from_done(
     """Extract a config-lever set from a FRAMEWORK specialist deliverable."""
     if not isinstance(done_payload, dict):
         return {}
-    # A patch deliverable takes precedence.
-    patches = done_payload.get("patches_written") or []
-    if isinstance(patches, list) and patches:
-        return {}
     proposals = done_payload.get("proposal_set") or []
     if not isinstance(proposals, list):
         return {}
+    # A patch deliverable takes precedence: a lever that merely *accompanies* a patch
+    # is not a config-only outcome. The exception is a proposal the specialist marked
+    # ``atomic``, which asserts the flag and the patch are jointly necessary -- the
+    # enablement case, where a patch clears a framework guard that the server then
+    # asserts on via a launch flag. Dropping the flag there leaves a patch that can
+    # never boot, so its round can never be kept and no recipe is ever emitted.
+    patches = done_payload.get("patches_written") or []
+    if isinstance(patches, list) and patches:
+        proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
+        if not proposals:
+            return {}
     for entry in proposals:
         if not isinstance(entry, dict):
             continue
