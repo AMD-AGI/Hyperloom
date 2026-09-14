@@ -26,7 +26,7 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
@@ -276,6 +276,13 @@ class RunState:
                     "unresolved_stall_iters",
                     int(stall.get("no_improvement_iters", 0) or 0),
                 )
+            version = 19
+        if version == 19:
+            # v19 had no caller-supplied scoring anchor, so the kernel a campaign started from was always the anchor
+            # and always scored 1.0 against it. Left absent rather than backfilled to 1.0: a checkpoint that never
+            # recorded the score did not measure one, and the KEEP bar does not read this field -- it is derived from
+            # the incumbent's own per-case times -- so only incremental reporting sees the difference.
+            payload.setdefault("search_start_mean_case_speedup", None)
             version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
             raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")
