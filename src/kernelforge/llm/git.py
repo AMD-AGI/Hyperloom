@@ -87,23 +87,29 @@ FALLBACK_COMMIT_IDENTITY = ("KernelForge", "kernel-forge@localhost")
 def ensure_commit_identity(cwd: str | Path) -> str:
     """Name a committer for a repository that has none to auto-detect.
 
-    Written repo-locally and only when git can resolve no identity at all, so a
-    workspace already carrying the operator's own identity keeps it.
+    Written repo-locally, only when git can resolve no identity at all, and only
+    for the keys the repository lacks, so a workspace already carrying the
+    operator's own identity keeps it.
 
     Args:
         cwd: The repository to configure.
 
     Returns:
-        The identity written, or an empty string when one was already available
-        or the directory is not a repository.
+        The settings written, or an empty string when an identity was already
+        available or the directory is not a repository.
     """
     if git("var", "GIT_AUTHOR_IDENT", cwd=cwd, check=False).returncode == 0:
         return ""
-    name, email = FALLBACK_COMMIT_IDENTITY
-    for key, value in (("user.name", name), ("user.email", email)):
+    written: list[str] = []
+    for key, value in zip(("user.name", "user.email"), FALLBACK_COMMIT_IDENTITY):
+        # A half-configured repository keeps the half it has: an unresolvable
+        # address is no reason to rename the operator.
+        if git("config", "--get", key, cwd=cwd, check=False).returncode == 0:
+            continue
         if git("config", key, value, cwd=cwd, check=False).returncode != 0:
             return ""
-    return f"{name} <{email}>"
+        written.append(f"{key}={value}")
+    return ", ".join(written)
 
 
 async def git_async(

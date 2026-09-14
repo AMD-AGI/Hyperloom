@@ -162,6 +162,19 @@ def test_a_configured_identity_is_not_rewritten(tmp_path, monkeypatch):
     assert _last_author(workspace) == "operator <operator@example.com>"
 
 
+def test_a_half_configured_identity_keeps_the_half_it_has(tmp_path, monkeypatch):
+    """An address git cannot resolve is no reason to rename the operator."""
+    _no_identity_to_borrow(monkeypatch)
+    workspace, kernel, driver = _workspace_without_an_identity(tmp_path)
+    task_preparer._git(workspace, "config", "user.name", "operator")
+    _conforming_preparation(monkeypatch, driver)
+
+    result = _prepare(tmp_path, workspace, kernel, driver)
+
+    assert result.ok is True, result.message
+    assert _last_author(workspace) == "operator <kernel-forge@localhost>"
+
+
 def test_a_later_commit_into_the_same_repo_also_lands(tmp_path, monkeypatch):
     """The identity must outlast preparation: the warm-start commit is a separate site."""
     _no_identity_to_borrow(monkeypatch)

@@ -71,7 +71,7 @@ def resolve_campaign(
     # Before the resume branch: a resumed campaign commits into this workspace too.
     written_identity = ensure_commit_identity(workspace)
     if written_identity:
-        print(f"  [git] workspace had no commit identity; using {written_identity}")
+        print(f"  [git] workspace had no commit identity; set {written_identity}")
 
     campaign_inputs_supplied = any(
         value not in (None, "") for value in (kernel, driver, source_files, program_md_file, operator_name)
