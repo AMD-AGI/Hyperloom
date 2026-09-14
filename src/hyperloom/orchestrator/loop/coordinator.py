@@ -161,21 +161,32 @@ def _resolvable_artifacts_from_done(
 
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
+    *,
+    levers_ride_with_patches: bool = False,
 ) -> dict[str, Any]:
-    """Extract a config-lever set from a FRAMEWORK specialist deliverable."""
+    """Extract a config-lever set from a FRAMEWORK specialist deliverable.
+
+    Args:
+        done_payload: The specialist's ``specialist_done`` payload.
+        levers_ride_with_patches: Whether a lever delivered alongside a patch
+            belongs to the patch's round. True for ENABLEMENT, where the pair is
+            jointly what makes the model boot; False while optimizing, where a
+            patch is its own outcome and a lever is judged on its own.
+    """
     if not isinstance(done_payload, dict):
         return {}
     proposals = done_payload.get("proposal_set") or []
     if not isinstance(proposals, list):
         return {}
-    # A patch deliverable takes precedence: a lever that merely *accompanies* a patch
-    # is not a config-only outcome. The exception is a proposal the specialist marked
-    # ``atomic``, which asserts the flag and the patch are jointly necessary -- the
-    # enablement case, where a patch clears a framework guard that the server then
-    # asserts on via a launch flag. Dropping the flag there leaves a patch that can
-    # never boot, so its round can never be kept and no recipe is ever emitted.
+    # A patch deliverable otherwise takes precedence: a lever that merely
+    # *accompanies* a patch is not a config-only outcome. ``atomic`` remains the
+    # specialist's own way to say the two are inseparable, but it cannot be the
+    # only way -- it is a model-authored boolean, and the same specialist has
+    # emitted ``atomic: false`` on a lever whose own reason read "required to
+    # boot at all once the patch lands". Enablement therefore decides this from
+    # the lane it is running, not from the deliverable's self-description.
     patches = done_payload.get("patches_written") or []
-    if isinstance(patches, list) and patches:
+    if isinstance(patches, list) and patches and not levers_ride_with_patches:
         proposals = [e for e in proposals if isinstance(e, dict) and e.get("atomic") is True]
         if not proposals:
             return {}

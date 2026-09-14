@@ -1591,16 +1591,21 @@ class ExplorePhase(CoordinatorCollaborator):
             "provenance": "specialist",
             "patch_name": patch_name,
         }
-        # A lever the specialist marked ``atomic`` is inseparable from the patch it
-        # ships with: the patch clears a framework guard that the server then asserts
-        # on through a launch flag, so a round that applies the patch without the flag
-        # cannot boot and can never be kept. ``_framework_config_levers_from_done``
-        # yields only those atomic levers once ``patches_written`` is non-empty, so an
-        # ordinary companion lever still stays out of the patch's round.
-        atomic_levers = _framework_config_levers_from_done(done_payload)
-        if atomic_levers:
-            integrate_params["extra_server_args"] = str(atomic_levers.get("extra_server_args") or "")
-            integrate_params["extra_envs"] = dict(atomic_levers.get("extra_envs") or {})
+        # In an ENABLEMENT round a companion lever is inseparable from the patch it
+        # ships with: the patch clears a framework guard the server then asserts on
+        # through a launch flag, so a round that applies one without the other cannot
+        # boot and can never be kept -- and with no KEEP the recipe is never emitted.
+        # The lane decides this, not the deliverable: ``atomic`` is authored by the
+        # specialist and is not reliably set even when its own reason says the flag is
+        # required to boot. While optimizing, a patch stays its own outcome and only an
+        # explicitly atomic lever rides with it.
+        companion_levers = _framework_config_levers_from_done(
+            done_payload,
+            levers_ride_with_patches=bool(spec_params.get("enablement")),
+        )
+        if companion_levers:
+            integrate_params["extra_server_args"] = str(companion_levers.get("extra_server_args") or "")
+            integrate_params["extra_envs"] = dict(companion_levers.get("extra_envs") or {})
         _forward_integrate_source(
             spec_params,
             integrate_params,
