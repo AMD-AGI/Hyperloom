@@ -6112,6 +6112,7 @@ async def integrate_handler(
     payload: dict,
     *,
     session_dir: Path,
+    preapplied_git_patch: bool = False,
 ) -> HandlerResult:
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
@@ -6238,9 +6239,11 @@ async def integrate_handler(
                 "error": f"invalid pre-applied manifest: {manifest_path}",
             }
         )
-    elif payload.get("_preapplied_git_patch"):
+    elif preapplied_git_patch:
         # A controller publication is git-applied to the worktree before the
         # validator runs; its unified diff cannot re-enter the whole-file apply.
+        # Only an in-process caller can set this: an agent's integrate params
+        # land in ``payload`` verbatim, so the payload cannot carry the trust.
         apply_result = {
             "status": "ok",
             "reason": "preapplied_git_patch",

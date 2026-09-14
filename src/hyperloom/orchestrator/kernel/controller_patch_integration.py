@@ -232,9 +232,9 @@ async def _default_validator(
             # a publication without it.
             "patch_write_paths": list(publication.changed_files)
             or list(publication.manifest.get("changed_files") or []),
-            "_preapplied_git_patch": True,
         },
         session_dir=session_dir,
+        preapplied_git_patch=True,
     )
 
 

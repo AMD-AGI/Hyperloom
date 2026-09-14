@@ -4,8 +4,8 @@
 """A controller publication is git-applied before validation; integrate must not re-apply it.
 
 ``integrate_controller_patches`` runs ``git apply`` on the working tree and only
-then calls the validator, which flags the payload ``_preapplied_git_patch``. The
-patch itself is a unified diff, so routing it back through the whole-file
+then calls the validator, which passes ``preapplied_git_patch``. The patch itself
+is a unified diff, so routing it back through the whole-file
 ``apply_kernel_patch`` contract fails and the measured KEEP is lost.
 """
 
@@ -100,14 +100,17 @@ def _controller_payload(applied: Path, patch_file: Path) -> dict:
         "patch_path": str(patch_file),
         "target_file": str(applied / KERNEL_REL),
         "patch_write_paths": [KERNEL_REL],
-        "_preapplied_git_patch": True,
     }
 
 
 async def test_preapplied_patch_reaches_the_rebaseline(session_dir, applied, patch_file, stop_at_rebaseline):
     """The KEEP must be measured, not refused at apply."""
     with pytest.raises(ReachedRebaseline):
-        await krh.integrate_handler(_controller_payload(applied, patch_file), session_dir=session_dir)
+        await krh.integrate_handler(
+            _controller_payload(applied, patch_file),
+            session_dir=session_dir,
+            preapplied_git_patch=True,
+        )
 
 
 async def test_preapplied_patch_is_never_reapplied(session_dir, applied, patch_file, stop_at_rebaseline, monkeypatch):
@@ -121,15 +124,26 @@ async def test_preapplied_patch_is_never_reapplied(session_dir, applied, patch_f
     monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", record)
 
     with pytest.raises(ReachedRebaseline):
-        await krh.integrate_handler(_controller_payload(applied, patch_file), session_dir=session_dir)
+        await krh.integrate_handler(
+            _controller_payload(applied, patch_file),
+            session_dir=session_dir,
+            preapplied_git_patch=True,
+        )
 
     assert calls == []
 
 
 async def test_a_diff_without_the_flag_is_still_refused(session_dir, applied, patch_file, stop_at_rebaseline):
     """Scope guard: only the controller's pre-applied contract skips apply."""
-    payload = _controller_payload(applied, patch_file)
-    del payload["_preapplied_git_patch"]
+    result = await krh.integrate_handler(_controller_payload(applied, patch_file), session_dir=session_dir)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "apply_failed"
+
+
+async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, applied, patch_file, stop_at_rebaseline):
+    """An agent's integrate params reach the payload verbatim, so the payload cannot carry this trust."""
+    payload = {**_controller_payload(applied, patch_file), "_preapplied_git_patch": True}
 
     result = await krh.integrate_handler(payload, session_dir=session_dir)
 
