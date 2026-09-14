@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -97,7 +98,11 @@ from ._grid_runner import (
     session_grid_bounds,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._grid_server_args import compose_server_args
+from ._grid_server_args import (
+    compose_server_args,
+    merge_server_args,
+    tokenize_server_args_preserving_json,
+)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -212,6 +217,104 @@ _LAUNCH_ONLY_MUTATION_FIELDS: tuple[str, ...] = (
     "config_changes",
     "enablement_setup_commands",
 )
+
+
+def _established_enablement_config(params: dict[str, Any], shared_state: Any) -> tuple[str, dict[str, str]]:
+    """What earlier enablement rounds established, for a round that restated nothing.
+
+    ``enablement.lane._rearm_on_advanced`` accumulates every advance into
+    ``state.enablement.accepted_config`` so a later kept round replays them --
+    but the accumulation only ever reached the emitted recipe. A launch that
+    does not read it back walks into a wall an earlier round already cleared:
+    observed live, a build launch probe booted with an empty ``EXTRA_VLLM_ARGS``
+    and died on ``AssertionError: DeepseekV4 only supports fp8 kv-cache format
+    for now, got auto`` while ``accepted_config`` held ``--kv-cache-dtype fp8``.
+    Every dispatcher that opens an enablement integrate_patch crosses this
+    executor, so the inheritance lives here rather than in each emitter.
+
+    Optimization rounds inherit nothing -- the rule is the enablement lane's.
+    Returns ``("", {})`` when the round is not enablement, when no SharedState
+    reached the context, or when nothing has been established yet.
+    """
+    if not bool(params.get("enablement")):
+        return "", {}
+    established = getattr(getattr(shared_state, "enablement", None), "accepted_config", None)
+    if not isinstance(established, dict) or not established:
+        return "", {}
+    args = str(established.get("extra_server_args") or "").strip()
+    raw_envs = established.get("extra_envs")
+    envs = {str(k): str(v) for k, v in raw_envs.items()} if isinstance(raw_envs, dict) else {}
+    envs, dropped = filter_untrusted_env_mapping(envs, allow_predicate=is_allowed_variant_env_key)
+    if dropped:
+        log.warning(
+            "integrate_patch: dropping unsafe inherited enablement env key(s): %s",
+            ", ".join(sorted(dropped)),
+        )
+    return args, envs
+
+
+def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
+    """Inherited first, this round last, deduped -- the shape the bridge uses."""
+    if not inherited_args:
+        return round_args
+    if not round_args:
+        return inherited_args
+    merged = merge_server_args(inherited_args, round_args)
+    if tokenize_server_args_preserving_json(merged) is not None:
+        from ...loop.coordinator_helpers import _dedupe_extra_server_args  # noqa: PLC0415
+
+        return _dedupe_extra_server_args(merged)
+    # The combined string carries a quoted value with embedded whitespace, which
+    # the deduper cannot parse; it would hand back the concatenation with two
+    # copies of every inherited flag, and a duplicate is what the server
+    # hard-errors on. Provenance cannot decide this either: only the autosubmit
+    # bridge pre-merges the inheritance, while this executor also serves rounds
+    # opened by the build probe, the framework-config bridge, an authored
+    # proposal and a re-queued row, any of which may carry args of its own. So
+    # add back only the inherited flags this round does not already name,
+    # decided on the inherited side, which comes from ``accepted_config`` and is
+    # already deduped.
+    try:
+        round_tokens = shlex.split(round_args)
+    except ValueError:
+        # Unbalanced quoting: fall back to whitespace splitting, which can only
+        # over-report option names, never miss one, so the comparison below
+        # stays conservative about adding a flag back.
+        round_tokens = round_args.split()
+    # Exact option names, never a substring test: ``--foo`` is not satisfied by
+    # ``--foo-bar``, and a name appearing inside a quoted value is not an option
+    # at all once shlex has stripped the quotes.
+    round_names = {token.split("=", 1)[0] for token in round_tokens if token.startswith("-")}
+    try:
+        # Quote-aware on this side too: ``accepted_config`` may itself hold a
+        # value carrying whitespace, and splitting it on spaces would keep only
+        # the first word of it and emit a malformed option.
+        inherited_tokens = shlex.split(inherited_args)
+    except ValueError:
+        inherited_tokens = inherited_args.split()
+    missing: list[str] = []
+    index = 0
+    while index < len(inherited_tokens):
+        token = inherited_tokens[index]
+        if not token.startswith("-"):
+            index += 1
+            continue
+        name = token.split("=", 1)[0]
+        takes_value = (
+            "=" not in token
+            and index + 1 < len(inherited_tokens)
+            and not inherited_tokens[index + 1].startswith("-")
+        )
+        if name not in round_names:
+            # shlex stripped the quoting when it parsed; restore a spelling that
+            # survives the next parse rather than re-emitting a bare value.
+            missing.append(shlex.quote(token))
+            if takes_value:
+                missing.append(shlex.quote(inherited_tokens[index + 1]))
+        index += 2 if takes_value else 1
+    if not missing:
+        return round_args
+    return " ".join([*missing, round_args]).strip()
 
 
 def _parse_framework_switches(
@@ -2561,6 +2664,9 @@ class IntegratePatchExecutor:
         # Before the setup commands, which are the round's first mutation: an
         # install writes into the same trees the patches and artifacts land in.
         is_enablement = bool(params.get("enablement"))
+        # Read back what earlier rounds established before either publish point
+        # below decides what this round launches with.
+        inherited_args, inherited_envs = _established_enablement_config(params, shared_state)
         for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
             _note_pre_mutation_head(ctx, candidate, enablement=is_enablement, session_dir=self.session_dir)
         setup_result: dict[str, Any] = {"applied": [], "skipped": [], "failed": [], "executions": []}
@@ -2716,8 +2822,8 @@ class IntegratePatchExecutor:
                 self._publish_gate_state(
                     ctx,
                     output_root=output_root,
-                    extra_envs_applied={},
-                    extra_server_args_applied="",
+                    extra_envs_applied=dict(inherited_envs),
+                    extra_server_args_applied=inherited_args,
                     dropped_env_overrides=[],
                     setup_result=setup_result,
                 )
@@ -3007,8 +3113,9 @@ class IntegratePatchExecutor:
                     },
                 )
 
-        extra_server_args_applied = proposal_extra_args
-        extra_envs_applied = dict(proposal_extra_envs)
+        # Inherited first, this round last: inheriting is not pinning.
+        extra_server_args_applied = _merge_established_server_args(inherited_args, proposal_extra_args)
+        extra_envs_applied = {**inherited_envs, **proposal_extra_envs}
 
         if params.get("apply_only"):
             return _with_stash_restore(
