@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **AITER installed as `amd-aiter` is now recorded in `stack_fingerprint`
+  instead of `unknown`.** AITER ships under two distribution names, and
+  `_probe_pkg_version` looked up only `aiter`, so on a host using the other name
+  the probe found nothing and the component degraded all the way to `unknown` —
+  losing the field rather than recording a coarser value. `kernelforge`'s aiter
+  preflight already probes both names for exactly this reason, and it documents
+  the precedence this restores: `AITER_COMMIT` is the finer pin, the installed
+  distribution version is the accepted fallback. Candidate names are declared in
+  preference order, so a host with both installed records the same value every
+  time rather than whichever `importlib.metadata` happened to answer for first.
+  `AITER_COMMIT` still wins over any probe.
+
+  Only what gets *written* changes. No read path compares `rocm` or `aiter`
+  against the pod today; that gap is real and is tracked separately, and getting
+  the recorded value right is a prerequisite for it, since a comparison over a
+  field that reads `unknown` on a whole class of hosts would fire on every
+  historical row.
+
 ### Changed
 
 - **One rule now picks the agent backend, in both packages: a configured
