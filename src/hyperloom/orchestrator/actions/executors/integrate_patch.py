@@ -1721,7 +1721,7 @@ class IntegratePatchExecutor:
             keep_threshold_pct (float): Minimum gain to KEEP a patch.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
         """
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
@@ -1730,6 +1730,15 @@ class IntegratePatchExecutor:
         # backup ledger and never a prior round's.
         self._nogit_backup_root: Path | None = None
         # Blocked env names this round was granted, each bound to one value.
+
+    @property
+    def session_dir(self) -> Path:
+        """The session root; resolved per read unless one was passed in."""
+        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
+
+    @session_dir.setter
+    def session_dir(self, value: Path | str | None) -> None:
+        self._session_dir = Path(value) if value else None
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""

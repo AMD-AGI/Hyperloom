@@ -164,7 +164,14 @@ def _validate_magpie_python_override(value: str) -> str:
 
 
 def _resolve_session_dir() -> Path:
-    """Resolve the active session_dir for executors that need an output root."""
+    """Resolve the active session_dir for executors that need an output root.
+
+    Call this per use, never once in ``__init__``. The executors in this package
+    are instantiated as module-level singletons at import time, which is before
+    the CLI pins ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; resolving eagerly
+    therefore freezes them on the workspace root, and every session sharing that
+    workspace writes its artifacts into one directory.
+    """
     from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
     return _sd()

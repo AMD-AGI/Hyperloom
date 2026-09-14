@@ -1652,18 +1652,27 @@ class BaselineExecutor:
         cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults."""
-        from ._grid_runner import _resolve_session_dir
-
         # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         self.magpie_python = magpie_python or resolve_benchmark_interpreter()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
+
+    @property
+    def session_dir(self) -> Path:
+        """The session root; resolved per read unless one was passed in."""
+        from ._grid_runner import _resolve_session_dir
+
+        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
+
+    @session_dir.setter
+    def session_dir(self, value: Path | str | None) -> None:
+        self._session_dir = Path(value) if value else None
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver."""

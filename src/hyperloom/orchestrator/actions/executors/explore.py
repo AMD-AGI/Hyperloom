@@ -480,9 +480,18 @@ class ExploreExecutor:
     ):
         """Initialize the explore executor and its gating thresholds."""
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
+
+    @property
+    def session_dir(self) -> Path:
+        """The session root; resolved per read unless one was passed in."""
+        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
+
+    @session_dir.setter
+    def session_dir(self, value: Path | str | None) -> None:
+        self._session_dir = Path(value) if value else None
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
