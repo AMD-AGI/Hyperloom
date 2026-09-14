@@ -733,10 +733,10 @@ def test_config_levers_helper_extracts_from_proposal_set():
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }
 
-    # A patch deliverable is NOT a config-only outcome.
-    assert (
-        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
-    )
+    # A patch alongside config levers: levers are returned so they can be forwarded
+    # into the same integrate_patch proposal (coupled deliverable, closes D1).
+    coupled = _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]})
+    assert coupled.get("extra_envs") == {"VLLM_USE_MTP": "1"}
     # No levers → empty.
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}

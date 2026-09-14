@@ -160,10 +160,6 @@ def _framework_config_levers_from_done(
     """Extract a config-lever set from a FRAMEWORK specialist deliverable."""
     if not isinstance(done_payload, dict):
         return {}
-    # A patch deliverable takes precedence.
-    patches = done_payload.get("patches_written") or []
-    if isinstance(patches, list) and patches:
-        return {}
     proposals = done_payload.get("proposal_set") or []
     if not isinstance(proposals, list):
         return {}

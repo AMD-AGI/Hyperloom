@@ -95,6 +95,12 @@ from ._grid_runner import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
+from ._grid_variant_filter import (
+    apply_aiter_moe_pin_filter,
+    apply_multi_node_invalid_variants,
+    apply_user_skip_list,
+    resolve_skip_spec,
+)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -4476,6 +4482,27 @@ class IntegratePatchExecutor:
             # Preserve list/dict values; apply_runtime_override expects them.
             variant.runtime_override = dict(_rt)
 
+        # The explore grid's origin-independent guards: an authored variant is no
+        # more exempt from a known-bad multi-node lever, an operator's env pin or
+        # the operator's skip list than a proposed one. The compatibility filter
+        # is deliberately absent -- it shells out to build the framework's arg
+        # parser, and a single authored variant must not pay for that probe.
+        grid, mn_dropped = apply_multi_node_invalid_variants([variant])
+        grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
+        grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
+        if not grid:
+            rejected = (mn_dropped + pin_dropped + skip_dropped)[0]
+            return (
+                {
+                    "status": "skipped",
+                    "error_class": "filtered_before_bench",
+                    "error": str(rejected.get("reason") or rejected.get("source") or ""),
+                    "workspace": "",
+                    "materialized_config": str(config_path),
+                },
+                {"accuracy_pass": None, "eval_probe": None},
+            )
+
         # Ray-managed GPU execution: hold a serving lease
         # (num_gpus=TP + serving_slot) for the whole run_grid so
         # the patch benchmark serializes against other serving on the
@@ -4490,7 +4517,7 @@ class IntegratePatchExecutor:
             results: list[VariantResult] = await run_grid(
                 base_yaml_path=config_path,
                 base_extra_args=str(params.get("base_extra_args") or "").strip(),
-                grid=[variant],
+                grid=grid,
                 output_root=output_root,
                 magpie_python=params.get("magpie_python") or None,
                 variant_timeout_sec=int(

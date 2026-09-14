@@ -36,11 +36,13 @@ def coord(session_dir) -> Coordinator:
 
 
 # _framework_config_levers_from_done
-def test_config_levers_non_dict_and_patch_precedence() -> None:
+def test_config_levers_non_dict_and_missing() -> None:
     f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
-    # A patch deliverable is not a config-only outcome.
-    assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
+    # A patch alongside config levers: levers are returned so they can be forwarded
+    # into the same integrate_patch proposal (coupled deliverable, closes D1).
+    levers = f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]})
+    assert levers.get("extra_envs") == {"X": "1"}
     assert f({"proposal_set": "nope"}) == {}
     assert f({}) == {}
 
