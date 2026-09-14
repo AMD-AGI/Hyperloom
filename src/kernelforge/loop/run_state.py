@@ -207,6 +207,10 @@ class RunState:
     # Scoring state that decides keep/revert.
     best_case_times: dict = field(default_factory=dict)
     unscored_cases: list[str] = field(default_factory=list)
+    # What the kernel this campaign started from scored against the anchor above. 1.0 whenever that kernel IS the
+    # anchor, and more when a caller supplied one it was already ahead of, which a resume cannot re-measure because
+    # the workspace has moved on.
+    search_start_mean_case_speedup: float | None = None
     best: BestRecord = field(default_factory=BestRecord)
     stall: StallState = field(default_factory=StallState)
     analysis: AnalysisRefreshState = field(default_factory=AnalysisRefreshState)

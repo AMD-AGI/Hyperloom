@@ -310,7 +310,7 @@ def run_rewrite(
         )
     print(
         f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
-        f"cases={list(preflight.reference_case_ids) or 'unreported'})",
+        f"cases={list(preflight.reference_case_ids)})",
         flush=True,
     )
     print(

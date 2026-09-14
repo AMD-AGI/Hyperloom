@@ -234,12 +234,25 @@ def test_a_hanging_driver_is_stopped_and_named(tmp_path):
 
 
 def test_the_deprecated_timing_key_is_accepted_with_a_warning(tmp_path):
-    spec, driver = _spec(tmp_path, driver_body="print('mean_ms: 3.0')\n")
+    spec, driver = _spec(
+        tmp_path,
+        driver_body="print('case_ms: only_case 3.0')\nprint('mean_ms: 3.0')\n",
+    )
     report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
 
     assert report.ok is True
     assert report.timing_ms == 3.0
     assert "median_ms" in report.warnings[0]
+
+
+def test_a_reference_mode_without_per_case_timings_is_refused(tmp_path):
+    """The source side of every published ratio; an aggregate alone cannot stand in for it."""
+    spec, driver = _spec(tmp_path, driver_body="print('median_ms: 3.0')\n")
+    report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
+
+    assert report.ok is False
+    assert report.failure_class == driver_contract.REF_CASE_TIMINGS_MISSING
+    assert "case_ms" in report.detail
 
 
 # ── candidate probe before porting ───────────────────────────────────────────

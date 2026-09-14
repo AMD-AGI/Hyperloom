@@ -2604,12 +2604,32 @@ class IterationLoop(AnalysisRuntimeMixin):
             self.run_state.baseline_case_times = dict(self._baseline_case_times)
             self.run_state.best_case_times = dict(self._best_case_times)
             self.run_state.unscored_cases = sorted(self._unscored_cases)
+            if self.search_start_mean_case_speedup is not None:
+                self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
             self.state_store.save(self.run_state)
         except Exception:  # noqa: BLE001 - persistence is best-effort
             self.persistence_degraded = True
             self.persistence_errors.append("persist scoring state")
             self.persistence_errors = self.persistence_errors[-10:]
             log.warning("run_state: failed to persist scoring state", exc_info=True)
+
+    def _incumbent_mean_case_speedup(self) -> float:
+        """Score the kernel currently in hand against the anchor every ratio divides by.
+
+        A coverage mismatch is left to propagate: the incumbent's timings and the anchor are both written by this
+        loop over the same case set, so they can only disagree on a checkpoint that no longer describes this
+        campaign, and a KEEP bar guessed from that would admit a regression.
+        """
+        if not self._best_case_times:
+            return 1.0
+        return (
+            calculate_mean_case_speedup(
+                self._best_case_times,
+                self._baseline_case_times,
+                self._unscored_cases,
+            )
+            or 1.0
+        )
 
     def _restore_scoring_state(self) -> None:
         """Rehydrate the keep/revert state recorded by a previous session."""
@@ -2618,6 +2638,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             self._best_case_times = dict(state.best_case_times)
         if state.unscored_cases:
             self._unscored_cases = {str(case_id) for case_id in state.unscored_cases}
+        # A resume cannot re-measure the kernel the campaign started from -- the workspace holds the incumbent now --
+        # so the score that anchors every ratio this session publishes has to come back from the checkpoint.
+        if state.search_start_mean_case_speedup is not None:
+            self.search_start_mean_case_speedup = state.search_start_mean_case_speedup
         self._scoring_state_restored = True
         if state.best_case_times:
             print(f"  [run-state] restored scoring state: {len(self._best_case_times)} case(s)")
@@ -4536,13 +4560,15 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self.ic.pristine_baseline_wall_ms is None:
             self.ic.pristine_baseline_wall_ms = self.ic.baseline_wall_ms
 
-        # The scoring model defines the anchor as 1.0x, so the kernel the search starts from scores 1.0 whenever it is
-        # the anchor. With a caller-supplied anchor it is not: the incumbent is already ahead of it, and starting the
-        # bar at 1.0 would KEEP a candidate that loses to the kernel this run began with.
+        # The bar a candidate has to clear is whatever the incumbent scores against the anchor, so it is read off the
+        # incumbent's own per-case times rather than assumed. It comes out at exactly 1.0 when the incumbent IS the
+        # anchor, which is every run that did not supply one. Assuming 1.0 instead would KEEP a candidate that loses
+        # to the kernel the campaign began with, on a fresh run whose anchor came from the caller and on any resume
+        # that has not recorded a KEEP yet.
         if self.ic.baseline_wall_ms is not None:
             self.best_wall_ms = self.ic.baseline_wall_ms
         if self._baseline_case_times:
-            self.best_mean_case_speedup = self.search_start_mean_case_speedup or 1.0
+            self.best_mean_case_speedup = self._incumbent_mean_case_speedup()
 
         # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
         # recorded best commit is still HEAD).

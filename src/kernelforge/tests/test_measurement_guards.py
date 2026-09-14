@@ -1602,3 +1602,43 @@ def test_an_anchor_that_cannot_divide_a_speedup_is_refused(tmp_path, payload):
 def test_a_missing_anchor_file_is_refused(tmp_path):
     with pytest.raises(click.BadParameter):
         _load_external_baseline(str(tmp_path / "absent.json"))
+
+
+def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatch):
+    """The incumbent scores 2.0x against a caller's anchor, so 2.0x is the bar -- not 1.0x."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop.ic.baseline_wall_ms = None
+    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+
+    asyncio.run(loop._measure_baseline())
+
+    assert loop._incumbent_mean_case_speedup() == pytest.approx(2.0)
+
+
+def test_a_resume_restores_the_bar_a_caller_anchor_put_it_at(tmp_path, monkeypatch):
+    """A resume cannot re-bench the kernel the campaign started from, so an assumed 1.0x bar would admit a regression."""
+    source_case_ms = {"a": 10.0, "b": 100.0}
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop.ic.baseline_wall_ms = None
+    loop.run_state = RunState()
+    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+
+    asyncio.run(loop._measure_baseline())
+
+    # What the first session checkpointed is all a later one has to go on.
+    checkpoint = loop.run_state
+    assert checkpoint.search_start_mean_case_speedup == pytest.approx(2.0)
+    assert checkpoint.best_case_times == {"a": 5.0, "b": 50.0}
+
+    later_session = tmp_path / "resumed"
+    later_session.mkdir()
+    resumed, _ = _make_loop(later_session, monkeypatch, baseline_case_times=source_case_ms)
+    resumed.run_state = RunState.from_dict(checkpoint.to_dict())
+    resumed._restore_scoring_state()
+
+    assert resumed.search_start_mean_case_speedup == pytest.approx(2.0)
+    bar = resumed._incumbent_mean_case_speedup()
+    assert bar == pytest.approx(2.0)
+    # A candidate beating the source but losing to the kernel the campaign started from must not clear the bar.
+    assert not beats_current_best(1.5, best_mean_case_speedup=bar)
+    assert beats_current_best(2.5, best_mean_case_speedup=bar)
