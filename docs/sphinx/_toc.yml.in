@@ -37,6 +37,8 @@ subtrees:
         title: AgentKernelArena
   - file: conceptual/optimization-loop.md
     title: Hyperloom optimization loop
+  - file: conceptual/agentx-workload.md
+    title: The AgentX workload
 
 - caption: How to
   entries:
