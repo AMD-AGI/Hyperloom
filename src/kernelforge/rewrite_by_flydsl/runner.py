@@ -31,6 +31,7 @@ from kernelforge.rewrite_by_flydsl.attempt import (
 )
 from kernelforge.rewrite_by_flydsl.kb import (
     RewriteKbReadResult,
+    scored_speedup,
     try_flydsl_kb_warmstart,
     write_flydsl_kb_solution,
 )
@@ -301,6 +302,7 @@ def run_rewrite(
     for warning in preflight.warnings:
         print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
     source_ms = preflight.source_ms
+    source_case_ms = preflight.source_case_ms
     if source_ms is None:
         return _setup_failed(
             "the conforming rewrite driver reported no source baseline",
@@ -308,7 +310,7 @@ def run_rewrite(
         )
     print(
         f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
-        f"cases={list(preflight.reference_case_ids) or 'unreported'})",
+        f"cases={list(preflight.reference_case_ids)})",
         flush=True,
     )
     print(
@@ -325,7 +327,7 @@ def run_rewrite(
                     spec,
                     driver_path,
                     config,
-                    source_ms=source_ms,
+                    source_case_ms=source_case_ms,
                     framework=framework,
                     stop_at_unix=search_stop_unix,
                 )
@@ -409,6 +411,7 @@ def run_rewrite(
     # (5b) Interim result: measure the ported FlyDSL kernel and write the result JSON NOW, reflecting a SUCCESSFUL
     # port (compiled + correct) with the ported kernel's own time as the interim best.
     flydsl_baseline_ms = None
+    flydsl_baseline_speedup = None
     if time.time() < search_stop_unix:
         flydsl_budget = max(1, min(600, int(search_stop_unix - time.time())))
         candidate = driver_contract.preflight_candidate(
@@ -421,6 +424,7 @@ def run_rewrite(
             print(f"  [forge-rewrite] driver contract warning: {warning}", flush=True)
         if candidate.ok:
             flydsl_baseline_ms = candidate.timing_ms
+            flydsl_baseline_speedup = scored_speedup(candidate.case_ms, source_case_ms)
         elif candidate.failure_class in _FATAL_CANDIDATE_FAILURES:
             return _setup_failed(candidate.detail, candidate.failure_class)
         else:
@@ -436,6 +440,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=flydsl_baseline_ms,
+            speedup=flydsl_baseline_speedup,
             best_commit=port_commit,
             framework=framework,
             snr_db=port.snr_db,
@@ -457,7 +462,10 @@ def run_rewrite(
         port_ok=True,
         port_attempts=port.attempts,
         source_ms=source_ms,
-        optimize_result={"best_ms": flydsl_baseline_ms},
+        optimize_result={
+            "best_ms": flydsl_baseline_ms,
+            "mean_case_speedup": flydsl_baseline_speedup,
+        },
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
         llm_usage=_total_usage(),
@@ -504,6 +512,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=payload.get("best_ms"),
+            speedup=payload.get("mean_case_speedup"),
             best_commit=commit,
             framework=framework,
             # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
@@ -534,6 +543,10 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
+            # final result -- already divides by the kernel this rewrite replaced.
+            source_ms=source_ms,
+            source_case_ms=source_case_ms,
             on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:
@@ -551,6 +564,8 @@ def run_rewrite(
     # (7) Report: FlyDSL best vs source baseline.
     if opt.get("best_ms") is None:
         opt = {**opt, "best_ms": flydsl_baseline_ms}
+    if opt.get("mean_case_speedup") is None:
+        opt = {**opt, "mean_case_speedup": flydsl_baseline_speedup}
     if not opt.get("best_commit"):
         opt = {**opt, "best_commit": port_commit}
 
@@ -562,6 +577,7 @@ def run_rewrite(
             config,
             source_ms=source_ms,
             flydsl_best_ms=opt.get("best_ms"),
+            speedup=opt.get("mean_case_speedup"),
             best_commit=final_commit,
             framework=framework,
             # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
@@ -584,6 +600,7 @@ def run_rewrite(
         best_commit=str(opt.get("best_commit") or ""),
         source_ms=source_ms,
         flydsl_best_ms=opt.get("best_ms"),
+        speedup=opt.get("mean_case_speedup"),
         reference_snr_db=port.snr_db,
         deadline_unix=deadline_unix,
         import_modules=applyback_import_modules,

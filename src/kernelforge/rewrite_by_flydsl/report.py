@@ -95,9 +95,8 @@ def build_result(
     # only as flydsl_best_commit.
     best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
 
-    speedup = None
-    if port_ok and source_ms and flydsl_best_ms and flydsl_best_ms > 0:
-        speedup = source_ms / flydsl_best_ms
+    mean_case_speedup = optimize_result.get("mean_case_speedup") if optimize_result else None
+    speedup = mean_case_speedup if port_ok else None
 
     return RewriteResult(
         logical_op_name=op_name,
