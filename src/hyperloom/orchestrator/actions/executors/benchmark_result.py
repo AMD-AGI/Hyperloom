@@ -264,7 +264,12 @@ def harvest_leaked_artifacts(
     # instead averaged baseline, explore and roofline rounds together and described none of them.
     from ._gpu_metrics import write_gpu_metrics
 
-    write_gpu_metrics(destination)
+    try:
+        write_gpu_metrics(destination)
+    except Exception as exc:
+        # Telemetry is a description of the round, not a part of it: failing to describe one must never discard the
+        # measurement it describes, nor the artifacts harvested above.
+        log.warning("benchmark_result.harvest: GPU-metrics write failed: %s", exc)
     return harvested
 
 

@@ -211,6 +211,25 @@ def test_the_harvest_writes_it_for_every_round(tmp_path, monkeypatch):
     assert json.loads((ws / GPU_ARTIFACT_NAME).read_text(encoding="utf-8"))["avg_power_w"] == 476.5
 
 
+def test_a_failed_telemetry_write_does_not_discard_the_harvest(tmp_path, monkeypatch):
+    """Telemetry describes a round; failing to describe one must not discard it.
+
+    Every other harvest step is wrapped, and this one has to be too: a read-only
+    or full workspace would otherwise lose the harvested artifacts as well.
+    """
+    from hyperloom.orchestrator.actions.executors import _gpu_metrics, benchmark_result as br
+
+    monkeypatch.setattr(br, "harvest_mn_gpu_metrics", lambda *_a, **_k: {})
+
+    def explode(_destination):
+        raise OSError("read-only workspace")
+
+    monkeypatch.setattr(_gpu_metrics, "write_gpu_metrics", explode)
+    ws = _round(tmp_path, MAGPIE_BLOCK)
+
+    assert br.harvest_leaked_artifacts(ws) == []
+
+
 def test_the_artifact_is_in_the_package_globs():
     """It lives in the round workspace, which the bundle does not otherwise reach."""
     from hyperloom.inference_optimizer.breakdown.session_package import PACKAGE_GLOBS
