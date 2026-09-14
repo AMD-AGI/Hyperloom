@@ -213,6 +213,94 @@ def test_rocm_devel_headers_absent_on_runtime_only_wheel_stack(tmp_path: Path) -
     assert result.returncode == 1, result.stdout
 
 
+def _run_export_rocm_sdk_toolchain_root(
+    tmp_path: Path, *, root: str, cli_rc: int = 0, path: str = "/usr/bin:/bin"
+) -> subprocess.CompletedProcess[str]:
+    fn_src = _extract_function("export_rocm_sdk_toolchain_root")
+    assert fn_src.strip(), "export_rocm_sdk_toolchain_root() not found in install_baremetal.sh"
+    fake_py = tmp_path / "fake_python"
+    fake_py.write_text('#!/usr/bin/env bash\nprintf "%s" "$FAKE_ROOT"\nexit "$FAKE_CLI_RC"\n')
+    fake_py.chmod(0o755)
+    stub = (
+        'log() { echo "LOG: $*"; }\n'
+        f'export FAKE_ROOT="{root}"\n'
+        f"export FAKE_CLI_RC={cli_rc}\n"
+        f'export PATH="{path}"\n'
+    )
+    script = (
+        f"set -euo pipefail\n{stub}\n{fn_src}\n"
+        f"export_rocm_sdk_toolchain_root '{fake_py}'\n"
+        'echo "ROCM_PATH=${ROCM_PATH:-}"\n'
+        'echo "ROCM_HOME=${ROCM_HOME:-}"\n'
+        'echo "HIP_PATH=${HIP_PATH:-}"\n'
+        'echo "PATH=${PATH}"\n'
+    )
+    env = {"PATH": "/usr/bin:/bin"}
+    return subprocess.run(["bash", "-lc", script], check=False, capture_output=True, text=True, env=env)
+
+
+def _parsed(result: subprocess.CompletedProcess[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        if key in ("ROCM_PATH", "ROCM_HOME", "HIP_PATH", "PATH"):
+            out[key] = value
+    return out
+
+
+def _make_devel_root(tmp_path: Path) -> Path:
+    root = tmp_path / "site" / "_rocm_sdk_devel"
+    (root / "include" / "hipblas").mkdir(parents=True)
+    (root / "bin").mkdir()
+    return root
+
+
+def test_export_rocm_sdk_toolchain_root_pins_devel_root(tmp_path: Path) -> None:
+    root = _make_devel_root(tmp_path)
+
+    result = _run_export_rocm_sdk_toolchain_root(tmp_path, root=str(root))
+
+    assert result.returncode == 0, result.stderr
+    env = _parsed(result)
+    assert env["ROCM_PATH"] == str(root)
+    assert env["ROCM_HOME"] == str(root)
+    assert env["HIP_PATH"] == str(root)
+    assert env["PATH"] == f"{root}/bin:/usr/bin:/bin"
+
+
+def test_export_rocm_sdk_toolchain_root_noop_on_standard_rocm_image(tmp_path: Path) -> None:
+    # `python -m rocm_sdk` is not importable outside TheRock's wheel layout.
+    result = _run_export_rocm_sdk_toolchain_root(tmp_path, root="", cli_rc=1)
+
+    assert result.returncode == 0, result.stderr
+    env = _parsed(result)
+    assert env["ROCM_PATH"] == ""
+    assert env["ROCM_HOME"] == ""
+    assert env["HIP_PATH"] == ""
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
+def test_export_rocm_sdk_toolchain_root_ignores_root_without_headers(tmp_path: Path) -> None:
+    bare = tmp_path / "bare-root"
+    bare.mkdir()
+
+    result = _run_export_rocm_sdk_toolchain_root(tmp_path, root=str(bare))
+
+    assert result.returncode == 0, result.stderr
+    env = _parsed(result)
+    assert env["ROCM_PATH"] == ""
+    assert env["PATH"] == "/usr/bin:/bin"
+
+
+def test_export_rocm_sdk_toolchain_root_does_not_duplicate_path_entry(tmp_path: Path) -> None:
+    root = _make_devel_root(tmp_path)
+
+    result = _run_export_rocm_sdk_toolchain_root(tmp_path, root=str(root), path=f"{root}/bin:/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert _parsed(result)["PATH"] == f"{root}/bin:/usr/bin:/bin"
+
+
 def _run_ensure_rocm_devel_headers(
     tmp_path: Path,
     *,
@@ -249,6 +337,7 @@ rocm_devel_headers_present() {{
   fi
   {"return 0" if headers_present_after else "return 1"}
 }}
+export_rocm_sdk_toolchain_root() {{ echo "EXPORT-ROOT"; }}
 """
     script = f"set -uo pipefail\n{stub}\n{fn_src}\nensure_rocm_devel_headers '{fake_py}'\n"
     return subprocess.run(["bash", "-lc", script], check=False, capture_output=True, text=True)
@@ -259,6 +348,7 @@ def test_ensure_rocm_devel_headers_noop_when_headers_already_present(tmp_path: P
     assert result.returncode == 0, result.stderr
     assert "PIP:" not in result.stdout
     assert "INIT:" not in result.stdout
+    assert "EXPORT-ROOT" in result.stdout
 
 
 def test_ensure_rocm_devel_headers_warns_when_rocm_is_not_wheel_based(tmp_path: Path) -> None:
@@ -266,6 +356,7 @@ def test_ensure_rocm_devel_headers_warns_when_rocm_is_not_wheel_based(tmp_path: 
     assert result.returncode == 0, result.stderr
     assert "not wheel-based" in result.stderr
     assert "PIP:" not in result.stdout
+    assert "EXPORT-ROOT" not in result.stdout
 
 
 def test_ensure_rocm_devel_headers_pins_devel_to_installed_core_version(tmp_path: Path) -> None:
@@ -275,6 +366,7 @@ def test_ensure_rocm_devel_headers_pins_devel_to_installed_core_version(tmp_path
     assert "--index-url https://index.example/whl" in result.stdout
     assert "INIT: -m rocm_sdk init" in result.stdout
     assert "ROCm devel headers ready" in result.stdout
+    assert "EXPORT-ROOT" in result.stdout
 
 
 def test_ensure_rocm_devel_headers_warns_and_continues_when_pip_fails(tmp_path: Path) -> None:
@@ -303,3 +395,4 @@ def test_ensure_rocm_devel_headers_warns_when_headers_still_missing_after_init(t
     )
     assert result.returncode == 0, result.stderr
     assert "still not found" in result.stderr
+    assert "EXPORT-ROOT" not in result.stdout

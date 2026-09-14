@@ -322,14 +322,28 @@ sys.exit(0 if any(
 PY
 }
 
+# torch's cpp_extension defaults ROCM_HOME to _rocm_sdk_core, whose include tree
+# carries no hipBLAS/hipSPARSE/thrust; pin it to the authoritative devel root.
+export_rocm_sdk_toolchain_root() {
+  local py="$1" root
+  root="$("$py" -m rocm_sdk path --root 2>/dev/null)" || return 0
+  [ -n "$root" ] && [ -d "${root}/include" ] || return 0
+  export ROCM_PATH="$root" ROCM_HOME="$root" HIP_PATH="$root"
+  case ":${PATH}:" in
+    *":${root}/bin:"*) ;;
+    *) export PATH="${root}/bin:${PATH}" ;;
+  esac
+  log "ROCm toolchain root: ${root}"
+}
+
 # TheRock's wheel-packaged ROCm ships hipBLAS/hipSPARSE/thrust headers only in
 # rocm-sdk-devel, archived until `rocm-sdk init` expands them. Best-effort:
 # no-ops when headers are already present or ROCm is not wheel-based, and warns
 # instead of failing so the build itself reports the real error.
 ensure_rocm_devel_headers() {
   local py="$1" core_ver
-  rocm_devel_headers_present "$py" && return 0
-  core_ver="$("$py" - <<'PY' 2>/dev/null
+  if ! rocm_devel_headers_present "$py"; then
+    core_ver="$("$py" - <<'PY' 2>/dev/null
 try:
     import importlib.metadata as meta
     print(meta.version("rocm-sdk-core"))
@@ -337,24 +351,26 @@ except Exception:
     pass
 PY
 )"
-  if [ -z "$core_ver" ]; then
-    warn "hipBLAS headers not found and ROCm is not wheel-based; source builds need a ROCm devel package."
-    return 0
-  fi
-  log "installing rocm-sdk-devel==${core_ver} from ${ROCM_SDK_INDEX_URL} for source-build headers"
-  if ! "$py" -m pip install "rocm-sdk-devel==${core_ver}" --index-url "$ROCM_SDK_INDEX_URL"; then
-    warn "could not install rocm-sdk-devel==${core_ver}; source builds may fail on missing headers"
-    return 0
-  fi
-  if ! "$py" -m rocm_sdk init; then
-    warn "rocm-sdk init failed; devel headers stay archived"
-    return 0
-  fi
-  if rocm_devel_headers_present "$py"; then
+    if [ -z "$core_ver" ]; then
+      warn "hipBLAS headers not found and ROCm is not wheel-based; source builds need a ROCm devel package."
+      return 0
+    fi
+    log "installing rocm-sdk-devel==${core_ver} from ${ROCM_SDK_INDEX_URL} for source-build headers"
+    if ! "$py" -m pip install "rocm-sdk-devel==${core_ver}" --index-url "$ROCM_SDK_INDEX_URL"; then
+      warn "could not install rocm-sdk-devel==${core_ver}; source builds may fail on missing headers"
+      return 0
+    fi
+    if ! "$py" -m rocm_sdk init; then
+      warn "rocm-sdk init failed; devel headers stay archived"
+      return 0
+    fi
+    if ! rocm_devel_headers_present "$py"; then
+      warn "rocm-sdk-devel installed but hipBLAS headers still not found"
+      return 0
+    fi
     log "ROCm devel headers ready"
-  else
-    warn "rocm-sdk-devel installed but hipBLAS headers still not found"
   fi
+  export_rocm_sdk_toolchain_root "$py"
 }
 
 check_torch_rocm_shared_libs() {
@@ -2315,6 +2331,7 @@ _default_workspace_root() {
   local py_for_env
   if py_for_env="$(resolve_python 2>/dev/null)"; then
     export_virtualenv_for_python "$py_for_env"
+    export_rocm_sdk_toolchain_root "$py_for_env"
   fi
 
   if [ "$VERIFY_HOTFIX_ONLY" -eq 1 ]; then
