@@ -447,6 +447,31 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "discovery_retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
                 "authoring_enabled": bool(getattr(state, "framework_agent_authoring_enabled", False)),
             },
+            # Per-lever thresholds (C6) alongside the legacy arm sub-objects.
+            "per_lever": {
+                "config": {
+                    "keep_gain_threshold_pct": overrides.get(
+                        "config_lever_keep_gain_pct",
+                        _phase_state.DEFAULT_PLATEAU_CONFIG_LEVER_KEEP_GAIN_PCT,
+                    ),
+                    "empty_streak_threshold": overrides.get(
+                        "config_lever_empty_streak",
+                        _phase_state.DEFAULT_PLATEAU_CONFIG_LEVER_EMPTY_STREAK,
+                    ),
+                },
+                "source_patch": {
+                    "no_keep_streak_threshold": overrides.get(
+                        "source-patch_no_keep_streak",
+                        _phase_state.DEFAULT_PLATEAU_SOURCE_PATCH_NO_KEEP_STREAK,
+                    ),
+                },
+                "upstream_pr": {
+                    "no_keep_streak_threshold": overrides.get(
+                        "upstream-pr_no_keep_streak",
+                        _phase_state.DEFAULT_PLATEAU_UPSTREAM_PR_NO_KEEP_STREAK,
+                    ),
+                },
+            },
         }
 
     def _close_framework_timeline(self, *, exit_reason: str = "", evidence: dict | None = None) -> None:

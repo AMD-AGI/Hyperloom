@@ -91,7 +91,9 @@ def config_attempts(breakdown: dict[str, Any]) -> list[tuple[dict[str, Any], dic
             str(row.get("proposal_id") or ""): row for row in dict_rows(ext.get("proposals")) if row.get("proposal_id")
         }
         for attempt in dict_rows(ext.get("attempts")):
-            if str(attempt.get("arm") or "") != "config":
+            # Use lever_kind when available (C6); fall back to arm for legacy rows.
+            lever = str(attempt.get("lever_kind") or attempt.get("arm") or "")
+            if lever != "config":
                 continue
             pairs.append((attempt, as_dict(proposals.get(str(attempt.get("proposal_ref") or "")))))
     return pairs
