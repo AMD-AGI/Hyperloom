@@ -89,8 +89,9 @@ For a multi-file operator or a whole repository (for example AITER), add
 `--source-files a.py,b.hip,...`. Those paths seed orientation, profiling and
 knowledge-base identity; `--kernel` stays the anchor.
 
-To port Triton/FlyDSL to ASM and then optimize only `.s`, use `--kernel-backend assembly` with
-the original Python launcher as the anchor. See
+To optimize compiler-emitted ASM, use `--kernel-backend assembly` with the original
+Python launcher as the anchor. Automatic capture currently supports a single explicit
+FlyDSL compile call. It can follow a source-language campaign as an optional second stage. See
 {doc}`Assembly candidates </kernelforge/how-to/assembly>` for the compiler,
 launcher, and measurement contract.
 

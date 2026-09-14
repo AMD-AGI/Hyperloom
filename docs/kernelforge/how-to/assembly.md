@@ -1,7 +1,7 @@
 ---
 myst:
   html_meta:
-    "description": "Port a kernel to verified AMDGPU assembly, then optimize only its .s in the existing Forge loop."
+    "description": "Optimize compiler-emitted AMDGPU assembly through the original kernel launcher."
 ---
 
 <!--
@@ -11,10 +11,10 @@ SPDX-License-Identifier: MIT
 
 # Assembly campaigns
 
-Use the existing `forge-loop --kernel-backend assembly`. The host runs a
-correctness-only PORT phase before optimization; there is no separate ASM
-rewrite command. The current scope is one Python Triton/FlyDSL entry point and
-one complete AMDHSA `.s`, or an existing standalone ASM implementation.
+Use `forge-loop --kernel-backend assembly` to optimize the current implementation's
+compiler-emitted instructions. There is no LLM PORT phase or separate rewrite
+command. The host exports the assembly, connects rebuilding to the original
+launcher and validates that path before the optimizer edits `.s`.
 
 ```bash
 kernelforge forge-loop \
@@ -23,90 +23,127 @@ kernelforge forge-loop \
   --max-hours 1 --git-branch forge-assembly
 ```
 
-## PORT: establish a callable, correct assembly implementation
+## Optional optimization after a source backend
 
-The workspace must have its source, driver and independent reference committed.
-The original driver must validate the original source and supply per-case
-benchmarks. An oracle that simply imports the editable kernel as its reference
-is insufficient; make the reference independent before starting a campaign.
+Source optimization and instruction optimization address different decisions:
 
-The host saves the source under `forge_experiments/assembly_port/`, measures it,
-and lets a correctness-only agent replace `kernel.py` with launch glue and
-create sibling `kernel.s`. Use `--source-files path/to/selected.s` to select a
-different single ASM path. Compiler output or an attributed handwritten seed
-can supply the initial instructions. The agent preserves the public API and
-implements the argument ABI, symbol, grid, block, LDS, device and stream through
-`kernelforge.assembly.compiler.assemble` and `kernelforge.assembly.hip.HipKernel`.
-All other tracked files and the saved original source are protected.
-
-The host checks complete AMDHSA metadata and target, runs the unchanged driver
-and the task's `config.yaml` acceptance suite when present, and deliberately
-injects an assembler error. A fresh driver must fail with that error; restoring
-the `.s` must pass again. This verifies the build path, not arbitrary Python
-semantics: review the launcher and use an independent oracle and wrong-result
-negative controls as well. Compilation and module loading belong outside timing
-and graph capture; retain each loaded module while its graphs can run.
-
-A correct port may be slower. The host benchmarks it over the complete source
-case set and commits the launcher plus ASM before optimization. An existing
-standalone launcher/ASM pair follows the same validation and can skip the LLM.
-Failed preparation restores the original input files and does not start the
-optimizer. PORT shares the campaign deadline and makes at most three attempts.
-
-## OPTIMIZE: edit only the declared .s
-
-Only the selected assembly file is editable. The launcher, original reference,
-driver and other tracked files are frozen through the normal workspace and
-session integrity guards, including when in-session performance gating is off.
-ABI, specialization and launch geometry stay fixed. New files are not accepted.
-
-The ordinary Forge loop performs correctness, repeated timing, KEEP/REVERT and
-export. Source timings remain the pristine baseline, and the verified port is
-the initial incumbent even if it is slower. The result includes `assembly_port`
-with source/initial ASM timings and hashes; regular loop artifacts carry the
-optimized ASM measurement. Do not attribute source-level tiling or fusion gains
-to instruction edits. Algorithm/layout changes require a separate source
-campaign followed by a fresh PORT.
-
-The export base remains the original source commit, so exports include both
-launcher and `.s`, including when no later ASM candidate is kept. Resume requires
-the matching PORT record and unchanged launcher. Whole-implementation KB
-warm-start patches and `--return-after-read-kb` are unavailable for assembly;
-such patches could replace the verified launcher. The normal knowledge maps
-remain available to the agent.
-
-## Minimal example and validation
-
-The [AttnRes score example](../../../examples/triton2asm-attnres/README.md)
-ports one Triton operator using Neha's attributed ASM seed, then optimizes `.s`.
-It includes an independent FP64 oracle, fixed cases and a HIP launcher. It is
-specialized to gfx950 and makes no speedup claim. The optional GPU regression
-covers real PORT, build-error and wrong-result rejection, streams, graph replay
-and clean export replay:
-
-```bash
-pytest -q src/kernelforge/tests/test_assembly_hip_gpu.py
+```text
+original kernel -> source backend optimization -> best source implementation
+                                                    |
+                                  optional assembly campaign
+                                                    |
+                         compiler output -> rebuild/validate -> edit .s
+                                                    |
+                                  KEEP winner or retain best source
 ```
 
-CPU tests cover phase transitions, frozen files, failed preparation, resume,
-source-relative scoring and compiler/loader contracts. GPU tests require ROCm
-PyTorch and compatible hardware; a skip is not GPU validation.
+Start the second campaign from the first campaign's selected source commit in
+a fresh workspace with the same independent driver. Its timings become the
+assembly campaign's original baseline. The two campaigns have separate budgets
+and records; Forge does not automatically run a second stage after every backend.
+`forge-rewrite-by-flydsl` keeps its semantic translation PORT phase. Its selected
+FlyDSL result can subsequently enter an assembly campaign if it meets the
+adapter contract.
+
+| Input | Current support |
+| --- | --- |
+| FlyDSL with one explicit `flydsl.compiler.compile(...)` call | Automatic capture and replacement, using the original compiled-function ABI. |
+| Existing `.s` with a working launcher | Verify its rebuild path and optimize the selected `.s`. |
+| Triton / Gluon | Automatic extraction and replacement adapter not implemented. |
+| HIP / CK / AITER / hipBLASLt / fusion | Require an explicitly extracted kernel and matching launcher; no general library-binary replacement. An individual AITER FlyDSL kernel can meet the FlyDSL contract. |
+
+That all these implementations eventually execute machine code does not make
+their packaging, specialization, ABI or dispatch interchangeable. Only add a
+backend adapter when it can export and replace the actual executed kernel.
+
+## Programmatic preparation
+
+Commit the source, driver, and independent reference before starting. For automatic
+capture, the Python module must have one direct FlyDSL compile call using a module
+import or an imported `compile` alias. Compile hints via subscripting, multiple
+compile sites and multiple specializations are currently rejected. Extract a
+minimal single-specialization entry rather than generating another algorithm.
+
+The host measures and saves the original source, then mechanically wraps only
+the compile call. It captures `*_final_isa.s` from FlyDSL's compiler using private
+dump/cache directories. It does not generate instructions with an LLM. The final
+binding rebuilds that file with ROCm LLVM and replaces the GPU object through
+`kernelforge.assembly.flydsl.with_assembly`. The frontend definitions, host launch
+logic, call arguments and stream forwarding remain in place. The binding belongs
+at the existing compilation boundary, outside timing and graph capture.
+
+The source IR fingerprint in `kernel.s.json` binds the assembly to one compiled
+specialization, ignoring debug locations so the patch can be relocated. Different
+specializations fail explicitly. The current adapter requires a self-contained,
+single-target `gpu.binary`; extern links, post-load processors and explicit-module
+artifacts are unsupported. FlyDSL's dump must be available; an external compiler
+mode that does not emit ISA is rejected instead of substituting disassembly.
+
+The host runs the unchanged driver's correctness suite and the task's canonical
+`config.yaml` commands. It also inserts a deliberate assembler error, requires a
+fresh driver to propagate it, and tests a no-op assembly negative control.
+The driver must reject that no-op before restoration validates again. FlyDSL
+`compile(...)` executes the source once during compilation, so the driver must
+exercise the returned candidate on fresh outputs beyond that warmup. Missing source,
+failed builds and invalid candidates never fall back to the frontend. These checks
+verify integration as well as numerical correctness; the original compiler's
+correctness alone cannot prove the replacement was loaded.
+
+`forge_experiments/assembly_preparation/result.json` records source and roundtrip
+timings, source/launcher/assembly hashes, the binding manifest, and preparation
+commit. Preparation failures restore the original files and Git state. Resume
+requires that record and an unchanged launcher/manifest. Old PORT campaign records
+are not migrated; start a fresh campaign from their selected source instead.
+
+## Assembly-only search and result selection
+
+Only the declared `.s` is editable. The frontend, launcher, provenance manifest,
+driver, ABI, launch geometry and specialization are frozen. To select an explicit
+existing assembly path, use `--source-files path/to/kernel.s`. The build-error probe
+must prove the driver actually consumes it. Whole-implementation KB warm starts
+are disabled because they could replace the verified binding; knowledge maps
+remain available to guide instruction edits.
+
+The original source timings remain the scoring incumbent at 1.0x. The unmodified
+roundtrip is diagnostic evidence, not a KEEP, even if noise makes its measurement
+look faster. A candidate must pass the normal repeated-measurement KEEP rule and
+also beat the original aggregate time. If none does, the result selects the
+original commit (`selected_implementation: original`) and publishes no assembly
+solution patch. The prepared search workspace remains available for resume.
+With a KEEP, the cumulative patch includes the mechanical binding, manifest and
+edited `.s`, so a fresh checkout can rebuild it without campaign caches.
+
+Timing noise and integration overhead can make measured roundtrip time differ
+from the source. Investigate substantial differences. Keeping the original as
+an alternative prevents choosing a measured regression; it is not a guarantee
+that every future run has a speedup. Kernel results also do not establish E2E gains.
+
+## Minimal example and tests
+
+The [FlyDSL vector-add example](../../../examples/flydsl2asm-vector-add/README.md)
+has one specialization, an independent exact oracle, changed inputs, a nondefault
+stream and graph replay. It demonstrates compiler capture and instruction edits,
+without a handwritten seed or a performance claim.
+
+```bash
+pytest -q src/kernelforge/tests/test_assembly_campaign_gpu.py \
+  src/kernelforge/tests/test_assembly_flydsl_gpu.py
+```
+
+These optional tests require ROCm PyTorch, FlyDSL and a compatible GPU. They verify
+build-failure and wrong-result rejection and replay the complete patch in a clean
+checkout. A skip is not GPU validation. CPU tests cover capture provenance,
+specialization refusal, frozen files, rollback, result selection and resume.
 
 ## Lower-level helpers
 
 `python -m kernelforge.assembly assemble --source kernel.s --output build/kernel.hsaco
 --gpu-target gfx950 --toolchain-dir /opt/rocm/llvm/bin` invokes `llvm-mc` and
-`ld.lld`. Supply full source with descriptors/metadata, not instruction-only
-`llvm-objdump` output. No arguments or launch geometry are inferred. Errors
-propagate; a stale binary must never substitute for a failed build.
+`ld.lld`. Supply complete AMDHSA source with descriptors and metadata, not an
+instruction-only disassembly. Preserve target features such as `xnack`/`sramecc`.
 
-`HipKernel` accepts explicit `ptr`, `i32`, `u32`, `i64`, `u64`, `f32` and `f64`
-arguments and an explicit HIP stream. Initialize the intended device before
-loading and call `close()` only after synchronization and graph retirement.
-
-The existing `kernelforge.assembly.flydsl.with_assembly` helper preserves a
-FlyDSL 0.2.0/0.2.4 compiled-function launcher while replacing its GPU object.
-It is a lower-level roundtrip adapter, separate from the standalone HIP PORT
-contract above. Its optional regressions are `test_assembly_flydsl_gpu.py` and
-`test_assembly_aiter_moe_gpu.py`. It does not make Triton/HIP callables compatible
-with FlyDSL. `forge-rewrite-by-flydsl` retains its existing FlyDSL contract.
+`HipKernel` loads standalone code with explicit argument types, launch geometry
+and HIP stream. `with_assembly` retains a FlyDSL compiled function's launcher and
+call specification while creating an independently owned execution engine. Both
+require compilation/loading before capture and module lifetime through graph
+retirement. Neither infers a universal ABI for arbitrary frontend kernels.

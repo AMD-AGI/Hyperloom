@@ -2,7 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
-updated: 2026-09-12
+updated: 2026-09-14
 ---
 
 <!--
@@ -14,20 +14,28 @@ SPDX-License-Identifier: MIT
 
 Use assembly to test a specific compiler limitation: instruction scheduling,
 register pressure, spills, barriers, or waits. Structural changes belong first
-in a separate FlyDSL, Triton/Gluon, or HIP campaign; start a fresh PORT after
+in a separate FlyDSL, Triton/Gluon, or HIP campaign; recapture compiler output after
 such a change. Inside an assembly optimization loop, only its selected `.s` is editable. Read the actual GPU's ISA and memory-ordering documentation from
 the hardware knowledge map before changing synchronization or register usage.
 
 ## Campaign phase contract
 
-`forge-loop --kernel-backend assembly` first validates a standalone HIP PORT,
-then freezes its launcher/reference/driver and permits only the selected `.s`
-to change. Source-language maps explain the input during PORT; they do not permit
-high-level fallback during optimization. A deliberate assembly build failure
-must propagate through the driver. Record source, initial ASM and optimized ASM
-separately. The FlyDSL adapter below remains a low-level helper, not the
-standalone campaign launcher contract. The minimal runnable example is
-`examples/triton2asm-attnres/`.
+`forge-loop --kernel-backend assembly` captures compiler output programmatically,
+verifies rebuilding/loading through the existing launcher, and permits only the
+selected `.s` to change. There is no correctness-only LLM rewrite or default
+handwritten seed. Automatic capture currently supports one explicit
+`flydsl.compiler.compile(...)` call and one specialization; unsupported frontends
+must first supply a verified assembly binding. Do not improvise a source rewrite.
+The minimal example is `examples/flydsl2asm-vector-add/`.
+
+A source backend can run first, then its best implementation can enter a fresh
+assembly campaign as an optional second stage. Keep its source result as the
+baseline. Do not run this stage unconditionally for every language: Triton/Gluon,
+HIP and operator libraries need distinct extraction/replacement adapters.
+A deliberate build failure must propagate through the protected driver, and a
+no-op assembly must fail correctness on fresh outputs beyond compiler warmup. Record
+source, unchanged roundtrip and optimized ASM separately. Preparation is not a
+KEEP; return the source when instruction optimization has no accepted benefit.
 
 ## Case knowledge: Neha / Evolve
 
@@ -170,18 +178,19 @@ work with Triton or HIP callables.
 
 1. Measure the original high-level implementation with the protected driver.
 2. Run the unmodified assembly through the same callable contract. Require the
-   complete correctness suite before optimizing. Record timing even when the
-   port is slower; PORT does not require speedup or timing parity.
+   complete correctness suite before optimizing. Record roundtrip timing; investigate
+   regressions in the binding instead of assuming compilation implies timing parity.
+   The original implementation remains the scoring incumbent.
 3. Make one instruction change and rerun correctness, graph-capture
    verification, per-case timing, and relevant counters. Keep the same inputs,
    dtype, tolerances, stream, launch dimensions, and measurement method.
 4. Before trusting the route, use a disposable negative control that changes
    the output and confirm the unchanged oracle rejects it. Restore that edit.
 5. Keep the launcher and `.s` in source control together. Use explicit
-   source paths during PORT; the host tracks the verified launcher and `.s`.
-   During OPTIMIZE, only the selected `.s` uses the existing KEEP/REVERT path. Do not commit temporary `.o`,
+   source paths during preparation; the host tracks the binding, provenance manifest
+   and compiler-emitted `.s`. During optimization, only the selected `.s` uses the existing KEEP/REVERT path. Do not commit temporary `.o`,
    `.hsaco`, IR dumps, compiler caches, or benchmark logs.
 
 Assembly does not guarantee a speedup. Report parity, regression, and variance
 as measured. When the limiting factor is an algorithm or layout, start a separate
-high-level campaign, regenerate assembly, and repeat PORT correctness validation.
+high-level campaign, regenerate assembly, and repeat roundtrip validation.

@@ -75,7 +75,7 @@ def forge_loop_prompts(monkeypatch):
 # else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
-    "assembly": "1dd4391c3468f37a9e0f37955977bc3252a5aecb0618abd20fba51a3d16481f9",
+    "assembly": "975d5e689bdb669c48dd502aea82a92e7ecb3071d530b1e6bbd43535d274104d",
     "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
     "flydsl": "4d5243fbaa2359693462baabcc1a7c24c102f895eda98cc2c10243f8ab8d26b9",
     "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
@@ -164,8 +164,8 @@ class TestEditSurfaceAndSweepContract:
     def test_assembly_has_a_fixed_edit_surface(self, forge_loop_prompts):
         prompt = forge_loop_prompts["assembly"]
         assert "Only the task's declared .s file is editable" in prompt
-        assert "launcher, source reference, driver, ABI and specialization are frozen" in prompt
-        assert "Correctness is required; a speedup is not required during PORT" in prompt
+        assert "Python launcher, binding manifest, driver, ABI and specialization are frozen" in prompt
+        assert "There is no LLM PORT phase and no handwritten replacement seed" in prompt
         assert "FLOOR, not a ceiling" not in prompt
         assert "FORGE_SWEEP_" not in prompt
 

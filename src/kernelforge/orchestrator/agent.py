@@ -153,14 +153,14 @@ def make_agent_fn(
     target_functions = [f for f in (target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
     if kernel_backend_name == "assembly" and not correctness_only:
-        from kernelforge.assembly.port import frozen_paths
+        from kernelforge.assembly.prepare import frozen_paths
 
         assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
         if not assembly_files:
-            raise ValueError("assembly optimization requires a verified .s target from PORT")
+            raise ValueError("assembly optimization requires a verified .s target from preparation")
         extra_protected_paths = list(extra_protected_paths or []) + frozen_paths(config.workspace, assembly_files)
-        port_dir = Path(config.workspace) / "forge_experiments" / "assembly_port"
-        extra_protected_paths.extend(str(path) for path in port_dir.glob("*") if path.is_file())
+        preparation_dir = Path(config.workspace) / "forge_experiments" / "assembly_preparation"
+        extra_protected_paths.extend(str(path) for path in preparation_dir.glob("*") if path.is_file())
         commit_new_paths = []
         source_files = assembly_files
         is_repo_task = False

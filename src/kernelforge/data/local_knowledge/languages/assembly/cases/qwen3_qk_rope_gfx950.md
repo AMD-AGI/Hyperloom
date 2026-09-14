@@ -22,7 +22,7 @@ scheduling, as recorded below.
 
 Historical source at Hyperloom commit `a7f41272b0b2ee8a312e94ef1132d9f3543281e0`,
 under `examples/qwen3-qk-assembly/`, contains the following files. This model
-integration is outside the minimal PORT example shipped by this PR:
+integration is outside the compiler-output example shipped by this PR:
 
 - `forge_qwen3_assembly/qk_norm_rope.s`: complete handwritten AMDHSA source.
 - `forge_qwen3_assembly/kernel.py`: shape/layout checks, assembly build, and

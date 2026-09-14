@@ -2304,6 +2304,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,
+        kernel_backend="",
         kernel_file="kernel.py",
         source_files=[],
         target_functions=[],
@@ -2480,7 +2481,8 @@ async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(tmp
 
 
 @pytest.mark.asyncio
-async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypatch):
+@pytest.mark.parametrize("kernel_backend,expected_keep", [("", True), ("assembly", False)])
+async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypatch, kernel_backend, expected_keep):
     loop, _benchmark_calls = _measurement_loop(
         monkeypatch,
         {
@@ -2501,9 +2503,11 @@ async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypat
         },
     )
 
+    loop.ic.kernel_backend = kernel_backend
+    loop.ic.pristine_baseline_wall_ms = 1.0
     result = await loop.run_one_iteration(1)
 
-    assert result.kept is True
+    assert result.kept is expected_keep
     assert result.bench_detail["mean_case_speedup"] == pytest.approx((2.0 + 2.0 / 3.0) / 2.0)
 
 

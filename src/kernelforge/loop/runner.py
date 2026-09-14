@@ -3774,6 +3774,11 @@ class IterationLoop(AnalysisRuntimeMixin):
             sigma_sample_size=sigma_resolution.sample_size,
         )
 
+        if improved and self.ic.kernel_backend == "assembly":
+            # A second-stage ASM result must also beat the original caller's aggregate time.
+            source_ms = self.ic.pristine_baseline_wall_ms
+            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
+
         # Step 7: the arena's own verdict.
         if improved:
             canonical_started = time.time()
