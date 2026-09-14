@@ -1307,7 +1307,7 @@ def materialize_config_with_envs(
         # (matches _multi_node_server_lifecycle).
         from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
 
-        is_sglang = not is_atom and "vllm" not in fw
+        is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
         if patch_attempted:
