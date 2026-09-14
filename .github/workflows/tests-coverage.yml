@@ -358,6 +358,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}
+          overwrite: true
           path: |
             .coverage.shard${{ matrix.shard }}
             shard-status/*.outcome
@@ -391,6 +392,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: durations-shard${{ matrix.shard }}
+          overwrite: true
           path: .test_durations.shard${{ matrix.shard }}
           include-hidden-files: true
           retention-days: 1
