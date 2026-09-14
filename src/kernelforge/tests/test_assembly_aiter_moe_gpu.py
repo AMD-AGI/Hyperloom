@@ -107,7 +107,7 @@ def test_aiter_w4a16_roundtrip_rejects_wrong_silu_and_rebinds_arguments(tmp_path
     sources = list((tmp_path / "dumps").rglob("*_final_isa.s"))
     assert len(sources) == 1
     assembly = sources[0].read_text()
-    target = re.search(r'\.amdgcn_target\s+"amdgcn-amd-amdhsa--([^\"]+)"', assembly)
+    target = re.search(r'\.amdgcn_target\s+"amdgcn-amd-amdhsa-(?:unknown)?-([^\"]+)"', assembly)
     assert target is not None
     options = {"gpu_target": target[1], "toolchain_dir": toolchain}
     source = tmp_path / "candidate.s"

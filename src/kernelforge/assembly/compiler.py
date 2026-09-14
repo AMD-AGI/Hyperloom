@@ -14,7 +14,9 @@ import time
 from pathlib import Path
 
 _TARGET = re.compile(r"gfx[0-9][0-9a-f]{2,3}(?::(?:xnack|sramecc)[+-])*")
-_TARGET_DIRECTIVE = re.compile(r'^\s*\.amdgcn_target\s+"amdgcn-amd-amdhsa--([^"\n]+)"', re.MULTILINE)
+_TARGET_DIRECTIVE = re.compile(
+    r'^\s*\.amdgcn_target\s+"(?P<triple>amdgcn-amd-amdhsa-(?:unknown)?)-(?P<target>[^"\n]+)"', re.MULTILINE
+)
 
 
 class AssemblyError(RuntimeError):
@@ -45,7 +47,7 @@ def _validate_source(source_text: str, gpu_target: str) -> tuple[str, dict[str, 
                 f"Missing .{directive}: supply complete compiler-generated AMDHSA assembly, "
                 "including kernel descriptors and metadata; instruction-only disassembly cannot be reassembled."
             )
-    targets = _TARGET_DIRECTIVE.findall(source_text)
+    targets = [match["target"] for match in _TARGET_DIRECTIVE.finditer(source_text)]
     if len(targets) != 1:
         raise AssemblyError("Expected exactly one .amdgcn_target directive for amdgcn-amd-amdhsa")
     if _target_parts(targets[0]) != expected:
@@ -134,7 +136,8 @@ def assemble(
         relocatable = staging / "kernel.o"
         code_object = staging / "kernel.hsaco"
         staged_source.write_bytes(source_bytes)
-        command = [str(assembler), "-triple=amdgcn-amd-amdhsa", f"-mcpu={cpu}", "-filetype=obj"]
+        triple = _TARGET_DIRECTIVE.search(source_text)["triple"].rstrip("-")
+        command = [str(assembler), f"-triple={triple}", f"-mcpu={cpu}", "-filetype=obj"]
         if features:
             command.append("-mattr=" + ",".join(setting + name for name, setting in sorted(features.items())))
         command.extend([str(staged_source), "-o", str(relocatable)])
