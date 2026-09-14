@@ -261,14 +261,37 @@ export_virtualenv_for_python() {
   fi
 }
 
-# TheRock's pip-packaged ROCm splits libraries across two namespace packages,
-# with host-math under a subdir the dynamic loader does not search by
-# default. Mirrors _rocm_sdk_wheel_lib_dirs() in cli/preflight.py, which
-# applies this at actual launch; done here too so this check does not
-# false-negative on a stack that will resolve correctly at runtime. No-ops
-# (prints nothing) on a standard /opt/rocm image, where neither package
-# exists.
+# TheRock's pip-packaged ROCm splits libraries across up to three namespace
+# packages (_rocm_sdk_core, _rocm_sdk_libraries, _rocm_sdk_devel; which ones
+# are installed depends on the wheel's build profile), with some libraries
+# nested under subdirs the dynamic loader does not search by default. Mirrors
+# _rocm_sdk_wheel_lib_dirs() in cli/preflight.py, which applies this at
+# actual launch; done here too so this check does not false-negative on a
+# stack that will resolve correctly at runtime. No-ops (prints nothing) on a
+# standard /opt/rocm image, where none of these packages exist.
 rocm_sdk_wheel_lib_dirs() {
+  local py="$1"
+  "$py" - <<'PY' 2>/dev/null
+import importlib.util
+from pathlib import Path
+for pkg in ("_rocm_sdk_core", "_rocm_sdk_libraries", "_rocm_sdk_devel"):
+    spec = importlib.util.find_spec(pkg)
+    if not spec or not spec.origin:
+        continue
+    root = Path(spec.origin).resolve().parent
+    for subdir in ("lib", "lib/host-math/lib", "lib/rocm_sysdeps/lib"):
+        candidate = root / subdir
+        if candidate.is_dir():
+            print(candidate)
+PY
+}
+
+# hipcc from a TheRock wheel is a console-script shim under <venv>/bin; its
+# headers live nested in the _rocm_sdk_core/_rocm_sdk_devel package, not at
+# <venv>/include. Falls back to that package root so toolchain-alignment
+# checks do not false-negative on this layout. Prints nothing if neither
+# package is importable or has headers.
+rocm_sdk_wheel_include_dir() {
   local py="$1"
   "$py" - <<'PY' 2>/dev/null
 import importlib.util
@@ -278,9 +301,9 @@ for pkg in ("_rocm_sdk_core", "_rocm_sdk_devel"):
     if not spec or not spec.origin:
         continue
     root = Path(spec.origin).resolve().parent
-    for candidate in (root / "lib", root / "lib" / "host-math" / "lib"):
-        if candidate.is_dir():
-            print(candidate)
+    if (root / "include" / "hip").is_dir():
+        print(root)
+        break
 PY
 }
 
@@ -323,7 +346,7 @@ PY
 }
 
 check_rocm_toolchain_alignment() {
-  local hip_version="$1" hip_major hipcc_path hipcc_root header
+  local hip_version="$1" py="$2" hip_major hipcc_path hipcc_root header wheel_include
   hip_major="${hip_version%%.*}"
   [ -n "$hip_major" ] || return 0
   hipcc_path="$(command -v hipcc 2>/dev/null || true)"
@@ -338,6 +361,12 @@ check_rocm_toolchain_alignment() {
   fi
   if [ "$hip_major" -ge 7 ] 2>/dev/null; then
     header="${hipcc_root}/include/hip/hip_runtime_api.h"
+    if [ ! -f "$header" ]; then
+      # hipcc from a TheRock wheel is a <venv>/bin shim; its headers live
+      # nested under the _rocm_sdk_core/_rocm_sdk_devel package, not <venv>/include.
+      wheel_include="$(rocm_sdk_wheel_include_dir "$py")"
+      [ -n "$wheel_include" ] && header="${wheel_include}/include/hip/hip_runtime_api.h"
+    fi
     if [ ! -f "$header" ] || ! grep -q 'hipDeviceAttributePciChipId' "$header" 2>/dev/null; then
       warn "hipcc headers at ${hipcc_root} do not look compatible with torch hip=${hip_version}."
       warn "Set ROCM_PATH/HIP_PATH/PATH to a ROCm ${hip_major}.x toolchain before installing AITER."
@@ -411,7 +440,7 @@ PY
   else
     log "torch: ${tv} (hip=${thip}) ROCm OK"
     check_torch_rocm_shared_libs "$py" || rc=1
-    check_rocm_toolchain_alignment "$thip" || rc=1
+    check_rocm_toolchain_alignment "$thip" "$py" || rc=1
     # The torch/triton pin only has to hold when this run is about to build a
     # framework layer against it. An image that already ships a working engine
     # (atom, or a prebuilt sglang/vllm) is allowed to carry its own triton.
@@ -866,9 +895,35 @@ assert_vllm_glibc_compatible() {
 }
 
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
+# vLLM's ROCm torch build links against system OpenMPI (libmpi.so.40 /
+# libmpi_cxx.so.40), which most container base images do not ship. Debian
+# and Ubuntu <24.04 package this as libopenmpi3; Ubuntu 24.04's 64-bit
+# time_t transition renamed it to libopenmpi3t64 with the same SONAMEs, so
+# both names are tried for compatibility across base images. Best-effort:
+# skips silently if apt is unavailable, if not running as root, or if the
+# library is already resolvable; a failed install here just falls through
+# to the existing verify_vllm_rocm gate.
+ensure_openmpi_runtime() {
+  command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libmpi\.so\.40' && return 0
+  command -v apt-get >/dev/null 2>&1 || return 0
+  [ "$(id -u)" = "0" ] || { warn "libmpi.so.40 not found and not running as root; cannot apt-get install openmpi runtime"; return 0; }
+  apt-get update -qq >/dev/null 2>&1 || true
+  local pkg
+  for pkg in libopenmpi3t64 libopenmpi3; do
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+      log "installed ${pkg} for vLLM's OpenMPI-linked torch build"
+      return 0
+    fi
+  done
+  warn "could not install an OpenMPI runtime package (tried libopenmpi3t64, libopenmpi3); vLLM's torch import may fail on libmpi.so.40"
+}
+
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
+  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    ensure_openmpi_runtime
+  fi
   py="$base_py"
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
     py="${VLLM_VENV_ROOT}/bin/python"

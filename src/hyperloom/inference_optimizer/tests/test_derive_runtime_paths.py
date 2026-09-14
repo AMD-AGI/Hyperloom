@@ -73,7 +73,10 @@ def test_derive_runtime_paths_noop_without_roots(monkeypatch):
 def test_rocm_sdk_wheel_lib_dirs_detects_therock_layout(tmp_path, monkeypatch):
     core_root = tmp_path / "_rocm_sdk_core"
     core_lib = core_root / "lib"
-    core_lib.mkdir(parents=True)
+    core_host_math_lib = core_lib / "host-math" / "lib"
+    core_sysdeps_lib = core_lib / "rocm_sysdeps" / "lib"
+    core_host_math_lib.mkdir(parents=True)
+    core_sysdeps_lib.mkdir(parents=True)
     devel_root = tmp_path / "_rocm_sdk_devel"
     devel_lib = devel_root / "lib"
     devel_host_math_lib = devel_lib / "host-math" / "lib"
@@ -93,9 +96,36 @@ def test_rocm_sdk_wheel_lib_dirs_detects_therock_layout(tmp_path, monkeypatch):
 
     assert str(devel_lib) in dirs
     assert str(devel_host_math_lib) in dirs
-    # core has no host-math subdir; a nonexistent candidate must not be reported.
     assert str(core_lib) in dirs
-    assert str(core_lib / "host-math" / "lib") not in dirs
+    assert str(core_host_math_lib) in dirs
+    assert str(core_sysdeps_lib) in dirs
+
+
+def test_rocm_sdk_wheel_lib_dirs_detects_libraries_package(tmp_path, monkeypatch):
+    # Real TheRock layout seen on rocm10/gfx950 images: _rocm_sdk_core +
+    # _rocm_sdk_libraries only, no _rocm_sdk_devel. The math/DNN libraries
+    # (MIOpen, rocBLAS, hipBLASLt, RCCL, ...) live under _rocm_sdk_libraries.
+    core_root = tmp_path / "_rocm_sdk_core"
+    core_lib = core_root / "lib"
+    core_lib.mkdir(parents=True)
+    libraries_root = tmp_path / "_rocm_sdk_libraries"
+    libraries_lib = libraries_root / "lib"
+    libraries_lib.mkdir(parents=True)
+
+    def fake_find_spec(name):
+        origins = {
+            "_rocm_sdk_core": core_root / "__init__.py",
+            "_rocm_sdk_libraries": libraries_root / "__init__.py",
+        }
+        origin = origins.get(name)
+        return None if origin is None else SimpleNamespace(origin=str(origin))
+
+    monkeypatch.setattr(cli_preflight.importlib.util, "find_spec", fake_find_spec)
+
+    dirs = cli_preflight._rocm_sdk_wheel_lib_dirs()
+
+    assert str(core_lib) in dirs
+    assert str(libraries_lib) in dirs
 
 
 def test_rocm_sdk_wheel_lib_dirs_absent_on_standard_rocm_image(monkeypatch):

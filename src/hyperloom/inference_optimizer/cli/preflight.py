@@ -247,20 +247,36 @@ def _prepend_path(var: str, entry: str) -> None:
     os.environ[var] = os.pathsep.join(parts)
 
 
-def _rocm_sdk_wheel_lib_dirs() -> list[str]:
-    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_core``/``_rocm_sdk_devel``).
+_ROCM_SDK_WHEEL_PACKAGES: tuple[str, ...] = (
+    "_rocm_sdk_core",
+    "_rocm_sdk_libraries",
+    "_rocm_sdk_devel",
+)
+_ROCM_SDK_WHEEL_LIB_SUBDIRS: tuple[str, ...] = (
+    "lib",
+    "lib/host-math/lib",
+    "lib/rocm_sysdeps/lib",
+)
 
-    That layout splits libraries across two namespace packages, with host-math
-    under a subdir the dynamic loader does not search by default. Returns []
-    on a standard ``/opt/rocm`` image, where neither package is importable.
+
+def _rocm_sdk_wheel_lib_dirs() -> list[str]:
+    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_*`` wheels).
+
+    TheRock splits libraries across up to three namespace packages
+    (``_rocm_sdk_core``, ``_rocm_sdk_libraries``, ``_rocm_sdk_devel``); which
+    ones are installed depends on the wheel's build profile. Each package can
+    also nest libraries under subdirs (host-math, rocm_sysdeps) the dynamic
+    loader does not search by default. Returns [] on a standard ``/opt/rocm``
+    image, where none of these packages are importable.
     """
     dirs: list[str] = []
-    for pkg in ("_rocm_sdk_core", "_rocm_sdk_devel"):
+    for pkg in _ROCM_SDK_WHEEL_PACKAGES:
         spec = importlib.util.find_spec(pkg)
         if not spec or not spec.origin:
             continue
         root = Path(spec.origin).resolve().parent
-        for candidate in (root / "lib", root / "lib" / "host-math" / "lib"):
+        for subdir in _ROCM_SDK_WHEEL_LIB_SUBDIRS:
+            candidate = root / subdir
             if candidate.is_dir():
                 dirs.append(str(candidate))
     return dirs
