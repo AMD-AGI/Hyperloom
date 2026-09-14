@@ -35,7 +35,7 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
 )
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
-from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.git_safety import is_installed_packages_root, safe_directory_args
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
     ALLOWED_SHAPE_PROVENANCE as _ALLOWED_SHAPE_PROVENANCE,
@@ -5425,7 +5425,13 @@ async def _run_forge_collective(payload: dict, *, session_dir: Path) -> HandlerR
 
 
 def _find_repo_root_for_source(source_file: str) -> str:
-    """Nearest ancestor of ``source_file`` containing a ``.git`` directory."""
+    """Nearest ancestor of ``source_file`` containing a ``.git`` directory.
+
+    An install root is not one: Forge's fusion lane ``git init``s the tree it
+    edits, so a ``site-packages`` / ``dist-packages`` directory can carry a
+    ``.git`` covering every installed package. Naming it here would hand the
+    whole install to a caller that wants one kernel's repo.
+    """
     if not source_file:
         return ""
     try:
@@ -5434,7 +5440,7 @@ def _find_repo_root_for_source(source_file: str) -> str:
         return ""
     for parent in current.parents:
         if (parent / ".git").exists():
-            return str(parent)
+            return "" if is_installed_packages_root(parent) else str(parent)
     return ""
 
 

@@ -167,6 +167,19 @@ except ImportError:  # pragma: no cover - standalone invocation
     # constant; the literal keeps the review's dims labelled either way.
     _REVIEW_DERIVED_PROVENANCE = "review_derived"
 
+try:
+    from hyperloom.common.git_safety import is_installed_packages_root
+except ImportError:  # pragma: no cover - standalone invocation
+
+    def is_installed_packages_root(target: object) -> bool:
+        """Fallback for the standalone path; same rule, no shared import."""
+        if not target:
+            return False
+        try:
+            return Path(str(target)).expanduser().resolve().name in {"site-packages", "dist-packages"}
+        except OSError:
+            return False
+
 log = logging.getLogger(__name__)
 
 # Duplicated from kernel_source_contract.SOURCE_RESOLUTION_FILENAME: the
@@ -3075,19 +3088,26 @@ def find_repo_root(source_file: str) -> str:
 
     Returns "" when no git repo root is found.
 
+    An install root (``site-packages`` / ``dist-packages``) is never returned,
+    even when it holds a ``.git``. Forge's fusion lane runs ``git init`` in the
+    tree it edits, so a single fusion run leaves a repository covering every
+    installed package; every later walk-up then stops there and reports a
+    14 GB "repo" for a kernel living in one subtree. Returning "" instead lets
+    the caller derive the one package it actually needs.
+
     Args:
         source_file (str): Path to a file inside a (possibly) git repo.
 
     Returns:
         str: The directory containing the nearest ``.git`` ancestor, or
-            ``""`` when none is found.
+            ``""`` when none is found or the only match is an install root.
     """
     if not source_file:
         return ""
     p = Path(source_file).expanduser().resolve()
     for parent in [p] + list(p.parents):
         if (parent / ".git").exists():
-            return str(parent)
+            return "" if is_installed_packages_root(parent) else str(parent)
     return ""
 
 

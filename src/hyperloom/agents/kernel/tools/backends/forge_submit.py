@@ -843,12 +843,21 @@ def _prepare_worktree_nogit(
         Those are detected by :func:`_needs_inplace` before this function is
         ever called.
     """
+    from hyperloom.common.git_safety import is_installed_packages_root  # noqa: PLC0415 - import-light
+
     src_abs = Path(source_file).resolve()
 
     # Scratch layout root == the directory placed on PYTHONPATH. Honour an
     # explicit kernel_repo; otherwise derive the single top-level package's
     # parent (not the whole dist-packages dir — ENOSPC risk).
-    if kernel_repo:
+    # An install root is honoured as a *location* but never as a repo to copy
+    # whole: `site-packages` holds every installed package, so "the whole repo"
+    # is torch plus vllm plus the rest. One such submit copied 14 GB and then
+    # spent the scaffold's entire 120s budget in `git add -A` before timing
+    # out, which surfaced as "not a clean git checkout" -- a message about the
+    # earlier worktree attempt, nothing to do with the real cause. Falling
+    # through to the derived path copies only the owning package instead.
+    if kernel_repo and not is_installed_packages_root(kernel_repo):
         layout_root = Path(kernel_repo).resolve()
         copy_subtrees: list[Path] | None = None  # copy the whole repo
     else:

@@ -15,7 +15,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__all__ = ["repo_root", "safe_directory_args"]
+__all__ = ["is_installed_packages_root", "repo_root", "safe_directory_args"]
+
+#: Directory names that hold every installed package rather than one project.
+_INSTALL_ROOT_NAMES = frozenset({"site-packages", "dist-packages"})
 
 
 def repo_root(target: str | Path) -> str | None:
@@ -35,6 +38,33 @@ def repo_root(target: str | Path) -> str | None:
         except OSError:
             continue
     return None
+
+
+def is_installed_packages_root(target: str | Path | None) -> bool:
+    """True when ``target`` is a ``site-packages`` / ``dist-packages`` directory.
+
+    Such a directory is not a project checkout: it holds every installed
+    package at once. Treating one as a kernel repo makes any whole-repo
+    operation span torch, vllm and everything else -- tens of gigabytes for a
+    change that touches one file.
+
+    Nothing here assumes the directory is not a git repository, because it can
+    be: a Forge fusion run does ``git init`` in the tree it edits, and the
+    ``.git`` it leaves behind makes every later walk-up land on the install
+    root. That is exactly the case this predicate exists to catch.
+
+    Args:
+        target (str | Path | None): A directory path, or None.
+
+    Returns:
+        bool: True when the path's own name marks it as an install root.
+    """
+    if not target:
+        return False
+    try:
+        return Path(target).expanduser().resolve().name in _INSTALL_ROOT_NAMES
+    except OSError:
+        return False
 
 
 def safe_directory_args(args: list[str], *, cwd: str | Path | None = None) -> list[str]:
