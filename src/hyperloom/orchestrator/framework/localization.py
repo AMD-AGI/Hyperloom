@@ -127,7 +127,10 @@ def build_localization_diff(
     fetch_raw_file: Callable[[str, str, str], str],
     framework_root: object = None,
 ) -> tuple[str, list[str], ClosureVerdict]:
-    """Fetch/synthesize the localization diff and classify its closure."""
+    """Fetch/synthesize the localization diff and classify its closure.
+
+    Blocking (synchronous HTTP); call via ``asyncio.to_thread``.
+    """
     kind = str(getattr(action, "kind", "") or "")
     repo_url = str(getattr(action, "repo_url", "") or "")
     slug = _repo_slug_safe(repo_url)
