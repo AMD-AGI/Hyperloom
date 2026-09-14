@@ -56,8 +56,10 @@ flag set from ATOM's published `Qwen3-8B-FP8` recipe: those constraints belong t
 a small-VRAM gfx1201 consumer card and are not required here.
 
 If Hyperloom needs the arguments passed explicitly, supply them through the
-`--server-args` CLI flag. That flag is the only injection point the optimizer
-honours; a `EXTRA_*` environment variable does not reach the server launch.
+`--server-args` CLI flag. Do not export `EXTRA_ATOM_ARGS` in the launching shell
+and expect it to be read: that variable is the transport, not the knob — the
+optimizer writes `--server-args` into it inside each materialized Magpie YAML,
+so a value exported by hand is overwritten rather than merged.
 
 ## Kernel Backend
 
