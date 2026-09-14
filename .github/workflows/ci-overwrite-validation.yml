@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: CI artifact overwrite validation
+
+on:
+  push:
+    branches: [feature/leixin/ci-overwrite-validation]
+    paths: [.github/workflows/ci-overwrite-validation.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  producer:
+    name: overwrite producer shard ${{ matrix.shard }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    steps:
+      - name: Generate synthetic shard bundle
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          shard = int(os.environ["SHARD"])
+          attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          outcome = "failure" if shard == 2 and attempt in (1, 4) else "success"
+          marker = {"shard": shard, "attempt": attempt, "outcome": outcome}
+          Path("shard-status").mkdir()
+          Path(f".coverage.shard{shard}").write_text(json.dumps(marker))
+          Path(f".test_durations.shard{shard}").write_text(json.dumps(marker))
+          Path(f"shard-status/py3.10-shard{shard}.outcome").write_text(outcome)
+          if outcome == "failure":
+              Path(f"shard-status/py3.10-shard{shard}.failed").write_text(f"synthetic failure from attempt {attempt}\n")
+          print(json.dumps(marker))
+          PY
+
+      - name: Upload synthetic coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: overwrite-validation-covdata-py3.10-shard${{ matrix.shard }}
+          path: |
+            .coverage.shard${{ matrix.shard }}
+            shard-status/*.outcome
+            shard-status/*.failed
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload synthetic durations
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: overwrite-validation-durations-shard${{ matrix.shard }}
+          path: .test_durations.shard${{ matrix.shard }}
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Apply synthetic test outcome
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: test "$(cat "shard-status/py3.10-shard${SHARD}.outcome")" = success
+
+  aggregate:
+    name: overwrite aggregate
+    needs: producer
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Download synthetic coverage
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: overwrite-validation-covdata-py3.10-shard*
+          path: coverage
+          merge-multiple: true
+
+      - name: Download synthetic durations
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: overwrite-validation-durations-shard*
+          path: durations
+          merge-multiple: false
+
+      - name: Verify whole bundles and retained shard
+        env:
+          UPSTREAM_RESULT: ${{ needs.producer.result }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          current = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          expected_probe_attempt = {1: 1, 2: 2, 3: 2, 4: 4}[current]
+          results = []
+          for shard, expected in ((1, 1), (2, expected_probe_attempt)):
+              cov = json.loads(Path(f"coverage/.coverage.shard{shard}").read_text())
+              duration = json.loads(Path(f"durations/overwrite-validation-durations-shard{shard}/.test_durations.shard{shard}").read_text())
+              outcome = Path(f"coverage/shard-status/py3.10-shard{shard}.outcome").read_text().strip()
+              assert cov == duration, (cov, duration)
+              assert cov == {"shard": shard, "attempt": expected, "outcome": outcome}, cov
+              failed = Path(f"coverage/shard-status/py3.10-shard{shard}.failed")
+              assert failed.exists() == (outcome == "failure"), (cov, failed)
+              if failed.exists():
+                  assert f"attempt {expected}" in failed.read_text()
+              results.append(cov)
+          expected_outcome = "failure" if current in (1, 4) else "success"
+          assert results[1]["outcome"] == expected_outcome, results
+          assert os.environ["UPSTREAM_RESULT"] == expected_outcome, os.environ["UPSTREAM_RESULT"]
+          print("Verified:", json.dumps(results))
+          Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(
+              f"Overwrite experiment attempt {current}: payload verification passed.\n\n"
+              + json.dumps(results, indent=2)
+              + f"\n\nExpected workflow outcome: {expected_outcome}.\n"
+          )
+          PY
+
+      - name: Preserve failure gate
+        env:
+          UPSTREAM_RESULT: ${{ needs.producer.result }}
+        run: test "$UPSTREAM_RESULT" = success
