@@ -38,7 +38,6 @@ _OLD_PATH_PATTERN = re.compile(
 #: exemption and fails :func:`test_every_allowlist_entry_still_exempts_something`.
 _OLD_PATH_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (_SELF, r".", "Names the old spellings in order to forbid them."),
-    ("adjustment.md", r".", "Records which spelling to migrate from."),
 )
 
 _ORCHESTRATOR_IMPORT = re.compile(r"^hyperloom\.orchestrator\.")
