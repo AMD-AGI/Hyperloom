@@ -13,6 +13,7 @@ Dispatch table is exposed via :data:`KERNEL_REQUEST_HANDLERS` for test monkey-pa
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import importlib
 import importlib.util
@@ -942,6 +943,135 @@ def materialize_unified_patch_snapshot(
     return str(snap)
 
 
+def _invalidate_preapplied_aiter_caches(
+    payload: dict[str, Any],
+    *,
+    session_dir: str,
+    kernel_id: str | None,
+) -> HandlerResult:
+    """Invalidate aiter's caches for a patch already present in the worktree.
+
+    The whole-file apply is skipped for a git-applied publication, but its
+    stale-binary guards are not optional: an aiter csrc edit only reaches the
+    served kernel once ``jit/build/`` and the cpp_itfs runtime cache are moved
+    aside. Both helpers are self-gating and report ``skipped`` off that path.
+
+    Args:
+        payload: Integrate payload naming the patched target.
+        session_dir: Session root owning the ``patches`` backup tree.
+        kernel_id: Kernel under measurement, used to name the backup dir.
+
+    Returns:
+        An apply result carrying the backup records, or a failure result when
+        invalidation could not be completed.
+    """
+    result: HandlerResult = {
+        "status": "ok",
+        "reason": "preapplied_git_patch",
+        "kernel_id": kernel_id,
+    }
+    target_name = str(payload.get("target_file") or payload.get("source_file") or "").strip()
+    if not target_name:
+        return result
+    tool = _load_apply_tool()
+    target = Path(target_name)
+    backup_dir = tool._claim_backup_dir(Path(session_dir) / "patches", str(kernel_id or "preapplied"), target)
+
+    jit_build_backup = tool._invalidate_aiter_jit_build(target, backup_dir)
+    if jit_build_backup.get("status") == "failed":
+        # Refuse to benchmark against an unknown/stale binary.
+        return {
+            "status": "failed",
+            "error_class": "aiter_jit_invalidation_failed",
+            "error": (f"aiter jit/build/ invalidation failed: {jit_build_backup.get('error') or ''}"),
+            "kernel_id": kernel_id,
+            "jit_build_backup": jit_build_backup,
+        }
+
+    cpp_itfs_cache_backup = tool._invalidate_aiter_cpp_itfs_cache(target, backup_dir)
+    if cpp_itfs_cache_backup.get("status") == "failed":
+        return {
+            "status": "failed",
+            "error_class": "aiter_cpp_itfs_invalidation_failed",
+            "error": (f"aiter cpp_itfs runtime cache invalidation failed: {cpp_itfs_cache_backup.get('error') or ''}"),
+            "kernel_id": kernel_id,
+            "cpp_itfs_cache_backup": cpp_itfs_cache_backup,
+            "jit_build_restore": _restore_preapplied_aiter_caches(
+                {
+                    "backup_dir": str(backup_dir),
+                    "jit_build_backup": jit_build_backup,
+                }
+            ),
+        }
+
+    result["jit_build_backup"] = jit_build_backup
+    result["cpp_itfs_cache_backup"] = cpp_itfs_cache_backup
+    if jit_build_backup.get("status") == "ok" or cpp_itfs_cache_backup.get("status") == "ok":
+        result["backup_dir"] = str(backup_dir)
+    else:
+        # Nothing was moved aside, so leave no empty claim behind per integrate.
+        with contextlib.suppress(OSError):
+            backup_dir.rmdir()
+    return result
+
+
+def _restore_preapplied_aiter_caches(apply_result: HandlerResult) -> HandlerResult:
+    """Put aiter's moved-aside caches back for a manifest-less apply.
+
+    Args:
+        apply_result: Apply metadata carrying the invalidation backup records.
+
+    Returns:
+        The restore outcome, or ``skipped`` when nothing was moved aside.
+    """
+    jit_build_backup = apply_result.get("jit_build_backup") or {}
+    cpp_itfs_cache_backup = apply_result.get("cpp_itfs_cache_backup") or {}
+    restores: HandlerResult = {}
+    if jit_build_backup.get("status") == "ok":
+        restores["jit_build_restore"] = _load_apply_tool()._restore_aiter_jit_build(
+            jit_build_backup,
+            backup_root=apply_result.get("backup_dir") or None,
+        )
+    if cpp_itfs_cache_backup.get("status") == "ok":
+        restores["cpp_itfs_cache_restore"] = _load_apply_tool()._restore_aiter_cpp_itfs_cache(cpp_itfs_cache_backup)
+    if not restores:
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    failed = [name for name, outcome in restores.items() if outcome.get("status") != "ok"]
+    return {
+        "status": "failed" if failed else "ok",
+        "reason": "preapplied_git_patch aiter caches",
+        **restores,
+    }
+
+
+def _discard_preapplied_aiter_caches(apply_result: HandlerResult) -> HandlerResult:
+    """Drop aiter's invalidation backups once a KEEP makes the rebuild durable.
+
+    Restoring them here would serve the pre-patch binary the KEEP replaced.
+
+    Args:
+        apply_result: Apply metadata carrying the invalidation backup records.
+
+    Returns:
+        The discard outcome, or ``skipped`` when nothing was moved aside.
+    """
+    backup_dir = str(apply_result.get("backup_dir") or "").strip()
+    if not backup_dir:
+        return {"status": "skipped", "reason": "no applied patch manifest"}
+    try:
+        shutil.rmtree(backup_dir, ignore_errors=False)
+    except FileNotFoundError:
+        return {"status": "ok", "reason": "backups already gone", "backup_dir": backup_dir}
+    except OSError as exc:
+        return {
+            "status": "failed",
+            "error_class": "patch_finalize_exception",
+            "error": repr(exc),
+            "backup_dir": backup_dir,
+        }
+    return {"status": "ok", "reason": "preapplied_git_patch aiter caches", "backup_dir": backup_dir}
+
+
 def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
     """Revert a kernel patch using its apply manifest.
 
@@ -956,7 +1086,9 @@ def _maybe_revert_kernel_patch(apply_result: HandlerResult) -> HandlerResult:
         The revert result, or an explicit failure result.
     """
     if not apply_result.get("manifest_path"):
-        return {"status": "skipped", "reason": "no applied patch manifest"}
+        # A git-applied publication has no manifest and its source is reversed by
+        # the caller, but aiter's caches were moved aside here and stay ours.
+        return _restore_preapplied_aiter_caches(apply_result)
     try:
         return _load_apply_tool().revert_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
@@ -978,7 +1110,7 @@ def _maybe_finalize_kernel_patch(
             "reason": "patch apply did not complete",
         }
     if not apply_result.get("manifest_path"):
-        return {"status": "skipped", "reason": "no applied patch manifest"}
+        return _discard_preapplied_aiter_caches(apply_result)
     try:
         return _load_apply_tool().finalize_kernel_patch(apply_result["manifest_path"])
     except Exception as exc:  # noqa: BLE001
@@ -6244,11 +6376,12 @@ async def integrate_handler(
         # validator runs; its unified diff cannot re-enter the whole-file apply.
         # Only an in-process caller can set this: an agent's integrate params
         # land in ``payload`` verbatim, so the payload cannot carry the trust.
-        apply_result = {
-            "status": "ok",
-            "reason": "preapplied_git_patch",
-            "kernel_id": kernel_id,
-        }
+        # Skipping the apply must not skip its aiter stale-binary guards.
+        apply_result = _invalidate_preapplied_aiter_caches(
+            payload,
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+        )
     else:
         apply_result = _maybe_apply_kernel_patch(
             payload,

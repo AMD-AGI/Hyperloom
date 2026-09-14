@@ -6,13 +6,17 @@
 ``integrate_controller_patches`` runs ``git apply`` on the working tree and only
 then calls the validator, which passes ``preapplied_git_patch``. The patch itself
 is a unified diff, so routing it back through the whole-file
-``apply_kernel_patch`` contract fails and the measured KEEP is lost.
+``apply_kernel_patch`` contract fails and the measured KEEP is lost. Skipping the
+apply still owes its aiter stale-binary guards, which the re-baseline reads off
+the apply result.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -149,3 +153,89 @@ async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, applied, pat
 
     assert result["status"] == "failed"
     assert result["error_class"] == "apply_failed"
+
+
+@pytest.fixture
+def stub_aiter_invalidation(monkeypatch):
+    """Report the target as a cpp_itfs kernel, recording what was invalidated."""
+    tool = krh._load_apply_tool()
+    invalidated: list[str] = []
+
+    def fake_jit(target_file, _backup_dir, **_kwargs):
+        invalidated.append(f"jit:{target_file}")
+        return {"status": "clean", "reason": "aiter jit/build/ does not exist"}
+
+    def fake_cpp_itfs(target_file, _backup_dir, **_kwargs):
+        invalidated.append(f"cpp_itfs:{target_file}")
+        # Nothing cached yet: still a cpp_itfs kernel, so a rebuild is still owed.
+        return {"status": "skipped", "is_cpp_itfs": True, "module_names": [], "invalidated_unix": 0.0}
+
+    monkeypatch.setattr(tool, "_invalidate_aiter_jit_build", fake_jit)
+    monkeypatch.setattr(tool, "_invalidate_aiter_cpp_itfs_cache", fake_cpp_itfs)
+    return invalidated
+
+
+async def test_preapplied_patch_invalidates_the_aiter_caches(
+    session_dir, applied, patch_file, stop_at_rebaseline, stub_aiter_invalidation
+):
+    """Skipping the apply must not skip its stale-binary guards."""
+    target = str(applied / KERNEL_REL)
+
+    with pytest.raises(ReachedRebaseline):
+        await krh.integrate_handler(
+            _controller_payload(applied, patch_file),
+            session_dir=session_dir,
+            preapplied_git_patch=True,
+        )
+
+    assert stub_aiter_invalidation == [f"jit:{target}", f"cpp_itfs:{target}"]
+
+
+async def test_preapplied_patch_forces_a_rebuild_for_a_cpp_itfs_target(
+    session_dir, applied, patch_file, stub_aiter_invalidation, monkeypatch
+):
+    """An apply result carrying no backup record leaves AITER_REBUILD unset for the server."""
+    monkeypatch.delenv("AITER_REBUILD", raising=False)
+    seen: list[str | None] = []
+
+    async def record_env(*_args, **_kwargs):
+        seen.append(os.environ.get("AITER_REBUILD"))
+        raise ReachedRebaseline
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.baseline.BaselineExecutor",
+        lambda **_kwargs: SimpleNamespace(default_timeout_sec=60),
+    )
+    monkeypatch.setattr(krh, "_run_integrate_rebaseline_with_lock_retry", record_env)
+
+    result = await krh.integrate_handler(
+        _controller_payload(applied, patch_file),
+        session_dir=session_dir,
+        preapplied_git_patch=True,
+    )
+
+    assert seen == ["1"]
+    assert result["error_class"] == "rebaseline_exception"
+
+
+async def test_preapplied_patch_refuses_when_invalidation_fails(
+    session_dir, applied, patch_file, stop_at_rebaseline, monkeypatch
+):
+    """Refuse to benchmark against an unknown/stale binary rather than measure it."""
+    tool = krh._load_apply_tool()
+    monkeypatch.setattr(
+        tool,
+        "_invalidate_aiter_jit_build",
+        lambda *_args, **_kwargs: {"status": "failed", "error": "permission denied"},
+    )
+
+    result = await krh.integrate_handler(
+        _controller_payload(applied, patch_file),
+        session_dir=session_dir,
+        preapplied_git_patch=True,
+    )
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "apply_failed"
+    assert result["decision"] == "REVERT"
+    assert "permission denied" in result["error"]
