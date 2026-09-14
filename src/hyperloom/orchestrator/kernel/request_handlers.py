@@ -6640,11 +6640,15 @@ async def integrate_handler(
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    finalize_result = (
-        _maybe_finalize_kernel_patch(apply_result)
-        if decision == "KEEP"
-        else {"status": "skipped", "reason": "non-KEEP decision"}
-    )
+    if decision != "KEEP":
+        finalize_result = {"status": "skipped", "reason": "non-KEEP decision"}
+    elif preapplied_git_patch:
+        # Only the caller's own commit makes a pre-applied KEEP durable, so the
+        # caller owns finalize. Dropping the backups here would strand the
+        # fanned-out pod-side patch if that commit then failed.
+        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
+    else:
+        finalize_result = _maybe_finalize_kernel_patch(apply_result)
     revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
     top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
         decision=decision,

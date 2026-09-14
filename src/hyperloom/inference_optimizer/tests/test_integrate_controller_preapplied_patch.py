@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.session.paths import make_session_dir
+from hyperloom.orchestrator.kernel import controller_patch_integration as cpi
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -195,3 +196,57 @@ async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, applied, pat
 
     assert result["status"] == "failed"
     assert result["error_class"] == "apply_failed"
+
+
+@pytest.fixture
+def settle_calls(monkeypatch):
+    """Record which lifecycle stage the controller drove the apply manifest to."""
+    called: list[str] = []
+
+    def finalize(_apply_result):
+        called.append("finalize")
+        return {"status": "ok"}
+
+    def revert(_apply_result):
+        called.append("revert")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(krh, "_maybe_finalize_kernel_patch", finalize)
+    monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", revert)
+    return called
+
+
+def test_a_durable_keep_finalizes_the_apply_manifest(settle_calls):
+    """Integrate defers finalize for a pre-applied KEEP, so the commit must drive it."""
+    note = cpi._settle_apply_manifest({"apply_result": {"manifest_path": "/tmp/m.json"}}, kept=True)
+
+    assert settle_calls == ["finalize"]
+    assert note == ""
+
+
+def test_a_failed_keep_commit_reverts_the_apply_manifest(settle_calls):
+    """The backups are still there precisely because integrate did not finalize."""
+    note = cpi._settle_apply_manifest({"apply_result": {"manifest_path": "/tmp/m.json"}}, kept=False)
+
+    assert settle_calls == ["revert"]
+    assert note == ""
+
+
+def test_settling_a_manifestless_apply_does_nothing(settle_calls):
+    """An env-only or skipped apply owns no backups to release."""
+    assert cpi._settle_apply_manifest({"apply_result": {"status": "ok"}}, kept=True) == ""
+    assert cpi._settle_apply_manifest({}, kept=False) == ""
+    assert settle_calls == []
+
+
+def test_an_incomplete_settle_is_reported(monkeypatch):
+    """A silent failure here leaves a pod patched with its backups already gone."""
+    monkeypatch.setattr(
+        krh,
+        "_maybe_revert_kernel_patch",
+        lambda _apply_result: {"status": "failed", "error": "pod unreachable"},
+    )
+
+    note = cpi._settle_apply_manifest({"apply_result": {"manifest_path": "/tmp/m.json"}}, kept=False)
+
+    assert note == " (patch revert incomplete: pod unreachable)"
