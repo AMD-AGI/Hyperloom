@@ -77,6 +77,20 @@ def test_exit_bypasses_interpreter_teardown(preflight: ModuleType, monkeypatch: 
     assert left_with == [2]
 
 
+def test_stale_scan_skips_the_launcher_ancestry(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A launcher shell whose argv quotes the CLI command is not leftover workload."""
+    parents = {11: 10, 10: 1}
+    monkeypatch.setattr(preflight.os, "getpid", lambda: 11)
+    monkeypatch.setattr(preflight, "_parent_pid", lambda pid: parents.get(pid, 0))
+    monkeypatch.setattr(preflight.os, "listdir", lambda path: ["10", "11", "12"])
+    monkeypatch.setattr(
+        preflight,
+        "_read_cmdline",
+        lambda pid: f"bash -c python -m hyperloom.inference_optimizer.cli optimize  # pid {pid}",
+    )
+    assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
+
+
 def test_main_returns_zero_when_every_check_passes(
     preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
