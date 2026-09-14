@@ -1946,6 +1946,9 @@ async def prepare_task(
                 ),
                 audit_dir=audit_dir_str,
             )
+        # The agent path that names an identity runs only when the backend needs
+        # a git cwd, and a commit with none to auto-detect cannot land.
+        ensure_commit_identity(workspace)
         _, commit_out = _git(
             workspace,
             "commit",
