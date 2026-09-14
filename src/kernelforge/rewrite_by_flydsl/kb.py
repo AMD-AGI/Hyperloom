@@ -244,6 +244,13 @@ async def try_flydsl_kb_warmstart(
     claim was computed over whatever cases its producing task scored and so cannot order candidates for *this* task.
     The measurement is scored the way the arena scores, so the candidate adopted here is the one the run is graded on.
     ``warmstart_policy`` bounds the search on both the claim floor and wall time.
+
+    Admission asks what a candidate IS, never where it came from. A record is kept out when it ports a different
+    implementation, when this code cannot read its shape, or when it does not expose the builder the driver imports.
+    It is not kept out because the source or driver file has changed since it was written: both are re-run here, the
+    current driver compares the candidate against the current source, and a port that survives that is reusable no
+    matter which revision produced it. Gating on their hashes only ever rejected ports this run went on to prove,
+    and it rejected every one of them the first time a comment moved.
     """
     plan = _read_top_candidates(
         spec,
@@ -256,8 +263,6 @@ async def try_flydsl_kb_warmstart(
         read_error=plan.read_error,
     )
     original = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
-    source_hash = _sha256(spec.source_kernel)
-    driver_hash = _sha256(driver_path)
     references: list[dict] = []
 
     # Survivors of the whole gauntlet, with what this task's driver timed them
@@ -303,10 +308,6 @@ async def try_flydsl_kb_warmstart(
             reason = "implementation_mismatch"
         elif attrs.get("schema_version") != _SCHEMA_VERSION or attrs.get("rewrite_kind") != _REWRITE_KIND:
             reason = "wrong_solution_kind"
-        elif attrs.get("source_sha256") != source_hash:
-            reason = "source_changed"
-        elif attrs.get("driver_sha256") != driver_hash:
-            reason = "driver_contract_changed"
         elif attrs.get("builder_symbol") != spec.builder_symbol:
             reason = "builder_contract_changed"
         content = _candidate_content(plan, candidate)

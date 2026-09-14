@@ -615,13 +615,19 @@ def test_a_weaker_later_port_does_not_take_the_champion_pointer(tmp_path, monkey
 
 # --------------------------------------------------------------------------- # contract gates
 # --------------------------------------------------------------------------- #
-def test_a_changed_driver_contract_is_rejected_and_the_seed_restored(
-    tmp_path,
-    monkeypatch,
-):
+@pytest.mark.parametrize(
+    "edit",
+    [
+        pytest.param("driver", id="driver edited since the record was written"),
+        pytest.param("source", id="source edited since the record was written"),
+    ],
+)
+def test_a_port_is_admitted_on_what_it_is_not_on_which_revision_wrote_it(tmp_path, monkeypatch, edit):
+    """The run re-validates and re-measures on today's files, so yesterday's hashes decide nothing."""
     _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
+    port = Path(spec.flydsl_kernel).read_text()
     written = kb.write_flydsl_kb_solution(
         spec,
         str(driver),
@@ -633,11 +639,17 @@ def test_a_changed_driver_contract_is_rejected_and_the_seed_restored(
     )
     assert written["written"] is True
 
-    seed = "def skeleton():\n    pass\n"
-    Path(spec.flydsl_kernel).write_text(seed)
-    driver.write_text("# changed contract\n")
+    Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
+    if edit == "driver":
+        driver.write_text("# stable rewrite driver contract, with a comment added\n")
+    else:
+        Path(spec.source_kernel).write_text(
+            "import triton\n# a comment the port does not care about\n"
+            "@triton.jit\ndef softmax_kernel(x):\n    return x\n"
+        )
+    _passing_validation(monkeypatch, best_ms=5.0)
 
-    restored = asyncio.run(
+    adopted = asyncio.run(
         kb.try_flydsl_kb_warmstart(
             spec,
             str(driver),
@@ -647,10 +659,9 @@ def test_a_changed_driver_contract_is_rejected_and_the_seed_restored(
         )
     )
 
-    assert restored.applied is False
-    assert restored.attempts[-1]["reason"] == "driver_contract_changed"
-    assert "Historical FlyDSL rewrite references" in restored.reference_context
-    assert Path(spec.flydsl_kernel).read_text() == seed
+    assert adopted.applied is True
+    assert adopted.attempts[-1]["reason"] == "applied"
+    assert Path(spec.flydsl_kernel).read_text() == port
 
 
 def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatch):
