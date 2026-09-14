@@ -118,3 +118,51 @@ def test_multi_node_still_fails_fast(monkeypatch):
 
     assert exc.value.code == 2
     assert _KEY not in os.environ
+
+
+def test_the_call_site_stays_behind_the_atom_guard():
+    """SGLang and vLLM must keep GEAK, and only the call site enforces that.
+
+    Every test above calls this function directly, so none of them would notice
+    the guard being widened or dropped. Read it out of the source instead: the
+    call has to sit under a comparison of ``framework`` against ``"atom"``.
+    """
+    import ast
+    import pathlib
+
+    # Read the file rather than import the package: this assertion is about source
+    # shape, and the import chain needs a POSIX-only module.
+    cli_init = pathlib.Path(__file__).resolve().parents[1] / "cli" / "__init__.py"
+    tree = ast.parse(cli_init.read_text(encoding="utf-8"))
+
+    def calls_it(node: ast.AST) -> bool:
+        return any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "_apply_atom_auto_tighten"
+            for inner in ast.walk(node)
+        )
+
+    def guards_on_atom(test: ast.expr) -> bool:
+        return any(
+            isinstance(cmp, ast.Compare)
+            and isinstance(cmp.left, ast.Name)
+            and cmp.left.id == "framework"
+            and any(isinstance(c, ast.Constant) and c.value == "atom" for c in cmp.comparators)
+            for cmp in ast.walk(test)
+        )
+
+    guarded = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and calls_it(node) and guards_on_atom(node.test)
+    ]
+    assert guarded, "the _apply_atom_auto_tighten call is no longer behind a framework == 'atom' test"
+
+    # And nowhere else: an unguarded second call would reach every framework.
+    total = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_apply_atom_auto_tighten"
+    )
+    assert total == 1, f"expected exactly one call site, found {total}"
