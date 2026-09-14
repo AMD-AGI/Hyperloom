@@ -132,6 +132,25 @@ def _revert_note(repo: Path, patch_path: Path) -> str:
     return f" (revert: {note})" if note else ""
 
 
+def _settle_apply_manifest(validation: dict[str, Any], *, kept: bool) -> str:
+    """Release the apply's backups now that the KEEP's fate is settled.
+
+    Integrate defers this for a pre-applied publication because only the commit
+    here makes it durable: finalizing earlier would delete the pod-side backups
+    a failed commit still needs.
+    """
+    from .request_handlers import _maybe_finalize_kernel_patch, _maybe_revert_kernel_patch
+
+    apply_result = validation.get("apply_result")
+    if not isinstance(apply_result, dict) or not apply_result.get("manifest_path"):
+        return ""
+    stage = "finalize" if kept else "revert"
+    outcome = _maybe_finalize_kernel_patch(apply_result) if kept else _maybe_revert_kernel_patch(apply_result)
+    if str(outcome.get("status") or "") in {"ok", "skipped"}:
+        return ""
+    return f" (patch {stage} incomplete: {outcome.get('error') or outcome.get('status')})"
+
+
 def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult) -> None:
     atomic_write_json(
         results_dir / f"{index:04d}.json",
@@ -228,13 +247,16 @@ async def _default_validator(
             "kernel_id": publication.operator_id,
             "patch_path": str(publication.patch_path),
             "target_file": str(publication.repo_root / publication.kernel_path),
+            # Apply resolves the patch's paths and its final-content snapshot
+            # against this root; without it the diff has no repo to land in.
+            "repo": str(publication.repo_root),
             # The Controller's Git-derived scope when it has one; the optimizer's own manifest only as a fallback for
             # a publication without it.
             "patch_write_paths": list(publication.changed_files)
             or list(publication.manifest.get("changed_files") or []),
-            "_preapplied_git_patch": True,
         },
         session_dir=session_dir,
+        preapplied_git_patch=True,
     )
 
 
@@ -446,10 +468,15 @@ async def integrate_controller_patches(
         # A KEEP is only durable once HEAD carries it, so ask Git rather than the note.
         keep_commit = _head_commit(repo)
         if not committed or not keep_commit or keep_commit == head_before:
+            # Pods, compiled artifacts and the JIT tree come back from the apply
+            # manifest first; the local worktree is reversed after, because its
+            # own backup holds the patched bytes.
+            settle_note = _settle_apply_manifest(validation, kept=False)
+            revert_note = _revert_note(repo, publication.patch_path)
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_commit_failed",
-                reason=(commit_note or "git commit did not advance HEAD") + _revert_note(repo, publication.patch_path),
+                reason=(commit_note or "git commit did not advance HEAD") + settle_note + revert_note,
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -472,7 +499,7 @@ async def integrate_controller_patches(
         result = PatchIntegrationResult(
             operator_id=publication.operator_id,
             status="kept",
-            reason=record_reason,
+            reason=record_reason + _settle_apply_manifest(validation, kept=True),
             base_commit=publication.base_commit,
             best_commit=publication.best_commit,
             repo_root=str(repo),
