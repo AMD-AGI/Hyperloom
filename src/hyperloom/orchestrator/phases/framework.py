@@ -24,6 +24,7 @@ from ..loop.coordinator import (
     _AUTHORED_LANE_MAX_ATTEMPTS,
     _framework_config_levers_from_done,
 )
+from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_SOURCE_PATCH,
@@ -273,9 +274,9 @@ def _record_source_attempt(
                 "server_log_path": str(result.get("server_log_path") or ""),
             },
             decision=status,
-            adopted=status == "kept",
+            adopted=_is_kept(status),
             attribution_eligible=(
-                status == "kept" and base is not None and result.get("output_throughput") is not None
+                _is_kept(status) and base is not None and result.get("output_throughput") is not None
             ),
         )
         if accuracy_pass is not None:

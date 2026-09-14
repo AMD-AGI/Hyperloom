@@ -43,6 +43,40 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
+# ---------------------------------------------------------------------------
+# Shared outcome vocabulary
+# ---------------------------------------------------------------------------
+# ``verdict`` uses the existing perf_metric constants (VERDICT_KEEP / VERDICT_REVERT /
+# VERDICT_RECORDED). The values below are the *non-verdict* terminal states — things
+# that ended an attempt without a graded comparison. Keeping them in one place prevents
+# each caller from mixing its own spellings into the same field.
+
+# explore terminal (non-verdict) states
+TS_FAILED = "FAILED"              # measurement subprocess failed / bad result
+TS_KILLED_OVERTIME = "KILLED_OVERTIME"   # wall-clock overtime kill
+TS_SKIPPED_DEDUP = "SKIPPED_DEDUP"      # exact-duplicate fingerprint; not measured
+
+# integrate_patch terminal (non-verdict) states
+TS_APPLY_FAILED = "apply_failed"                 # patch did not apply cleanly
+TS_KEPT_INERT = "kept_inert"                     # patch kept but behind an off-switch; no throughput delta
+TS_NO_PATCHES = "no_patches"                     # specialist returned nothing measurable
+TS_ADVANCED = "advanced"                         # enablement: boot advanced past previous failure
+TS_REJECTED_BY_CRITIC = "rejected_by_critic"     # Critic rejected before measurement
+TS_SKIPPED = "skipped"                           # skipped (e.g. pre-baseline-enablement guard)
+TS_APPLIED_NO_BENCH = "applied_no_bench"         # patch applied; no benchmark slot (launch-only)
+TS_ACCURACY_UNAVAILABLE_REJECT = "accuracy_unavailable_reject"  # required accuracy missing
+TS_DISPATCH_FAILED = "dispatch_failed"           # specialist never delivered
+
+
+def is_kept(outcome: str) -> bool:
+    """True when *outcome* represents a KEEP in either casing convention.
+
+    ``explore`` uses ``VERDICT_KEEP = "KEEP"`` from perf_metric; ``integrate_patch``
+    uses lowercase ``"kept"``. Both callers can derive ``adopted`` from this one
+    function instead of each embedding a case-specific literal comparison.
+    """
+    return outcome in ("KEEP", "kept")
+
 
 @dataclass
 class GridVariant:
