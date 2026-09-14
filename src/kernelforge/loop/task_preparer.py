@@ -127,7 +127,7 @@ class PreflightResult:
 # timing independently of whatever the driver prints: an eager driver replays zero times, a graph-timed one replays
 # once per timed iteration.
 _GRAPH_PROBE_SITECUSTOMIZE = r'''
-import atexit, json, os
+import atexit, json, os, sys
 
 _n = [0]
 # Collected only when the caller declares a rank count. A single-rank probe
@@ -159,17 +159,13 @@ _ancestors = _ancestor_pids()
 _import_pid = os.getpid()
 
 
-def _install():
+def _install(torch):
     """Patch CUDAGraph.replay lazily: torch may not be imported yet.
 
-    Everything is inside the guard, not only the import. A module named torch
-    that carries no ``cuda`` is a real shape -- a test stub, a partially
-    initialized package mid-import -- and reading the attribute outside would
-    raise out of an import hook that runs in every process on the path.
+    A module named torch may be a stub or partially initialized. Use the
+    existing module rather than importing through our own lazy hook again.
     """
     try:
-        import torch
-
         orig = torch.cuda.CUDAGraph.replay
 
         def _replay(self, *a, **k):
@@ -182,7 +178,7 @@ def _install():
         return False
 
 
-_graph_ready = _install()
+_graph_ready = _install(sys.modules.get("torch"))
 
 if not _graph_ready:
     # torch is imported by the driver, not by us. Hook the import so the patch
@@ -194,10 +190,10 @@ if not _graph_ready:
     def _hooked(name, *a, **k):
         global _graph_ready
         mod = _real_import(name, *a, **k)
-        if name == "torch" or name.startswith("torch."):
-            _graph_ready = _install()
-            if _graph_ready:
-                builtins.__import__ = _real_import
+        if not _graph_ready and (name == "torch" or name.startswith("torch.")):
+            _graph_ready = _install(sys.modules.get("torch"))
+        if _graph_ready and builtins.__import__ is _hooked:
+            builtins.__import__ = _real_import
         return mod
 
     builtins.__import__ = _hooked

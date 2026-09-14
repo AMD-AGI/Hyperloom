@@ -44,7 +44,7 @@ skip the user-approval step (#1314).
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.28.0`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
 
