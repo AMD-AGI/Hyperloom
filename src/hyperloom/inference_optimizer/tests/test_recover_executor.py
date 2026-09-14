@@ -207,6 +207,17 @@ async def test_sigkill_fallthrough_when_pid_still_alive(tmp_path, monkeypatch):
     assert out["killed_pids"][0]["signal"] == "KILL"
 
 
+def test_atom_entrypoint_is_found_behind_a_launcher_that_has_its_own_dash_m():
+    """A launcher prefix carries its own ``-m``; matching only the first reads its argument."""
+    is_atom = RecoverExecutor._is_atom_server
+    assert is_atom("python3 -m atom.entrypoints.openai_server --model /m -tp 8") is True
+    assert is_atom("numactl -m 0 python3 -m atom.entrypoints.openai_server --model /m") is True
+    # A framework name in the model path is not an entrypoint.
+    assert is_atom("python3 -m sglang.launch_server --model /models/atom.entrypoints") is False
+    assert is_atom("python3 -m") is False
+    assert is_atom("") is False
+
+
 def test_sigkill_skips_pid_reused_after_sigterm(monkeypatch):
     """The KILL phase revalidates ownership after its grace period."""
     exe = RecoverExecutor()

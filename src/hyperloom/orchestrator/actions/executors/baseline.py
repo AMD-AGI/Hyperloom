@@ -2050,8 +2050,15 @@ class BaselineExecutor:
 
         Evidence of a refused connection says the eval never reached a verdict, so the run carries no information
         about accuracy or about a missing framework capability -- the two things the enablement lane exists to chase.
+
+        Read only from this result, deliberately not through ``_failure_carries_markers``: that climbs out of a round
+        directory and scans every log under the shared task root, so a warmup round whose server crashed would decide
+        the classification of a measure round that did reach a verdict -- demoting a real accuracy failure out of the
+        enablement lane, the inverse of what this check is for.
         """
-        return BaselineExecutor._failure_carries_markers(result, _EVAL_SERVER_UNREACHABLE_MARKERS)
+        texts = [str(result.get("error") or "")]
+        texts.extend(str(warning) for warning in result.get("nonfatal_warnings") or [])
+        return any(marker in text for text in texts for marker in _EVAL_SERVER_UNREACHABLE_MARKERS)
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
@@ -2394,13 +2401,8 @@ class BaselineExecutor:
             return
         if self._eval_disabled(ctx):
             return
-        # A failed status must NOT skip straight past the salvage below -- with one exception. An eval that never
-        # reached a verdict because the server was unreachable produced no accuracy signal at all, so neither the
-        # accuracy stop nor the enablement routing below has anything to act on. Without this the run is stamped with
-        # an accuracy-flavoured verdict on evidence that says only that the measurement broke.
-        if result.get("status") != "succeeded" and (
-            not self._is_eval_rooted_failure(result) or self._is_server_unreachable_eval_failure(result)
-        ):
+        # A failed status must NOT skip straight past the salvage below.
+        if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
             return
         acc = result.get("accuracy")
         eval_enablement = self._eval_enablement_active(ctx)
@@ -2459,6 +2461,13 @@ class BaselineExecutor:
             # Salvaged, but unusable (zero or still under the floor): that is a real quality signal, so fall through
             # with the observed value rather than reporting it as a missing measurement.
             acc = acc_val
+
+        # An eval that never reached a verdict because the server was unreachable produced no accuracy signal, so
+        # neither the stop below nor the enablement routing has anything to act on; stamping either would put an
+        # accuracy-flavoured verdict on evidence that says only that the measurement broke. The salvage above still
+        # runs first -- a sibling round may have measured an accuracy this one could not.
+        if result.get("status") != "succeeded" and self._is_server_unreachable_eval_failure(result):
+            return
 
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.

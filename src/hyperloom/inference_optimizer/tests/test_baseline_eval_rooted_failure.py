@@ -75,6 +75,38 @@ def test_empty_result_is_not_an_unreachable_server_and_does_not_raise():
     assert ex._is_server_unreachable_eval_failure({}) is False
 
 
+def test_a_sibling_round_s_connection_noise_does_not_demote_a_real_accuracy_failure(tmp_path):
+    """The evidence has to be about *this* failure, not about a log left by another round.
+
+    ``_failure_carries_markers`` climbs out of a round directory to the shared task root
+    and scans every log under it. Reading the unreachable-server markers that way lets a
+    warmup round whose server crashed decide the classification of a measure round that
+    ran its eval to a real verdict -- which would keep a genuine capability gap out of
+    the enablement lane, the exact inverse of what this check is for.
+    """
+    task_root = tmp_path / "task"
+    warmup = task_root / "warmup_round" / "benchmark_atom_1"
+    measure = task_root / "measure_round" / "benchmark_atom_2"
+    warmup.mkdir(parents=True)
+    measure.mkdir(parents=True)
+    # The warmup round's server died, so its log is full of refused connections.
+    (warmup / "server.log").write_text(
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099\n",
+        encoding="utf-8",
+    )
+    # The measure round reached a verdict and failed on accuracy.
+    # The executor is handed the round directory, which is the name that makes
+    # ``_failure_carries_markers`` climb to the shared task root.
+    result = {
+        "status": "failed",
+        "output_dir": str(task_root / "measure_round"),
+        "error": "accuracy 0.21 below floor 0.5\nERROR: run_eval failed with exit code 1\n",
+    }
+    ex = _bare_executor()
+    assert ex._is_eval_rooted_failure(result) is True
+    assert ex._is_server_unreachable_eval_failure(result) is False
+
+
 def test_only_a_genuine_baseline_may_establish_the_quality_reference():
     assert baseline_mod._should_establish_quality_ref("baseline") is True
     # replay_warm_recipe reuses this executor but is a candidate: letting it redefine the reference would mask its own

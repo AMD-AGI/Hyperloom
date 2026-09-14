@@ -282,17 +282,16 @@ class RecoverExecutor:
                 members = self._atom_group_members(pgid)
                 # Capture identities while the recorded ATOM leader can still
                 # establish ownership; its anonymous workers may outlive TERM.
-                if (
-                    pid not in members
-                    or not self._is_atom_server(self._pid_cmdline(pid))
-                    or self._process_identity(pid) != (pgid, members[pid])
-                ):
+                if pid in members and self._is_atom_server(self._pid_cmdline(pid)):
+                    atom_members[pid] = members
+                else:
+                    # Unconfirmed ownership only costs the extra per-worker pass; the
+                    # recorded group still gets the teardown every framework gets.
                     log.warning(
-                        "recover_executor: ATOM owner identity could not be confirmed for pid %d; not signalling", pid
+                        "recover_executor: ATOM owner identity could not be confirmed for pid %d; "
+                        "falling back to the generic group teardown",
+                        pid,
                     )
-                    self._remove_finished_pidfile(entry)
-                    continue
-                atom_members[pid] = members
             sent = (
                 self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
                 if isinstance(pgid, int)
@@ -309,19 +308,29 @@ class RecoverExecutor:
         for entry in killed:
             pid = entry["pid"]
             pgid = entry.get("pgid")
-            if pid in atom_members:
-                for member_pid, starttime in atom_members[pid].items():
-                    member_cmd = self._pid_cmdline(member_pid)
-                    if self._process_identity(member_pid) != (pgid, starttime):
-                        continue
-                    if not self._send_signal(member_pid, signal.SIGKILL):
-                        continue
-                    if member_pid == pid:
-                        entry["signal"] = "KILL"
-                    else:
-                        killed_workers.append({"pid": member_pid, "pgid": pgid, "cmd": member_cmd, "signal": "KILL"})
-                self._remove_finished_pidfile(entry)
-                continue
+            # The snapshot is what makes the anonymous workers reachable by identity, but it
+            # cannot see a rank forked after it was taken. Signal what was recorded, then fall
+            # through to the same group teardown every other framework gets, so a late member
+            # is still covered by the group KILL rather than left holding its cards.
+            for member_pid, starttime in atom_members.get(pid, {}).items():
+                member_cmd = self._pid_cmdline(member_pid)
+                if self._process_identity(member_pid) != (pgid, starttime):
+                    continue
+                if not self._send_signal(member_pid, signal.SIGKILL):
+                    continue
+                if member_pid == pid:
+                    entry["signal"] = "KILL"
+                else:
+                    killed_workers.append(
+                        {
+                            "pid": member_pid,
+                            "pgid": pgid,
+                            "cmd": member_cmd,
+                            "pid_file": entry.get("pid_file"),
+                            "pattern": entry.get("pattern"),
+                            "signal": "KILL",
+                        }
+                    )
             if isinstance(pgid, int):
                 still_owned = bool(self._process_group_owner_cmd(pgid))
                 alive = self._process_group_alive(pgid)
@@ -342,13 +351,16 @@ class RecoverExecutor:
 
     @staticmethod
     def _is_atom_server(cmd: str) -> bool:
-        """Identify the module entrypoint rather than framework names in its arguments."""
+        """Identify the module entrypoint rather than framework names in its arguments.
+
+        Every ``-m`` is checked, not just the first: a launcher prefix carries its own
+        (``numactl -m 0 python3 -m atom.entrypoints.openai_server``) and matching only
+        the first one reads the launcher's argument instead of the module.
+        """
         args = cmd.split()
-        try:
-            entry = args[args.index("-m") + 1]
-        except (ValueError, IndexError):
-            return False
-        return entry == "atom.entrypoints.openai_server"
+        return any(
+            arg == "-m" and args[i + 1 :][:1] == ["atom.entrypoints.openai_server"] for i, arg in enumerate(args)
+        )
 
     @staticmethod
     def _process_identity(pid: int) -> tuple[int, int] | None:
