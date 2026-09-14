@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -368,6 +369,69 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     return result
 
 
+_DIFF_TARGET_RE = re.compile(r"^diff --git a/(\S+) b/\S+", re.MULTILINE)
+
+#: Where a campaign's best manifest sits under the shadow repo it was built in.
+_SHADOW_EXPERIMENTS_MARKER = "/forge_experiments/"
+
+
+def _patch_target_file(patch_path: Path) -> str:
+    """Return the first path a unified diff touches, or empty when it names none."""
+    try:
+        head = patch_path.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return ""
+    match = _DIFF_TARGET_RE.search(head)
+    return match.group(1) if match else ""
+
+
+def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
+    """Collect the per-recipe keepers a run exported before it was killed.
+
+    ``on_keep`` exports ``fusion_<pattern_id>.patch`` the moment a recipe is kept and
+    ``run_campaign`` writes ``forge_loop_<pattern_id>.json`` beside it, but the aggregate
+    ``fusion_manifest.json`` only lands once every campaign has returned. A run killed in
+    between leaves proven work on disk with nothing pointing at it.
+
+    Args:
+        root: The fusion output directory.
+
+    Returns:
+        Nomination rows for every campaign whose own loop result says it won, strongest
+        first.
+    """
+    rows: list[dict[str, Any]] = []
+    for patch_file in sorted(root.glob("fusion_*.patch")):
+        stem = patch_file.name[len("fusion_") : -len(".patch")]
+        loop_file = root / f"forge_loop_{stem}.json"
+        if not loop_file.is_file():
+            continue
+        try:
+            loop = json.loads(loop_file.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(loop, dict) or not loop.get("improved"):
+            continue
+        target_file = _patch_target_file(patch_file)
+        if not target_file:
+            continue
+        best_manifest = str(loop.get("best_manifest") or "")
+        rows.append(
+            {
+                "kernel_name": stem,
+                "patch_path": str(patch_file),
+                "target_file": target_file,
+                "kernel_repo": best_manifest.split(_SHADOW_EXPERIMENTS_MARKER)[0]
+                if _SHADOW_EXPERIMENTS_MARKER in best_manifest
+                else "",
+                "micro_speedup": float(loop.get("total_speedup") or 0.0),
+                "kind": "fusion",
+            }
+        )
+    rows.sort(key=lambda row: row["micro_speedup"], reverse=True)
+    return rows
+
+
 def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | None:
     """Rebuild a KEEP result from pre-smoke checkpoint + patch after a kill."""
     root = Path(output_dir or "")
@@ -415,7 +479,16 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
     if patch_path.is_file():
         patch = str(patch_path)
     if not kept or not patch or not Path(str(patch)).is_file():
-        return None
+        campaign = _campaign_patches_on_disk(root)
+        if not campaign:
+            return None
+        strongest = campaign[0]
+        kept = True
+        siblings = campaign
+        patch = strongest["patch_path"]
+        speedup = strongest["micro_speedup"]
+        source_file = source_file or strongest["target_file"]
+        repo_root = repo_root or strongest["kernel_repo"]
     flags = [f for f in env_flag.split() if f]
     result: dict[str, Any] = {
         "status": "ok",

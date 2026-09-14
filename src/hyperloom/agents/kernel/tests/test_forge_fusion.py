@@ -1419,3 +1419,99 @@ def test_build_cmd_omits_the_recipe_ceiling_when_none_was_derived(tmp_path):
     assert "--max-recipes" not in cmd
     # The rest of the brief still travels, so the omission is not a broken build.
     assert cmd[cmd.index("--framework") + 1] == "sglang"
+
+
+def _campaign_loop_result(*, total_speedup: float, improved: bool = True) -> dict:
+    """What ``kernelforge.cli`` writes to ``forge_loop_<stem>.json`` per campaign."""
+    return {
+        "baseline_ms": 0.0741,
+        "pristine_baseline_ms": 0.0741,
+        "best_ms": 0.0741 / total_speedup,
+        "mean_case_speedup": total_speedup,
+        "total_speedup": total_speedup,
+        "aggregate_regression": False,
+        "improved": improved,
+        "total_improved": improved,
+        "best_commit": "b3999b41eb67",
+        "remote_publication": {"status": "published", "state": "published"},
+    }
+
+
+def test_salvage_recovers_campaign_artifacts_when_the_run_dies_before_the_manifest(tmp_path):
+    """A kill between the campaigns and the manifest still has per-recipe results on disk.
+
+    ``export_artifacts`` writes ``fusion_<pattern_id>.patch`` as each recipe is kept and
+    ``run_campaign`` writes ``forge_loop_<stem>.json`` beside it, but the aggregate
+    ``fusion_manifest.json`` only lands once every campaign has returned. A wrapper killed
+    in between leaves proven, already-published work that the aggregate-only lookup cannot
+    see, and the lane reports REVERT.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    strong = output_dir / "fusion_llm_qkgate_split_qknorm_rope.patch"
+    strong.write_text("diff --git a/qk.py b/qk.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_qkgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=11.99)), encoding="utf-8"
+    )
+    weak = output_dir / "fusion_llm_qk_gemma_norm_rope_gate.patch"
+    weak.write_text("diff --git a/gate.py b/gate.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_qk_gemma_norm_rope_gate.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.53)), encoding="utf-8"
+    )
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert result is not None, "campaign artifacts on disk must not be thrown away"
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["requires_e2e_validation"] is True
+    # The strongest campaign fills the singular slots the older consumers read.
+    assert result["patch"] == str(strong)
+    assert result["kernel_speedup"] == 11.99
+    # Both keepers travel, so integrate queues the pair rather than one of them.
+    outcome = parse_outcome(result)
+    assert outcome.schema_error == ""
+    assert sorted(p.patch_path for p in outcome.patches) == sorted([str(strong), str(weak)])
+
+
+def test_salvage_ignores_campaigns_that_did_not_improve(tmp_path):
+    """A campaign patch is only worth e2e time when its own loop result says it won."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_slower.patch").write_text("diff --git a/s.py b/s.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_slower.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=0.92, improved=False)), encoding="utf-8"
+    )
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
+
+
+def test_salvage_prefers_the_manifest_over_campaign_artifacts(tmp_path):
+    """When the run got far enough to write a manifest, that stays the source of truth."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    stale = output_dir / "fusion_llm_stale.patch"
+    stale.write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_stale.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=9.0)), encoding="utf-8"
+    )
+    final = output_dir / "fusion_0.patch"
+    final.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    (output_dir / "fusion.patch").write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(final),
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        }
+    ]
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_multi_patch_manifest(output_dir, patches=patches)), encoding="utf-8"
+    )
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert [p.patch_path for p in parse_outcome(result).patches] == [str(final)]
