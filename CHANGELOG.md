@@ -909,6 +909,16 @@ for the user-facing summary.
   checks each recorded PID, group and start time before sending KILL. This
   allows anonymous workers to be reaped after their leader exits without
   treating a reused PID or a newly discovered process as an owned worker.
+  A rank that forked after the snapshot is in neither the recorded set nor any
+  cmdline that still reads as an owner, so a confirmed group also receives a
+  closing group KILL; measured on an 8-rank bring-up, those ranks otherwise
+  survived holding their cards. That kill reaches members this pass never
+  enumerated, so it is not treated as proof the group exited. Ownership must be
+  confirmed first: when the recorded leader is absent from the group, no longer
+  reads as an ATOM server, or no longer matches the group and start time
+  recorded for it, nothing is signalled at all and the pidfile is kept for a
+  later pass -- a recorded pgid the kernel has since recycled would otherwise
+  take the teardown meant for ours.
   Recovery retains the pidfile while the group is still alive and reports the
   worker PIDs actually signalled. Normal warmup/measure reuse and the existing
   vLLM/SGLang recovery paths are unchanged. This does not recover ownership of

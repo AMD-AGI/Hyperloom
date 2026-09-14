@@ -282,16 +282,23 @@ class RecoverExecutor:
                 members = self._atom_group_members(pgid)
                 # Capture identities while the recorded ATOM leader can still
                 # establish ownership; its anonymous workers may outlive TERM.
-                if pid in members and self._is_atom_server(self._pid_cmdline(pid)):
-                    atom_members[pid] = members
-                else:
-                    # Unconfirmed ownership only costs the extra per-worker pass; the
-                    # recorded group still gets the teardown every framework gets.
+                if (
+                    pid not in members
+                    or not self._is_atom_server(self._pid_cmdline(pid))
+                    or self._process_identity(pid) != (pgid, members[pid])
+                ):
+                    # A recorded pgid is stale data: the kernel may already have handed it
+                    # to somebody else. Only the recorded leader, still in that group and
+                    # still reading as an ATOM server, can authorize signalling it. Keep
+                    # the pidfile so a later pass retries rather than losing the record.
                     log.warning(
                         "recover_executor: ATOM owner identity could not be confirmed for pid %d; "
-                        "falling back to the generic group teardown",
+                        "not signalling process group %s",
                         pid,
+                        pgid,
                     )
+                    continue
+                atom_members[pid] = members
             sent = (
                 self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
                 if isinstance(pgid, int)
@@ -336,7 +343,9 @@ class RecoverExecutor:
                 # established before TERM, so clear the group on that evidence rather than
                 # re-deriving it from a cmdline that no longer exists.
                 self._send_group_signal(pgid, signal.SIGKILL)
-                self._remove_finished_pidfile(entry, force=True)
+                # That kill targeted members this pass never enumerated, so it proves
+                # nothing about whether the group is gone. Keep the pidfile as a handle
+                # for the next pass instead of recording the group as finished.
                 continue
             if isinstance(pgid, int):
                 still_owned = bool(self._process_group_owner_cmd(pgid))

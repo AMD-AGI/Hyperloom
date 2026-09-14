@@ -748,7 +748,9 @@ class TestKillStaleOwnersNoneSignalled:
 
         out = exe._kill_stale_owners()
 
-        assert sent == [(222, signal.SIGTERM)]
+        # The leader exited on TERM, so no per-pid KILL follows it; the group KILL still
+        # runs for ranks that forked after the member snapshot.
+        assert sent == [(222, signal.SIGTERM), (222, signal.SIGKILL)]
         assert out[0]["signal"] == "TERM"
 
     def test_unrecognized_pidfile_owner_is_not_signalled(self, monkeypatch):
@@ -856,7 +858,13 @@ class TestAtomRecoveryIdentities:
     def test_kills_only_a_recorded_survivor_and_keeps_the_live_group_handle(self, monkeypatch, tmp_path):
         exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20), 113: (222, 30)})
         result = exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM), ("pid", 112, signal.SIGKILL)]
+        # The trailing group KILL reaches ranks forked after the member snapshot; they
+        # are in neither the recorded set nor any cmdline that still reads as an owner.
+        assert sent == [
+            ("group", 222, signal.SIGTERM),
+            ("pid", 112, signal.SIGKILL),
+            ("group", 222, signal.SIGKILL),
+        ]
         assert [(entry["pid"], entry["signal"]) for entry in result] == [(111, "TERM"), (112, "KILL")]
         assert pidfile.exists(), "sending KILL is not proof that the group exited"
 
@@ -864,7 +872,9 @@ class TestAtomRecoveryIdentities:
     def test_does_not_kill_a_missing_reused_or_moved_worker(self, monkeypatch, tmp_path, identity):
         exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: identity})
         exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM)]
+        # No per-pid KILL: the recorded worker is gone, reused, or moved. The group
+        # KILL still runs, because it is aimed at members this pass never saw.
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
         assert pidfile.exists()
 
     def test_a_new_owner_marker_does_not_override_the_recorded_identity(self, monkeypatch, tmp_path):
@@ -872,7 +882,7 @@ class TestAtomRecoveryIdentities:
             monkeypatch, tmp_path, {111: (222, 99)}, owner_after_term="python3 -m atom.entrypoints.openai_server"
         )
         exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM)]
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
         assert pidfile.exists()
 
     def test_dead_group_does_not_fall_back_to_a_reused_leader_pid(self, monkeypatch, tmp_path):
@@ -881,7 +891,9 @@ class TestAtomRecoveryIdentities:
         monkeypatch.setattr(exe, "_pid_alive", lambda _pid: True)
         monkeypatch.setattr(exe, "_process_group_alive", lambda _pgid: False)
         exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM)]
+        # The point is the absent ``("pid", 111, SIGKILL)``: the leader pid now belongs to
+        # a different process. Signalling the group it was recorded in is still allowed.
+        assert sent == [("group", 222, signal.SIGTERM), ("group", 222, signal.SIGKILL)]
 
     def test_no_signals_without_a_live_recorded_atom_leader(self, monkeypatch, tmp_path):
         exe, sent, pidfile = self._recovery(monkeypatch, tmp_path, {112: (222, 20)})
@@ -915,7 +927,11 @@ class TestAtomRecoveryIdentities:
             command=f"python3 -m atom.entrypoints.openai_server --model /models/{path_marker}.export/model",
         )
         exe._kill_stale_owners()
-        assert sent == [("group", 222, signal.SIGTERM), ("pid", 112, signal.SIGKILL)]
+        assert sent == [
+            ("group", 222, signal.SIGTERM),
+            ("pid", 112, signal.SIGKILL),
+            ("group", 222, signal.SIGKILL),
+        ]
 
     @pytest.mark.parametrize("framework", ["vllm", "sglang"])
     def test_atom_marker_in_another_frameworks_model_path_does_not_snapshot(self, monkeypatch, tmp_path, framework):
