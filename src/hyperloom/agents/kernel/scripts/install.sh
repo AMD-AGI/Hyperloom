@@ -692,16 +692,88 @@ ensure_moreutils() {
   command -v ts >/dev/null 2>&1 || warn "ts still missing after apt-get install moreutils"
 }
 
+_RAY_VERSION_WAS_SET="${RAY_VERSION+x}"
+_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="${RAY_CLI_CLICK_MAX_VERSION+x}"
 RAY_VERSION="${RAY_VERSION:-2.44.1}"
 # Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
 RAY_CLI_CLICK_MAX_VERSION="${RAY_CLI_CLICK_MAX_VERSION:-8.3.0}"
 RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
 CLICK_INSTALL_SPEC="click<${RAY_CLI_CLICK_MAX_VERSION}"
 
+# The default Ray pin predates newer CPython ABIs (no cp314 wheels before
+# 2.55.0), so on such interpreters the exact pin cannot resolve at all. Print
+# the lowest published version that does ship a wheel here, or nothing when
+# the pin itself is installable. Only consulted for the built-in default; an
+# operator-supplied RAY_VERSION is always honoured as-is.
+lowest_ray_version_for_interpreter() {
+  local pinned="$1"
+  RAY_PINNED_VERSION="$pinned" python3 - <<'PY' 2>/dev/null
+import os
+import re
+import subprocess
+import sys
+
+pinned = os.environ["RAY_PINNED_VERSION"]
+
+
+def as_tuple(version):
+    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+    parts.extend([0] * (3 - len(parts)))
+    return tuple(parts[:3])
+
+
+try:
+    out = subprocess.run(
+        [sys.executable, "-m", "pip", "index", "versions", "ray"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    ).stdout
+except Exception:
+    raise SystemExit(0)
+
+match = re.search(r"Available versions:\s*(.+)", out)
+if not match:
+    raise SystemExit(0)
+# pip filters this list by the running interpreter, so anything listed has a
+# usable wheel here.
+available = [v.strip() for v in match.group(1).split(",") if v.strip()]
+if pinned in available:
+    raise SystemExit(0)
+newer = sorted((v for v in available if as_tuple(v) >= as_tuple(pinned)), key=as_tuple)
+if newer:
+    print(newer[0])
+PY
+}
+
+# Relax the pin only when the default is genuinely uninstallable on this
+# interpreter, and say so loudly: the kernel-agent runtime version is part of
+# what a release gate certifies.
+resolve_ray_version() {
+  [ -n "$_RAY_VERSION_WAS_SET" ] && return 0
+  local resolved
+  resolved="$(lowest_ray_version_for_interpreter "$RAY_VERSION")"
+  [ -n "$resolved" ] || return 0
+  warn "ray ${RAY_VERSION} has no wheel for this interpreter ($(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)); using ray ${resolved} instead"
+  RAY_VERSION="$resolved"
+  RAY_INSTALL_SPEC="ray[default]==${RAY_VERSION}"
+  # The click ceiling exists for 2.44.1's CLI import bug; past that version it
+  # would pin click below what the newer Ray itself ships against.
+  if [ -z "$_RAY_CLI_CLICK_MAX_VERSION_WAS_SET" ]; then
+    RAY_CLI_CLICK_MAX_VERSION=""
+    CLICK_INSTALL_SPEC=""
+  fi
+}
+
 ensure_ray() {
-  log "ensuring ${RAY_INSTALL_SPEC} and ${CLICK_INSTALL_SPEC}"
+  resolve_ray_version
+  log "ensuring ${RAY_INSTALL_SPEC}${CLICK_INSTALL_SPEC:+ and ${CLICK_INSTALL_SPEC}}"
   if [ "$CHECK_ONLY" -eq 0 ]; then
-    run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
+    if [ -n "$CLICK_INSTALL_SPEC" ]; then
+      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$CLICK_INSTALL_SPEC" "$RAY_INSTALL_SPEC"
+    else
+      run python3 -m pip install --quiet --no-cache-dir --break-system-packages "$RAY_INSTALL_SPEC"
+    fi
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     RAY_VERSION="$RAY_VERSION" RAY_CLI_CLICK_MAX_VERSION="$RAY_CLI_CLICK_MAX_VERSION" python3 - <<'PY'
@@ -723,7 +795,7 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
 if ray.__version__ != RAY_VERSION:
     raise SystemExit(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}")
 click_version = md.version("click")
-if _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
+if RAY_CLI_CLICK_MAX_VERSION and _version_tuple(click_version) >= _version_tuple(RAY_CLI_CLICK_MAX_VERSION):
     raise SystemExit(f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}")
 try:
     from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
