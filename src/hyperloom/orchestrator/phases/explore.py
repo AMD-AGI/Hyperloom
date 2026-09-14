@@ -38,6 +38,8 @@ from ..loop.coordinator import (
     SPECIALIST_AUTO_RETRY_MAX,
     _framework_config_levers_from_done,
 )
+from ..loop.coordinator_helpers import _dedupe_extra_server_args
+from ..actions.executors._grid_server_args import merge_server_args
 from ..collaborator import CoordinatorCollaborator
 
 log = _logging.getLogger(__name__)
@@ -1599,13 +1601,30 @@ class ExplorePhase(CoordinatorCollaborator):
         # specialist and is not reliably set even when its own reason says the flag is
         # required to boot. While optimizing, a patch stays its own outcome and only an
         # explicitly atomic lever rides with it.
+        is_enablement_round = bool(spec_params.get("enablement"))
         companion_levers = _framework_config_levers_from_done(
             done_payload,
-            levers_ride_with_patches=bool(spec_params.get("enablement")),
+            levers_ride_with_patches=is_enablement_round,
         )
-        if companion_levers:
-            integrate_params["extra_server_args"] = str(companion_levers.get("extra_server_args") or "")
-            integrate_params["extra_envs"] = dict(companion_levers.get("extra_envs") or {})
+        round_args = str(companion_levers.get("extra_server_args") or "")
+        round_envs = dict(companion_levers.get("extra_envs") or {})
+        if is_enablement_round:
+            # Inherit what earlier rounds already established. ``_rearm_on_advanced``
+            # accumulates these "so a later kept round replays every advance", but the
+            # accumulation only reached the emitted recipe -- each new round still
+            # launched from whatever the latest deliverable happened to restate. A flag
+            # the architecture requires does not stop being required because the next
+            # specialist is working on a different blocker, and one that omits it sends
+            # the round back to the wall an earlier round already cleared.
+            established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
+            round_envs = {**{str(k): str(v) for k, v in (established.get("extra_envs") or {}).items()}, **round_envs}
+            # This round last, so it overrides an inherited value for the same flag.
+            round_args = _dedupe_extra_server_args(
+                merge_server_args(str(established.get("extra_server_args") or ""), round_args)
+            )
+        if round_args or round_envs:
+            integrate_params["extra_server_args"] = round_args
+            integrate_params["extra_envs"] = round_envs
         _forward_integrate_source(
             spec_params,
             integrate_params,
