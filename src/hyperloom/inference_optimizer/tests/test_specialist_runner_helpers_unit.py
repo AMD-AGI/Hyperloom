@@ -7,6 +7,7 @@ the prompt/transcript/heartbeat/done writers."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 
@@ -228,15 +229,17 @@ def _finalize(r, tmp_path, payload):
         workspace=tmp_path,
     )
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    result = r._finalize(
-        ctx=ctx,
-        prep=prep,
-        specialist_done_payload=payload,
-        turns_used=1,
-        tool_violations=[],
-        backend_error="",
-        extra_notes=[],
-        patches_written=[],
+    result = asyncio.run(
+        r._finalize(
+            ctx=ctx,
+            prep=prep,
+            specialist_done_payload=payload,
+            turns_used=1,
+            tool_violations=[],
+            backend_error="",
+            extra_notes=[],
+            patches_written=[],
+        )
     )
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
@@ -376,6 +379,155 @@ def test_patch_path_within_bases_accepts_sandbox_paths(tmp_path):
     inside.write_text("diff", encoding="utf-8")
     assert sr._patch_path_within_bases(inside, bases) is True
     assert sr._patch_path_within_bases(workspace / "y.patch", bases) is True
+
+
+def _gated_patch(tmp_path, env_name="VLLM_EXAMPLE_GATE"):
+    """A patch whose added lines read `env_name`, so the gate scan finds it."""
+    patch = tmp_path / "rewrite.patch"
+    patch.write_text(
+        "diff --git a/vllm/worker.py b/vllm/worker.py\n"
+        "--- a/vllm/worker.py\n"
+        "+++ b/vllm/worker.py\n"
+        "@@ -1,3 +1,5 @@\n"
+        " import os\n"
+        "+if os.environ.get(\"" + env_name + "\"):\n"
+        "+    fast_path()\n"
+        " done()\n",
+        encoding="utf-8",
+    )
+    return patch
+
+
+class _RepairDispatcher:
+    """Records the repair dispatch and returns a scripted done payload."""
+
+    def __init__(self, manifest=None, patches=()):
+        self.manifest = manifest
+        self.patches = list(patches)
+        self.calls = []
+
+    async def run(self, **kwargs):
+        self.calls.append(kwargs)
+        payload = {"framework_switches": self.manifest} if self.manifest else {}
+        return SimpleNamespace(done_payload=payload, patches=list(self.patches))
+
+
+def _repair_runner(dispatcher):
+    """A runner with the dispatcher attached; it is derived in __init__, not a kwarg."""
+    runner = _runner()
+    runner.subprocess_dispatcher = dispatcher
+    return runner
+
+
+def _repair(runner, tmp_path, *, done_payload, kept):
+    notes = []
+    prep = sr._PreparedRun(workspace=tmp_path, worktree=tmp_path, worktree_base=tmp_path)
+    ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
+    out = asyncio.run(
+        runner._repair_switch_manifest(
+            ctx=ctx, prep=prep, done_payload=done_payload, kept=kept, notes=notes
+        )
+    )
+    return out, notes
+
+
+def test_a_patch_gating_on_an_undeclared_switch_gets_one_repair_round(tmp_path):
+    """The author is asked while it still exists, not reverted hours later.
+
+    An undeclared gate is only caught at integrate_patch, which benches the
+    rewrite inert and reverts it -- the whole attempt is lost, and the only
+    party who knows which value means "on" is long gone.
+    """
+    patch = _gated_patch(tmp_path)
+    dispatcher = _RepairDispatcher(
+        manifest=[{"switch": "VLLM_EXAMPLE_GATE", "value": "1"}]
+    )
+    runner = _repair_runner(dispatcher)
+    payload = {"framework_switches": []}
+
+    _, notes = _repair(runner, tmp_path, done_payload=payload, kept=[str(patch)])
+
+    assert len(dispatcher.calls) == 1
+    call = dispatcher.calls[0]
+    # The missing name is in the prompt: the scan already resolved which gate
+    # is undeclared, so the round is told, not asked to re-derive it.
+    assert "VLLM_EXAMPLE_GATE" in call["user_prompt"]
+    # A round that only edits one JSON field does not get an authoring budget.
+    assert call["max_turns"] == sr._SWITCH_REPAIR_MAX_TURNS
+    assert call["wall_budget_sec"] == sr._SWITCH_REPAIR_WALL_SEC
+    assert payload["framework_switches"] == [{"switch": "VLLM_EXAMPLE_GATE", "value": "1"}]
+    assert "switch_manifest_repaired:VLLM_EXAMPLE_GATE" in "\n".join(notes)
+    assert "problems" not in payload
+
+
+def test_a_declared_manifest_costs_no_repair_round(tmp_path):
+    """The common case must not spend a subprocess."""
+    patch = _gated_patch(tmp_path)
+    dispatcher = _RepairDispatcher()
+    runner = _repair_runner(dispatcher)
+    payload = {"framework_switches": [{"switch": "VLLM_EXAMPLE_GATE", "value": "1"}]}
+
+    _repair(runner, tmp_path, done_payload=payload, kept=[str(patch)])
+
+    assert dispatcher.calls == []
+
+
+def test_the_done_artifact_is_parked_so_the_repair_round_is_not_reaped(tmp_path):
+    """`specialist_done.json` is the exit signal the reaper polls for.
+
+    Left in place, the repair subprocess is reaped the instant it spawns.
+    """
+    patch = _gated_patch(tmp_path)
+    done = tmp_path / "specialist_done.json"
+    done.write_text('{"summary": "first round"}', encoding="utf-8")
+    seen = {}
+
+    class _Checking(_RepairDispatcher):
+        async def run(self, **kwargs):
+            seen["done_present_during_run"] = done.exists()
+            return await super().run(**kwargs)
+
+    dispatcher = _Checking(manifest=[{"switch": "VLLM_EXAMPLE_GATE", "value": "1"}])
+    runner = _repair_runner(dispatcher)
+
+    _repair(runner, tmp_path, done_payload={}, kept=[str(patch)])
+
+    assert seen["done_present_during_run"] is False
+    # The round wrote no new artifact, so the original is restored rather than
+    # left parked -- the payload on disk still describes the round.
+    assert done.exists()
+    assert json.loads(done.read_text(encoding="utf-8"))["summary"] == "first round"
+
+
+def test_a_still_undeclared_switch_is_handed_to_the_critic_not_retried(tmp_path):
+    """One round only; a second would spend the lane on a silent specialist."""
+    patch = _gated_patch(tmp_path)
+    dispatcher = _RepairDispatcher(manifest=[{"switch": "SOMETHING_ELSE", "value": "1"}])
+    runner = _repair_runner(dispatcher)
+    payload = {}
+
+    _, notes = _repair(runner, tmp_path, done_payload=payload, kept=[str(patch)])
+
+    assert len(dispatcher.calls) == 1
+    assert "switch_manifest_still_undeclared:VLLM_EXAMPLE_GATE" in "\n".join(notes)
+    assert any("VLLM_EXAMPLE_GATE" in p for p in payload["problems"])
+
+
+def test_a_failed_repair_round_does_not_fail_the_specialist(tmp_path):
+    """The patches and findings are real work; a repair crash must not void it."""
+    patch = _gated_patch(tmp_path)
+
+    class _Broken(_RepairDispatcher):
+        async def run(self, **kwargs):
+            raise RuntimeError("agent CLI unavailable")
+
+    runner = _repair_runner(_Broken())
+    payload = {}
+
+    kept, notes = _repair(runner, tmp_path, done_payload=payload, kept=[str(patch)])
+
+    assert kept == [str(patch)]
+    assert "switch_manifest_still_undeclared:VLLM_EXAMPLE_GATE" in "\n".join(notes)
 
 
 def test_patch_path_within_bases_rejects_outside_paths(tmp_path):

@@ -48,6 +48,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
+from ..actions.executors import _framework_switch_manifest as _switch_manifest
 from ..framework.paths import resolve_framework_tree
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
@@ -57,6 +58,58 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+
+# The switch-manifest repair round edits one JSON field in a workspace it
+# already owns. It gets a fraction of an authoring budget because a round that
+# needs more than this is not doing the one thing it was asked to do.
+_SWITCH_REPAIR_MAX_TURNS = 3
+_SWITCH_REPAIR_WALL_SEC = 240.0
+
+
+def _switch_repair_prompt(missing: list[str], kept: list[str]) -> str:
+    """Ask the specialist to declare the gates its own patch reads.
+
+    Names the variables rather than describing the rule, because the scan has
+    already resolved which ones are undeclared, and states why a wrong "on"
+    value is worse than a missing one: the manifest drives what the benchmark
+    turns on, so a plausible-looking value gets measured as if it were the
+    rewrite the specialist intended.
+
+    Args:
+        missing (list[str]): Undeclared environment gates found in the diff.
+        kept (list[str]): Patch files the declaration must cover.
+
+    Returns:
+        str: The repair round's user prompt.
+    """
+    names = "\n".join(f"  - {name}" for name in missing)
+    patches = "\n".join(f"  - {p}" for p in kept)
+    return (
+        "Your patches are written and they passed the safety gate. One thing is "
+        "missing before they can be measured.\n\n"
+        "Your patch reads these environment variables on lines it adds, and your "
+        f"`{_switch_manifest.MANIFEST_KEY}` manifest does not declare them:\n"
+        f"{names}\n\n"
+        "The patches in question:\n"
+        f"{patches}\n\n"
+        "Every switch a patch gates on has to be declared, because the manifest is "
+        "what the benchmark uses to turn your rewrite on. An undeclared gate means "
+        "the patch is benched with the rewrite inert, measured as a no-op, and "
+        "reverted — the work is thrown away.\n\n"
+        f"Write `{_switch_manifest.MANIFEST_KEY}` into your specialist_done JSON as a "
+        "list of entries:\n\n"
+        '  {"switch": "VLLM_EXAMPLE_FLAG", "value": "1", "category": "", '
+        '"target": "the file and function it gates", '
+        '"evidence": "why this rewrite should help", '
+        '"depends_on": [], "enables": []}\n\n'
+        "`value` is the value that turns your rewrite ON, and only you know it. Do "
+        "not default to \"1\": a size or threshold variable has a real number, and a "
+        "minimum-size gate is switched on by \"0\". A wrong value is worse than a "
+        "missing one, because it will be measured and attributed to your idea.\n\n"
+        "Declare every name listed above and change nothing else. Keep the rest of "
+        "your findings and proposals exactly as they are."
+    )
 
 
 def resolve_specialist_max_turns(raw: Any, *, default: int) -> int:
@@ -1051,7 +1104,7 @@ class SpecialistRunner:
             status="finished",
         )
 
-        return self._finalize(
+        return await self._finalize(
             ctx=ctx,
             prep=prep,
             specialist_done_payload=(
@@ -1222,7 +1275,7 @@ class SpecialistRunner:
         elif sub_result.exit_code not in (None, 0) and sub_result.done_payload is None:
             backend_error = f"subprocess_exit_code:{sub_result.exit_code}"
 
-        return self._finalize(
+        return await self._finalize(
             ctx=ctx,
             prep=prep,
             specialist_done_payload=sub_result.done_payload,
@@ -1235,7 +1288,140 @@ class SpecialistRunner:
         )
 
     # Finalize phase (shared)
-    def _finalize(
+    async def _repair_switch_manifest(
+        self,
+        *,
+        ctx: RunnerContext,
+        prep: "_PreparedRun",
+        done_payload: dict[str, Any],
+        kept: list[str],
+        notes: list[str],
+    ) -> list[str]:
+        """Give the specialist one round to declare switches its patch gates on.
+
+        A specialist that puts every rewrite behind an environment switch and
+        then leaves ``framework_switches`` empty has written a patch that cannot
+        be integrated: ``integrate_patch`` scans the diff, finds a gate nobody
+        declared, and reverts the whole attempt. Three live rounds ended that
+        way. The scan that catches it runs at integration time, hours after the
+        only party who knows the answer stopped existing.
+
+        The missing values cannot be filled in from the diff. Of five observed
+        gates only two were boolean, where ``"1"`` happens to be right;
+        ``VLLM_CUSTOM_AR_MAX_SIZE_MB`` backfilled to ``"1"`` means a 1 MiB
+        buffer, worse than the 8 MiB default, and a ``..._MIN_M`` threshold is
+        turned *on* by ``0``, so ``"1"`` inverts it. Only the author knows which
+        value means "on", so the author is asked -- once, while the worktree
+        holding the patch is still there.
+
+        Args:
+            ctx (RunnerContext): Dispatch context, read for the wall budget.
+            prep (_PreparedRun): Setup bundle; supplies workspace and worktree.
+            done_payload (dict[str, Any]): The payload, updated in place with
+                whatever manifest the repair round declares.
+            kept (list[str]): Patches that passed the safety gate.
+            notes (list[str]): Audit notes, appended to.
+
+        Returns:
+            list[str]: ``kept``, re-vetted when the repair round touched the
+                patches, else unchanged.
+        """
+        workspace = prep.workspace
+        if not kept or workspace is None or self.subprocess_dispatcher is None:
+            return kept
+
+        declared, _ = _switch_manifest.parse_manifest(
+            done_payload.get(_switch_manifest.MANIFEST_KEY)
+        )
+        missing = _switch_manifest.undeclared_switch_gates(
+            [Path(p) for p in kept], declared
+        )
+        if not missing:
+            return kept
+
+        done_path = self._done_path(workspace)
+        # The done artifact is the exit signal the reaper polls for. Leaving it
+        # in place would have the repair round reaped the moment it spawned.
+        parked = None
+        if done_path is not None and done_path.exists():
+            parked = done_path.with_suffix(".prerepair.json")
+            done_path.replace(parked)
+
+        notes.append("switch_manifest_repair_dispatched:" + ",".join(missing[:8]))
+        try:
+            repair = await self.subprocess_dispatcher.run(
+                task_id=f"{ctx.task.task_id}-switch-repair",
+                workspace=workspace,
+                worktree=prep.worktree,
+                worktree_base=prep.worktree_base,
+                system_prompt=prep.system_prompt,
+                user_prompt=_switch_repair_prompt(missing, kept),
+                disallowed_tools=SPECIALIST_TOOL_DENYLIST,
+                max_turns=_SWITCH_REPAIR_MAX_TURNS,
+                gpu_ids=(),
+                wall_budget_sec=_SWITCH_REPAIR_WALL_SEC,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed repair is not a failed task
+            log.warning(
+                "specialist %s: switch-manifest repair round failed: %s",
+                ctx.task.task_id,
+                exc,
+            )
+            repair = None
+
+        if parked is not None and done_path is not None and not done_path.exists():
+            # Nothing new was written; put the original back so the payload on
+            # disk still matches what this method returns.
+            parked.replace(done_path)
+            parked = None
+
+        repaired_manifest = None
+        if repair is not None and isinstance(repair.done_payload, dict):
+            repaired_manifest = repair.done_payload.get(_switch_manifest.MANIFEST_KEY)
+        if repaired_manifest:
+            done_payload[_switch_manifest.MANIFEST_KEY] = repaired_manifest
+
+        # The round was told to edit the manifest, but it holds the worktree and
+        # may have touched the patches to do it, so re-vet rather than trust.
+        if repair is not None and repair.patches:
+            merged = list(dict.fromkeys(list(kept) + list(repair.patches)))
+            kept, _, _, _ = _patch_safety.vet_patches(
+                merged,
+                base_checkout=prep.worktree_base or prep.worktree,
+                candidate_roots=_sibling_checkouts(
+                    tuple(self.subprocess_config.framework_source_roots)
+                    if self.subprocess_config
+                    else (),
+                    prep.worktree_base or prep.worktree,
+                ),
+                explicit_root="",
+            )
+
+        declared, _ = _switch_manifest.parse_manifest(
+            done_payload.get(_switch_manifest.MANIFEST_KEY)
+        )
+        still_missing = _switch_manifest.undeclared_switch_gates(
+            [Path(p) for p in kept], declared
+        )
+        if still_missing:
+            # One round only. A second would spend the lane on a specialist that
+            # has already shown it will not answer; handing the list to the
+            # Critic costs nothing and puts the gap in front of a reader.
+            notes.append("switch_manifest_still_undeclared:" + ",".join(still_missing[:8]))
+            problems = done_payload.get("problems")
+            if not isinstance(problems, list):
+                problems = []
+            problems.append(
+                "framework_switches omits environment gates this patch reads: "
+                + ", ".join(still_missing[:8])
+                + " — integrate_patch will revert the patch over these."
+            )
+            done_payload["problems"] = problems
+        else:
+            notes.append("switch_manifest_repaired:" + ",".join(missing[:8]))
+        return kept
+
+    async def _finalize(
         self,
         *,
         ctx: RunnerContext,
@@ -1404,6 +1590,14 @@ class SpecialistRunner:
                 d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
                 for d in dropped
             )
+        )
+        # One chance to name the switches it gated on before it stops existing.
+        kept = await self._repair_switch_manifest(
+            ctx=ctx,
+            prep=prep,
+            done_payload=done_payload,
+            kept=kept,
+            notes=notes,
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
