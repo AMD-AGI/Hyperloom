@@ -309,9 +309,7 @@ class RecoverExecutor:
             pid = entry["pid"]
             pgid = entry.get("pgid")
             # The snapshot is what makes the anonymous workers reachable by identity, but it
-            # cannot see a rank forked after it was taken. Signal what was recorded, then fall
-            # through to the same group teardown every other framework gets, so a late member
-            # is still covered by the group KILL rather than left holding its cards.
+            # cannot see a rank forked after it was taken.
             for member_pid, starttime in atom_members.get(pid, {}).items():
                 member_cmd = self._pid_cmdline(member_pid)
                 if self._process_identity(member_pid) != (pgid, starttime):
@@ -331,6 +329,15 @@ class RecoverExecutor:
                             "signal": "KILL",
                         }
                     )
+            if pid in atom_members and isinstance(pgid, int):
+                # A rank forked after the snapshot is in neither the recorded set nor, by
+                # then, anything that still reads as an owner: the leader we just killed was
+                # the only member carrying the entrypoint in its cmdline. Ownership was
+                # established before TERM, so clear the group on that evidence rather than
+                # re-deriving it from a cmdline that no longer exists.
+                self._send_group_signal(pgid, signal.SIGKILL)
+                self._remove_finished_pidfile(entry, force=True)
+                continue
             if isinstance(pgid, int):
                 still_owned = bool(self._process_group_owner_cmd(pgid))
                 alive = self._process_group_alive(pgid)
