@@ -462,7 +462,10 @@ def run_rewrite(
         port_ok=True,
         port_attempts=port.attempts,
         source_ms=source_ms,
-        optimize_result={"best_ms": flydsl_baseline_ms},
+        optimize_result={
+            "best_ms": flydsl_baseline_ms,
+            "mean_case_speedup": flydsl_baseline_speedup,
+        },
         applyback_result={"ok": False, "error": "apply-back pending"},
         applyback_required=bool(rewrite_base_commit),
         llm_usage=_total_usage(),
