@@ -1616,10 +1616,21 @@ class ExplorePhase(CoordinatorCollaborator):
                 before_path = str(spec_params.get("enablement_before_observation_path") or "")
                 if before_path:
                     integrate_params["enablement_before_observation_path"] = before_path
-                # Forward stacked base setup commands to replay before boot.
-                base_setup = spec_params.get("enablement_setup_commands")
-                if isinstance(base_setup, list) and base_setup:
-                    integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
+                # Merge stacked base setup commands with any NEW setup_commands the
+                # specialist proposed (e.g. a stack upgrade), so a patch-bearing
+                # enablement round replays the install step instead of silently
+                # dropping it.
+                merged_setup: list[str] = []
+                for c in spec_params.get("enablement_setup_commands") or []:
+                    sc = str(c)
+                    if sc and sc not in merged_setup:
+                        merged_setup.append(sc)
+                for c in done_payload.get("setup_commands") or []:
+                    sc = str(c)
+                    if sc and sc not in merged_setup:
+                        merged_setup.append(sc)
+                if merged_setup:
+                    integrate_params["enablement_setup_commands"] = merged_setup
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
