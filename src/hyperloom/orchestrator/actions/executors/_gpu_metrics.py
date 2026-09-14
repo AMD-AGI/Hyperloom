@@ -35,6 +35,7 @@ __all__ = [
     "GPU_ARTIFACT_NAME",
     "gpu_metrics_from_report",
     "write_gpu_metrics",
+    "write_gpu_metrics_from_report",
 ]
 
 #: Artifact written into the round's workspace, beside ``benchmark_report.json``.
@@ -67,19 +68,26 @@ def _to_float(raw: Any) -> float | None:
     return value if value == value and value not in (float("inf"), float("-inf")) else None
 
 
+#: Statistics this reader actually emits. A block that carries only the others has nothing to contribute.
+_REPORTED_STATS = ("avg", "max")
+
+
 def _source(block: dict[str, Any], keys: tuple[str, ...]) -> Any:
-    """Pick the one alias in this block that carries a usable reading.
+    """Pick the one alias in this block that carries a reading this reader can report.
 
     Resolved once per block rather than once per statistic. Choosing per statistic lets the mean come from
     ``power_watts`` and the peak from a stale ``power_w`` in the same block, which can report a maximum below the
     average -- a self-contradictory number of exactly the kind this exists to stop emitting.
+
+    Usable means usable *here*: only ``avg`` and ``max`` are emitted, so a block offering nothing but ``min`` measured
+    nothing this artifact can carry. Accepting it would credit its ``sample_count`` toward a row of nulls.
     """
     for key in keys:
         if key not in block:
             continue
         raw = block[key]
         if isinstance(raw, dict):
-            if any(_to_float(raw.get(stat)) is not None for stat in ("avg", "max", "min")):
+            if any(_to_float(raw.get(stat)) is not None for stat in _REPORTED_STATS):
                 return raw
         elif _to_float(raw) is not None:
             return raw
@@ -173,27 +181,52 @@ def gpu_metrics_from_report(report: Any) -> dict[str, Any]:
     }
 
 
-def write_gpu_metrics(workspace: Path | str) -> str | None:
-    """Normalise the round's GPU telemetry into ``gpu_metrics.json``. Returns the path, or ``None``.
+def write_gpu_metrics_from_report(workspace: Path | str, report: Any, *, source: str) -> str | None:
+    """Write ``gpu_metrics.json`` from a report already in hand. Returns the path, or ``None``.
 
-    Best-effort throughout: this runs while a round is finishing, and a round that produced a good benchmark number and
-    no GPU artifact is a far better outcome than one that failed here.
+    This is the whole of the failure policy, and it draws one distinction the caller cannot draw for itself: a round
+    that carried no telemetry is an ordinary outcome and stays quiet, while a round that carried telemetry this failed
+    to write is a defect and says so. Reporting both at the same volume is how a broken writer goes unnoticed for as
+    long as this data did.
+
+    It never raises. A round that produced a good benchmark number and no GPU artifact is a far better outcome than a
+    round failed by its own telemetry, so the one guarantee lives here rather than being repeated by each caller.
     """
+    root = Path(workspace)
     try:
-        root = Path(workspace)
-        report_path = root / "benchmark_report.json"
-        if not report_path.is_file():
-            return None
-        payload = gpu_metrics_from_report(json.loads(report_path.read_text(encoding="utf-8")))
-        if not payload:
-            return None
-        payload["source"] = report_path.name
-        out = root / GPU_ARTIFACT_NAME
-
+        payload = gpu_metrics_from_report(report)
+    except Exception:  # noqa: BLE001 - a malformed block must not fail the round
+        log.warning("gpu_metrics: could not normalise telemetry for %s", root, exc_info=True)
+        return None
+    if not payload:
+        return None
+    payload["source"] = source
+    out = root / GPU_ARTIFACT_NAME
+    try:
         from hyperloom.common.io import atomic_write_json
 
         atomic_write_json(out, payload)
-        return str(out)
-    except Exception:  # noqa: BLE001 - telemetry must never fail a round
-        log.debug("gpu_metrics: could not write telemetry for %s", workspace, exc_info=True)
+    except Exception:  # noqa: BLE001 - the round's measurement outranks its description
+        log.warning("gpu_metrics: telemetry was read but could not be written to %s", out, exc_info=True)
         return None
+    return str(out)
+
+
+def write_gpu_metrics(workspace: Path | str) -> str | None:
+    """Normalise the round's GPU telemetry into ``gpu_metrics.json``. Returns the path, or ``None``.
+
+    A missing report is not a failure here: harvest runs before the report is guaranteed to have settled, so this is
+    called again once one is in hand.
+    """
+    root = Path(workspace)
+    report_path = root / "benchmark_report.json"
+    if not report_path.is_file():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # A report still being written is the expected case at harvest time, not a fault worth warning about; the
+        # settled call that follows is what reports a genuinely unreadable one.
+        log.debug("gpu_metrics: %s is not readable yet", report_path, exc_info=True)
+        return None
+    return write_gpu_metrics_from_report(root, report, source=report_path.name)

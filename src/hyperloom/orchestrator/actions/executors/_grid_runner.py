@@ -63,6 +63,7 @@ from .benchmark_result import (
     select_run_workspace,
     snapshot_workspaces,
 )
+from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_start_patched,
@@ -556,6 +557,11 @@ async def _settled_measurement(
                     "the report was still being written when the subprocess was reaped",
                     attempts,
                 )
+            # Harvest already tried this, but it runs before the report is guaranteed to exist: a report Magpie
+            # finishes writing after the subprocess is reaped would otherwise leave the round with no GPU artifact at
+            # all. Here the report is in hand, so write it from that rather than reading the file a second time.
+            if report is not None:
+                write_gpu_metrics_from_report(workspace, report, source="benchmark_report.json")
             return report, measurement
         await asyncio.sleep(max(0.01, float(poll_seconds)))
 

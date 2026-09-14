@@ -11,6 +11,7 @@ The blocks below are the two shapes that actually occur, taken from production
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -211,23 +212,76 @@ def test_the_harvest_writes_it_for_every_round(tmp_path, monkeypatch):
     assert json.loads((ws / GPU_ARTIFACT_NAME).read_text(encoding="utf-8"))["avg_power_w"] == 476.5
 
 
-def test_a_failed_telemetry_write_does_not_discard_the_harvest(tmp_path, monkeypatch):
-    """Telemetry describes a round; failing to describe one must not discard it.
+def test_a_block_offering_only_min_contributes_nothing(tmp_path):
+    """``min`` is not among the statistics reported, so a block with only ``min`` measured nothing reportable.
 
-    Every other harvest step is wrapped, and this one has to be too: a read-only
-    or full workspace would otherwise lose the harvested artifacts as well.
+    Crediting its ``sample_count`` would put 27000 samples beside a row of nulls,
+    which reads as a large, well-sampled round that somehow measured nothing.
     """
-    from hyperloom.orchestrator.actions.executors import _gpu_metrics, benchmark_result as br
+    out = gpu_metrics_from_report({"gpu_monitor": {"sample_count": 27000, "power_watts": {"min": 100.0}}})
 
-    monkeypatch.setattr(br, "harvest_mn_gpu_metrics", lambda *_a, **_k: {})
+    assert out["samples"] == 0
+    assert out["avg_power_w"] is None
+    assert out["max_power_w"] is None
 
-    def explode(_destination):
+
+def test_a_min_only_block_does_not_inflate_a_real_one(tmp_path):
+    """The weighting must come from the blocks that actually reported."""
+    out = gpu_metrics_from_report(
+        {"gpu_monitor": [MAGPIE_BLOCK, {"sample_count": 27000, "power_watts": {"min": 100.0}}]}
+    )
+
+    assert out["samples"] == 35
+    assert out["avg_power_w"] == 476.5
+
+
+def test_a_failed_write_is_reported_not_swallowed(tmp_path, monkeypatch, caplog):
+    """Telemetry that was read but could not be written is a defect, and has to be audible.
+
+    The bug this artifact exists to fix went unnoticed for 101 sessions because
+    nothing said anything; a silent writer would repeat exactly that.
+    """
+    from hyperloom.common import io as common_io
+
+    def explode(*_a, **_k):
         raise OSError("read-only workspace")
 
-    monkeypatch.setattr(_gpu_metrics, "write_gpu_metrics", explode)
+    monkeypatch.setattr(common_io, "atomic_write_json", explode)
     ws = _round(tmp_path, MAGPIE_BLOCK)
 
-    assert br.harvest_leaked_artifacts(ws) == []
+    with caplog.at_level(logging.WARNING):
+        assert write_gpu_metrics(ws) is None
+    assert "could not be written" in caplog.text
+
+
+def test_a_round_without_telemetry_stays_quiet(tmp_path, caplog):
+    """The ordinary case must not cry wolf, or the warning above stops meaning anything."""
+    (tmp_path / "benchmark_report.json").write_text(json.dumps({"throughput": {}}), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert write_gpu_metrics(tmp_path) is None
+    assert caplog.text == ""
+
+
+def test_a_report_that_lands_after_the_harvest_is_still_written(tmp_path):
+    """Harvest runs before the report is guaranteed to exist, so it cannot be the only chance.
+
+    Magpie can finish writing ``benchmark_report.json`` after the subprocess is
+    reaped; the round settles on a report the harvest never saw.
+    """
+    from hyperloom.orchestrator.actions.executors import benchmark_result as br
+    from hyperloom.orchestrator.actions.executors._gpu_metrics import write_gpu_metrics_from_report
+
+    # Harvest first, with no report on disk yet: nothing to write.
+    br.harvest_leaked_artifacts(tmp_path)
+    assert not (tmp_path / GPU_ARTIFACT_NAME).exists()
+
+    # The report settles afterwards, which is where the second attempt reads it.
+    report = {"gpu_monitor": MAGPIE_BLOCK}
+    (tmp_path / "benchmark_report.json").write_text(json.dumps(report), encoding="utf-8")
+    write_gpu_metrics_from_report(tmp_path, report, source="benchmark_report.json")
+
+    assert json.loads((tmp_path / GPU_ARTIFACT_NAME).read_text(encoding="utf-8"))["avg_power_w"] == 476.5
 
 
 def test_the_artifact_is_in_the_package_globs():
