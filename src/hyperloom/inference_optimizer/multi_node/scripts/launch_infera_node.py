@@ -412,9 +412,7 @@ def _reap_stale_engine_ports() -> None:
                     break
 
 
-# SGLang >= 0.5.18 uses the no-patch kernel_shape_tool (PYTHONPATH +
-# sitecustomize + TRACELENS_SHAPE_DISCOVERY) for shape discovery. This script is
-# standalone (no hyperloom import), so the gate is mirrored inline.
+# SGLang >= 0.5.18 no-patch shape tool; gate mirrored inline (no hyperloom import).
 _KERNEL_SHAPE_TOOL_REL = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 _SGLANG_SITECUSTOMIZE_MIN_VERSION = (0, 5, 18)
 

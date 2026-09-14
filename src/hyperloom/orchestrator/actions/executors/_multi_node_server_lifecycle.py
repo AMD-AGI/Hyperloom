@@ -380,9 +380,7 @@ async def restart_server_for_round(
             _tracelens_patch_enabled_fn = _tracelens_patch_enabled
             _sglang_shape_mode_val = resolve_sglang_shape_mode()
         if _sglang_shape_mode_val == "sitecustomize":
-            # SGLang >= 0.5.18: shapes come from the no-patch kernel_shape_tool
-            # (PYTHONPATH + TRACELENS_SHAPE_DISCOVERY, wired in launch_multinode /
-            # infera), so the git-apply fan-out is skipped entirely.
+            # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
             log.info(
                 "restart_server_for_round: SGLang shape mode=sitecustomize; "
                 "skipping TraceLens patch fan-out (shapes via kernel_shape_tool)."

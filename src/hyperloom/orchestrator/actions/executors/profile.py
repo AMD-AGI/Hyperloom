@@ -577,10 +577,8 @@ def _validate_trace_structure(
             skip_reason="main trace could not be sampled",
         )
     else:
-        # Shape discovery lands via one of two mechanisms and leaves either
-        # marker: the ``sglang_profiler::`` custom-op namespace (both the legacy
-        # patch and the no-patch kernel_shape_tool use it) or the
-        # ``kernel_shape_profiler`` module frame (present when with_stack is on).
+        # Shape markers left by either mechanism: the sglang_profiler:: op
+        # namespace, or the kernel_shape_profiler frame (when with_stack is on).
         _shape_markers = ("sglang_profiler::", "kernel_shape_profiler")
         _shape_present = any(m in main_text for m in _shape_markers)
         _note_check(

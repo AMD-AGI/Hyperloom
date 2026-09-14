@@ -213,17 +213,11 @@ def ensure_sglang_patched_for_tracelens(
     return _ensure_patched(plan)
 
 
-# SGLang shape-discovery mechanism gate.
-#
-# From 0.5.18 the kernel shape profiler is delivered as the no-patch TraceLens
-# tool (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY) instead of a
-# ``git apply`` of the shape-profiler patches; ``detailed_annotations`` is
-# upstream by then, so dropping the patch loses only shapes (the tool restores
-# them). Older versions keep the patch mechanism.
+# SGLang shape-discovery gate: >= 0.5.18 uses the no-patch TraceLens tool
+# (PYTHONPATH + sitecustomize + TRACELENS_SHAPE_DISCOVERY); older uses git-apply.
 _SGLANG_SITECUSTOMIZE_MIN_VERSION: tuple[int, ...] = (0, 5, 18)
 _SGLANG_SHAPE_MODE_ENV = "HYPERLOOM_SGLANG_SHAPE_MODE"
-# The no-patch kernel shape tool lives in the TraceLens package under
-# ``TraceLens/TraceUtils/kernel_shape_tool`` (relative to TRACELENS_ROOT).
+# No-patch tool location, relative to TRACELENS_ROOT.
 _KERNEL_SHAPE_TOOL_REL: tuple[str, ...] = ("TraceLens", "TraceUtils", "kernel_shape_tool")
 
 

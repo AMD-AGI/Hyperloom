@@ -90,10 +90,8 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
-    # SGLang >= 0.5.18 no-patch shape discovery: the pod-side launcher
-    # (launch_infera_node.py) puts kernel_shape_tool on PYTHONPATH from
-    # TRACELENS_ROOT and honors these flags. PYTHONPATH itself is blocked from
-    # SSH forwarding (BLOCKED_UNTRUSTED_ENV_NAMES) and is set pod-side instead.
+    # Forward no-patch shape-discovery config; the pod-side launcher sets
+    # PYTHONPATH itself (it is blocked from SSH forwarding).
     for _shape_key in (
         "TRACELENS_ROOT",
         "TRACELENS_SHAPE_DISCOVERY",
