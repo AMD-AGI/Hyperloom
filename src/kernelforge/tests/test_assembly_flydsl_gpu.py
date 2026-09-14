@@ -63,7 +63,7 @@ def test_roundtrip_executes_edits_without_mutating_reference(tmp_path, monkeypat
     assert len(sources) == 1
     source = sources[0]
     assembly = source.read_text()
-    target = re.search(r'\.amdgcn_target\s+"amdgcn-amd-amdhsa--([^\"]+)"', assembly)
+    target = re.search(r'\.amdgcn_target\s+"amdgcn-amd-amdhsa-(?:unknown)?-([^\"]+)"', assembly)
     assert target is not None
     options = {"gpu_target": target[1], "toolchain_dir": toolchain}
     candidate = with_assembly(reference, source, **options)

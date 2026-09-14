@@ -72,7 +72,13 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     git("clone", str(workspace), str(replay))
     git("checkout", base, cwd=replay)
     patch = tmp_path / "roundtrip.patch"
-    patch.write_text(git("diff", "--binary", base, record["preparation_commit"]) + "\n")
+    patch.write_bytes(
+        subprocess.run(
+            ["git", "-C", str(workspace), "diff", "--binary", base, record["preparation_commit"]],
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
     git("apply", str(patch), cwd=replay)
     assert (replay / "kernel.s").read_text() == original
     assert not (replay / "forge_experiments").exists()

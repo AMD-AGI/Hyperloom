@@ -144,6 +144,27 @@ def test_target_features_are_matched_independent_of_order_and_passed_to_llvm(bui
     assert "-mattr=+sramecc,-xnack" in fake_tools[0][0]
 
 
+def test_explicit_unknown_environment_target_preserves_compiler_output(build_paths, fake_tools):
+    source, output, toolchain = build_paths
+    source.write_text(_SOURCE.replace("amdgcn-amd-amdhsa--", "amdgcn-amd-amdhsa-unknown-"))
+    original = source.read_bytes()
+
+    assemble(source, output, gpu_target="gfx950", toolchain_dir=toolchain)
+
+    assert fake_tools[0][2] == original
+    assert "-triple=amdgcn-amd-amdhsa-unknown" in fake_tools[0][0]
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("environment", ["pal", "mesa3d"])
+def test_other_target_environments_are_not_treated_as_hsa(build_paths, fake_tools, environment):
+    source, output, toolchain = build_paths
+    source.write_text(_SOURCE.replace("amdgcn-amd-amdhsa--", f"amdgcn-amd-amdhsa-{environment}-"))
+    with pytest.raises(AssemblyError, match="exactly one .amdgcn_target"):
+        assemble(source, output, gpu_target="gfx950", toolchain_dir=toolchain)
+    assert not fake_tools
+
+
 @pytest.mark.parametrize("target", ["gfx942", "gfx950:xnack-", "gfx950:sramecc+"])
 def test_mismatched_target_is_rejected_before_invoking_tools(build_paths, fake_tools, target):
     source, output, toolchain = build_paths
