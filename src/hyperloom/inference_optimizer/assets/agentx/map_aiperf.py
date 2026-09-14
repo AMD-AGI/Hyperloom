@@ -66,8 +66,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
-        # E2E normalised interactivity slow tail: P10 of the per-request rate OSL/E2EL_s equals 1/P90 of the
-        # E2EL/OSL ratio, which is the definition upstream uses (MODELS.md:78).
+        # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
         intvty_p90 = _pct(m, "e2e_output_token_throughput", "p10")
         return {
             "request_throughput": _stat(m, "request_throughput"),
@@ -107,10 +106,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
 
 
 def main(src, dst):
-    with open(src) as f:
+    with open(src, encoding="utf-8") as f:
         data = json.load(f)
     res = map_aiperf(data, noncanonical_reasons=_noncanonical_reasons())
-    with open(dst, "w") as f:
+    with open(dst, "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2)
     print(json.dumps(res, indent=2))
 
