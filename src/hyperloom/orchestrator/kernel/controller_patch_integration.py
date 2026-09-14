@@ -228,6 +228,9 @@ async def _default_validator(
             "kernel_id": publication.operator_id,
             "patch_path": str(publication.patch_path),
             "target_file": str(publication.repo_root / publication.kernel_path),
+            # Apply resolves the patch's paths and its final-content snapshot
+            # against this root; without it the diff has no repo to land in.
+            "repo": str(publication.repo_root),
             # The Controller's Git-derived scope when it has one; the optimizer's own manifest only as a fallback for
             # a publication without it.
             "patch_write_paths": list(publication.changed_files)
