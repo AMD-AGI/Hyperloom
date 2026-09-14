@@ -602,6 +602,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._usage = None
         self.best_wall_ms: float | None = None
         self.best_mean_case_speedup: float | None = None
+        # What the kernel the search starts from scores against the anchor. 1.0 whenever that kernel IS the anchor,
+        # and the port's own speedup when a caller supplied the anchor it was ported from.
+        self.search_start_mean_case_speedup: float | None = None
         self.start_time: float = 0
         # Total LLM token spend for the run, populated from the UsageAccumulator passed to run() (empty when no agent
         # / no accumulator).
@@ -1475,7 +1478,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
                 best_wall_ms=result.wall_ms,
                 mean_case_speedup=result.mean_case_speedup,
-                search_start_mean_case_speedup=(self.ic.warm_start_mean_case_speedup or 1.0),
+                search_start_mean_case_speedup=(
+                    self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+                ),
                 snr_db=result.snr_db,
                 validation_text=validation_text,
                 benchmark=benchmark,
@@ -2561,6 +2566,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not self._baseline_case_times:
             self._baseline_case_times = dict(baseline_case_times)
             self.ic.baseline_case_times = dict(baseline_case_times)
+        self.search_start_mean_case_speedup = baseline_score
         self._best_case_times = dict(baseline_case_times)
         self._unscored_cases = set(unscored_cases)
         self._persist_scoring_state()
@@ -4530,11 +4536,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         if self.ic.pristine_baseline_wall_ms is None:
             self.ic.pristine_baseline_wall_ms = self.ic.baseline_wall_ms
 
-        # The scoring model defines the pristine kernel as 1.0x.
+        # The scoring model defines the anchor as 1.0x, so the kernel the search starts from scores 1.0 whenever it is
+        # the anchor. With a caller-supplied anchor it is not: the incumbent is already ahead of it, and starting the
+        # bar at 1.0 would KEEP a candidate that loses to the kernel this run began with.
         if self.ic.baseline_wall_ms is not None:
             self.best_wall_ms = self.ic.baseline_wall_ms
         if self._baseline_case_times:
-            self.best_mean_case_speedup = 1.0
+            self.best_mean_case_speedup = self.search_start_mean_case_speedup or 1.0
 
         # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
         # recorded best commit is still HEAD).

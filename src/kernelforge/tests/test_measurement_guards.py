@@ -13,8 +13,10 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import click
 import pytest
 
+from kernelforge.cli import _load_external_baseline
 from kernelforge.knowledge import experience_integration as integration
 from kernelforge.loop.baseline_reference import (
     BASELINE_DRIFT_TOLERANCE,
@@ -33,6 +35,7 @@ from kernelforge.loop.scoring import (
     SIGMA_REMEASURE_MAX_ROUNDS,
     aggregate_regression_detail,
     attribute_sigma,
+    beats_current_best,
     keep_t_critical,
     measurement_sigma,
     passes_keep_threshold,
@@ -1503,3 +1506,99 @@ def test_a_larger_sample_can_raise_the_bar_as_well_as_lower_it():
 
     assert rescaled_sigma(0.01, base, wide) > 0.01
     assert rescaled_sigma(0.01, wide, base) < 0.01
+
+
+# ── a scoring anchor measured outside the loop ───────────────────────────────
+
+
+def _port_bench(case_times: dict[str, float]):
+    """Stand in for the loop's own first bench of the kernel it starts from."""
+
+    async def _bench(**_kwargs):
+        return {
+            "success": True,
+            "case_times": dict(case_times),
+            "median_ms": sum(case_times.values()),
+        }
+
+    return _bench
+
+
+def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatch):
+    """No caller anchor: the kernel the run starts from is the 1.0x it divides by."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
+    loop.ic.baseline_wall_ms = None
+    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+
+    asyncio.run(loop._measure_baseline())
+
+    assert loop.search_start_mean_case_speedup == pytest.approx(1.0)
+    assert loop._baseline_case_times == {"a": 5.0, "b": 50.0}
+
+
+def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, monkeypatch):
+    """A rewrite anchors the loop on the source its port replaced, not on the port."""
+    source_case_ms = {"a": 10.0, "b": 100.0}
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop.ic.baseline_wall_ms = None
+    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+
+    asyncio.run(loop._measure_baseline())
+
+    # The loop's own bench measured the port, so it becomes the incumbent -- but the anchor every speedup divides by
+    # is still the source the caller supplied.
+    assert loop._baseline_case_times == source_case_ms
+    assert loop._best_case_times == {"a": 5.0, "b": 50.0}
+    assert loop.search_start_mean_case_speedup == pytest.approx((10.0 / 5.0 + 100.0 / 50.0) / 2)
+
+
+def test_an_injected_anchor_starts_the_keep_bar_at_the_search_start(tmp_path, monkeypatch):
+    """Starting the bar at 1.0x would KEEP a candidate that loses to the kernel the run began with."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop.ic.baseline_wall_ms = None
+    monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
+    monkeypatch.setattr(loop, "_seed_and_hydrate_run_state", lambda: None)
+
+    asyncio.run(loop._measure_baseline())
+    loop.best_mean_case_speedup = loop.search_start_mean_case_speedup or 1.0
+
+    # A candidate at 1.5x beats the source and would clear a 1.0x bar, while being slower than the port at 2.0x.
+    assert not beats_current_best(1.5, best_mean_case_speedup=loop.best_mean_case_speedup)
+    assert beats_current_best(2.5, best_mean_case_speedup=loop.best_mean_case_speedup)
+
+
+def _anchor_file(tmp_path, payload):
+    path = tmp_path / "baseline.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    return str(path)
+
+
+def test_a_usable_anchor_file_is_read_whole(tmp_path):
+    wall_ms, case_times = _load_external_baseline(_anchor_file(tmp_path, {"wall_ms": 101, "case_times": {"a": 1.5}}))
+
+    assert wall_ms == pytest.approx(101.0)
+    assert case_times == {"a": 1.5}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"case_times": {"a": 1.0}}, id="no wall time"),
+        pytest.param({"wall_ms": 1.0}, id="no cases"),
+        pytest.param({"wall_ms": 1.0, "case_times": {}}, id="empty cases"),
+        pytest.param({"wall_ms": 0.0, "case_times": {"a": 1.0}}, id="zero wall time"),
+        pytest.param({"wall_ms": 1.0, "case_times": {"a": 0.0}}, id="zero case time"),
+        pytest.param({"wall_ms": 1.0, "case_times": {"a": "fast"}}, id="non-numeric case time"),
+        pytest.param("[]", id="not an object"),
+        pytest.param("{", id="not JSON"),
+    ],
+)
+def test_an_anchor_that_cannot_divide_a_speedup_is_refused(tmp_path, payload):
+    """Every number the run publishes divides by this file, so a bad entry must cost an exit code, not a ratio."""
+    with pytest.raises(click.BadParameter):
+        _load_external_baseline(_anchor_file(tmp_path, payload))
+
+
+def test_a_missing_anchor_file_is_refused(tmp_path):
+    with pytest.raises(click.BadParameter):
+        _load_external_baseline(str(tmp_path / "absent.json"))

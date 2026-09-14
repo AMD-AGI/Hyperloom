@@ -543,6 +543,10 @@ def run_rewrite(
             profile_timeout_sec=profile_timeout_sec,
             deadline_unix=deadline_unix,
             stop_at_unix=search_stop_unix,
+            # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
+            # final result -- already divides by the kernel this rewrite replaced.
+            source_ms=source_ms,
+            source_case_ms=source_case_ms,
             on_new_best=_publish_keep if rewrite_kb_enabled else None,
         )
     else:

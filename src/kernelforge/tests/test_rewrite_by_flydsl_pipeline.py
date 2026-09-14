@@ -168,6 +168,84 @@ def _fake_popen(lines, returncode=0):
     return _popen
 
 
+def test_optimize_anchors_the_loop_on_the_source_when_given_its_timings(tmp_path, monkeypatch):
+    """The loop grades on what it is anchored to, and a rewrite is graded against the kernel it replaced."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-ANCHOR\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        source_ms=101.0,
+        source_case_ms={"small": 1.0, "big": 100.0},
+    )
+
+    command = captured["command"]
+    baseline_path = Path(command[command.index("--baseline-json") + 1])
+    assert json.loads(baseline_path.read_text()) == {
+        "wall_ms": 101.0,
+        "case_times": {"small": 1.0, "big": 100.0},
+    }
+
+
+def test_optimize_leaves_the_loop_on_its_own_baseline_when_not_given_one(tmp_path, monkeypatch):
+    """The anchor is optional: without it the loop keeps measuring its own, as every other caller expects."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-NOANCHOR\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+    )
+
+    assert "--baseline-json" not in captured["command"]
+    assert not (tmp_path / "forge_loop_baseline.json").exists()
+
+
+def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):
+    """Without them every score the loop reports would divide by the port instead of the source."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen = {}
+
+    def capture_optimize(*_args, **kwargs):
+        seen.update(kwargs)
+        return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
+
+    monkeypatch.setattr(runner, "run_optimize", capture_optimize)
+    out = runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+    )
+
+    assert seen["source_ms"] == pytest.approx(1.0)
+    assert seen["source_case_ms"] == {"case0": 1.0}
+    # Anchored on the source, the loop's own score is what the run publishes.
+    assert out["speedup"] == pytest.approx(2.5)
+
+
 def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
     s = _spec(tmp_path)
     rj = tmp_path / "res.json"

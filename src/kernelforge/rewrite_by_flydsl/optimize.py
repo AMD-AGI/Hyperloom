@@ -237,10 +237,18 @@ def run_optimize(
     result_json: str | None = None,
     deadline_unix: float | None = None,
     stop_at_unix: float | None = None,
+    source_ms: float | None = None,
+    source_case_ms: dict[str, float] | None = None,
     on_new_best: Callable[[dict], None] | None = None,
     new_best_poll_sec: float = 5.0,
 ) -> dict:
     """Run forge-loop over the FlyDSL kernel; return its parsed result dict.
+
+    ``source_ms`` and ``source_case_ms`` are the source kernel's own timings. Passed together they become the loop's
+    scoring anchor, so every speedup it reports -- each KEEP and the final result -- is measured against the kernel
+    the port replaced rather than against the port. Without them the loop anchors on its own first bench, which
+    scores the search against the port and cannot be composed back onto the source: the equal-weight mean of
+    per-case ratios does not multiply.
 
     ``on_new_best`` is polled every ``new_best_poll_sec`` with the parsed result of each KEEP, and once more after the
     loop exits so the last one cannot be missed by timing. Anything it raises is logged and swallowed, because the
@@ -252,6 +260,17 @@ def run_optimize(
     """
     if result_json is None:
         result_json = str(Path(experiments_dir) / "forge_loop_result.json")
+
+    # Both halves or neither: a wall time without per-case times cannot anchor the score, and per-case times without
+    # a wall time leave the published aggregate on a different kernel than the score.
+    baseline_json = ""
+    if source_ms and source_case_ms:
+        baseline_path = Path(experiments_dir) / "forge_loop_baseline.json"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text(
+            json.dumps({"wall_ms": float(source_ms), "case_times": dict(source_case_ms)}, indent=2)
+        )
+        baseline_json = str(baseline_path)
 
     cmd = _forge_loop_argv() + [
         "forge-loop",
@@ -290,6 +309,8 @@ def run_optimize(
         "--profile-timeout-sec",
         str(profile_timeout_sec),
     ]
+    if baseline_json:
+        cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
         cmd += ["--gpu-type", config.gpu_type]
     if deadline_unix and deadline_unix > 0:
