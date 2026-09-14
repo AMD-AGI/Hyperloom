@@ -145,7 +145,7 @@ async def test_provision_runs_off_the_event_loop_thread(_executor, monkeypatch):
         return orig(action, attempt_dir)
 
     adapter.provision = _spy_provision
-    monkeypatch.setattr("hyperloom.orchestrator.framework.adapters.get_adapter", lambda _fw: adapter)
+    monkeypatch.setattr("hyperloom.orchestrator.enablement.runtime.adapters.get_adapter", lambda _fw: adapter)
     ctx = _ctx()
     out = await _executor._stage_provision_attempt_runtime(ctx, {"runtime_candidate": _candidate()}, "t-1")
     assert out is None

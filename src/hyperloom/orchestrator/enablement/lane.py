@@ -138,7 +138,7 @@ class EnablementLane(CoordinatorCollaborator):
             launch_log=launch_log,
             candidate_refs=params.get("enablement_candidate_refs"),
             mode=str(state.enablement_mode or ""),
-            origin=origin or enablement_event.ORIGIN_BOOT,
+            origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
         )
         state.save(self.session_dir)
         log.info(

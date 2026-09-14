@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Enablement renderer — admission status, round ledger, targeted-build attempts."""
+"""Enablement renderer — admission, authoring rounds, and targeted builds.
+
+Read off the ``enablement`` events on the V6 timeline. The lane's facts are
+written by six modules on different ticks, so the event is the only place they
+meet.
+"""
 
 from __future__ import annotations
 
@@ -9,58 +14,69 @@ from typing import Any
 
 from ..base import RenderedSection, as_dict, md_kv_list, md_table, register_renderer
 
-_ROUND_COLUMNS = ("round_id", "state", "outcome", "holder_task_id")
+_ATTEMPT_COLUMNS = ("attempt", "status", "failure_kind", "reason")
 _BUILD_COLUMNS = ("component", "ref", "gpu_arch", "ok", "failure_class")
 
 
-def _table(entries: Any, columns: tuple[str, ...]) -> str:
+def _table(rows: Any, columns: tuple[str, ...]) -> str:
     """Render a list of mappings as a table of ``columns``."""
-    return md_table(list(columns), [[e.get(c) for c in columns] for e in entries or []])
-
-
-def _outcomes_table(outcomes: Any) -> str:
-    """Render the settled-round outcome counts."""
-    if not outcomes:
-        return ""
-    return md_table(["outcome", "count"], [[k, v] for k, v in sorted(outcomes.items())])
+    return md_table(list(columns), [[r.get(c) for c in columns] for r in rows or []])
 
 
 @register_renderer("enablement")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
-    """Render the enablement admission and round-lifecycle section."""
-    e = as_dict(breakdown.get("enablement"))
-    if not e:
+    """Render the enablement section from the lane's timeline event."""
+    events = [
+        event
+        for event in as_dict(breakdown).get("timeline") or []
+        if isinstance(event, dict) and str(event.get("type") or "") == "enablement"
+    ]
+    if not events:
         return RenderedSection(section_id="enablement", title="Enablement", skipped=True)
 
-    mode = e.get("mode") or "unset"
-    facts: list[str] = []
-    if e.get("engaged"):
-        facts.append(f"Enablement engaged (mode={mode}, attempts={e.get('attempts') or 0}).")
-    else:
-        facts.append(f"Enablement did not engage (mode={mode}).")
-    if e.get("succeeded"):
-        facts.append("Enablement produced a KEEP.")
-    if e.get("failure_kind"):
-        facts.append(f"Last classified failure: {e['failure_kind']}.")
+    event = events[0]
+    ext = as_dict(event.get("ext"))
+    attempts = as_dict(ext.get("attempts"))
+    builds = as_dict(ext.get("builds"))
+    revalidations = as_dict(ext.get("revalidations"))
+    result = as_dict(ext.get("result"))
+    status = str(event.get("status") or "")
+
+    facts = [
+        f"Enablement ran {attempts.get('count') or 0} authoring round(s) "
+        f"(mode={ext.get('mode') or 'unset'}, origin={ext.get('origin') or 'unset'})."
+    ]
+    if attempts.get("landed"):
+        facts.append(f"{attempts['landed']} round(s) landed a fix.")
+    if attempts.get("advanced"):
+        facts.append(f"{attempts['advanced']} round(s) moved the boot forward without landing one.")
+    if builds.get("failed"):
+        facts.append(f"{builds['failed']} targeted build(s) failed.")
+    if status:
+        facts.append(f"Lane outcome: {status}.")
 
     parts = [
         md_kv_list(
             [
-                ("mode", e.get("mode")),
-                ("engaged", e.get("engaged")),
-                ("origin", e.get("origin")),
-                ("trigger_kind", e.get("trigger_kind")),
-                ("attempts", e.get("attempts")),
-                ("succeeded", e.get("succeeded")),
-                ("failure_kind", e.get("failure_kind")),
-                ("round_count", e.get("round_count")),
+                ("mode", ext.get("mode")),
+                ("origin", ext.get("origin")),
+                ("status", status),
+                ("outcome", result.get("outcome")),
+                ("rounds", attempts.get("count")),
+                ("settled", attempts.get("settled")),
+                ("landed", attempts.get("landed")),
+                ("advanced", attempts.get("advanced")),
+                ("builds", builds.get("count")),
+                ("builds_failed", builds.get("failed")),
+                ("revalidations", revalidations.get("count")),
+                ("revalidations_promoted", revalidations.get("promoted")),
+                ("human_review", as_dict(ext.get("human_review")).get("count")),
             ]
         )
     ]
     for title, block in (
-        ("Round outcomes", _outcomes_table(e.get("round_outcomes"))),
-        ("Rounds", _table(e.get("rounds"), _ROUND_COLUMNS)),
-        ("Build attempts", _table(e.get("build_attempts"), _BUILD_COLUMNS)),
+        ("Rounds", _table(attempts.get("rows"), _ATTEMPT_COLUMNS)),
+        ("Build attempts", _table(builds.get("rows"), _BUILD_COLUMNS)),
     ):
         if block:
             parts.append(f"\n**{title}**\n\n{block}")
