@@ -48,13 +48,14 @@ def _codes(decision):
     return [r["code"] for r in decision["reasons"]]
 
 
-def _decide(enablement=None, section=None):
+def _decide(enablement=None, section=None, delivered=None):
     enablement = dict(enablement or {})
     steps = build_recipe_steps(enablement, attempt_summary=_build_attempt_summary)
     return evaluate_replay_sufficiency(
         enablement,
         steps=steps,
         section=dict(section or {}),
+        delivered_payloads=delivered,
     )
 
 
@@ -1873,3 +1874,151 @@ def test_patch_step_reasons_never_carry_the_patch_path():
     state = {k: v for k, v in _two_round_state().items() if k != "patch_targets"}
     for reason in _decide(state, _sufficient_section())["reasons"]:
         assert "/p/" not in reason["scope"]
+
+
+# ---- The delivery contract over referenced payloads (B43) -------------------
+#
+# A recipe names bytes its manifests and digests stand for. Those bytes travel
+# in the bundle's overlay, not in the section, so a recipe can read complete
+# while what it points at was never shipped. These cover the one claim an
+# independent consumer cannot check for itself.
+
+SNAPSHOT_PAYLOAD = "optimization_stack/enablement/r1/files/srt/a.py"
+# The fixture default (runs/materialized.yaml) matches no package glob, so a
+# path the curated selection actually carries is what makes these tests about
+# delivery rather than about selection.
+CONFIG_PAYLOAD = "reports/enablement/spec-1/launch_config.yaml"
+
+
+def _payloads(*paths):
+    """Pair each path with the empty digest, for payloads no recorder digested."""
+    return [(path, "") for path in paths]
+
+
+def _delivery_section():
+    section = _sufficient_section()
+    section["accepted_config"]["config_path"] = CONFIG_PAYLOAD
+    return section
+
+
+def _delivered_everything():
+    return _payloads(CONFIG_PAYLOAD, SNAPSHOT_PAYLOAD)
+
+
+def test_fully_packaged_delivery_stays_sufficient():
+    """The negative control: a delivery carrying every reference refuses nothing."""
+    decision = _decide(_sufficient_state(), _delivery_section(), delivered=_delivered_everything())
+    assert decision["status"] == "sufficient", decision["reasons"]
+
+
+def test_a_snapshot_whose_captured_file_is_undelivered_is_missing():
+    """The manifest travelling in the section is not the payload."""
+    decision = _decide(_sufficient_state(), _delivery_section(), delivered=_payloads(CONFIG_PAYLOAD))
+    assert decision["status"] == "insufficient"
+    assert "source_snapshot_missing" in _codes(decision)
+
+
+def test_an_undelivered_config_is_not_self_contained():
+    codes = _codes(_decide(_sufficient_state(), _delivery_section(), delivered=_payloads(SNAPSHOT_PAYLOAD)))
+    assert codes.count("artifact_not_self_contained") == 1
+
+
+def test_a_declared_deletion_needs_no_delivered_payload():
+    """The one exemption: a deletion names no bytes for a bundle to carry."""
+    section = _delivery_section()
+    section["source_snapshots"] = [_snapshot(files=(("srt/gone.py", "delete"),))]
+    decision = _decide(_sufficient_state(), section, delivered=_payloads(CONFIG_PAYLOAD))
+    assert "source_snapshot_missing" not in _codes(decision)
+
+
+def test_no_delivery_assembled_leaves_the_contract_unapplied():
+    """``None`` is not an empty bundle: nothing is being assembled to judge."""
+    assert _decide(_sufficient_state(), _delivery_section())["status"] == "sufficient"
+
+
+def test_a_configuration_digest_binds_the_delivered_config_to_its_bytes():
+    """A recorded digest makes the path alone an insufficient answer."""
+    section = _delivery_section()
+    section["accepted_config"]["config_digest"] = "d" * 64
+    undigested = _decide(_sufficient_state(), section, delivered=_delivered_everything())
+    assert "artifact_not_self_contained" in _codes(undigested)
+
+    bound = _decide(
+        _sufficient_state(),
+        section,
+        delivered=[(CONFIG_PAYLOAD, "d" * 64), (SNAPSHOT_PAYLOAD, "")],
+    )
+    assert "artifact_not_self_contained" not in _codes(bound)
+
+
+def _session_bundle(tmp_path, *, config=True, snapshot_bytes=b"x"):
+    """A session root shaped like the one the packager bundles."""
+    session = tmp_path / "session"
+    captured = session / "optimization_stack" / "enablement" / "r1" / "files" / "srt"
+    captured.mkdir(parents=True)
+    (captured / "a.py").write_bytes(snapshot_bytes)
+    if config:
+        archived = session / "reports" / "enablement" / "spec-1"
+        archived.mkdir(parents=True)
+        (archived / "launch_config.yaml").write_text("model: m\n", encoding="utf-8")
+    return session
+
+
+def _bundle_decision(session, state=None):
+    from hyperloom.inference_optimizer.breakdown.session_package import deliverable
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
+
+    section = _delivery_section()
+    state = _sufficient_state() if state is None else state
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+    referenced = referenced_payloads(section, steps)
+    return _decide(state, section, delivered=deliverable(session, referenced))
+
+
+def test_a_session_bundle_carrying_every_payload_is_sufficient(tmp_path):
+    """End to end over the real packager: producer and rule agree."""
+    assert _bundle_decision(_session_bundle(tmp_path))["status"] == "sufficient"
+
+
+def test_a_session_bundle_missing_the_captured_overlay_fails_closed(tmp_path):
+    """The regression B43 exists to prevent, proven through the real packager."""
+    session = _session_bundle(tmp_path)
+    (session / "optimization_stack" / "enablement" / "r1" / "files" / "srt" / "a.py").unlink()
+    decision = _bundle_decision(session)
+    assert decision["status"] == "insufficient"
+    assert "source_snapshot_missing" in _codes(decision)
+
+
+def test_an_unrelated_file_sorted_ahead_does_not_refuse_a_referenced_payload(tmp_path, monkeypatch):
+    """Each payload is judged on its own bytes, not on the bundle's running total.
+
+    Spending the packager's cumulative budget before looking at the reference
+    would refuse a recipe over content it does not name -- a small overlay file
+    reported undeliverable because an unrelated report sorted ahead of it. The
+    size test is therefore per payload. What a truncated bundle actually dropped
+    stays the packager manifest's to report, so a consumer reads the verdict for
+    "were these bytes referenced and present" and PACKAGE_MANIFEST.json for
+    "did every selected file fit".
+    """
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    session = _session_bundle(tmp_path)
+    bulky = session / "reports" / "enablement" / "spec-1" / "unrelated.log"
+    bulky.write_bytes(b"z" * 4096)
+    # A cap that the unrelated file alone would exhaust cumulatively, while each
+    # referenced payload still fits inside it on its own.
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 4096)
+
+    assert _bundle_decision(session)["status"] == "sufficient"
+
+
+def test_a_referenced_payload_larger_than_the_cap_is_undeliverable(tmp_path, monkeypatch):
+    """Per payload does not mean unbounded: its own size still has to fit."""
+    from hyperloom.inference_optimizer.breakdown import session_package
+
+    session = _session_bundle(tmp_path, snapshot_bytes=b"y" * 8192)
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 4096)
+
+    decision = _bundle_decision(session)
+    assert decision["status"] == "insufficient"
+    assert "source_snapshot_missing" in _codes(decision)

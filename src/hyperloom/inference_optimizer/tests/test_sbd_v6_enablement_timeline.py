@@ -632,7 +632,20 @@ _STACK_CODES = frozenset(
 )
 
 
+def _capture_overlay(session_dir):
+    """Write the bytes the snapshot manifest names into the session's overlay.
+
+    The manifest travels in the emitted section, the captured bytes do not, so a
+    round whose overlay was never written is one a consumer cannot replay. A
+    fixture that declares a capture has to put it on disk to claim it.
+    """
+    captured = Path(session_dir) / "optimization_stack" / "enablement" / "r1" / "files" / "srt"
+    captured.mkdir(parents=True, exist_ok=True)
+    (captured / "a.py").write_text("# captured\n", encoding="utf-8")
+
+
 def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
+    _capture_overlay(_bound_session)
     _boot_trigger()
     enablement_event.finish(
         outcome=enablement_event.OUTCOME_SUCCEEDED,

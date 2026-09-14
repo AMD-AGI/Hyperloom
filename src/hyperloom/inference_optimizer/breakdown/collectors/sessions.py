@@ -16,6 +16,7 @@ from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ._common import _to_int
+from ..session_package import deliverable
 
 
 log = logging.getLogger(__name__)
@@ -440,6 +441,26 @@ def _recipe_state(state: dict[str, Any]) -> dict[str, Any]:
     return {name: _eg(state, name) for name in _RECIPE_STATE_FIELDS}
 
 
+def _delivered_payloads(
+    out: dict[str, Any],
+    steps: list[dict[str, Any]],
+    session_dir: Path,
+) -> set[tuple[str, str]] | None:
+    """What the session bundle actually hands a consumer of this recipe.
+
+    The recipe names the bytes behind its manifests and digests, and the
+    packager says which of them arrive as the recipe describes them; neither
+    side restates the other's rules. ``None`` when the recipe references
+    nothing, which is the one case with nothing to deliver.
+    """
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import referenced_payloads
+
+    referenced = referenced_payloads(out, steps)
+    if not referenced:
+        return None
+    return deliverable(session_dir, referenced)
+
+
 def _collect_recipe(
     out: dict[str, Any],
     state: dict[str, Any],
@@ -491,6 +512,7 @@ def _collect_recipe(
         enablement,
         steps=steps,
         section=out,
+        delivered_payloads=_delivered_payloads(out, steps, session_dir),
         launch_argv_refused=argv_refused or bool(enablement.get("launch_argv_refused")),
     )
     out["replay_sufficiency"] = decision

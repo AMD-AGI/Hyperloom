@@ -12,7 +12,7 @@ produced by an older writer cannot be mistaken for one this contract judged.
 from __future__ import annotations
 
 import shlex
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from .steps import BUILD_KIND, PATCH_KIND, SETUP_KIND, command_digest, select_linked_build
 
@@ -584,11 +584,96 @@ def _credential_reasons(
     return reasons
 
 
+def _payload_references(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> list[tuple[str, str, str, str]]:
+    """Return ``(code, scope, path, sha256)`` for every byte a replay is handed.
+
+    The recipe carries manifests, digests and class names; these name the bytes
+    behind them, each with the refusal its absence earns and, where its recorder
+    took one, the digest the delivered bytes must still hash to. A patch step is
+    not among them: its own ``path`` names the authoring workspace no bundle
+    ships, while the content it produced is its root's snapshot payload.
+    """
+    refs: list[tuple[str, str, str, str]] = []
+    for snapshot in section.get("source_snapshots") or []:
+        if not isinstance(snapshot, Mapping):
+            continue
+        ref = str(snapshot.get("snapshot_ref") or "").strip("/")
+        root_id = str(snapshot.get("root_id"))
+        rows = [row for row in (snapshot.get("files") or []) if isinstance(row, Mapping)]
+        # A declared deletion has no payload to deliver; a snapshot with no
+        # reference at all has nowhere for one to be.
+        payloads = [str(row.get("rel") or "").strip("/") for row in rows if str(row.get("op") or "") != "delete"]
+        if not ref:
+            refs.append(("source_snapshot_missing", root_id, "", ""))
+            continue
+        refs.extend(("source_snapshot_missing", root_id, f"{ref}/files/{rel}", "") for rel in payloads if rel)
+    accepted_config = section.get("accepted_config") or {}
+    config_path = str(accepted_config.get("config_path") or "").strip("/")
+    if config_path:
+        # PORT NOTE: no producer records ``config_digest`` today, so this degrades to a
+        # presence check. The read stays so the reference re-binds to bytes the moment a
+        # recorder writes the digest again.
+        digest = str(accepted_config.get("config_digest") or "")
+        refs.append(("artifact_not_self_contained", "config_path", config_path, digest))
+    for index, step in enumerate(steps):
+        # A digest names the bytes an install consumed; only the delivery makes
+        # them obtainable.
+        # PORT NOTE: ``input_identity`` is not recorded on any step today, so this loop is
+        # inert. It is the enforcement point for install payloads and must be here when the
+        # setup ledger records identities again.
+        for identity in step.get("input_identity") or ():
+            if not isinstance(identity, Mapping):
+                continue
+            rel = str(identity.get("rel") or "").strip("/")
+            if rel:
+                refs.append(("artifact_not_self_contained", f"step[{index}]", rel, str(identity.get("sha256") or "")))
+    return refs
+
+
+def referenced_payloads(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+) -> set[tuple[str, str]]:
+    """Return the ``(path, sha256)`` payloads a delivery must be asked about.
+
+    The digest is ``""`` where the recipe recorded none; where it recorded one,
+    a delivery carrying different bytes is not carrying this payload. One path
+    referenced under two digests yields two entries: two occurrences consumed
+    different bytes there, and a delivery holding one is not holding the other.
+    """
+    return {(path, digest) for _code, _scope, path, digest in _payload_references(section, steps) if path}
+
+
+def _delivery_reasons(
+    section: Mapping[str, Any],
+    steps: Sequence[Mapping[str, Any]],
+    delivered: Iterable[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Refuse a bundle whose referenced bytes it does not actually carry.
+
+    A reference the delivery omits is not a thinner recipe -- it is one an
+    independent consumer cannot execute, so the export fails closed rather than
+    reporting a self-contained artifact it is not. Judged per captured file, not
+    per manifest: the manifest travels in this section, and the bytes it names
+    do not. Judged per ``(path, digest)`` besides, so a delivery satisfying one
+    occurrence's bytes does not answer for another occurrence's at that path.
+    """
+    packaged = {(str(path).strip("/"), str(digest or "")) for path, digest in delivered}
+    reasons: list[dict[str, Any]] = []
+    for code, scope, path, digest in _payload_references(section, steps):
+        if (path, digest) not in packaged:
+            reasons.append(_reason(code, scope))
+    return reasons
+
 def evaluate_replay_sufficiency(
     enablement: Mapping[str, Any],
     *,
     steps: Sequence[Mapping[str, Any]],
     section: Mapping[str, Any],
+    delivered_payloads: Iterable[tuple[str, str]] | None = None,
     launch_argv_refused: bool = False,
 ) -> dict[str, Any]:
     """Decide whether the projected recipe can be replayed.
@@ -597,6 +682,11 @@ def evaluate_replay_sufficiency(
         enablement: The durable enablement state, keyed by field name.
         steps: The projected ``recipe_steps`` array.
         section: The emitted enablement section this decision travels in.
+        delivered_payloads: The ``(session-relative path, sha256)`` payloads an
+            export actually delivers. When given, every payload the recipe
+            references must be among them or the export fails closed; when
+            ``None`` no delivery is being assembled and the recipe is judged on
+            its content alone.
         launch_argv_refused: Whether the sanitizer refused a launch line it could
             not represent, so the evidence carries no observed argv at all.
 
@@ -618,6 +708,8 @@ def evaluate_replay_sufficiency(
     reasons.extend(_build_reasons(enablement, steps))
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
+    if delivered_payloads is not None:
+        reasons.extend(_delivery_reasons(section, steps, delivered_payloads))
     deduped: list[dict[str, Any]] = []
     for reason in reasons:
         if reason not in deduped:
