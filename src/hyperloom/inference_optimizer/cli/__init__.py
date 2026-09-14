@@ -1324,6 +1324,67 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
         args.streams_per_partition = int(streams) if streams else None
 
 
+#: Manifest objective kinds and the flag each one was parsed from.
+_OBJECTIVE_KIND_TO_FLAG: Mapping[str, str] = {
+    "gain_pct": "target_gain",
+    "tput": "target_tput",
+    "baseline": "target_baseline_dir",
+    "roofline_pct": "target_roofline",
+}
+
+
+def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mapping[str, Any]) -> list[str]:
+    """Fill the budget and the stop target from the archive when this resume omitted them.
+
+    Both are part of the launch shape a resume is documented to keep, and both
+    are unrecoverable from the flags: ``--max-hours`` defaults to
+    :data:`~.parser.DEFAULT_MAX_HOURS`, so a bare resume of a longer session
+    silently shortens it to two hours and closes the leg as ``time_exhausted``
+    the moment the elapsed total already exceeds that -- which is what the
+    Robustness Monitor's auto-resume does, since it passes no flags at all. The
+    target flags default to ``None``, so a bare resume drops the operator's
+    objective and the run stops only on the clock.
+
+    Args:
+        args: Parsed arguments for this resume; an explicit flag always wins.
+        state: Loaded session state, whose ``max_minutes`` already carries every
+            ``--extend-hours`` grant from earlier legs.
+        manifest: The session manifest, which is where the objective is recorded.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    from .parser import DEFAULT_MAX_HOURS
+
+    lines: list[str] = []
+    persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
+    if float(getattr(args, "max_hours", 0) or 0) == DEFAULT_MAX_HOURS and persisted_minutes > 0:
+        args.max_hours = persisted_minutes / 60.0
+        lines.append(
+            f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted; not the {DEFAULT_MAX_HOURS}h default)"
+        )
+
+    # Restored as a set: a target named on this resume replaces the persisted
+    # objective outright rather than joining it, which build_objective refuses.
+    if any(getattr(args, flag, None) is not None for flag in _OBJECTIVE_KIND_TO_FLAG.values()):
+        return lines
+    recorded = manifest.get("objective")
+    if not isinstance(recorded, Mapping):
+        return lines
+    entries = recorded.get("objectives")
+    entries = entries if isinstance(entries, list) else [recorded]
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        flag = _OBJECTIVE_KIND_TO_FLAG.get(str(entry.get("kind") or ""))
+        value = entry.get("value")
+        if flag is None or value is None:
+            continue
+        setattr(args, flag, str(value) if flag == "target_baseline_dir" else float(value))
+        lines.append(f"  → restored objective: --{flag.replace('_', '-')} {value}")
+    return lines
+
+
 def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
@@ -1881,6 +1942,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
         print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
+        for line in _restore_budget_and_objective(args, state, manifest):
+            print(line)
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.

@@ -31,6 +31,11 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
+#: Fallback wall-clock budget. Named because ``--resume-from`` reads it back as
+#: the "operator did not set this" signal: unlike the target flags, this one has
+#: a real default, so the value alone cannot say whether it was asked for.
+DEFAULT_MAX_HOURS = 2.0
+
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
 _SECRET_NAME_HINTS = (
     "token",
@@ -451,7 +456,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "state.json under `explore_search.last_round.skipped_dup`, and in the "
         "action's per-variant outcomes, tagged `user_skip`.",
     )
-    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--max-hours",
+        type=float,
+        default=DEFAULT_MAX_HOURS,
+        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
+    )
     opt.add_argument(
         "--extend-hours",
         dest="extend_hours",
