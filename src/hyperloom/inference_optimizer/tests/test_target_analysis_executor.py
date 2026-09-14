@@ -40,6 +40,20 @@ def _ctx(session_dir: Path, params: dict[str, Any] | None = None) -> _Ctx:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_query_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer the executor's query from the arguments each test sets, not from the process.
+
+    ``TargetAnalysisExecutor`` resolves every query field as ``params`` > environment >
+    ``SharedState``, so a variable left behind by anything that ran earlier in the same
+    worker silently outranks the state a test builds. That is not hypothetical: a stale
+    ``PRECISION`` turned an expected match into ``no_match``, and only for whichever
+    xdist worker happened to inherit it.
+    """
+    for name in ("PRECISION", "FRAMEWORK", "MODEL_PATH", "ISL", "OSL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def session_dir(tmp_path: Path) -> Path:
     sd = tmp_path / "sess"

@@ -18,6 +18,8 @@ from typing import Any
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
 
+from ._gpu_metrics import write_gpu_metrics
+
 log = logging.getLogger(__name__)
 
 
@@ -259,6 +261,13 @@ def harvest_leaked_artifacts(
         harvest_mn_gpu_metrics(destination, subprocess_started_unix=subprocess_started_unix)
     except Exception as exc:
         log.warning("benchmark_result.harvest: MN GPU-metrics harvest failed: %s", exc)
+    # Whatever wrote the round's ``gpu_monitor`` block -- Magpie on one node, the harvest above on several -- normalise
+    # it into an artifact of its own now, while the round's own workspace is the subject. Aggregating it per session
+    # instead averaged baseline, explore and roofline rounds together and described none of them.
+    # Best effort, and only that: the report may still be settling, in which case there is nothing to read yet and the
+    # settled path writes it instead. ``write_gpu_metrics`` owns the guarantee that it never raises, so wrapping it
+    # again here would only add a second, unreachable handler over the one that reports what actually went wrong.
+    write_gpu_metrics(destination)
     return harvested
 
 
