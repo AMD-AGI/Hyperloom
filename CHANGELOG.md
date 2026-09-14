@@ -920,7 +920,10 @@ for the user-facing summary.
   later pass -- a recorded pgid the kernel has since recycled would otherwise
   take the teardown meant for ours.
   Recovery retains the pidfile while the group is still alive and reports the
-  worker PIDs actually signalled. Normal warmup/measure reuse and the existing
+  worker PIDs actually signalled. Measured on one MI355X serving
+  Qwen3-14B-FP8: against a fully booted server recovery reaped the leader and
+  three anonymous workers and the card went from 87% to 0% VRAM; fired mid-boot
+  it left no engine process behind. Normal warmup/measure reuse and the existing
   vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
   anonymous workers whose leader had already exited before recovery began;
   the generic subprocess teardown and third-party benchmark scripts are unchanged.
