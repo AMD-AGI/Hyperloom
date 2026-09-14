@@ -74,9 +74,7 @@ def _pump_joins_one_task(monkeypatch, *, release: asyncio.Event) -> dict[str, in
     async def _not_shutting_down(self, *_args, **_kwargs) -> bool:
         return False
 
-    monkeypatch.setattr(
-        DispatcherCollaborator, "_spawn_fitting_queued", _spawn_fitting_queued
-    )
+    monkeypatch.setattr(DispatcherCollaborator, "_spawn_fitting_queued", _spawn_fitting_queued)
     monkeypatch.setattr(DispatcherCollaborator, "_reap_dispatched_task", _reap)
     monkeypatch.setattr(DispatcherCollaborator, "_reclaim_stale_dispatch_state", _noop)
     monkeypatch.setattr(DispatcherCollaborator, "cancel_inflight_actions", _noop)
@@ -85,9 +83,7 @@ def _pump_joins_one_task(monkeypatch, *, release: asyncio.Event) -> dict[str, in
         "_cancel_inflight_that_outlived_the_session",
         _not_shutting_down,
     )
-    monkeypatch.setattr(
-        DispatcherCollaborator, "_dispatch_paused_for_phase_budget", lambda self: False
-    )
+    monkeypatch.setattr(DispatcherCollaborator, "_dispatch_paused_for_phase_budget", lambda self: False)
     return counts
 
 
@@ -114,9 +110,7 @@ async def test_pump_stamps_tick_while_joining_a_long_task(tmp_path, monkeypatch)
     assert counts == {"spawned": 1, "reaped": 1}
     assert first is not None, "pump joined a long task without ever stamping the tick"
     assert second is not None
-    assert second.stamped_unix > first.stamped_unix, (
-        "tick stamp went stale while the pump was still polling its join"
-    )
+    assert second.stamped_unix > first.stamped_unix, "tick stamp went stale while the pump was still polling its join"
 
 
 @pytest.mark.asyncio
