@@ -46,6 +46,7 @@ from ..bus.resource_lock import (
     KNOWN_LANES,
     _expand_lanes,
 )
+from ..supervisor import store as supervisor_store
 from .sub_agent_runner import SubAgentResult
 from ..state.task_registry import Task
 from .coordinator_helpers import (
@@ -422,6 +423,9 @@ class DispatcherCollaborator:
                     timeout=self._dispatcher_poll_sec,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                # A joined task can hold this tick body for hours, and the stamp
+                # the supervisor reads only advances at the main loop boundary.
+                await self._stamp_pump_liveness()
                 if not done:
                     # Poll elapsed with no completion; re-scan in case a lane freed.
                     continue
@@ -451,6 +455,27 @@ class DispatcherCollaborator:
                 reason="dispatcher_pump_exit",
                 only_task_ids={task.task_id for task, _atask, _gpu_lease in inflight},
             )
+
+    async def _stamp_pump_liveness(self) -> None:
+        """Tell the supervisor the coordinator is still cycling, not wedged.
+
+        Reaching here proves the event loop runs and the pump woke from its
+        poll; a genuinely wedged coordinator never gets this far and is killed
+        as before. Best-effort: a stamp that cannot be written must not abort
+        dispatch.
+        """
+        session_dir = getattr(self, "session_dir", None)
+        if session_dir is None:
+            return
+        try:
+            await asyncio.to_thread(
+                supervisor_store.stamp_tick,
+                session_dir,
+                tick=int(getattr(self.shared_state, "tick", 0) or 0),
+                now_unix=time.time(),
+            )
+        except OSError:
+            log.debug("dispatcher: could not stamp pump liveness", exc_info=True)
 
     async def _reconcile_cancelled_policy_denied_integrate_tasks(self) -> list[str]:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
