@@ -26,6 +26,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 KERNEL_REL = "python/sglang/kernels/ops/attention/decode_attention.py"
 BASE_SRC = "BLOCK_N = 16\n\n\ndef _fwd_grouped_kernel_stage1():\n    return BLOCK_N\n"
 PATCHED_SRC = "BLOCK_N = 32\n\n\ndef _fwd_grouped_kernel_stage1():\n    return BLOCK_N\n"
+SMUGGLED_SRC = "BLOCK_N = 64\n\n\ndef _fwd_grouped_kernel_stage1():\n    return BLOCK_N\n"
 PATCH = f"""\
 diff --git a/{KERNEL_REL} b/{KERNEL_REL}
 --- a/{KERNEL_REL}
@@ -65,6 +66,13 @@ def repo(tmp_path) -> Path:
     ):
         subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
     return root
+
+
+@pytest.fixture
+def smuggled(applied: Path) -> Path:
+    """Worktree bytes the diff does not produce, as leftover state would leave."""
+    (applied / KERNEL_REL).write_text(SMUGGLED_SRC, encoding="utf-8")
+    return applied
 
 
 @pytest.fixture
@@ -180,22 +188,22 @@ async def test_the_patched_file_survives_the_apply(session_dir, applied, patch_f
     assert (applied / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
-async def test_a_diff_without_the_flag_is_still_refused(session_dir, applied, patch_file, stop_at_rebaseline):
-    """Scope guard: only the controller's pre-applied contract skips apply."""
-    result = await krh.integrate_handler(_controller_payload(applied, patch_file), session_dir=session_dir)
+async def test_a_diff_without_the_flag_reads_the_committed_base(session_dir, smuggled, patch_file, stop_at_rebaseline):
+    """Scope guard: only the controller's contract measures the worktree as published."""
+    with pytest.raises(ReachedRebaseline):
+        await krh.integrate_handler(_controller_payload(smuggled, patch_file), session_dir=session_dir)
 
-    assert result["status"] == "failed"
-    assert result["error_class"] == "apply_failed"
+    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
-async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, applied, patch_file, stop_at_rebaseline):
+async def test_a_payload_cannot_claim_to_be_preapplied(session_dir, smuggled, patch_file, stop_at_rebaseline):
     """An agent's integrate params reach the payload verbatim, so the payload cannot carry this trust."""
-    payload = {**_controller_payload(applied, patch_file), "_preapplied_git_patch": True}
+    payload = {**_controller_payload(smuggled, patch_file), "_preapplied_git_patch": True}
 
-    result = await krh.integrate_handler(payload, session_dir=session_dir)
+    with pytest.raises(ReachedRebaseline):
+        await krh.integrate_handler(payload, session_dir=session_dir)
 
-    assert result["status"] == "failed"
-    assert result["error_class"] == "apply_failed"
+    assert (smuggled / KERNEL_REL).read_text(encoding="utf-8") == PATCHED_SRC
 
 
 @pytest.fixture
