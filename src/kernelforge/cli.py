@@ -1476,7 +1476,6 @@ def forge_loop(
         source_files_list = [str(workspace / assembly_preparation["assembly"])]
         iter_config.source_files = source_files_list
         iter_config.commit_new_paths = []
-        commit_new_paths = []
         # A cached whole-implementation patch could replace the launcher preparation just verified.
         kb_warmstart_enabled = False
         program_md += (
