@@ -921,10 +921,8 @@ async def _run_enablement_integrate(
 
     executor = IntegratePatchExecutor(session_dir=session_dir)
 
-    # Every bench records what its boot did; the gate's verdict on whether the
-    # combo runs is that observation's, not the throughput's. A round that did
-    # not boot and names no earlier wall re-hits the same one, which is what a
-    # round with nothing to compare against actually looks like.
+    # A round that did not boot and names no earlier wall re-hits the same one,
+    # which is what a round with nothing to compare against actually looks like.
     wall = boot_log_for(LadderStage.ENGINE_INIT)
     after_text = after_log or (boot_log_for(None) if booted else wall)
     before_text = before_log or ("" if booted else wall)
@@ -932,11 +930,14 @@ async def _run_enablement_integrate(
     async def _fake_bench(**_kwargs):
         bench_result = {
             "output_throughput": 137.0 if booted else 0.0,
+            # A measurement exists only where the client completed requests, so
+            # this is what tells the gate the server served.
+            "completed_requests": 12 if booted else 0,
             "error": bench_error,
             "effective_config": dict(bench_effective_config or {}),
         }
-        # Every bench records what its boot did; the gate's verdict on whether
-        # the combo runs is that observation's, not the throughput's.
+        # The observation still records how far the boot climbed, for the
+        # ladder arithmetic and for the failure it explains.
         bench_result["boot_observation_path"] = _persist_observation(session_dir, "after", after_text)
         return bench_result, {
             "accuracy_pass": None,
@@ -1493,6 +1494,7 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
     async def _fake_bench(**_kwargs):
         return {
             "output_throughput": 150.0,
+            "completed_requests": 12,
             "error": "",
             "boot_observation_path": _persist_observation(session_dir, "after", boot_log_for(None)),
         }, {

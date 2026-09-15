@@ -2913,9 +2913,9 @@ class IntegratePatchExecutor:
         from hyperloom.common.failure_signature import runnable_decision
 
         from ...bringup import round_advanced
+        from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
-        boot_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
@@ -2976,16 +2976,14 @@ class IntegratePatchExecutor:
             "after_observation_degraded": after_loaded.degraded,
         }
 
-        # The boot verdict is the ladder observation's, never the benchmark's
-        # throughput, which cannot separate a slow server from a dead one.
-        booted = after_loaded.observation.booted if after_loaded.observation is not None else None
+        # A measurement exists only after the client completed requests against
+        # the server, so it witnesses the serving rather than inferring it from
+        # a marker the log may never carry. The observations above stay for the
+        # ladder arithmetic below and for the failure they explain.
+        served = is_valid_measurement(bench_result)
 
-        runs, run_reason = runnable_decision(
-            booted=booted,
-            correctness_ok=correctness_ok,
-            boot_timed_out=boot_timed_out,
-        )
-        advanced = not runs and not booted and round_advanced(before_loaded.observation, after_loaded.observation)
+        runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)
+        advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
@@ -3111,7 +3109,7 @@ class IntegratePatchExecutor:
         provisional = correctness_ok is None
         reason = f"enablement runnable: {run_reason}"
         if provisional:
-            reason += " (provisional: booted but eval produced no accuracy; correctness not verified)"
+            reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(
             params=params,
             done_payload=done_payload,
