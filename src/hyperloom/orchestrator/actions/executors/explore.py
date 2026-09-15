@@ -1250,6 +1250,8 @@ class ExploreExecutor:
                         "total_throughput": r.total_token_throughput,
                         GRADED_INTVTY: r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
+                        # Graded against the session latency budget when one is set.
+                        "e2el_mean_ms": r.e2el_mean_ms,
                     }
                     graded = resolve_graded_comparison(
                         ss,
@@ -1284,7 +1286,13 @@ class ExploreExecutor:
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
-                        if _graded_on_intvty:
+                        if graded.veto_reason:
+                            # The variant is refused a round earlier than the
+                            # promotion gate would, so it is never folded onto the
+                            # stack and never becomes the anchor the rest of the
+                            # batch is graded against.
+                            reason = graded.veto_reason
+                        elif _graded_on_intvty:
                             reason = f"both_axes_regressed ({axes})"
                         else:
                             reason = "gain_below_threshold"
@@ -1300,7 +1308,11 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes" if _graded_on_intvty else "keep_threshold",
+                                "gate": (
+                                    "latency_budget"
+                                    if graded.veto_reason
+                                    else ("graded_axes" if _graded_on_intvty else "keep_threshold")
+                                ),
                                 "passed": graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as

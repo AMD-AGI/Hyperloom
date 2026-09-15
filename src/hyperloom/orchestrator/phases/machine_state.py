@@ -181,6 +181,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "recipe_kb_commit_failed",
         "prelude_baseline_failed",
         "prelude_cold_anchor_low_budget",  # PRELUDE → CLOSE; only a cold anchor, nothing comparable to it affordable
+        "baseline_over_latency_budget",  # the baseline itself breaks --max-latency-ms, so no candidate can clear it
         "prelude_policy_loop",
         "policy_loop",
         "crash_threshold_exceeded",
@@ -222,6 +223,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "robustness_escalated",
         "user_stop_requested",
         "prelude_baseline_failed",
+        "baseline_over_latency_budget",
         "prelude_cold_anchor_low_budget",
         "prelude_policy_loop",
         "time_exhausted_during_prelude",

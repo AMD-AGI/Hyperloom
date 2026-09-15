@@ -2017,6 +2017,10 @@ class KernelPhase(PhaseHandler):
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
+            # Canonical name, read from the measurement the axes are graded from rather than from ``result``: a
+            # recheck supersedes the original figures, and pairing this round's throughput with a previous round's
+            # latency is the divergence the budget exists to catch. Absent here, the budget fails closed.
+            "e2el_mean_ms": graded_measurement.get("e2el_mean_ms", graded_measurement.get("e2el_ms")),
             **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }

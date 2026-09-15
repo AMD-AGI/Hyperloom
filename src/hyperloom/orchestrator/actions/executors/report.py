@@ -275,6 +275,14 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
+    "baseline_over_latency_budget": (
+        "The baseline's own mean end-to-end latency exceeded --max-latency-ms, so the run stopped before "
+        "optimizing. The budget refuses any KEEP over the ceiling, and the reference the run is measured against "
+        "already breaks it — no candidate built on it could have been promoted, so continuing would have spent the "
+        "whole time budget refusing every winner in turn. Either the ceiling is lower than this workload's floor on "
+        "this hardware, or the baseline configuration itself is the thing to fix; relaunch with a ceiling the "
+        "baseline can meet, or without one, to see what the search finds."
+    ),
     # Recipe KB knowledge-plane bootstrap failures.
     "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
     "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",
