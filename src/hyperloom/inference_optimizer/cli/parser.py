@@ -451,7 +451,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "state.json under `explore_search.last_round.skipped_dup`, and in the "
         "action's per-variant outcomes, tagged `user_skip`.",
     )
-    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--max-hours",
+        type=float,
+        default=None,
+        help="Wall-clock budget in hours (default 2.0 on a fresh run). On "
+        "--resume-from, omitting it keeps the session's own budget, including "
+        "any --extend-hours grant; passing it explicitly sets the leg's bound "
+        "as it always has, which for a smaller value tightens the session.",
+    )
     opt.add_argument(
         "--extend-hours",
         dest="extend_hours",
