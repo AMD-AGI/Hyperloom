@@ -118,19 +118,21 @@ _PATCH_SUBDIR_PREFIX = "sglang"
 _RELEASE_BRANCH_SUFFIX = "sgldev"
 
 
-def _is_release_branch_build(version: str) -> bool:
-    """Whether a version string names a build off SGLang's release branch.
+def _is_release_branch_build(version: str, source_root: Path | None = None) -> bool:
+    """Whether the installed SGLang is a build off its release branch.
 
     setuptools_scm marks those with a ``.dev`` segment, a ``+g<sha>`` local part,
-    or both (``0.5.18.dev20260825+g0c7ff19e3b``); a point release carries neither.
+    or both (``0.5.18.dev20260825+g0c7ff19e3b``). SETUPTOOLS_SCM_PRETEND_VERSION
+    flattens that to a bare release number, so a source checkout counts on the
+    strength of its own git dir: a point release is never installed that way.
     """
     text = (version or "").strip()
-    if not text:
-        return False
-    return ".dev" in text or bool(re.search(r"\+g[0-9a-f]{7,}", text))
+    if text and (".dev" in text or re.search(r"\+g[0-9a-f]{7,}", text)):
+        return True
+    return source_root is not None and (source_root / ".git").exists()
 
 
-def _versioned_patches_subdir_names(version: str) -> list[str]:
+def _versioned_patches_subdir_names(version: str, source_root: Path | None = None) -> list[str]:
     """Patch subdir names to try for an SGLang version, best match first."""
     text = (version or "").strip()
     if not text:
@@ -148,14 +150,14 @@ def _versioned_patches_subdir_names(version: str) -> list[str]:
     if len(numeric) < 2:
         return []
     base = f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
-    if _is_release_branch_build(version):
+    if _is_release_branch_build(version, source_root):
         return [f"{base}_{_RELEASE_BRANCH_SUFFIX}", base]
     return [base]
 
 
-def _versioned_patches_subdir_name(version: str) -> str | None:
+def _versioned_patches_subdir_name(version: str, source_root: Path | None = None) -> str | None:
     """The preferred patch subdir name for a version, or ``None`` if unparseable."""
-    names = _versioned_patches_subdir_names(version)
+    names = _versioned_patches_subdir_names(version, source_root)
     return names[0] if names else None
 
 
@@ -181,13 +183,14 @@ def _subdir_is_release_branch(name: str) -> bool:
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
+    source_root: Path | None = None,
 ) -> Path | None:
     """Locate the per-version patches dir for the running SGLang version."""
 
     def _qualifies(d: Path) -> bool:
         return any(d.glob("*.patch"))
 
-    for subdir_name in _versioned_patches_subdir_names(version):
+    for subdir_name in _versioned_patches_subdir_names(version, source_root):
         candidate = patches_root / subdir_name
         if candidate.is_dir() and _qualifies(candidate):
             return candidate
@@ -201,7 +204,7 @@ def _resolve_versioned_patches_dir(
     # Keyed by version alone, the plain and release-branch subdirs of one version
     # collide and directory order decides the winner; prefer the variant matching
     # the running build instead.
-    want_branch = _is_release_branch_build(version)
+    want_branch = _is_release_branch_build(version, source_root)
     available: dict[tuple[int, ...], Path] = {}
     for d in sorted(patches_root.iterdir()):
         if not d.is_dir() or not _qualifies(d):
@@ -559,15 +562,23 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
         )
         return None
 
+    # Resolved before the patch set so its git dir can tell a source checkout
+    # from a point release when the version string cannot.
+    sglang_module = Path(sglang.__file__).resolve()
+    apply_resolution = _resolve_sglang_apply_root(sglang_module)
+    if apply_resolution is None:
+        return None
+    apply_root, apply_strip = apply_resolution
+
     # Per-version subdir layout required.
-    patches_dir = _resolve_versioned_patches_dir(patches_root, version)
+    patches_dir = _resolve_versioned_patches_dir(patches_root, version, apply_root)
     if patches_dir is None:
         log.warning(
             "_server_patcher: no SGLang patches found under %s/%s/ for "
             "version %s; upgrade TraceLens to Hyperloom_integration_v0.3.1+ — "
             "kernel shape profiling will be unavailable",
             patches_root,
-            _versioned_patches_subdir_name(version) or "<unknown>",
+            _versioned_patches_subdir_name(version, apply_root) or "<unknown>",
             version,
         )
         return None
@@ -588,13 +599,6 @@ def _discover_sglang_plan(arg: Path | str | None) -> _PatchPlan | None:
     if not patches:
         log.warning("_server_patcher: SGLang patches directory empty; skip")
         return None
-
-    # Support both editable and wheel layouts (see _resolve_sglang_apply_root).
-    sglang_module = Path(sglang.__file__).resolve()
-    apply_resolution = _resolve_sglang_apply_root(sglang_module)
-    if apply_resolution is None:
-        return None
-    apply_root, apply_strip = apply_resolution
 
     filtered_patches: list[Path] = list(patches)
 

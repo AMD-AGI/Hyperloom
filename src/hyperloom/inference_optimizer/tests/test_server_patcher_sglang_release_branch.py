@@ -81,6 +81,37 @@ def test_branch_build_takes_the_plain_set_when_no_variant_exists(tmp_path: Path)
     assert _resolve_versioned_patches_dir(tmp_path, BRANCH_BUILD) == made["sglang_0_5_18"]
 
 
+def test_a_source_checkout_counts_even_when_the_version_is_flattened(tmp_path: Path) -> None:
+    # SETUPTOOLS_SCM_PRETEND_VERSION makes a bare-metal source install report the
+    # release number with no .dev/+g part, so only the checkout's git dir shows
+    # that the tree is the release branch rather than the tag.
+    checkout = tmp_path / "sglang"
+    (checkout / ".git").mkdir(parents=True)
+
+    assert _is_release_branch_build(POINT_RELEASE, checkout) is True
+    assert _versioned_patches_subdir_names(POINT_RELEASE, checkout) == [
+        "sglang_0_5_18_sgldev",
+        "sglang_0_5_18",
+    ]
+
+    root = tmp_path / "patches"
+    made = _make(root, "sglang_0_5_18", "sglang_0_5_18_sgldev")
+    assert _resolve_versioned_patches_dir(root, POINT_RELEASE, checkout) == made["sglang_0_5_18_sgldev"]
+
+
+def test_a_wheel_install_stays_on_the_plain_set(tmp_path: Path) -> None:
+    # No git dir: a genuine point-release install must not be handed the
+    # release-branch patches.
+    wheel_root = tmp_path / "site-packages"
+    wheel_root.mkdir()
+
+    assert _is_release_branch_build(POINT_RELEASE, wheel_root) is False
+
+    root = tmp_path / "patches"
+    made = _make(root, "sglang_0_5_18", "sglang_0_5_18_sgldev")
+    assert _resolve_versioned_patches_dir(root, POINT_RELEASE, wheel_root) == made["sglang_0_5_18"]
+
+
 def test_fallback_to_an_older_version_keeps_the_matching_variant(tmp_path: Path) -> None:
     # No 0.5.18 set at all: the nearest not-newer version is 0.5.17, which also
     # ships both variants, and a branch build still wants the branch one.
