@@ -2012,7 +2012,7 @@ def _drive_vllm_glibc_gate(
     tmp_path: Path,
     *,
     glibc: str,
-    vllm_version: str = "0.28.0",
+    vllm_version: str = "0.29.0",
     check_only: bool = True,
 ) -> subprocess.CompletedProcess:
     return _drive_installer(
@@ -2031,14 +2031,14 @@ def _drive_vllm_glibc_gate(
 
 
 def test_vllm_install_rejects_glibc_235_for_028(tmp_path: Path):
-    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.28.0")
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.29.0")
 
     assert res.returncode != 0
     assert "glibc >= 2.39" in res.stderr
 
 
 def test_vllm_install_accepts_glibc_239_for_028(tmp_path: Path):
-    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.28.0")
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.29.0")
 
     assert res.returncode == 0, res.stderr
 
