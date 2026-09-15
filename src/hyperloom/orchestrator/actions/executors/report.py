@@ -289,9 +289,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
     "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
-    # Retired reason names, kept so a report over an archived session still explains what it is reading.
+    # Retired reason names, kept so a report over an archived session still explains what it is reading. Some no longer
+    # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
+    "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
+    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
     "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",

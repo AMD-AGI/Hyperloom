@@ -9,8 +9,10 @@ import sqlite3
 
 # Recorded by ensure_schema for provenance only: nothing compares it against the
 # version already in the DB, so a database written by an older version keeps its
-# own columns and is read as-is. Rows are addressed by column name, so a column
-# this version no longer writes is inert rather than a migration hazard.
+# own columns and is read as-is -- rows are addressed by column name, so a column
+# this version no longer reads is inert. Dropping one is not: CREATE TABLE IF NOT
+# EXISTS leaves the older database's column in place, and a column declared NOT
+# NULL with no default then fails every INSERT this version writes.
 SCHEMA_VERSION = 5
 
 

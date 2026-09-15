@@ -51,7 +51,7 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Severities accepted by ``alert`` and ``escalate_strategy_change``; ``high`` raises priority 0 broadcasts.
+# Severities accepted by ``alert`` and ``escalate_strategy_change``.
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
