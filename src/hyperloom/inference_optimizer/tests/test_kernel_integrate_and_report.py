@@ -985,8 +985,8 @@ async def test_integrate_retries_once_after_aiter_jit_registry_mismatch(tmp_path
     dropped: list[dict] = []
     extra_envs = {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": "/tmp/merged.csv"}
 
-    def _drop(envs=None, *, backup_dir=None):
-        dropped.append({"envs": envs, "backup_dir": backup_dir})
+    def _drop(envs=None, *, backup_dir=None, also_modules=()):
+        dropped.append({"envs": envs, "backup_dir": backup_dir, "also_modules": also_modules})
         return {"action": "invalidate"}
 
     monkeypatch.setattr(krh, "_sweep_integrate_aiter_locks", lambda **_kwargs: {"scanned": 0, "deleted": 0})

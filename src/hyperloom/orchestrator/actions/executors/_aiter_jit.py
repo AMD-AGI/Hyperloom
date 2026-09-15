@@ -9,6 +9,7 @@ import csv
 import importlib.util
 import logging
 import os
+import re
 import shutil
 import time
 from pathlib import Path
@@ -453,6 +454,37 @@ def is_aiter_jit_registry_mismatch(*texts: str) -> bool:
     return COMPILED_REGISTRY_MARKER in blob
 
 
+#: How aiter names the kernel it could not find: ``kernel '<name>' is not present``.
+_MISSING_KERNEL_RE = re.compile(r"kernel '([^']+)' is not present", re.IGNORECASE)
+
+
+def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
+    """Serving modules that own the kernels a registry mismatch named.
+
+    The env a round carries does not always reach the module at fault: a round tuning
+    one CSV still boots against every CSV aiter merges, so the missing kernel can
+    belong to a variable the round never set -- and to one absent from
+    :data:`AITER_ENV_TO_SERVING_MODULES` entirely, which leaves the env-keyed drop
+    with nothing to unlink and the retry certain to fail the same way. The error text
+    names the kernel, and the kernel names its module.
+
+    Args:
+        texts: Error strings or log excerpts from the failed round.
+
+    Returns:
+        Module stems to unlink, deduplicated, empty when no kernel was named.
+    """
+    blob = "\n".join(t for t in texts if t)
+    modules: list[str] = []
+    for kernel in _MISSING_KERNEL_RE.findall(blob):
+        # libtype is not in the message; the prefix table answers for ck, and a
+        # cktile kernel carries it in its own name.
+        resolved = serving_module_for_kernel(kernel, "cktile" if "cktile" in kernel else "ck")
+        if resolved:
+            modules.append(resolved)
+    return tuple(dict.fromkeys(modules))
+
+
 def csv_kernel_names(
     csv_path: Path,
     *,
@@ -773,12 +805,21 @@ def drop_serving_so_for_envs(
     envs: dict[str, str] | None = None,
     *,
     backup_dir: Path | None = None,
+    also_modules: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds."""
+    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds.
+
+    Args:
+        envs: ``AITER_CONFIG_*`` the round carried; ``None`` means every known module.
+        backup_dir: Where to park the invalidated ``jit/build``.
+        also_modules: Modules to unlink on top of the env's own, for a mismatch whose
+            kernel belongs to a variable this round never set. Without them an env
+            that maps to no module unlinks nothing and the retry repeats the failure.
+    """
     jit_dir = _resolve_serving_jit_dir()
     if jit_dir is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    modules = _modules_for_envs(envs)
+    modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
     removed = _unlink_serving_modules(jit_dir, modules)
     invalidation = _invalidate_jit_build(jit_dir, dest)
@@ -820,6 +861,7 @@ __all__ = [
     "is_aiter_jit_registry_mismatch",
     "prepare_serving_so_for_csvs",
     "probe_aiter_jit_cache",
+    "registry_mismatch_modules",
     "result_is_aiter_jit_registry_mismatch",
     "serving_module_for_kernel",
     "serving_modules_cover_csv",

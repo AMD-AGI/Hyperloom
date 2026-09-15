@@ -244,6 +244,27 @@ def test_the_preflight_runs_before_the_config_is_materialized():
 
     ordered = [name for _lineno, name in sorted(called)]
     assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_config_with_envs"]
+    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs, output_dir)")
+    materialize = source.index("config_path = materialize_config_with_envs(")
+    assert preflight < materialize
+
+
+def test_the_error_names_the_module_when_the_env_cannot(tmp_path):
+    """A round's env does not always reach the module at fault.
+
+    fmoe_ck tunes AITER_CONFIG_FMOE, which maps to no serving module, yet it boots
+    against every CSV aiter merges -- so the missing kernel can belong to bpreshuffle.
+    An env-keyed drop unlinks nothing there and the retry repeats the failure.
+    """
+    from hyperloom.orchestrator.actions.executors._aiter_jit import registry_mismatch_modules
+
+    observed = (
+        "RuntimeError: gemm_a8w8_blockscale_bpreshuffle kernel "
+        "'a8w8_blockscale_bpreshuffle_1x128x128_256x32x128x256_16x16_16x16_16x16x1"
+        "_16x16x1_1x32x1x8_8_2x1_intrawave_v1' is not present in the compiled registry. "
+        "The tuned CSV references a kernel that was not built into aiter."
+    )
+
     assert registry_mismatch_modules(observed) == ("module_gemm_a8w8_blockscale_bpreshuffle",)
     # A cktile kernel carries its libtype in its own name.
     assert registry_mismatch_modules("kernel 'a8w8_blockscale_cktile_x' is not present") == (
