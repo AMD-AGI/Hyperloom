@@ -49,21 +49,32 @@ def resolve_keep_interpreter(
     override: Mapping[str, Any] | None,
     *,
     backend_name: str,
-    bypass_interpreter: str = "",
+    backend_interpreter: str = "",
 ) -> str:
     """Return the interpreter the graded server ran, or ``""``.
 
     Within the override the priority is ``runtime_python_exe`` then
     ``framework_python`` -- the order ``apply_runtime_override`` itself encodes
-    and the launcher reads back. An override naming neither is resolvable only
-    on the bypass path, where the backend's own interpreter is what launched the
-    server.
+    and the launcher reads back. An override naming neither falls back to the
+    interpreter the caller resolved, on every backend and not only on bypass: an
+    enablement that patches the framework in place never provisions a runtime,
+    so keying the fallback on the backend name would leave that topology's
+    closure permanently unobserved.
+
+    Args:
+        override: The runtime override launch bound, if any.
+        backend_name: The active benchmark backend, retained so a backend that
+            cannot name an interpreter resolves to ``""`` rather than guessing.
+        backend_interpreter: The interpreter that launched the graded server
+            when the override names none. The caller resolves it -- the serving
+            framework's interpreter, which on a split-venv host is not the
+            benchmark backend's own.
     """
     resolved = str((override or {}).get("runtime_python_exe") or "").strip()
     resolved = resolved or str((override or {}).get("framework_python") or "").strip()
     if resolved:
         return resolved
-    return bypass_interpreter if str(backend_name or "").strip().lower() == "bypass" else ""
+    return str(backend_interpreter or "").strip() if str(backend_name or "").strip() else ""
 
 
 def keep_assertion_packages(
@@ -106,15 +117,17 @@ def keep_assertion_packages(
 def probe_environment_closure(
     interpreter: str,
     *,
-    override: Mapping[str, Any] | None,
+    env: Mapping[str, str],
     packages: tuple[str, ...] = (),
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Observe the distribution closure and the assertion set at the KEEP.
 
     Args:
         interpreter: The interpreter the graded server ran.
-        override: The runtime override that launch bound, applied to the probe's
-            environment exactly as the launch applies it.
+        env: The environment the graded server was launched into, composed by
+            the caller. It is what the probe runs under, because a ``PYTHONPATH``
+            the launch saw and the probe does not yields a closure that is
+            missing distributions the KEEP actually depended on.
         packages: Names to lift into the assertion map.
 
     Returns:
@@ -124,7 +137,7 @@ def probe_environment_closure(
     """
     if not interpreter:
         return {}, {}
-    env = _probe_env(override)
+    env = dict(env)
     try:
         completed = subprocess.run(  # noqa: S603  # nosec B603 - argv-only, no shell.
             [interpreter, "-c", _PROBE_SCRIPT],
@@ -154,8 +167,13 @@ def probe_environment_closure(
     return closure, assertions
 
 
-def _probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
-    """Return the inherited environment with the graded override applied."""
+def keep_probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
+    """Return the inherited environment with the graded override applied.
+
+    Exposed because resolving *which* interpreter the graded launch used has to
+    happen under the same environment the launch ran in -- an override that
+    rewrites ``PATH`` selects a different executable than the ambient one does.
+    """
     from ...actions.executors._grid_runner import apply_runtime_override
 
     env = dict(os.environ)
