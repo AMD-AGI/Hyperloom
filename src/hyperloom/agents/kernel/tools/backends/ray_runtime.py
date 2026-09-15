@@ -10,6 +10,7 @@ import os
 import resource
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -17,6 +18,11 @@ from typing import Optional, Tuple
 DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
+#: Wall-clock bound on the ``ray.init`` connect handshake. Registration with the
+#: raylet has no timeout of its own, so a raylet that accepts the socket and then
+#: never replies blocks the caller forever. Observed: a coordinator sat in this
+#: call for 44 minutes, holding tick 1, until the container was torn down.
+DEFAULT_RAY_INIT_TIMEOUT_SEC = 300.0
 
 # Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
 # gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
@@ -88,6 +94,11 @@ def _ray_status_timeout_sec() -> float:
 def _ray_stop_timeout_sec() -> float:
     """Return the ``ray stop --force`` timeout in seconds."""
     return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
+
+
+def _ray_init_timeout_sec() -> float:
+    """Return the ``ray.init`` connect timeout in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", DEFAULT_RAY_INIT_TIMEOUT_SEC)
 
 
 def ensure_fd_limit(
@@ -304,17 +315,59 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     runtime_env = safe_runtime_env()
 
+    def _connect(address: str) -> None:
+        """Call ``ray.init`` with standard options.
+
+        Deliberately does NOT redirect stdout. ``sys.stdout`` is process-global and
+        this runs on a thread the caller abandons on timeout, so a redirection held
+        here would never be unwound -- every later write, from every thread, would
+        vanish into a buffer nobody reads. The caller suppresses the banner instead,
+        around a join it always completes.
+        """
+        ray.init(
+            address=address,
+            ignore_reinit_error=True,
+            log_to_driver=False,
+            logging_level="error",
+            runtime_env=runtime_env,
+        )
+
     def _init(address: str) -> None:
-        """Call ``ray.init`` with stdout suppressed and standard options."""
+        """Connect under a wall-clock bound.
+
+        ``ray.init`` takes no timeout: the driver registers with the raylet over a
+        socket and waits for a reply that a wedged raylet never sends, so the call
+        blocks indefinitely with nothing to observe -- no child process, no log, no
+        failure. A daemon thread makes that state reportable. The call itself cannot
+        be cancelled, so the thread is abandoned rather than joined; it cannot keep
+        the interpreter alive, and the caller has already been told the cluster is
+        unusable.
+        """
+        timeout = _ray_init_timeout_sec()
+        outcome: dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                _connect(address)
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                outcome["error"] = exc
+
+        thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
+        # The banner suppression is held here, across a join that always returns, so
+        # stdout is restored whether the connect succeeded, failed or was abandoned.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            ray.init(
-                address=address,
-                ignore_reinit_error=True,
-                log_to_driver=False,
-                logging_level="error",
-                runtime_env=runtime_env,
+            thread.start()
+            thread.join(timeout)
+        if thread.is_alive():
+            raise TimeoutError(
+                f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
+                "the raylet accepted the connection but never finished registration. "
+                "Raise HYPERLOOM_RAY_INIT_TIMEOUT_SEC if the cluster is merely slow to start."
             )
+        error = outcome.get("error")
+        if error is not None:
+            raise error
 
     try:
         _init(os.environ.get("RAY_ADDRESS", "auto"))
