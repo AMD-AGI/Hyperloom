@@ -11,8 +11,10 @@ import sys
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
@@ -35,7 +37,7 @@ from hyperloom.orchestrator.enablement.recipe.keep_records import (
     declared_targets,
 )
 from hyperloom.orchestrator.enablement.recipe.keep_probe import (
-    _probe_env,
+    keep_probe_env,
     keep_assertion_packages,
     probe_environment_closure,
     resolve_keep_interpreter,
@@ -410,16 +412,21 @@ def test_undeclared_absent_target_is_recorded_missing_and_incomplete(repo: Path,
     assert manifests[0]["files"][0]["op"] == "missing"
 
 
-def test_keep_interpreter_prefers_the_override_then_the_bypass_backend():
+def test_keep_interpreter_prefers_the_override_then_the_backend():
     assert (
         resolve_keep_interpreter({"runtime_python_exe": "/a/py", "framework_python": "/b/py"}, backend_name="bypass")
         == "/a/py"
     )
     assert resolve_keep_interpreter({"framework_python": "/b/py"}, backend_name="magpie") == "/b/py"
-    assert resolve_keep_interpreter({}, backend_name="bypass", bypass_interpreter="/c/py") == "/c/py"
-    # Under any other backend the launching interpreter is not resolvable, and
-    # naming a plausible one would reproduce the defect this closes.
-    assert resolve_keep_interpreter({}, backend_name="magpie", bypass_interpreter="/c/py") == ""
+    assert resolve_keep_interpreter({}, backend_name="bypass", backend_interpreter="/c/py") == "/c/py"
+    # An override naming no interpreter leaves the backend's own as the one that
+    # launched the server, on every backend. Restricting this to bypass left an
+    # in-place enablement -- which provisions no runtime at all -- with its
+    # closure permanently unobserved.
+    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="/c/py") == "/c/py"
+    # A backend that names no interpreter still resolves to nothing rather than
+    # to a guess.
+    assert resolve_keep_interpreter({}, backend_name="magpie", backend_interpreter="") == ""
 
 
 def _installed_dist(root: Path, name: str, version: str) -> str:
@@ -450,8 +457,8 @@ def test_the_graded_override_decides_what_the_probe_observes(tmp_path: Path):
     never imported.
     """
     override = {"pythonpath_prefixes": [_installed_dist(tmp_path, "overlaid", "3.1")]}
-    closure, assertions = probe_environment_closure(sys.executable, override=override, packages=("overlaid",))
-    bare_closure, bare_assertions = probe_environment_closure(sys.executable, override=None, packages=("overlaid",))
+    closure, assertions = probe_environment_closure(sys.executable, env=keep_probe_env(override), packages=("overlaid",))
+    bare_closure, bare_assertions = probe_environment_closure(sys.executable, env=keep_probe_env(None), packages=("overlaid",))
     assert closure["distributions"]["overlaid"] == "3.1" and assertions == {"overlaid": "3.1"}
     assert "overlaid" not in bare_closure["distributions"] and bare_assertions == {}
 
@@ -544,27 +551,55 @@ def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
     assert assertions == {}
 
 
-def test_an_override_naming_no_interpreter_off_the_bypass_path_observes_nothing(
+def test_an_override_naming_no_interpreter_observes_under_the_backend(
     tmp_path: Path,
     monkeypatch,
 ):
-    """An AITER runtime names no interpreter, and only bypass can say which ran.
+    """An AITER runtime names no interpreter; the backend's own is what ran.
 
-    Under any other backend both probes report nothing rather than an
-    environment the graded server never ran in.
+    Reporting nothing here left every non-bypass KEEP unobserved, and the
+    override's own path entries -- which the graded server did run under -- went
+    unrecorded with it.
     """
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
         _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
     )
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
-    assert executor._probe_keep_environment(ctx, params, specialist_task_id=PROBE_TASK, provision_result=None) == (
-        {},
-        {},
+    closure, assertions = executor._probe_keep_environment(
+        ctx, params, specialist_task_id=PROBE_TASK, provision_result=None
     )
+    assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
+
+
+def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, monkeypatch):
+    """The topology this closes: patch the framework tree, provision nothing.
+
+    No provisioning result and no ``runtime_override`` is not an absent
+    environment -- it is the ambient one the backend graded the server in, and
+    it is the closure a replay of that KEEP has to reproduce.
+    """
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""})))
+    )
+    closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    assert closure["distributions"], "the ambient interpreter has a non-empty closure"
+    assert assertions.get("pytest"), "a named package is asserted at its observed version"
 
 
 def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path, monkeypatch):
@@ -584,7 +619,172 @@ def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path,
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
 
-def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path):
+def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Path, monkeypatch):
+    """A split-venv host: Magpie runs from one venv, the server from another.
+
+    Attributing Magpie's distributions to a KEEP whose server ran elsewhere is a
+    confidently wrong closure, which is worse than an absent one. The fallback is
+    therefore the serving framework's interpreter, resolved the same way the
+    accuracy probes resolve it.
+    """
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter, benchmark_backend
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setattr(
+        benchmark_backend,
+        "resolve_benchmark_interpreter",
+        lambda: pytest.fail("the benchmark backend's interpreter must not be the fallback off bypass"),
+    )
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""})))
+    )
+    closure, assertions = executor._probe_keep_environment(
+        ctx, {}, specialist_task_id=PROBE_TASK, provision_result=None
+    )
+    # The framework resolver named this interpreter, so its closure is the one
+    # on record; reaching the backend's resolver at all fails the test above.
+    assert assertions.get("pytest"), "the framework interpreter's own closure is what is asserted"
+    assert closure["distributions"].get("pytest")
+
+
+def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path, monkeypatch):
+    """The override's PATH decides which framework executable the launch used.
+
+    Resolving the fallback against the ambient PATH names the interpreter the
+    launch did *not* use, and records its closure against the KEEP. The resolver
+    therefore runs under the environment ``keep_probe_env`` builds.
+    """
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter, benchmark_backend
+
+    ambient_bin = tmp_path / "ambient" / "bin"
+    graded_bin = tmp_path / "graded" / "bin"
+    for d in (ambient_bin, graded_bin):
+        d.mkdir(parents=True)
+        (d / "vllm").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (d / "vllm").chmod(0o755)
+        (d / "python").symlink_to(sys.executable)
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setenv("PATH", str(ambient_bin))
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
+    # Force the branch that consults PATH: pin Magpie's own answer to the
+    # single-venv sentinel so resolution falls through to `which("vllm")`.
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
+
+    seen: dict[str, str] = {}
+    real_probe = _benchmark_interpreter._resolve_probe_python
+
+    def _record(framework="vllm", *, env=None):
+        resolved = real_probe(framework, env=env)
+        seen["resolved"] = resolved
+        return resolved
+
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    params = {"runtime_override": {"path_prefix": str(graded_bin)}, "framework": "vllm"}
+    executor._probe_keep_environment(ctx, params, specialist_task_id=PROBE_TASK, provision_result=None)
+    assert seen["resolved"] == str(graded_bin / "python"), "the override's PATH, not the ambient one"
+
+
+def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: Path, monkeypatch):
+    """The config the launch read is what says which framework and PATH it used.
+
+    A round can reach a KEEP with no runtime override at all while its
+    materialized config sets ``benchmark.envs.PATH``. Resolving against the
+    ambient environment then names an interpreter the graded server never ran
+    under, and records its closure against that KEEP.
+    """
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter, benchmark_backend
+
+    ambient_bin = tmp_path / "ambient" / "bin"
+    config_bin = tmp_path / "from_config" / "bin"
+    for d in (ambient_bin, config_bin):
+        d.mkdir(parents=True)
+        (d / "vllm").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (d / "vllm").chmod(0o755)
+        (d / "python").symlink_to(sys.executable)
+
+    config = tmp_path / "materialized.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"PATH": str(config_bin)}}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setenv("PATH", str(ambient_bin))
+    monkeypatch.setenv("FRAMEWORK", "sglang")  # outranked by the config's own framework
+    monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
+    monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python"
+    )
+
+    seen: dict[str, Any] = {}
+    real_probe = _benchmark_interpreter._resolve_probe_python
+
+    def _record(framework="vllm", *, env=None):
+        seen["framework"] = framework
+        seen["resolved"] = real_probe(framework, env=env)
+        return seen["resolved"]
+
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
+    executor._probe_keep_environment(
+        ctx,
+        {},
+        specialist_task_id=PROBE_TASK,
+        provision_result=None,
+        materialized_config=str(config),
+    )
+    assert seen["framework"] == "vllm", "the config's framework outranks $FRAMEWORK"
+    assert seen["resolved"] == str(config_bin / "python"), "the config's PATH, not the ambient one"
+
+
+def test_a_dist_reachable_only_through_the_configs_pythonpath_is_in_the_closure(tmp_path: Path, monkeypatch):
+    """The probe runs under the composed launch environment, not the override alone.
+
+    Selecting the right interpreter is not enough: a ``PYTHONPATH`` the config
+    contributes is part of what the graded server imported from, and a closure
+    observed without it is missing distributions the KEEP depended on.
+    """
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    config_only = _installed_dist(tmp_path, "configonly", "3.1")
+    config = tmp_path / "materialized.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"PYTHONPATH": config_only}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
+    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
+    executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
+    ctx = SimpleNamespace(
+        _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"configonly": ""})))
+    )
+    closure, assertions = executor._probe_keep_environment(
+        ctx,
+        {},
+        specialist_task_id=PROBE_TASK,
+        provision_result=None,
+        materialized_config=str(config),
+    )
+    assert closure["distributions"].get("configonly") == "3.1"
+    assert assertions == {"configonly": "3.1"}
+
+
+def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path, monkeypatch):
+    """No override and a backend that cannot name an interpreter is still absent."""
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
+
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: "")
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(_ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=[])))
     assert executor._probe_keep_environment(ctx, {}, specialist_task_id=PROBE_TASK, provision_result=None) == ({}, {})
@@ -765,18 +965,18 @@ def test_the_probe_environment_carries_the_prefixes_and_the_runtime_env(tmp_path
     """An AITER runtime names no interpreter: a prefix list and a runtime_env
     are the whole of what makes its build importable."""
     prefix = _installed_dist(tmp_path, "overlaid", "3.1")
-    env = _probe_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}})
+    env = keep_probe_env({"pythonpath_prefixes": [prefix], "runtime_env": {"AITER_REBUILD": "1"}})
     assert env["PYTHONPATH"].split(":")[0] == prefix
     assert env["AITER_REBUILD"] == "1"
 
 
 def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
     """Fail closed on the invocation too, not only on an unresolved interpreter."""
-    assert probe_environment_closure(str(tmp_path / "absent-python"), override=None, packages=("demo",)) == ({}, {})
+    assert probe_environment_closure(str(tmp_path / "absent-python"), env=keep_probe_env(None), packages=("demo",)) == ({}, {})
     silent = tmp_path / "silent-python"
     silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     silent.chmod(0o755)
-    assert probe_environment_closure(str(silent), override=None, packages=("demo",)) == ({}, {})
+    assert probe_environment_closure(str(silent), env=keep_probe_env(None), packages=("demo",)) == ({}, {})
 
 
 # --------------------------------------------------------------------------
