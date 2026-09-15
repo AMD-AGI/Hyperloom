@@ -8,10 +8,12 @@ from __future__ import annotations
 import glob
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -176,6 +178,29 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "ValidationError for ModelConfig",
     "are not supported for now",
 )
+
+#: Engine deaths that happen *after* the server reported ready and began
+#: serving. Kept out of :data:`_SERVER_DEAD_MARKERS` on purpose: that tuple also
+#: drives the live readiness waiter, and widening it would change when a running
+#: server is torn down. These are read only when building a diagnostic excerpt.
+_FATAL_ENGINE_MARKERS: tuple[str, ...] = (
+    "EngineCore encountered a fatal error",
+    "EngineCore encountered an issue",
+    "EngineDeadError",
+    "Engine core proc died",
+    "died with exit code",
+)
+
+#: A framework line's exception, named anywhere in it: these logs prefix every
+#: line with the worker pid, the level and the source location, so the exception
+#: never starts the line.
+_EXCEPTION_LINE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)\s*:")
+
+#: Lines after a fatal marker that may carry its terminating exception.
+_MARKER_WINDOW_LINES: int = 60
+
+#: Lines of preceding context a legacy bootstrap marker keeps.
+_MARKER_CONTEXT_LINES: int = 2
 
 # Default grace after the first fatal marker before forcing a reap.
 _SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
@@ -400,24 +425,90 @@ def server_log_death_excerpt(path: str, *, max_chars: int = 1200) -> str | None:
     except OSError:
         pass
     for candidate in candidates:
-        try:
-            with open(candidate, "rb") as fh:
-                try:
-                    fh.seek(-_SERVER_LOG_TAIL_BYTES, os.SEEK_END)
-                except OSError:
-                    fh.seek(0)
-                tail = fh.read().decode("utf-8", "ignore")
-        except (OSError, ValueError):
-            continue
-        lines = tail.splitlines()
-        for idx, line in enumerate(lines):
-            if any(marker in line for marker in _SERVER_DEAD_MARKERS):
-                start = max(0, idx - 2)
-                excerpt = "\n".join(lines[start : idx + 3]).strip()
-                if not excerpt:
-                    continue
-                return excerpt[-max_chars:]
+        excerpt = _first_marker_excerpt(candidate, max_chars=max_chars)
+        if excerpt is not None:
+            return excerpt
     return None
+
+
+def _first_marker_excerpt(path: str, *, max_chars: int) -> str | None:
+    """Return the excerpt around the first terminal marker in ``path``.
+
+    The whole file is streamed a line at a time rather than sampled from its
+    head or tail. An engine that dies while serving logs one downstream error
+    per rejected request afterwards, so the cause sits at the head of that
+    cascade: a tail window never reaches it, and a bounded head read leaves the
+    middle of a long log unsearched. Memory stays flat either way.
+
+    Args:
+        path: Log to read.
+        max_chars: Cap on the returned excerpt.
+
+    Returns:
+        The excerpt, or ``None`` when the file cannot be read or names no
+        terminal marker.
+    """
+    before: deque[str] = deque(maxlen=_MARKER_CONTEXT_LINES)
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            for raw in fh:
+                line = raw.rstrip("\n")
+                # Legacy first: every ``_FATAL_ENGINE_MARKERS`` entry is a
+                # substring of some line these also match -- ``EngineDeadError``
+                # of ``AsyncEngineDeadError`` -- and a legacy line must keep the
+                # legacy extraction, whose cause sits above the marker.
+                if any(marker in line for marker in _SERVER_DEAD_MARKERS):
+                    after = _read_lines(fh, _MARKER_CONTEXT_LINES)
+                    excerpt = "\n".join([*before, line, *after]).strip()
+                    return excerpt[-max_chars:] or None
+                if any(marker in line for marker in _FATAL_ENGINE_MARKERS):
+                    return _cause_first_excerpt(
+                        line.strip(), _read_lines(fh, _MARKER_WINDOW_LINES - 1), max_chars=max_chars
+                    )
+                before.append(line)
+    except OSError:
+        return None
+    return None
+
+
+def _read_lines(fh: Any, count: int) -> list[str]:
+    """Return the next ``count`` lines of ``fh``, fewer at end of file."""
+    out: list[str] = []
+    for _ in range(max(0, count)):
+        nxt = fh.readline()
+        if not nxt:
+            break
+        out.append(nxt.rstrip("\n"))
+    return out
+
+
+def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str | None:
+    """Return the marker line followed by the exceptions it names, nearest first.
+
+    A post-startup engine death names its cause *below* the marker, two dozen
+    frames down. The frames carry no rule the classifier can use, and the window
+    runs past this traceback into the errors it caused downstream -- so the last
+    exception in it names a consequence (``EngineDeadError``) while the cause
+    (``HIP out of memory``) sits above that. No leading context: the line above
+    such a marker is routinely a scheduler-state dump tens of KB wide.
+    """
+    room = max_chars - len(head) - 1
+    if room <= 0:
+        return head[:max_chars] or None
+    causes: list[str] = []
+    used = 0
+    for line in window:
+        if not _EXCEPTION_LINE.search(line):
+            continue
+        text = line.strip()
+        if used + len(text) + 1 > room:
+            break
+        causes.append(text)
+        used += len(text) + 1
+    if causes:
+        return head + "\n" + "\n".join(causes)
+    rest = "\n".join(window).strip()
+    return f"{head}\n{rest[-room:]}" if rest else head[:max_chars] or None
 
 
 # Name of the stamp written beside the caller's ``server.log`` the moment the server first reports ready.

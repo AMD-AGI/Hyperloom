@@ -1166,6 +1166,9 @@ class WritebackCollaborator:
         enablement_event.finish(
             outcome=outcome,
             reason=reason,
+            enablement=lane,
+            session_dir=str(self.session_dir or ""),
+            mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
             kept_patches=lane.kept_patches,
             kept_artifacts=lane.kept_artifacts,
             setup_commands=lane.setup_commands,

@@ -948,6 +948,38 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
         raise SystemExit(2)
 
 
+#: Wall-clock budget a fresh run takes when ``--max-hours`` is not given. The
+#: parser leaves it unset so a resume can tell "not given" from "asked for 2.0".
+DEFAULT_MAX_HOURS: float = 2.0
+
+
+def resolve_leg_max_hours(max_hours: float | None, *, session_max_minutes: float | None) -> float:
+    """Return the wall-clock bound this leg runs against.
+
+    An explicit ``--max-hours`` decides the leg on every path, including a
+    resume, where a smaller value tightens the session as it always has. Left
+    unset, a fresh run takes :data:`DEFAULT_MAX_HOURS` and a resume takes the
+    session's own budget -- the parser default used to be 2.0 either way, which
+    on a resume overwrote an ``--extend-hours`` grant with a bound the session
+    had already spent. The leg then skipped every action as out of time while
+    the banner printed the granted budget, and exited 0.
+
+    Args:
+        max_hours: The value ``--max-hours`` carried, or ``None`` when unset.
+        session_max_minutes: The resumed session's budget after any grant, or
+            ``None`` for a fresh run. ``0`` is an unbounded session and is
+            passed through as ``0.0``.
+
+    Returns:
+        float: Hours this leg is bounded by.
+    """
+    if max_hours is not None:
+        return float(max_hours)
+    if session_max_minutes is None:
+        return DEFAULT_MAX_HOURS
+    return float(session_max_minutes) / 60.0
+
+
 def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     """Widen the per-variant time budgets for AgentX's much longer runs."""
     if not _agentx_enabled():
@@ -1569,6 +1601,13 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
     _preflight_agentx_backend(args)
+    # A fresh run takes the documented default here, before anything reads the
+    # value. A resume leaves it unresolved until the session's own budget is
+    # known: the parser default used to be 2.0, which silently overwrote an
+    # --extend-hours grant with a bound the session had already spent, and the
+    # leg then skipped every action while the banner printed the granted budget.
+    if not args.resume_from:
+        args.max_hours = resolve_leg_max_hours(args.max_hours, session_max_minutes=None)
     _apply_agentx_budget_profile(args)
 
     if args.resume_from:
@@ -1846,6 +1885,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
+        # The session's budget, post-grant, so this leg runs against what was
+        # just printed. An explicit --max-hours still decides the leg.
+        args.max_hours = resolve_leg_max_hours(args.max_hours, session_max_minutes=float(state.max_minutes))
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,

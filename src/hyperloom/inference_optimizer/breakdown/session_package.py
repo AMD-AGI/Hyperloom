@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 from ..session.paths import is_path_within
 
@@ -64,6 +66,15 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "reports/bringup/**",
     # ── reports/ ──────────────────────────────────────────────────────
     "reports/enablement/**",
+    # ── the enablement KEEP's source overlay ──────────────────────────
+    # Every ``snapshot_ref`` in ``session_breakdown.json`` points in here. The
+    # replay-sufficiency verdict certifies that the accepted stack's files were
+    # captured; without the capture in the bundle the reference resolves to
+    # nothing on the consumer's side, so a "sufficient" recipe would ship with
+    # its own evidence missing. Scoped to ``enablement/`` rather than the whole
+    # directory: this is the only writer under it, and a broader glob would
+    # silently adopt whatever lands there next.
+    "optimization_stack/enablement/**",
     "reports/final.md",
     "reports/optimization_journal.json",
     "reports/kernel_optimization_summary.json",
@@ -452,6 +463,56 @@ def _pack(
             reserved_bytes + optional_bytes,
         )
     return selected, truncated, reserved_overflow, dropped, reserved_bytes + optional_bytes
+
+
+def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Return which of ``expected``'s payloads this bundle would hand a consumer.
+
+    ``expected`` pairs each session-relative path with the sha256 its recorder
+    took of it, or ``""`` where none was taken; the same path may appear under
+    two digests, and at most one of them can be satisfied by what is on disk. A
+    payload is deliverable when the curated selection matches its path, the
+    session holds it as a regular file resolving inside itself, it alone fits
+    the byte cap, and -- where a digest was recorded -- the bytes still hash to
+    it.
+
+    Each payload is judged alone. The bundle's byte budget is spent in selection
+    order, so charging a referenced payload for unrelated files sorted ahead of
+    it would refuse a recipe over content it does not name; what a truncated
+    bundle actually dropped is the packager's own manifest to report.
+    """
+    try:
+        sd = Path(session_dir).resolve()
+    except OSError:
+        log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
+        return set()
+    out: set[tuple[str, str]] = set()
+    for raw_path, raw_digest in expected:
+        rel = str(raw_path).strip("/")
+        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
+            continue
+        candidate = sd / rel
+        try:
+            if not _is_packageable(candidate, sd) or candidate.stat().st_size > _MAX_TOTAL_BYTES:
+                continue
+        except OSError:
+            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
+            continue
+        digest = str(raw_digest or "")
+        if _digest_matches(candidate, digest):
+            out.add((rel, digest))
+    return out
+
+
+def _digest_matches(path: Path, expected_sha256: str) -> bool:
+    """Whether ``path`` still hashes to the digest its recorder took, if any."""
+    if not expected_sha256:
+        return True
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+    except OSError:
+        log.debug("session package: could not re-read %s to verify its digest", path, exc_info=True)
+        return False
 
 
 def package_session_artifacts(

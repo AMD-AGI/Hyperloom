@@ -9,7 +9,11 @@ import argparse
 import json
 import os
 
-from hyperloom.inference_optimizer.cli import _export_operator_launch_shape
+from hyperloom.inference_optimizer.cli import (
+    DEFAULT_MAX_HOURS,
+    _export_operator_launch_shape,
+    resolve_leg_max_hours,
+)
 from hyperloom.inference_optimizer.cli.backends import resolve_robustness_options
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -174,3 +178,38 @@ def test_restore_operator_paths_leaves_env_when_cli_repasses(monkeypatch):
     assert os.environ.get("FRAMEWORK_REPO_PATH", "") == ""
     assert os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "") == ""
     assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
+
+
+def test_a_fresh_run_without_max_hours_takes_the_documented_default():
+    assert resolve_leg_max_hours(None, session_max_minutes=None) == DEFAULT_MAX_HOURS
+
+
+def test_an_explicit_max_hours_decides_the_leg_on_every_path():
+    assert resolve_leg_max_hours(6.0, session_max_minutes=None) == 6.0
+    # A resume may still tighten: that is the documented behavior and the only
+    # way an operator caps one leg of a longer session.
+    assert resolve_leg_max_hours(1.0, session_max_minutes=600.0) == 1.0
+
+
+def test_a_resume_without_max_hours_keeps_the_sessions_own_budget():
+    """The defect this closes: the parser default silently spent the grant.
+
+    A session granted 10h through --extend-hours resumed against a 2.0h bound it
+    had already burned, so every action was skipped as out of time while the
+    banner printed 10h, and the leg exited 0 within seconds.
+    """
+    assert resolve_leg_max_hours(None, session_max_minutes=600.0) == 10.0
+
+
+def test_a_resume_of_an_unbounded_session_stays_unbounded():
+    assert resolve_leg_max_hours(None, session_max_minutes=0.0) == 0.0
+
+
+def test_the_parser_leaves_max_hours_unset_so_a_resume_can_tell():
+    """Without this the resume path cannot distinguish unset from an explicit 2.0."""
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    args = _build_parser().parse_args(["optimize", "--model", "/m"])
+    assert args.max_hours is None
+    args = _build_parser().parse_args(["optimize", "--model", "/m", "--max-hours", "2"])
+    assert args.max_hours == 2.0

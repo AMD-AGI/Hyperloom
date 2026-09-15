@@ -247,3 +247,230 @@ def test_launch_argv_from_log_falls_back_to_double_dash_scan(
     )
     flags = launch_argv_from_log(str(log), "vllm")
     assert "--mem-fraction-static 0.9" in flags
+
+
+# ── vLLM: the launch line this reader has to be able to pass ──────────────
+
+
+def test_vllm_module_form_yields_observed_flags(tmp_path: Path) -> None:
+    """Keyed on ``--model-path``, this line could never pass the gate, so every
+    vLLM session produced empty observed flags and a verdict that was
+    insufficient by construction rather than by evidence."""
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO 09-13 10:00:00 [api_server.py:1] python3 -m vllm.entrypoints.openai.api_server "
+        "--model /models/glm5 --max-num-seqs 256 --enable-chunked-prefill\n",
+        encoding="utf-8",
+    )
+    flags = launch_argv_from_log(str(log), "vllm")
+    assert flags == "--max-num-seqs 256 --enable-chunked-prefill"
+    assert "/models/glm5" not in flags
+
+
+def test_vllm_serve_form_yields_observed_flags_without_the_model(tmp_path: Path) -> None:
+    """``vllm serve <model>`` carries the model as a positional, which the
+    run-specific FLAG list cannot reach; left in it would put a host model path
+    in the durable record."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm serve /models/glm5 --max-num-seqs 256 --tensor-parallel-size 8\n", encoding="utf-8")
+    flags = launch_argv_from_log(str(log), "vllm")
+    assert flags == "--max-num-seqs 256"
+    assert "/models/glm5" not in flags and "serve" not in flags
+
+
+def test_a_line_that_names_no_model_is_not_a_launch_line(tmp_path: Path) -> None:
+    """The gate still has to reject a passing mention of the marker; it was
+    widened to every model spelling, not removed."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm is starting up --max-num-seqs 256\n", encoding="utf-8")
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_a_model_prefixed_flag_does_not_pass_the_gate(tmp_path: Path) -> None:
+    """``--model`` is a prefix of ``--model-loader-extra-config``; a substring
+    test would read that as the model operand."""
+    log = tmp_path / "server.log"
+    log.write_text("INFO: vllm --model-loader-extra-config {} --max-num-seqs 256\n", encoding="utf-8")
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_sglang_model_path_still_passes_the_gate(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO: python3 -m sglang.launch_server --model-path /models/glm5 --chunked-prefill-size 2048\n",
+        encoding="utf-8",
+    )
+    assert launch_argv_from_log(str(log), "sglang") == "--chunked-prefill-size 2048"
+
+
+# ── vLLM: the record it actually writes ───────────────────────────────────
+
+
+_VLLM_NON_DEFAULT = (
+    "(APIServer pid=1) INFO 09-14 07:03:07 [utils.py:233] non-default args: "
+    "{'model_tag': '/models/m', 'port': 38035, 'model': '/models/m', "
+    "'trust_remote_code': True, 'max_model_len': 4096, 'tensor_parallel_size': 4, "
+    "'kv_cache_dtype': 'fp8', 'gpu_memory_utilization': 0.95, "
+    "'compilation_config': CompilationConfig(level=3, backend='inductor')}\n"
+)
+
+
+def test_vllm_identity_is_read_from_the_record_vllm_actually_writes(tmp_path: Path) -> None:
+    """vLLM prints no argv line in any log, successful or failed. It prints the
+    RESOLVED argument dict, which is a better observed record than a command
+    line -- it is what the parser produced rather than what was typed.
+
+    Without this reader ``observed_server_launch_flags`` and
+    ``observed_model_binding`` are empty for every vLLM session, every requested
+    setting is judged unconfirmed, and the replay verdict is insufficient by
+    construction rather than by evidence.
+    """
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    identity = observed_vllm_server_identity_from_log(str(log))
+
+    assert identity["model"] == "/models/m"
+    assert identity["tensor_parallel_size"] == 4
+    assert identity["max_model_len"] == 4096
+    assert identity["kv_cache_dtype"] == "fp8"
+    # There is no argv line to find, and the argv reader must not invent one.
+    assert launch_argv_from_log(str(log), "vllm") == ""
+
+
+def test_a_non_literal_value_skips_its_key_rather_than_the_whole_record(tmp_path: Path) -> None:
+    """vLLM prints object reprs inside that dict -- ``CompilationConfig(...)``.
+    A single ``literal_eval`` of the dict raises on the first one and yields
+    nothing, which is what makes the whole record look unreadable."""
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    identity = observed_vllm_server_identity_from_log(str(log))
+
+    assert "compilation_config" not in identity
+    assert identity["model"] == "/models/m", "the literal keys must survive the non-literal one"
+
+
+def test_the_vllm_binding_carries_the_width_and_digests_the_model(tmp_path: Path) -> None:
+    import hashlib
+
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.orchestrator.actions.executors._launch_evidence import _binding_from_vllm_identity
+
+    log = tmp_path / "server.log"
+    log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
+    binding = _binding_from_vllm_identity(observed_vllm_server_identity_from_log(str(log)))
+
+    assert binding["tp"] == "4"
+    assert binding["model_digest"] == "sha256:" + hashlib.sha256(b"/models/m").hexdigest()
+    assert "/models/m" not in str(binding), "a host model path must not travel in the binding"
+
+
+def test_a_log_with_no_such_record_yields_no_vllm_identity(tmp_path: Path) -> None:
+    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+
+    log = tmp_path / "server.log"
+    log.write_text("(APIServer pid=1) INFO starting up\n", encoding="utf-8")
+    assert observed_vllm_server_identity_from_log(str(log)) == {}
+
+
+def _vllm_slot(tmp_path, log_text: str):
+    """A minimal measured-launch slot with a vLLM server log."""
+    slot = tmp_path / "slot"
+    slot.mkdir(parents=True, exist_ok=True)
+    config = tmp_path / "bench.yaml"
+    config.write_text("benchmark: {}\n", encoding="utf-8")
+    log = slot / "server.log"
+    log.write_text(log_text, encoding="utf-8")
+    return config, slot, str(log)
+
+
+def test_a_vllm_launch_reaches_the_evidence_through_the_production_entry_point(tmp_path):
+    """Pins the WIRING, not just the reader.
+
+    The reader and the binding helper were each covered directly, so deleting
+    the whole vLLM branch out of ``build_launch_evidence`` left every one of
+    those tests passing while no vLLM launch was bound to anything. This goes
+    through the production entry point, which is the only thing that fails when
+    the branch is removed.
+    """
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] non-default args: "
+        "{'model': '/models/m', 'tensor_parallel_size': 4, 'quantization': 'fp8'}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/models/m",
+    )
+    identity = evidence["observed_server_identity"]
+    assert identity["tensor_parallel_size"] == 4
+    assert identity["quantization"] == "fp8"
+    assert evidence["observed_model_binding"]
+
+
+def test_a_quoted_marker_is_not_accepted_as_a_vllm_launch_through_the_entry_point(tmp_path):
+    """User- or attacker-supplied text echoed into the log quotes the marker
+    but carries no launch record; binding to it reports settings the server
+    never ran with."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "WARNING 09-14 07:00:00 [x.py:1] ignored user text: "
+        "\"non-default args: {'model': '/wanted', 'tensor_parallel_size': 4}\"\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/wanted",
+    )
+    assert not evidence["observed_server_identity"]
+
+
+def test_a_preceding_dict_does_not_displace_the_real_vllm_record(tmp_path):
+    """Extraction anchored at the line's first brace reads an unrelated dict
+    and ignores the actual record that follows it on the same line."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] context={'model': '/wanted', 'tensor_parallel_size': 8} "
+        "non-default args: {'model': '/actual', 'tensor_parallel_size': 2}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/actual",
+    )
+    assert evidence["observed_server_identity"]["tensor_parallel_size"] == 2
+
+
+def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path):
+    """A ``}`` inside a string is not structure; ending the payload there drops
+    every field after it, including the parallelism the decision compares."""
+    from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
+
+    config, slot, log = _vllm_slot(
+        tmp_path,
+        "INFO 09-14 07:00:00 [config.py:1] non-default args: {'model': '/models/m}', 'tensor_parallel_size': 4}\n",
+    )
+    evidence = build_launch_evidence(
+        config_path=config,
+        actual_server_log=log,
+        framework="vllm",
+        slot=slot,
+        model_path="/models/m}",
+    )
+    assert evidence["observed_server_identity"]["tensor_parallel_size"] == 4

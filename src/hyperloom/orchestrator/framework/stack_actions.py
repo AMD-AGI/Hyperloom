@@ -189,13 +189,23 @@ class EnablementStackAction:
 
 @dataclass(frozen=True)
 class ProvisionResult:
-    """Outcome of provisioning one :class:`EnablementStackAction`."""
+    """Outcome of provisioning one :class:`EnablementStackAction`.
+
+    ``resolved_ref`` is the commit an editable clone actually landed on (the
+    action's own ``ref`` is a branch or tag, which names different bytes
+    tomorrow); ``resolved_packages`` is ``{name: {version, artifact_digest}}``
+    for a wheel acquisition, because a version string is not the identity of
+    the installed bytes — the install runs ``--upgrade`` against the index, so
+    re-running it reproduces whatever that index holds at replay time.
+    """
 
     ok: bool
     runtime: FrameworkRuntime = field(default_factory=FrameworkRuntime)
     installed_versions: Mapping[str, str] = field(default_factory=dict)
     log_path: str = ""
     error: str = ""
+    resolved_ref: str = ""
+    resolved_packages: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def to_state(self) -> dict[str, Any]:
         """Serialize to a plain dict for shared state / observability."""
@@ -205,6 +215,8 @@ class ProvisionResult:
             "installed_versions": dict(self.installed_versions),
             "log_path": self.log_path,
             "error": self.error,
+            "resolved_ref": self.resolved_ref,
+            "resolved_packages": {k: dict(v) for k, v in self.resolved_packages.items()},
         }
 
     @classmethod
