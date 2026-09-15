@@ -31,6 +31,11 @@ not predict speed. Preserve complete .amdhsa_kernel and .amdgpu_metadata blocks.
 Rebuild the current bytes after edits; an existing callable retains its old
 code object. Never substitute an old binary or the original source on failure.
 Run the protected correctness suite before canonical benchmark measurements.
+The task's frozen numerical_validation contract is mandatory: both source and
+candidate must satisfy the mathematical tolerance, and candidate oracle error
+and repeated-output variability must stay within its source-relative bounds.
+This requires fresh structured evidence for every declared input/output/mode;
+a passing average SNR or missing stability measurements cannot authorize KEEP.
 The original source is the baseline and remains selected if no candidate wins.
 Report roundtrip timing and instruction-edit gains separately. A kernel KEEP
 does not establish a model-serving gain.

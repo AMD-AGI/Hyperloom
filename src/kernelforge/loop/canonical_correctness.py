@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
@@ -13,6 +15,7 @@ from typing import Any, ClassVar
 import yaml
 
 from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.loop.numerical import REQUEST_ENV, judge_evidence, validate_contract
 
 CANONICAL_CONFIG_FILENAME = "config.yaml"
 
@@ -36,6 +39,7 @@ class CanonicalCorrectnessResult:
     # "timeout" when the suite was killed, so the run's decision label separates a candidate the arena rejected from
     # one it never finished judging.
     outcome: str = ""
+    numerical_evidence: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,7 @@ class _CanonicalSuite:
 
     compile_step: _CompileStep
     correctness_step: _CorrectnessStep
+    numerical_contract: dict | None = None
 
     @property
     def steps(self) -> tuple[_CompileStep | _CorrectnessStep, ...]:
@@ -132,9 +137,16 @@ def _load_suite(workspace_dir: str) -> _CanonicalSuite | str | None:
     if isinstance(correctness_timeout, str):
         return correctness_timeout
 
+    numerical_contract = document.get("numerical_validation")
+    if numerical_contract is not None:
+        try:
+            numerical_contract = validate_contract(numerical_contract)
+        except ValueError as error:
+            return f"{path}: {error}"
     return _CanonicalSuite(
         compile_step=_CompileStep(commands=compile_commands, timeout_sec=compile_timeout),
         correctness_step=_CorrectnessStep(commands=correctness_commands, timeout_sec=correctness_timeout),
+        numerical_contract=numerical_contract,
     )
 
 
@@ -142,10 +154,17 @@ async def _run_canonical_suite(
     workspace_dir: str,
     *,
     timeout_cap_sec: int,
+    kernel_backend: str = "",
 ) -> CanonicalCorrectnessResult:
     """Run the arena's Step 1 then Step 2 and stop at the first failure."""
     suite = _load_suite(workspace_dir)
     if suite is None:
+        if kernel_backend == "assembly":
+            return CanonicalCorrectnessResult(
+                passed=False,
+                detail="assembly acceptance requires config.yaml with a numerical_validation contract",
+                outcome="unverified",
+            )
         return CanonicalCorrectnessResult(
             passed=True,
             detail="",
@@ -157,8 +176,16 @@ async def _run_canonical_suite(
         )
     if isinstance(suite, str):
         return CanonicalCorrectnessResult(passed=False, detail=suite)
+    if kernel_backend == "assembly" and suite.numerical_contract is None:
+        return CanonicalCorrectnessResult(
+            passed=False,
+            detail="assembly acceptance requires numerical_validation with source-relative repeat-output evidence",
+            outcome="unverified",
+        )
 
     passed_steps: list[str] = []
+    numerical_output: list[str] = []
+    request_id = uuid.uuid4().hex
     for step in suite.steps:
         timeout_sec = min(step.timeout_sec, timeout_cap_sec)
         for command in step.commands:
@@ -168,6 +195,7 @@ async def _run_canonical_suite(
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env={**os.environ, REQUEST_ENV: request_id},
             )
             try:
                 stdout, stderr = await communicate_process_group(proc, timeout=timeout_sec)
@@ -179,6 +207,8 @@ async def _run_canonical_suite(
                     outcome="timeout",
                 )
             output = stdout.decode(errors="replace") + stderr.decode(errors="replace")
+            if isinstance(step, _CorrectnessStep):
+                numerical_output.append(output)
             if proc.returncode != 0:
                 return CanonicalCorrectnessResult(
                     passed=False,
@@ -193,7 +223,23 @@ async def _run_canonical_suite(
                 )
         passed_steps.append(f"{step.label}: {len(step.commands)} command(s) under {timeout_sec}s")
 
-    return CanonicalCorrectnessResult(passed=True, detail="; ".join(passed_steps))
+    evidence = None
+    if suite.numerical_contract is not None:
+        try:
+            passed, detail, evidence = judge_evidence("\n".join(numerical_output), suite.numerical_contract, request_id)
+        except (ValueError, TypeError) as error:
+            return CanonicalCorrectnessResult(
+                passed=False,
+                detail=str(error),
+                outcome="invalid_result",
+                output="\n".join(numerical_output)[-_OUTPUT_TAIL_CHARS:],
+            )
+        if not passed:
+            return CanonicalCorrectnessResult(
+                passed=False, detail=detail, outcome="numerical_correctness_failure", numerical_evidence=evidence
+            )
+        passed_steps.append(detail)
+    return CanonicalCorrectnessResult(passed=True, detail="; ".join(passed_steps), numerical_evidence=evidence)
 
 
 async def accept_candidate(
@@ -201,6 +247,7 @@ async def accept_candidate(
     *,
     timeout_cap_sec: int,
     candidate_label: str,
+    kernel_backend: str = "",
 ) -> CanonicalCorrectnessResult:
     """Judge a candidate every other gate has already accepted."""
     print(
@@ -209,6 +256,7 @@ async def accept_candidate(
     result = await _run_canonical_suite(
         workspace_dir,
         timeout_cap_sec=timeout_cap_sec,
+        kernel_backend=kernel_backend,
     )
     if result.unverified_reason:
         print(f"  [canonical] UNVERIFIED: {result.unverified_reason}")
