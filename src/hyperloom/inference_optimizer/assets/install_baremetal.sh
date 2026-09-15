@@ -66,15 +66,10 @@ SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
 SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
-SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-rocm724}"
-if [ -z "$_SGLANG_ROCM_PYPI_VERSION_WAS_SET" ]; then
-  case "$SGLANG_ROCM_EXTRA" in
-    rocm700) SGLANG_ROCM_PYPI_VERSION="7.0.0" ;;
-    rocm724) SGLANG_ROCM_PYPI_VERSION="7.2.4" ;;
-    *)       SGLANG_ROCM_PYPI_VERSION="7.2.0" ;;
-  esac
-fi
-SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.4}"
+# Left unset so the wheel target is derived from the ROCm stack that is
+# actually installed; an explicitly exported value still wins.
+SGLANG_ROCM_EXTRA="${SGLANG_ROCM_EXTRA:-}"
+SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.28.0}"
@@ -647,6 +642,33 @@ install_compatible_aiter() {
   die "no AITER tag installed and imported successfully with the current torch/triton constraints"
 }
 
+# Index version paired with each published amd-sglang wheel extra.
+sglang_pypi_version_for_extra() {
+  case "$1" in
+    rocm700) echo "7.0.0" ;;
+    rocm724) echo "7.2.4" ;;
+    *)       echo "7.2.0" ;;
+  esac
+}
+
+# amd-sglang wheel extra matching the installed ROCm torch. Prints nothing when
+# no published extra targets it, which is the case for a ROCm 10 wheel stack.
+sglang_rocm_extra_for_torch() {
+  local py="$1" hip
+  hip="$("$py" - <<'PY' 2>/dev/null
+try:
+    import torch
+    print(getattr(torch.version, "hip", None) or "")
+except Exception:
+    pass
+PY
+)"
+  case "$hip" in
+    7.0*) echo "rocm700" ;;
+    7.2*) echo "rocm724" ;;
+  esac
+}
+
 # Install the AMD SGLang wheel only when its dependency set matches this Python.
 # ROCm target is overridable so hosts pinned to an older driver (e.g. amdgpu
 # 6.3.x, which supports up to ROCm 7.0 user space) can select a matching wheel.
@@ -680,15 +702,26 @@ PY
   else
     log "AITER_REF=auto (newest tag compatible with installed torch/triton)"
   fi
-  log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
-  log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
+  if [ -z "$SGLANG_ROCM_EXTRA" ]; then
+    SGLANG_ROCM_EXTRA="$(sglang_rocm_extra_for_torch "$py")"
+  fi
+  if [ -z "${_SGLANG_ROCM_PYPI_VERSION_WAS_SET:-}" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
+    SGLANG_ROCM_PYPI_VERSION="$(sglang_pypi_version_for_extra "$SGLANG_ROCM_EXTRA")"
+  fi
+  if [ -n "$SGLANG_ROCM_EXTRA" ]; then
+    log "SGLANG_ROCM_EXTRA=${SGLANG_ROCM_EXTRA}"
+    log "SGLANG_ROCM_PYPI_VERSION=${SGLANG_ROCM_PYPI_VERSION}"
+  else
+    log "SGLANG_ROCM_EXTRA=none (no published amd-sglang wheel for the installed ROCm stack)"
+  fi
 
   if [ "$SGLANG_ROCM_EXTRA" = "rocm700" ] && [ "$py_mm" != "3.10" ]; then
     die "SGLANG_ROCM_EXTRA=rocm700 currently supports Python 3.10 AMD wheels only; Python ${py_mm} would use source install and can pull mismatched ROCm 7.2 Triton."
   fi
 
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    _py_has "$py" sglang && log "sglang import OK" || warn "sglang missing (check-only; would install amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}])"
+    _py_has "$py" sglang && log "sglang import OK" \
+      || warn "sglang missing (check-only; would install ${SGLANG_ROCM_EXTRA:+amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]}${SGLANG_ROCM_EXTRA:-from source})"
     if _py_has "$py" aiter; then
       log "aiter import OK"
     elif [ -n "$AITER_REF" ]; then
@@ -701,7 +734,7 @@ PY
   fi
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    if [ "$py_mm" = "3.10" ]; then
+    if [ "$py_mm" = "3.10" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
       log "would run: ${py} -m pip install 'amd-sglang[all-hip,${SGLANG_ROCM_EXTRA}]' -i https://pypi.amd.com/rocm-${SGLANG_ROCM_PYPI_VERSION}/simple --extra-index-url https://pypi.org/simple"
     else
       local sglang_root="${SGLANG_ROOT:-${deps_root}/sglang}" kernel_dir=""
@@ -723,10 +756,14 @@ PY
   fi
 
   if ! _py_has "$py" sglang || ! _py_has "$py" sgl_kernel; then
-    if [ "$py_mm" = "3.10" ]; then
+    if [ "$py_mm" = "3.10" ] && [ -n "$SGLANG_ROCM_EXTRA" ]; then
       install_sglang_from_wheel "$py"
     else
-      warn "amd-sglang ROCm 7.2 wheel currently pulls cp310 torch; Python ${py_mm} uses source install instead"
+      if [ -z "$SGLANG_ROCM_EXTRA" ]; then
+        warn "no published amd-sglang wheel targets the installed ROCm stack; using source install"
+      else
+        warn "amd-sglang ROCm wheels currently pull cp310 torch; Python ${py_mm} uses source install instead"
+      fi
       install_sglang_from_source "$py" "$deps_root"
     fi
   else
@@ -833,9 +870,33 @@ assert_vllm_glibc_compatible() {
 }
 
 # Install vLLM from the official ROCm wheel index without replacing ROCm torch.
+# vLLM's ROCm torch build links against system OpenMPI (libmpi.so.40 /
+# libmpi_cxx.so.40), which most container base images do not ship. Debian and
+# Ubuntu <24.04 package this as libopenmpi3; Ubuntu 24.04's 64-bit time_t
+# transition renamed it to libopenmpi3t64 with the same SONAMEs, so both names
+# are tried. Best-effort: skips silently when apt is unavailable, when not
+# running as root, or when the library already resolves.
+ensure_openmpi_runtime() {
+  command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libmpi\.so\.40' && return 0
+  command -v apt-get >/dev/null 2>&1 || return 0
+  [ "$(id -u)" = "0" ] || { warn "libmpi.so.40 not found and not running as root; cannot apt-get install openmpi runtime"; return 0; }
+  apt-get update -qq >/dev/null 2>&1 || true
+  local pkg
+  for pkg in libopenmpi3t64 libopenmpi3; do
+    if DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+      log "installed ${pkg} for vLLM's OpenMPI-linked torch build"
+      return 0
+    fi
+  done
+  warn "could not install an OpenMPI runtime package (tried libopenmpi3t64, libopenmpi3); vLLM's torch import may fail on libmpi.so.40"
+}
+
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
+  if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
+    ensure_openmpi_runtime
+  fi
   py="$base_py"
   if [ "$FRAMEWORK_ENV" = "isolated" ]; then
     py="${VLLM_VENV_ROOT}/bin/python"

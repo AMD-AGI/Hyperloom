@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 KERNEL_ROOT = Path(__file__).resolve().parent.parent
@@ -28,10 +27,10 @@ def _run_resolve_ray_version(
     stub = f"""
 warn() {{ echo "WARN: $*" >&2; }}
 lowest_ray_version_for_interpreter() {{ printf '%s' '{suggested}'; }}
-_RAY_VERSION_WAS_SET="{'x' if pin_env else ''}"
-_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="{'x' if click_env else ''}"
-RAY_VERSION="{pin_env or '2.44.1'}"
-RAY_CLI_CLICK_MAX_VERSION="{click_env or '8.3.0'}"
+_RAY_VERSION_WAS_SET="{"x" if pin_env else ""}"
+_RAY_CLI_CLICK_MAX_VERSION_WAS_SET="{"x" if click_env else ""}"
+RAY_VERSION="{pin_env or "2.44.1"}"
+RAY_CLI_CLICK_MAX_VERSION="{click_env or "8.3.0"}"
 RAY_INSTALL_SPEC="ray[default]==${{RAY_VERSION}}"
 CLICK_INSTALL_SPEC="click<${{RAY_CLI_CLICK_MAX_VERSION}}"
 """
@@ -92,11 +91,7 @@ import sys
 if "index" in sys.argv:
     sys.stdout.write({pip_stdout!r})
 """
-    script = (
-        "set -uo pipefail\n"
-        f"{fn_src}\n"
-        f"lowest_ray_version_for_interpreter '{pinned}'\n"
-    )
+    script = f"set -uo pipefail\n{fn_src}\nlowest_ray_version_for_interpreter '{pinned}'\n"
     # The helper shells out to `python3 -m pip`; shadow pip with a fake module.
     result = subprocess.run(
         ["bash", "-lc", script],
@@ -125,16 +120,12 @@ def _fake_pip_dir(source: str) -> str:
 
 
 def test_lowest_version_picks_the_smallest_available_at_or_above_pin() -> None:
-    out = _run_lowest_ray_version(
-        "ray (2.58.0)\nAvailable versions: 2.58.0, 2.57.0, 2.55.0, 2.40.0\n"
-    )
+    out = _run_lowest_ray_version("ray (2.58.0)\nAvailable versions: 2.58.0, 2.57.0, 2.55.0, 2.40.0\n")
     assert out == "2.55.0"
 
 
 def test_lowest_version_prints_nothing_when_pin_is_available() -> None:
-    out = _run_lowest_ray_version(
-        "ray (2.58.0)\nAvailable versions: 2.58.0, 2.44.1, 2.40.0\n"
-    )
+    out = _run_lowest_ray_version("ray (2.58.0)\nAvailable versions: 2.58.0, 2.44.1, 2.40.0\n")
     assert out == ""
 
 

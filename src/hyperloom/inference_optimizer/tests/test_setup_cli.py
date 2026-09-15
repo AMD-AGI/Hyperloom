@@ -2210,6 +2210,8 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
+                "sglang_rocm_extra_for_torch() { printf 'rocm724\\n'; }",
+                "sglang_pypi_version_for_extra() { printf '7.2.4\\n'; }",
                 f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
                 install_sglang_framework,
                 "install_sglang_framework",
