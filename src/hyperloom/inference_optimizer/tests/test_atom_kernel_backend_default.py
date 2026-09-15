@@ -121,47 +121,91 @@ def test_multi_node_still_fails_fast(monkeypatch):
     assert _KEY not in os.environ
 
 
-def test_the_call_site_stays_behind_the_atom_guard():
-    """SGLang and vLLM must keep GEAK, and only the call site enforces that.
+def _cli_source_tree():
+    """Parse ``cli/__init__.py`` as source.
 
-    Every test above calls this function directly, so none of them would notice
-    the guard being widened or dropped. Read it out of the source instead: the
-    call has to sit under a comparison of ``framework`` against ``"atom"``.
+    Read the file rather than import the package: these assertions are about
+    source shape, and the import chain needs a POSIX-only module.
     """
     import ast
     import pathlib
 
-    # Read the file rather than import the package: this assertion is about source
-    # shape, and the import chain needs a POSIX-only module.
     cli_init = pathlib.Path(__file__).resolve().parents[1] / "cli" / "__init__.py"
-    tree = ast.parse(cli_init.read_text(encoding="utf-8"))
+    return ast, ast.parse(cli_init.read_text(encoding="utf-8"))
 
-    def calls_it(node: ast.AST) -> bool:
-        return any(
-            isinstance(inner, ast.Call)
-            and isinstance(inner.func, ast.Name)
-            and inner.func.id == "_apply_atom_auto_tighten"
-            for inner in ast.walk(node)
-        )
+
+def _calls_auto_tighten(ast, node) -> bool:
+    return any(
+        isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "_apply_atom_auto_tighten"
+        for inner in ast.walk(node)
+    )
+
+
+def test_every_call_site_stays_behind_an_atom_guard():
+    """SGLang and vLLM must keep GEAK, and only the call sites enforce that.
+
+    Every behavioural test above calls this function directly, so none of them
+    would notice a guard being widened or dropped. Read it out of the source
+    instead: each call has to sit under a test that the framework is atom.
+    """
+    ast, tree = _cli_source_tree()
 
     def guards_on_atom(test: ast.expr) -> bool:
-        return any(
-            isinstance(cmp, ast.Compare)
-            and isinstance(cmp.left, ast.Name)
-            and cmp.left.id == "framework"
-            and any(isinstance(c, ast.Constant) and c.value == "atom" for c in cmp.comparators)
-            for cmp in ast.walk(test)
-        )
+        """True for ``framework == "atom"`` and for ``state.framework == "atom"``."""
+        for cmp in ast.walk(test):
+            if not isinstance(cmp, ast.Compare):
+                continue
+            left = cmp.left
+            name = left.id if isinstance(left, ast.Name) else (left.attr if isinstance(left, ast.Attribute) else "")
+            if name != "framework":
+                continue
+            if any(isinstance(c, ast.Constant) and c.value == "atom" for c in cmp.comparators):
+                return True
+        return False
 
-    guarded = [
-        node for node in ast.walk(tree) if isinstance(node, ast.If) and calls_it(node) and guards_on_atom(node.test)
-    ]
-    assert guarded, "the _apply_atom_auto_tighten call is no longer behind a framework == 'atom' test"
-
-    # And nowhere else: an unguarded second call would reach every framework.
-    total = sum(
-        1
+    calls = [
+        node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_apply_atom_auto_tighten"
+    ]
+    guarded_ifs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If) and _calls_auto_tighten(ast, node) and guards_on_atom(node.test)
+    ]
+    assert len(calls) == len(guarded_ifs), (
+        f"{len(calls)} call site(s) but only {len(guarded_ifs)} behind a framework == 'atom' test; "
+        "an unguarded call would reach every framework"
     )
-    assert total == 1, f"expected exactly one call site, found {total}"
+
+
+def test_resume_applies_the_default_too():
+    """A resumed atom session must not silently fall back to GEAK.
+
+    ``KERNEL_OPT_BACKEND_ORDER`` lives in the process environment, not in the
+    session, so it is gone in the new process. The example documents
+    ``--resume-from`` as the crash-recovery path and tells the operator to leave
+    the variable unset, so a resume that skips the default hands them GEAK --
+    without even the warning, which lives in the same skipped function.
+    """
+    ast, tree = _cli_source_tree()
+
+    resume_ifs = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
+        and (node.body or node.orelse)
+    ]
+    assert resume_ifs, "no `if args.resume_from:` branch found; this test needs updating"
+
+    reached = [
+        node
+        for node in resume_ifs
+        if any(_calls_auto_tighten(ast, stmt) for stmt in node.body)
+        and any(_calls_auto_tighten(ast, stmt) for stmt in node.orelse)
+    ]
+    assert reached, (
+        "_apply_atom_auto_tighten is applied on only one side of `if args.resume_from:`; "
+        "a resumed atom session would use a different kernel backend than the launch did"
+    )
