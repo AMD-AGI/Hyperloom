@@ -302,6 +302,34 @@ def _read_top_solutions_impl(
             log.warning("experience read failed (cold start): %s", kb.reason)
             _set_read_status(read_status, "read_error", kb.reason)
             return []
+        selected_kb = kb
+        match_tier = "exact"
+        if not candidates:
+            fallback_ids = kb.fallback_canonical_ids()
+            if kb.reason:
+                log.warning("experience fuzzy identity search failed: %s", kb.reason)
+                _set_read_status(read_status, "read_error", kb.reason)
+                return []
+            for fallback_id in fallback_ids:
+                donor_kb = KernelRecipeKB.open_canonical_id(fallback_id, config)
+                candidates = donor_kb.read_top_n(destination, limit=top_k)
+                if donor_kb.reason:
+                    log.warning(
+                        "experience fuzzy candidate read failed for %s: %s",
+                        fallback_id,
+                        donor_kb.reason,
+                    )
+                    _set_read_status(read_status, "read_error", donor_kb.reason)
+                    return []
+                if candidates:
+                    selected_kb = donor_kb
+                    match_tier = "fuzzy"
+                    log.info(
+                        "experience fuzzy identity match: requested=%s selected=%s",
+                        kb.canonical_id,
+                        fallback_id,
+                    )
+                    break
         if not candidates:
             log.info("experience read: no prior record for %s", kb.canonical_id)
             _set_read_status(read_status, "no_prior_record")
@@ -309,7 +337,7 @@ def _read_top_solutions_impl(
 
         out: list[dict[str, Any]] = [
             _build_solution_dict(
-                canonical_id=kb.canonical_id,
+                canonical_id=selected_kb.canonical_id,
                 prior=bundle,
                 patch=_bundle_patch(bundle),
                 consumer_signature=consumer_signature,
@@ -318,6 +346,10 @@ def _read_top_solutions_impl(
             )
             for bundle in candidates
         ]
+        if read_status is not None and match_tier != "exact":
+            read_status["match_tier"] = match_tier
+            read_status["requested_canonical_id"] = kb.canonical_id
+            read_status["selected_canonical_id"] = selected_kb.canonical_id
     if not out:
         log.info("experience read: no usable record for %s", kb.canonical_id)
         _set_read_status(read_status, "no_prior_record")

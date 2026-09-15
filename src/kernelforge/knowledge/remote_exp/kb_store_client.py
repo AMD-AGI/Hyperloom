@@ -291,6 +291,26 @@ class KBStoreClient:
                 return None
             raise
 
+    def search_identities(
+        self,
+        *,
+        scheme: str,
+        match: dict[str, str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Discover indexed identities matching exact named dimensions."""
+        return self._request(
+            "POST",
+            "/v1/kb/search",
+            {
+                "scheme": str(scheme),
+                "match": dict(match or {}),
+                "offset": int(offset),
+                "limit": int(limit),
+            },
+        ) or {}
+
     def get_rollup(self, canonical_id: str) -> dict[str, Any] | None:
         """Read the candidate index, or ``None`` when nothing is recorded."""
         try:

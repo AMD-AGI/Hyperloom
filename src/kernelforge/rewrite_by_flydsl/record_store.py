@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, Mapping, Protocol
 
+from kernelforge.knowledge.kernel_identity import KernelRecipeIdentity
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - exercised only on non-POSIX hosts
@@ -66,6 +68,15 @@ class RewriteRecordStore(Protocol):
         raise NotImplementedError
 
     def candidates(self, canonical_id: str, *, limit: int) -> list[RewriteCandidate]:
+        raise NotImplementedError
+
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Discover identities differing only in fuzzy warm-start dimensions."""
         raise NotImplementedError
 
     def materialize(
@@ -440,6 +451,44 @@ class KBStoreRewriteRecords:
             )
         return _rank(found, limit)
 
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Search while retaining exact ownership and implementation dimensions."""
+        requested = max(0, int(limit))
+        if requested == 0:
+            return []
+        rows: list[dict[str, Any]] = []
+        offset = 0
+        while len(rows) < requested:
+            page_limit = min(100, requested - len(rows))
+            result = self._client.search_identities(
+                scheme="kernel",
+                match={
+                    "producer": identity.producer,
+                    "kernel_name": identity.kernel_name,
+                    "framework": identity.framework,
+                    "backend": identity.backend,
+                },
+                offset=offset,
+                limit=page_limit,
+            )
+            page = result.get("items")
+            if not isinstance(page, list):
+                raise RewriteRecordError("identity search response has no items list")
+            rows.extend(dict(item) for item in page if isinstance(item, Mapping))
+            next_offset = result.get("next_offset")
+            if next_offset is None or not page:
+                break
+            resolved_offset = int(next_offset)
+            if resolved_offset <= offset:
+                raise RewriteRecordError("identity search pagination did not advance")
+            offset = resolved_offset
+        return rows[:requested]
+
     def materialize(
         self,
         canonical_id: str,
@@ -607,6 +656,16 @@ class LocalRewriteRecords:
     @property
     def configured(self) -> bool:
         return True
+
+    def search_identities(
+        self,
+        identity: KernelRecipeIdentity,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Local rewrite records remain exact-only in the first rollout."""
+        del identity, limit
+        return []
 
     def _identity_dir(self, canonical_id: str) -> Path:
         return self._root / canonical_relpath(canonical_id)
