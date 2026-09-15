@@ -15,7 +15,7 @@ def _target() -> KernelRecipeIdentity:
     )
 
 
-def _row(version: str, gpu: str, *, suffix: str = "", **overrides):
+def _row(version: str, gpu: str, **overrides):
     dimensions = {
         "producer": "forge-loop",
         "kernel_name": "softmax",
@@ -25,7 +25,7 @@ def _row(version: str, gpu: str, *, suffix: str = "", **overrides):
         "gpu": gpu,
         **overrides,
     }
-    canonical_id = "kernel:" + ":".join(dimensions.values()) + suffix
+    canonical_id = "kernel:" + ":".join(dimensions.values())
     return {
         "canonical_id": canonical_id,
         "dimensions": dimensions,
@@ -38,6 +38,7 @@ def test_fuzzy_ranking_accepts_newer_older_and_cross_isa_donors():
         _row("1.0.0", "mi300x"),
         _row("0.10.2", "mi355x"),
         _row("0.11.4", "mi355x"),
+        _row("0.11.3", "mi355x"),
     ]
 
     ranked = rank_fallback_identities(_target(), rows)
@@ -68,9 +69,3 @@ def test_fuzzy_ranking_never_relaxes_the_other_four_dimensions():
     ]
 
     assert rank_fallback_identities(_target(), rows) == []
-
-
-def test_exact_identity_is_not_returned_by_fallback_search():
-    exact = _row("0.11.3", "mi355x")
-
-    assert rank_fallback_identities(_target(), [exact]) == []
