@@ -315,9 +315,7 @@ def test_rewrite_warmstart_uses_fuzzy_identity_after_exact_miss(
     )
 
     assert plan.read_reason == "hit"
-    assert [candidate["canonical_id"] for candidate in plan.candidates] == [
-        kernel_recipe_canonical_id(donor)
-    ]
+    assert [candidate["canonical_id"] for candidate in plan.candidates] == [kernel_recipe_canonical_id(donor)]
 
 
 def test_rewrite_warmstart_keeps_exact_identity_ahead_of_fuzzy_donor(
@@ -360,9 +358,7 @@ def test_rewrite_warmstart_keeps_exact_identity_ahead_of_fuzzy_donor(
         top_k=3,
     )
 
-    assert [candidate["attrs"]["tag"] for candidate in plan.candidates] == [
-        "exact"
-    ]
+    assert [candidate["attrs"]["tag"] for candidate in plan.candidates] == ["exact"]
 
 
 # --------------------------------------------------------------------------- # identity

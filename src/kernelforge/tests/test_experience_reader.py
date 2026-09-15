@@ -223,9 +223,7 @@ def test_remote_read_falls_back_across_known_framework_version_and_gpu(
     assert solutions[0]["kernel_slug"].endswith(":vllm:1.0.0:triton:mi300x")
     assert status["read_reason"] == "hit"
     assert status["match_tier"] == "fuzzy"
-    assert status["requested_canonical_id"].endswith(
-        ":vllm:2.0.0:triton:mi355x"
-    )
+    assert status["requested_canonical_id"].endswith(":vllm:2.0.0:triton:mi355x")
     assert status["selected_canonical_id"] == solutions[0]["kernel_slug"]
 
 

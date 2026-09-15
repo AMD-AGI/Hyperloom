@@ -129,19 +129,13 @@ def _read_top_candidates(
             gpu=gpu_type,
             source_text=_source_text(spec),
         )
-        resolved = [
-            (canonical_id, candidate)
-            for candidate in store.candidates(canonical_id, limit=top_k)
-        ]
+        resolved = [(canonical_id, candidate) for candidate in store.candidates(canonical_id, limit=top_k)]
         if not resolved:
             searched = store.search_identities(identity, limit=300)
             for fallback_id in rank_fallback_identities(identity, searched):
                 fallback = store.candidates(fallback_id, limit=top_k)
                 if fallback:
-                    resolved = [
-                        (fallback_id, candidate)
-                        for candidate in fallback
-                    ]
+                    resolved = [(fallback_id, candidate) for candidate in fallback]
                     break
         candidates: list[dict[str, Any]] = []
         for candidate_canonical_id, candidate in resolved:

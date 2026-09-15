@@ -108,10 +108,7 @@ def rank_fallback_identities(
         dimensions = row.get("dimensions")
         if not canonical_id or canonical_id in seen or not isinstance(dimensions, Mapping):
             continue
-        values = {
-            str(key): str(value or "").strip().lower()
-            for key, value in dimensions.items()
-        }
+        values = {str(key): str(value or "").strip().lower() for key, value in dimensions.items()}
         if any(values.get(key) != expected for key, expected in fixed.items()):
             continue
         candidate_gpu = values.get("gpu", "")
