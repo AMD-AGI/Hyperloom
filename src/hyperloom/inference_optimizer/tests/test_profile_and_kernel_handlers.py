@@ -1175,6 +1175,49 @@ def test_instrumentation_preflight_skips_without_an_envs_block(tmp_path):
     assert "benchmark.envs" in row["skip_reason"]
 
 
+def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
+    """The certificate must not become a trace candidate for the directory it describes.
+
+    ``_trace_candidates`` rglobs the trace dir for anything ending in ``_TRACE_EXTS``, and a bare ``.json`` is in
+    that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
+    ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
+    """
+    from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
+
+    # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
+    single = tmp_path / "single" / "torch_trace"
+    single.mkdir(parents=True)
+    trace = single / "host_1.1700000000.pt.trace.json.gz"
+    trace.write_bytes(b"x" * 4096)
+
+    path = _write_trace_certificate(single, {"padding": "y" * 100_000})
+
+    assert path, "certificate should have been written"
+    assert Path(path).is_file()
+    # Outside the scanned directory, so no recursive glob of it can pick the certificate up.
+    assert Path(path).parent == single.parent
+    assert Path(path) not in _trace_candidates(single)
+    assert resolve_trace_file(single, require_single_rank=True) == trace
+
+    # A degenerate trace smaller than the certificate: the size fallback must still not prefer the certificate.
+    tiny_dir = tmp_path / "tiny" / "torch_trace"
+    tiny_dir.mkdir(parents=True)
+    tiny = tiny_dir / "tiny.trace.json"
+    tiny.write_text(json.dumps({"traceEvents": []}))
+
+    tiny_cert = _write_trace_certificate(tiny_dir, {"padding": "y" * 100_000})
+
+    assert Path(tiny_cert).stat().st_size > tiny.stat().st_size
+    assert _trace_candidates(tiny_dir) == [tiny]
+    assert resolve_trace_file(tiny_dir) == tiny
+
+    # One workspace can certify more than one trace dir; the names must not collide.
+    other = tmp_path / "single" / "capture_traces"
+    other.mkdir()
+    assert _write_trace_certificate(other, {}) != path
+
+
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
     tmp_path,
     monkeypatch,

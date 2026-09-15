@@ -725,7 +725,12 @@ class RooflineExecutor:
                     failure={"phase": last_phase, "error_class": type(exc).__name__, "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_EXCEPTION
-                _cg_category, _cg_marker = _classify_cuda_graph_capture_failure(last_error)
+                # Only meaningful when capture was actually on. With the operator override set, a capture marker
+                # in the log tail says nothing about this run -- the tail can span an earlier boot -- so it is not
+                # evidence worth failing the action over, and the run row already carries the override.
+                _cg_category, _cg_marker = (
+                    ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(last_error)
+                )
                 if _cg_category:
                     return _fail_capture(
                         category=_cg_category,
@@ -823,7 +828,11 @@ class RooflineExecutor:
                     "profile_error": _profile_err_text(profile_result),
                     "server_log_tail": _profile_server_log_tail(profile_result),
                 }
-                _cg_category, _cg_marker = _classify_cuda_graph_capture_failure(*_cg_sources.values())
+                # Same reason as the exception path: with capture already off, a marker is not evidence about this
+                # run, and "does not retry with graph capture disabled" would be nonsense to read on such a run.
+                _cg_category, _cg_marker = (
+                    ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(*_cg_sources.values())
+                )
                 if _cg_category:
                     return _fail_capture(
                         category=_cg_category,

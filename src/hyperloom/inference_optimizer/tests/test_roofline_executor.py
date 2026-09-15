@@ -205,6 +205,35 @@ async def test_cuda_graph_capture_failure_is_reported_not_retried_eager(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_capture_marker_is_not_classified_when_capture_was_already_off(tmp_path, monkeypatch):
+    """With the operator override set, a capture marker is not evidence about this run.
+
+    The server log tail can span an earlier boot, so a stale marker must not hard-fail the action as a capture
+    failure -- and "does not retry with graph capture disabled" would be nonsense to read on a run that already
+    had it disabled. The failure stays a plain profile failure.
+    """
+    state = _state()
+    state.framework = "sglang"
+    ctx = _ctx(tmp_path)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "1")
+
+    async def fake_profile(profile_ctx):
+        return {"status": "failed", "error": "Capture cuda graph failed"}
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+        fake_profile,
+    )
+
+    result = await RooflineExecutor(shared_state=state)(ctx)
+
+    assert result["status"] == "failed"
+    assert not result["error_class"].startswith("profile_cuda_graph_capture_")
+    assert "does not retry with graph capture disabled" not in result["error"]
+    assert not (tmp_path / "diagnostics").exists()
+
+
+@pytest.mark.asyncio
 async def test_profile_instrumentation_capture_failure_is_classified_apart(tmp_path, monkeypatch):
     """The profiler's own shape discovery colliding with capture is a different owner than bad server args."""
     state = _state()
