@@ -422,6 +422,9 @@ class DispatcherCollaborator:
                     timeout=self._dispatcher_poll_sec,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+                # A joined task can hold this tick body for hours, and the stamp
+                # the supervisor reads only advances at the main loop boundary.
+                await self.reconciler.stamp_progress(time.time())
                 if not done:
                     # Poll elapsed with no completion; re-scan in case a lane freed.
                     continue
