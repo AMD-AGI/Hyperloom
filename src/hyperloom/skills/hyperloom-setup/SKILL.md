@@ -171,7 +171,7 @@ value.
      order above without a default selection.
 
 8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
-   briefly note that the installer enforces the vLLM 0.28.0 glibc floor
+   briefly note that the installer enforces the vLLM 0.28.0+ glibc floor
    (glibc >= 2.39). If setup later fails with that error, explain it in plain
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
