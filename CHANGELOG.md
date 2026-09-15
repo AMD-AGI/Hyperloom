@@ -159,11 +159,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   legal value in the enablement timeline event namespace, which is a different
   vocabulary and is untouched.
 
-  **One upgrade note.** `coordinator.db` is per-session, but `--resume` on a
-  session started before this change will fail: the old database still carries
-  `priority INTEGER NOT NULL` with no default, and the new `INSERT` no longer
-  supplies it. Finish or discard in-flight sessions before upgrading; fresh
-  sessions are unaffected.
+  **Resuming across the change needs nothing from the operator.**
+  `CREATE TABLE IF NOT EXISTS` leaves `priority INTEGER NOT NULL` on a
+  `coordinator.db` written before this release, where a column with no default
+  would refuse every append the new code writes, so `ensure_schema` drops it on
+  the way in. An in-flight session resumes with its event history intact.
 
   The rewrite kernel lane is a **refactor, not a removal**. `allocate()` built
   a `LaneAllocation` for a lane whose budget the rewrite route never read — it
