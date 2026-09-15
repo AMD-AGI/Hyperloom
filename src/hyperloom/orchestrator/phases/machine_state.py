@@ -60,8 +60,8 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
-    # ``targeted_build`` and ``baseline`` are Coordinator-internal; the LLM only
-    # proposes ``specialist`` and ``integrate_patch`` from this set.
+    # ``baseline`` is carried so the Coordinator's revalidation survives the
+    # phase-transition sweep, but it is reserved: see PHASE_COORDINATOR_RESERVED.
     PHASE_ENABLEMENT: frozenset(
         {
             "target_analysis",
@@ -120,6 +120,21 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
+# Actions a single phase reserves for the Coordinator. The set above cannot say
+# this: ``baseline`` is the action PRELUDE exists to propose, while ENABLEMENT
+# runs it only as the revalidation that closes a KEEP, on a machine the phase
+# already holds.
+PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
+    PHASE_ENABLEMENT: frozenset({"baseline"}),
+}
+
+
+def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
+    reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
+    return (action_name or "").strip() in reserved
+
+
 # Task kinds that mean the KERNEL lane is busy, which is a wider question than what a model may propose: a
 # Coordinator-owned lane is dispatched without ever being proposable, and its task occupies the phase just the same.
 KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
@@ -132,8 +147,9 @@ KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGEN
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
-    actions = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())
-    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE))
+    key = (phase or "").strip().upper()
+    actions = PHASE_ALLOWED_ACTIONS.get(key, frozenset())
+    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE - PHASE_COORDINATOR_RESERVED.get(key, frozenset())))
 
 
 def render_phase_action_bullets(
@@ -2290,6 +2306,7 @@ __all__ = [
     "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
+    "PHASE_COORDINATOR_RESERVED",
     "PHASE_ENABLEMENT",
     "PHASE_FRAMEWORK_AGENT",
     "PHASE_HUMAN_LABELS",
@@ -2314,6 +2331,7 @@ __all__ = [
     "bank_phase_segment",
     "compute_next_phase",
     "compute_plateau_explore",
+    "coordinator_reserved_in_phase",
     "framework_agent_consecutive_no_keep",
     "framework_agent_plateau_streak_threshold",
     "compute_plateau_kernel",

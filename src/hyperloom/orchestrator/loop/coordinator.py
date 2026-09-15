@@ -955,6 +955,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_reap_dispatched_task": "dispatcher",
         "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
+        "_phase_denial_for_action": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_time_budget_denial_for_action": "dispatcher",
         "_admission_denial_for_action": "dispatcher",

@@ -47,6 +47,11 @@ def test_allowed_actions_disjoint_phases():
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    # ENABLEMENT carries baseline so the Coordinator's revalidation survives the
+    # phase sweep, but reserves it so no agent can propose one.
+    assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["ENABLEMENT"]
+    assert "baseline" not in phase_state.allowed_actions_for("ENABLEMENT")
+    assert "baseline" in phase_state.allowed_actions_for("PRELUDE")
     # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL entry from a lane budget, so they
     # are proposable in no phase at all.
     assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]

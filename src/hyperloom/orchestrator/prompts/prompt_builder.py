@@ -569,6 +569,20 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     Returns:
         list[str]: Markdown lines for the decision framework.
     """
+    from ..phases.machine_state import allowed_actions_for
+
+    # An empty phase renders every phase-scoped block, so it keeps the proposal form.
+    phase_key = (phase or "").strip().upper()
+    if not phase_key or "baseline" in allowed_actions_for(phase_key):
+        measure_lines = [
+            "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
+            "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        ]
+    else:
+        measure_lines = [
+            "2. **Measure**: `baseline` is Coordinator-dispatched in this phase, so do",
+            "   not propose it; `baseline_tput` is set when that run promotes.",
+        ]
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -577,8 +591,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
         "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
-        "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
-        "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
