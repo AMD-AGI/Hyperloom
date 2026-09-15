@@ -48,16 +48,21 @@ class _StateStub:
         return _ms.append_phase_history_event(self, **kwargs)
 
 
-def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
-    from hyperloom.orchestrator.phases.machine_state import phase_history_event_name
+def _event_name(row: dict[str, Any]) -> str:
+    """Marker name from either a legacy row or a canonical one."""
+    legacy = str(row.get("event") or "").strip()
+    if legacy:
+        return legacy
+    evidence = row.get("evidence")
+    if isinstance(evidence, dict):
+        nested = str(evidence.get("event") or "").strip()
+        if nested:
+            return nested
+    return str(row.get("reason") or "").strip()
 
-    rows: list[dict[str, Any]] = []
-    for row in history:
-        if not isinstance(row, dict):
-            continue
-        if phase_history_event_name(row) == event:
-            rows.append(row)
-    return rows
+
+def _phase_history_event_rows(history: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    return [row for row in history if isinstance(row, dict) and _event_name(row) == event]
 
 
 class _CoordinatorStub:

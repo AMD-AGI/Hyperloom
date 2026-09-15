@@ -848,7 +848,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_ts: str = ""
     # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
+    # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Durable sum of completed optimisation-phase segments.
     explore_elapsed_accum_s: float | None = 0.0
