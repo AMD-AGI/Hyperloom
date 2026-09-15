@@ -91,11 +91,17 @@ def _solution(patch: str, **overrides) -> dict:
     return sol
 
 
-def _patch_read_solutions(monkeypatch, *sols: dict):
+def _patch_read_solutions(monkeypatch, *sols: dict, status: dict | None = None):
     """Patch the top-k reader to return the given ranked solution list."""
+
+    def read(**kwargs):
+        if status is not None:
+            kwargs["read_status"].update(status)
+        return [dict(solution) for solution in sols]
+
     monkeypatch.setattr(
         "kernelforge.knowledge.experience_reader.read_top_solutions",
-        lambda **_kwargs: [dict(s) for s in sols],
+        read,
     )
 
 
@@ -201,6 +207,11 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
                 "aiter/ops/kernel.py": "src/aiter/ops/kernel.py",
             },
         ),
+        status={
+            "match_tier": "fuzzy",
+            "requested_canonical_id": "kernel:requested",
+            "selected_canonical_id": "kernel:selected",
+        },
     )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(
@@ -222,6 +233,9 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
     assert warm["applied"] is True
     assert warm["read_reason"] == "hit"
     assert warm["read_error"] == ""
+    assert warm["match_tier"] == "fuzzy"
+    assert warm["requested_canonical_id"] == "kernel:requested"
+    assert warm["selected_canonical_id"] == "kernel:selected"
     assert consumer.read_text() == "new\n"
 
 

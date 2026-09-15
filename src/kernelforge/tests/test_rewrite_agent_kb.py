@@ -143,6 +143,39 @@ def test_sdk_opens_and_records_an_arbitrary_rewrite_backend(tmp_path, monkeypatc
     assert document["value"] == {"rewrite_kind": "triton"}
 
 
+def test_sdk_discovers_fuzzy_identity_only_after_exact_lookup_misses(
+    tmp_path,
+    monkeypatch,
+):
+    _use_in_memory_kb_store(monkeypatch)
+    config = _remote_config(tmp_path)
+    target = KernelRecipeIdentity(
+        producer="forge-loop",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="2.0.0",
+        backend="triton",
+        gpu="mi355x",
+    )
+    donor = KernelRecipeIdentity(
+        producer="forge-loop",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="1.0.0",
+        backend="triton",
+        gpu="mi300x",
+    )
+    donor_kb = KernelRecipeKB.open_identity(donor, config)
+    donor_kb.write_candidate({"tag": "cross-version-gpu"}, speedup=2.0)
+
+    target_kb = KernelRecipeKB.open_identity(target, config)
+
+    assert target_kb.read_top_n(tmp_path / "exact") == []
+    assert target_kb.fallback_canonical_ids() == [
+        kernel_recipe_canonical_id(donor)
+    ]
+
+
 def test_resolved_identity_allows_an_explicit_backend(tmp_path, monkeypatch):
     _use_in_memory_kb_store(monkeypatch)
     spec, _driver = _spec(tmp_path)

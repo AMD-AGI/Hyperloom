@@ -20,9 +20,12 @@ from kernelforge.knowledge.experience_sink import (
 )
 from kernelforge.knowledge.experience_store import (
     REMOTE_BACKEND_GBRAIN,
+    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
 )
+from kernelforge.rewrite_by_flydsl import identity as rewrite_identity
 from kernelforge.rewrite_by_flydsl import record_store
+from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
 KERNEL_SOURCE = "import triton\n\n\n@triton.jit\ndef my_kernel(x):\n    return x\n"
@@ -171,6 +174,59 @@ def test_read_returns_the_champion_with_its_patch(config, workspace):
     assert best["patch_content"] == DIFF
     assert best["kernel_slug"].startswith("kernel:forge-loop:my:")
     assert solutions[0]["solution_slug"] == best["solution_slug"]
+
+
+def test_remote_read_falls_back_across_known_framework_version_and_gpu(
+    tmp_path,
+    workspace,
+    monkeypatch,
+):
+    store = InMemoryKBStore()
+    monkeypatch.setattr(record_store, "KBStoreClient", lambda *args, **kwargs: store)
+    knowledge = KnowledgeConfig.from_env(
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        kb_store_url="http://in-memory",
+        kb_store_token="token",
+        remote_backend=REMOTE_BACKEND_KB_STORE,
+    )
+    config = Config.from_env(
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
+    )
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "1.0.0",
+    )
+    _seed(config, workspace, framework="vllm")
+
+    config.gpu_type = "mi355x"
+    config.gpu_target = "gfx950"
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "2.0.0",
+    )
+    status: dict[str, str] = {}
+
+    solutions = read_top_solutions(
+        **_read_args(config, workspace, framework="vllm"),
+        read_status=status,
+    )
+
+    assert len(solutions) == 1
+    assert solutions[0]["kernel_slug"].endswith(":vllm:1.0.0:triton:mi300x")
+    assert status["read_reason"] == "hit"
+    assert status["match_tier"] == "fuzzy"
+    assert status["requested_canonical_id"].endswith(
+        ":vllm:2.0.0:triton:mi355x"
+    )
+    assert status["selected_canonical_id"] == solutions[0]["kernel_slug"]
 
 
 def test_the_same_tree_matches_its_own_implementation_signature(config, workspace):

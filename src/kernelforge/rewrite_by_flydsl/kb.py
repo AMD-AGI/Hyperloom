@@ -16,6 +16,7 @@ from kernelforge.config import Config
 from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.experience_reader import sanitize_read_error
 from kernelforge.knowledge.experience_store import knowledge_config_from_runtime
+from kernelforge.knowledge.warmstart_identity import rank_fallback_identities
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
 from kernelforge.rewrite_by_flydsl import driver_contract
@@ -122,22 +123,36 @@ def _read_top_candidates(
     if not gpu_type:
         return _ReadPlan(None, [], "missing_gpu_type", "")
     try:
-        _, canonical_id, _signature, _implementation = resolve_identity(
+        identity, canonical_id, _signature, _implementation = resolve_identity(
             spec,
             framework=framework,
             gpu=gpu_type,
             source_text=_source_text(spec),
         )
+        resolved = [
+            (canonical_id, candidate)
+            for candidate in store.candidates(canonical_id, limit=top_k)
+        ]
+        if not resolved:
+            searched = store.search_identities(identity, limit=300)
+            for fallback_id in rank_fallback_identities(identity, searched):
+                fallback = store.candidates(fallback_id, limit=top_k)
+                if fallback:
+                    resolved = [
+                        (fallback_id, candidate)
+                        for candidate in fallback
+                    ]
+                    break
         candidates: list[dict[str, Any]] = []
-        for candidate in store.candidates(canonical_id, limit=top_k):
+        for candidate_canonical_id, candidate in resolved:
             value = candidate.knowledge.get("value")
             if not isinstance(value, dict):
                 continue
             candidates.append(
                 {
-                    "canonical_id": canonical_id,
+                    "canonical_id": candidate_canonical_id,
                     "session_id": candidate.session_id,
-                    "solution_slug": f"{canonical_id}/{candidate.session_id}",
+                    "solution_slug": f"{candidate_canonical_id}/{candidate.session_id}",
                     "speedup": candidate.speedup,
                     "attrs": value,
                 }

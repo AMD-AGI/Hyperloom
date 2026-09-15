@@ -16,7 +16,17 @@ from kernelforge.knowledge.experience_store import (
     KnowledgeConfig,
     KnowledgeStoreMode,
 )
-from kernelforge.rewrite_by_flydsl import driver_contract, kb, record_store
+from kernelforge.knowledge.kernel_identity import (
+    KernelRecipeIdentity,
+    kernel_recipe_canonical_id,
+)
+from kernelforge.rewrite_by_flydsl import (
+    driver_contract,
+    identity as rewrite_identity,
+    kb,
+    record_store,
+)
+from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 from kernelforge.rewrite_by_flydsl.identity import (
     framework_version,
     segment,
@@ -47,6 +57,46 @@ class InMemoryKBStore:
         if not sessions and canonical_id not in self.champions:
             return None
         return {"sessions": sessions, "champion": self.champions.get(canonical_id, {})}
+
+    def search_identities(
+        self,
+        *,
+        scheme,
+        match=None,
+        offset=0,
+        limit=50,
+    ):
+        names = (
+            "producer",
+            "kernel_name",
+            "framework",
+            "framework_version",
+            "backend",
+            "gpu",
+        )
+        found = []
+        for canonical_id, _session_id in self.order:
+            parts = canonical_id.split(":")
+            if len(parts) != 7 or parts[0] != scheme:
+                continue
+            dimensions = dict(zip(names, parts[1:]))
+            if any(dimensions.get(key) != value for key, value in (match or {}).items()):
+                continue
+            if canonical_id not in {item["canonical_id"] for item in found}:
+                found.append(
+                    {
+                        "canonical_id": canonical_id,
+                        "dimensions": dimensions,
+                        "updated_at": f"{len(found):04d}",
+                    }
+                )
+        page = found[offset : offset + limit]
+        next_offset = offset + len(page)
+        return {
+            "items": page,
+            "total": len(found),
+            "next_offset": next_offset if next_offset < len(found) else None,
+        }
 
     def get_top_sessions(
         self,
@@ -229,6 +279,90 @@ def _use_in_memory_kb_store(monkeypatch):
     store = InMemoryKBStore()
     monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
     return store
+
+
+def test_rewrite_warmstart_uses_fuzzy_identity_after_exact_miss(
+    tmp_path,
+    monkeypatch,
+):
+    _use_in_memory_kb_store(monkeypatch)
+    spec, _driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    donor = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="1.0.0",
+        backend="flydsl",
+        gpu="mi300x",
+    )
+    KernelRecipeKB.open_identity(donor, config).write_candidate(
+        {"flydsl_kernel": "kernel.py"},
+        files={"kernel.py": spec.flydsl_kernel},
+        speedup=2.0,
+    )
+    monkeypatch.setattr(
+        rewrite_identity,
+        "framework_version",
+        lambda _framework: "2.0.0",
+    )
+
+    plan = kb._read_top_candidates(
+        spec,
+        config,
+        framework="vllm",
+        top_k=3,
+    )
+
+    assert plan.read_reason == "hit"
+    assert [candidate["canonical_id"] for candidate in plan.candidates] == [
+        kernel_recipe_canonical_id(donor)
+    ]
+
+
+def test_rewrite_warmstart_keeps_exact_identity_ahead_of_fuzzy_donor(
+    tmp_path,
+    monkeypatch,
+):
+    _use_in_memory_kb_store(monkeypatch)
+    spec, _driver = _spec(tmp_path)
+    config = _remote_config(tmp_path)
+    exact_identity = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version=VLLM_VERSION,
+        backend="flydsl",
+        gpu="mi355x",
+    )
+    fuzzy_identity = KernelRecipeIdentity(
+        producer="flydsl",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="99.0.0",
+        backend="flydsl",
+        gpu="mi300x",
+    )
+    for identity, tag, speedup in (
+        (exact_identity, "exact", 1.1),
+        (fuzzy_identity, "fuzzy", 9.0),
+    ):
+        KernelRecipeKB.open_identity(identity, config).write_candidate(
+            {"flydsl_kernel": "kernel.py", "tag": tag},
+            files={"kernel.py": spec.flydsl_kernel},
+            speedup=speedup,
+        )
+
+    plan = kb._read_top_candidates(
+        spec,
+        config,
+        framework="vllm",
+        top_k=3,
+    )
+
+    assert [candidate["attrs"]["tag"] for candidate in plan.candidates] == [
+        "exact"
+    ]
 
 
 # --------------------------------------------------------------------------- # identity
