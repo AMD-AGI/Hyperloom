@@ -33,9 +33,10 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     )
     assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
-    # A dropped entry falls back to its default rather than vanishing: a phase with no share would run to whatever it
-    # costs.
-    assert set(out) == set(ps.PHASE_NAMES)
+    # A dropped entry falls back to its default rather than vanishing: a capped phase with no share would run to
+    # whatever it costs. ENABLEMENT carries no default, so it stays absent and uncapped.
+    assert set(out) == set(ps.DEFAULT_PHASE_BUDGET_PCT)
+    assert ps.PHASE_ENABLEMENT not in out
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
@@ -207,6 +208,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     # The flags live on the ``optimize`` subparser, so walk the tree.
     pending = [_build_parser()]
     quoted: dict[str, float] = {}
+    uncapped: set[str] = set()
     while pending:
         for action in pending.pop()._actions:
             choices = getattr(action, "choices", None)
@@ -217,7 +219,11 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
             if not match:
                 continue
             default_text = re.search(r"Default:\s*([0-9.]+)\.", action.help or "")
-            assert default_text, f"{action.dest} help does not quote a default"
+            if default_text is None:
+                # A phase with no default cap must say so rather than quote a number.
+                assert "Uncapped by default" in (action.help or ""), action.dest
+                uncapped.add(match.group(1).upper())
+                continue
             quoted[match.group(1).upper()] = float(default_text.group(1))
 
     assert quoted, "no phase-budget flags found; this guard would pass vacuously"
@@ -226,6 +232,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     # The FRAMEWORK_AGENT flag is spelled --phase-budget-framework-pct.
     real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
     real["KERNEL"] = real.pop("KERNEL_AGENT")
-    # ENABLEMENT stays as "ENABLEMENT" (--phase-budget-enablement-pct).
 
     assert quoted == real
+    # A flag whose phase carries no default must be the one that says so.
+    assert uncapped == {ps.PHASE_ENABLEMENT}

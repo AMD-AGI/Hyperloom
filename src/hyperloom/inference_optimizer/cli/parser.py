@@ -1262,7 +1262,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_enablement_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for ENABLEMENT as a fraction of --max-hours. Default: 0.05.",
+        help="Wall-clock budget cap for ENABLEMENT as a fraction of --max-hours. "
+        "Uncapped by default: a combo that cannot run has nothing to optimise, "
+        "so the phase is bounded by its attempt cap and the session clock.",
     )
     opt.add_argument(
         "--max-minutes-framework-pct",
