@@ -164,17 +164,31 @@ def _validate_magpie_python_override(value: str) -> str:
 
 
 def _resolve_session_dir() -> Path:
-    """Resolve the active session_dir for executors that need an output root.
-
-    Call this per use, never once in ``__init__``. The executors in this package
-    are instantiated as module-level singletons at import time, which is before
-    the CLI pins ``$INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR``; resolving eagerly
-    therefore freezes them on the workspace root, and every session sharing that
-    workspace writes its artifacts into one directory.
-    """
+    """Resolve the active session_dir for executors that need an output root."""
     from hyperloom.inference_optimizer.session.paths import session_dir as _sd
 
     return _sd()
+
+
+class SessionDirField:
+    """An executor's ``session_dir``, resolved on read rather than at construction.
+
+    The executors here are module-level singletons built at import, which is
+    before the CLI pins the session. Resolving in ``__init__`` freezes them on
+    the workspace root that concurrent sessions share.
+    """
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._slot = f"_{name}"
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        if obj is None:
+            return self
+        explicit = getattr(obj, self._slot, None)
+        return explicit if explicit is not None else _resolve_session_dir()
+
+    def __set__(self, obj: Any, value: Path | str | None) -> None:
+        setattr(obj, self._slot, Path(value) if value else None)
 
 
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against ``GridVariant.name``.

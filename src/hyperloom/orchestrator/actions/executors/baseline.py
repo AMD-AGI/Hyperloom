@@ -66,6 +66,7 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
 # launch needs.
 from ._grid_runner import (
+    SessionDirField,
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
@@ -251,16 +252,11 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
-#: ends are needed: the earliest boot milestones are at the head, the wall at
-#: the tail. The milestones are NOT all within the head — a build whose kernel
-#: layer logs per-shape (aiter on ROCm emits a line per GEMM/MoE shape) pushes
-#: ``application startup complete`` megabytes in, so the middle is scanned for
-#: milestone lines too. See :func:`read_bringup_log`.
+#: Bytes read from each end of a ``server.log`` when observing a bring-up.
 _BRINGUP_LOG_EDGE_BYTES = 65_536
 
-#: Cap on milestone lines carried out of the unread middle. The ladder only
-#: needs one witness per milestone, so this is far above what any boot needs.
+#: Cap on milestone lines carried out of the unread middle; the ladder needs
+#: one witness per milestone.
 _BRINGUP_MIDDLE_MARKER_LINES = 200
 
 #: Subdirectory of a round slot holding earlier attempts' server logs.
@@ -324,14 +320,11 @@ def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str
 def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
     """Read a server log for bring-up classification: both edges, plus milestones.
 
-    The head and tail are what the failure excerpt needs. The ladder needs
-    something else — a witness for every milestone the boot passed — and those
-    are not all near an edge: on a build that logs per-kernel-shape, the head
-    window ends around engine init and ``application startup complete`` lands
-    megabytes further in. Reading only the edges therefore reports a fully
-    served boot as ``stage_reached=ENGINE_INIT``, hence ``booted=False``, which
-    is indistinguishable from a server that hung. So the middle is streamed for
-    milestone lines and those are carried into the text between the edges.
+    The edges carry the failure excerpt. The ladder needs a witness for every
+    milestone the boot passed, and those are not all near one: a build that logs
+    per kernel shape pushes the later rungs megabytes in, which would understate
+    ``stage_reached`` and make two unequal boots compare as equal. So the middle
+    is streamed for milestone lines and they are carried between the edges.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -1641,6 +1634,8 @@ def _rollback_warm_kernel_apply_results(
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -1662,17 +1657,6 @@ class BaselineExecutor:
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
-
-    @property
-    def session_dir(self) -> Path:
-        """The session root; resolved per read unless one was passed in."""
-        from ._grid_runner import _resolve_session_dir
-
-        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
-
-    @session_dir.setter
-    def session_dir(self, value: Path | str | None) -> None:
-        self._session_dir = Path(value) if value else None
 
     def _resolve_default_config(self) -> Path:
         """Hook for subclasses (ProfileExecutor) to swap the resolver."""

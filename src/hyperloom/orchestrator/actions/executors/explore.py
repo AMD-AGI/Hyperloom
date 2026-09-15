@@ -62,9 +62,9 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    SessionDirField,
     _kill_stale_servers,
     _num_gpus_for_config,
-    _resolve_session_dir,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
     apply_multi_node_invalid_variants,
@@ -470,6 +470,8 @@ def _compute_explore_variant_timeout(
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -483,15 +485,6 @@ class ExploreExecutor:
         self.session_dir = session_dir
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-
-    @property
-    def session_dir(self) -> Path:
-        """The session root; resolved per read unless one was passed in."""
-        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
-
-    @session_dir.setter
-    def session_dir(self, value: Path | str | None) -> None:
-        self._session_dir = Path(value) if value else None
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""

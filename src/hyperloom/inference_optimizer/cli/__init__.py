@@ -1336,14 +1336,10 @@ _OBJECTIVE_KIND_TO_FLAG: Mapping[str, str] = {
 def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mapping[str, Any]) -> list[str]:
     """Fill the budget and the stop target from the archive when this resume omitted them.
 
-    Both are part of the launch shape a resume is documented to keep, and both
-    are unrecoverable from the flags: ``--max-hours`` defaults to
-    :data:`~.parser.DEFAULT_MAX_HOURS`, so a bare resume of a longer session
-    silently shortens it to two hours and closes the leg as ``time_exhausted``
-    the moment the elapsed total already exceeds that -- which is what the
-    Robustness Monitor's auto-resume does, since it passes no flags at all. The
-    target flags default to ``None``, so a bare resume drops the operator's
-    objective and the run stops only on the clock.
+    Neither survives the flags alone: ``--max-hours`` has a real default, so a
+    bare resume would shorten a longer session and close the leg as
+    ``time_exhausted``, and the target flags default to ``None``, so it would
+    drop the objective. The Robustness Monitor auto-resumes with no flags at all.
 
     Args:
         args: Parsed arguments for this resume; an explicit flag always wins.
@@ -1368,14 +1364,10 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     # objective outright rather than joining it, which build_objective refuses.
     if any(getattr(args, flag, None) is not None for flag in _OBJECTIVE_KIND_TO_FLAG.values()):
         return lines
-    recorded = manifest.get("objective")
-    if not isinstance(recorded, Mapping):
-        return lines
-    entries = recorded.get("objectives")
-    entries = entries if isinstance(entries, list) else [recorded]
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
+    recorded = manifest.get("objective") or {}
+    # ``_objective_summary`` writes one entry, and ``objectives`` too when a
+    # roofline target joins a throughput one.
+    for entry in recorded.get("objectives") or [recorded]:
         flag = _OBJECTIVE_KIND_TO_FLAG.get(str(entry.get("kind") or ""))
         value = entry.get("value")
         if flag is None or value is None:

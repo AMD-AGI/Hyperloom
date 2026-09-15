@@ -48,23 +48,22 @@ def _read_cmdline(pid: str) -> str:
 
 
 def _parent_pid(pid: int) -> int:
-    """Return the parent pid from ``/proc/<pid>/status``, or 0 when unreadable."""
+    """Return the parent pid from ``/proc/<pid>/status``, or 0 when it is gone."""
     try:
-        for line in pathlib.Path("/proc", str(pid), "status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("PPid:"):
-                return int(line.split()[1])
-    except (OSError, IndexError, ValueError):
+        status = pathlib.Path("/proc", str(pid), "status").read_text(encoding="utf-8")
+    except OSError:
         return 0
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            return int(line.split()[1])
     return 0
 
 
 def _own_process_chain() -> set[int]:
     """Return this process and every ancestor up to init.
 
-    The launcher shell that invokes this tool carries the whole command text in
-    its own argv, so the shell, its wrapper, and the agent harness above it all
-    match ``hyperloom.inference_optimizer.cli`` without a leftover run existing.
-    Excluding the chain is what makes the scan report foreign workload only.
+    The launcher shell carries the whole command text in its own argv, so it and
+    everything above it match the patterns without a leftover run existing.
     """
     chain: set[int] = set()
     pid = os.getpid()

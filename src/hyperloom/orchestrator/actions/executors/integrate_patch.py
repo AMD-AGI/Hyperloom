@@ -85,9 +85,9 @@ from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
     GridVariant,
+    SessionDirField,
     VariantResult,
     _num_gpus_for_config,
-    _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -1701,6 +1701,8 @@ def _enforce_critic_gate(
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -1730,15 +1732,6 @@ class IntegratePatchExecutor:
         # backup ledger and never a prior round's.
         self._nogit_backup_root: Path | None = None
         # Blocked env names this round was granted, each bound to one value.
-
-    @property
-    def session_dir(self) -> Path:
-        """The session root; resolved per read unless one was passed in."""
-        return self._session_dir if self._session_dir is not None else _resolve_session_dir()
-
-    @session_dir.setter
-    def session_dir(self, value: Path | str | None) -> None:
-        self._session_dir = Path(value) if value else None
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Apply a specialist's patches/config changes and benchmark them."""
@@ -2976,10 +2969,8 @@ class IntegratePatchExecutor:
             "after_observation_degraded": after_loaded.degraded,
         }
 
-        # A measurement exists only after the client completed requests against
-        # the server, so it witnesses the serving rather than inferring it from
-        # a marker the log may never carry. The observations above stay for the
-        # ladder arithmetic below and for the failure they explain.
+        # A measurement exists only where the client completed requests, so it
+        # witnesses the serving instead of inferring it from a log marker.
         served = is_valid_measurement(bench_result)
 
         runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)

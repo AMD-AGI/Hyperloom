@@ -120,10 +120,9 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
-# Actions a single phase reserves for the Coordinator. The set above cannot say
-# this: ``baseline`` is the action PRELUDE exists to propose, while ENABLEMENT
-# runs it only as the revalidation that closes a KEEP, on a machine the phase
-# already holds.
+# Actions a single phase reserves for the Coordinator. The global set above
+# cannot say this: ``baseline`` is what PRELUDE exists to propose, while
+# ENABLEMENT runs it only as the revalidation that closes a KEEP.
 PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
     PHASE_ENABLEMENT: frozenset({"baseline"}),
 }
