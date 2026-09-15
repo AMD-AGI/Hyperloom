@@ -50,6 +50,18 @@ Rules: derive tile sizes / env knobs / MFMA layout for the ACTUAL target arch an
 operator FROM these docs — never rely on memorized numbers, and never copy another
 kernel's tuning or layout without re-measuring.
 
+## Moving between FlyDSL and assembly
+
+When profiling points to compiler-generated spills, barriers, wait placement,
+or scheduling, read the assembly workflow in `languages/assembly/`. Export the
+concrete specialization's compiler assembly, reassemble it, and establish
+correctness and timing parity through the original launcher before editing ISA.
+`kernelforge.assembly.flydsl.with_assembly` creates an independent candidate
+from a compiled FlyDSL function without changing its host ABI or the JIT cache.
+Keep the editable assembly and launcher together in the candidate commit.
+For changes to the algorithm, layout, tile, or pipeline, return to FlyDSL and
+lower a fresh baseline. Follow any explicit task restriction on languages.
+
 ## When to Stop
 
 - Gate met → STOP, report GREEN.
