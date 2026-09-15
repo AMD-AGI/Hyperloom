@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import subprocess
 import sys
@@ -322,6 +323,39 @@ def _forge_session_timeout_sec(max_hours: float, override_sec: int | None) -> in
 def _is_long_horizon(max_hours: float) -> bool:
     """Whether one campaign session enables expensive long-horizon agents."""
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
+
+
+def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
+    """Read the ``--baseline-json`` scoring anchor, rejecting one that cannot anchor a speedup.
+
+    Every number the run publishes divides by these per-case times, so a malformed or non-positive entry is refused
+    here rather than silently producing ratios no consumer can interpret.
+    """
+    try:
+        payload = json.loads(Path(path).read_text())
+    except (OSError, ValueError) as error:
+        raise click.BadParameter(f"--baseline-json could not be read as JSON: {error}")
+    if not isinstance(payload, dict):
+        raise click.BadParameter("--baseline-json must hold a JSON object")
+    try:
+        wall_ms = float(payload.get("wall_ms"))
+    except (TypeError, ValueError):
+        raise click.BadParameter("--baseline-json needs a numeric 'wall_ms'")
+    if not math.isfinite(wall_ms) or wall_ms <= 0.0:
+        raise click.BadParameter("--baseline-json 'wall_ms' must be finite and positive")
+    raw_cases = payload.get("case_times")
+    if not isinstance(raw_cases, dict) or not raw_cases:
+        raise click.BadParameter("--baseline-json needs a non-empty 'case_times' object")
+    case_times: dict[str, float] = {}
+    for case_id, value in raw_cases.items():
+        try:
+            ms = float(value)
+        except (TypeError, ValueError):
+            raise click.BadParameter(f"--baseline-json case {case_id!r} has a non-numeric time")
+        if not math.isfinite(ms) or ms <= 0.0:
+            raise click.BadParameter(f"--baseline-json case {case_id!r} must be finite and positive")
+        case_times[str(case_id)] = ms
+    return wall_ms, case_times
 
 
 def _validate_agent_provider(ctx, param, value):
@@ -923,6 +957,18 @@ def _make_lane_agent_factory(
     "or a sibling of the workspace when that would land inside it. Falls "
     "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
 )
+@click.option(
+    "--baseline-json",
+    default="",
+    help="JSON file holding a scoring anchor measured outside this loop: "
+    '{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}. Every speedup '
+    "this run reports then divides by those per-case times instead of by the "
+    "kernel the run starts from, which is what a caller wants when that "
+    "kernel already replaced something else (a rewrite's port replacing its "
+    "source). The loop still benches the starting kernel, but as the search "
+    "start rather than the anchor. Omit it and the loop anchors on its own "
+    "first bench, as it always has.",
+)
 @click.option("--resume", is_flag=True, help="Resume the campaign stored in the exact workspace")
 def forge_loop(
     kernel,
@@ -977,6 +1023,7 @@ def forge_loop(
     specialist_probe_budget_sec,
     specialist_probe_scratch_root,
     commit_new_paths,
+    baseline_json,
 ):
     """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend)."""
     long_horizon = _is_long_horizon(max_hours)
@@ -1214,6 +1261,13 @@ def forge_loop(
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
     )
+    if baseline_json:
+        # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
+        # measurement. ``baseline_wall_ms`` is deliberately left unset so the loop still benches the kernel it starts
+        # from -- that bench is the search start and the first incumbent, not the anchor.
+        external_baseline_ms, external_baseline_case_times = _load_external_baseline(baseline_json)
+        iter_config.baseline_case_times = dict(external_baseline_case_times)
+        iter_config.pristine_baseline_wall_ms = external_baseline_ms
     tracker = ExperimentTracker(config.experiments_dir)
     # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
     # loses this process outright, can still read what the run spent.
@@ -1768,7 +1822,11 @@ def forge_loop(
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         pristine_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -1954,7 +2012,11 @@ def forge_loop(
         search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
             loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
+        search_start_mean_case_speedup = (
+            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
+            or getattr(loop_runner, "search_start_mean_case_speedup", None)
+            or 1.0
+        )
         baseline_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)

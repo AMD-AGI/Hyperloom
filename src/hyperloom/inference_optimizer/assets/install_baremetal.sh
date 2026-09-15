@@ -54,8 +54,8 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # io_struct.py between the two, and TraceLens' annotation patches need that field.
 # On the tag, three of the ten patches fail `git apply --check`, the atomic set
 # rolls back, and kernel-shape profiling is silently unavailable.
-# vLLM installs 0.28.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# vllm/vllm-openai-rocm:v0.28.0 Docker image. The rocm723 variant puts the
+# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index, matching the
+# vllm/vllm-openai-rocm:v0.29.0 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
@@ -77,7 +77,7 @@ fi
 SGLANG_ROCM_PYPI_VERSION="${SGLANG_ROCM_PYPI_VERSION:-7.2.4}"
 AITER_REPO="${AITER_REPO:-https://github.com/ROCm/aiter.git}"
 AITER_REF="${AITER_REF:-}"
-VLLM_VERSION="${VLLM_VERSION:-0.28.0}"
+VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
 _VLLM_VENV_ROOT_WAS_SET="${VLLM_VENV_ROOT+x}"
@@ -187,7 +187,7 @@ die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
-vllm/vllm-openai-rocm:v0.28.0), then re-run."
+vllm/vllm-openai-rocm:v0.29.0), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
@@ -324,11 +324,12 @@ detect_gpu_label() {
   case "$gfx" in
     gfx942) echo "MI300X" ;;
     gfx950) echo "MI355X" ;;
-    *) echo "MI300X" ;;
+    "") echo "unknown" ;;
+    *) echo "$gfx" ;;
   esac
 }
 
-DETECTED_GPU="MI300X"
+DETECTED_GPU="unknown"
 
 base_preflight() {
   local rc=0

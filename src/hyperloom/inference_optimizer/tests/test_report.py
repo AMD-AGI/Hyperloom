@@ -25,6 +25,82 @@ from hyperloom.inference_optimizer.session.session_paths import (
 )
 
 
+def _agentx_reference():
+    return {
+        "status": "ok",
+        "reason": "ok",
+        "source": "https://reference.test/api/v1",
+        "query": {"benchmark_mode": "agentx", "model": "GLM-5.2", "gpu": "b300", "precision": "fp4"},
+        "best": {"conc": 8, "tput_per_gpu": 9999.0, "e2e_norm_intvty_p90": 99.0, "benchmark_id": "other-conc"},
+        "all_concurrencies": [
+            {"conc": 4, "decode_tp": 8, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "benchmark_id": "42"},
+            {
+                "conc": 8,
+                "decode_tp": 8,
+                "tput_per_gpu": 9999.0,
+                "e2e_norm_intvty_p90": 99.0,
+                "benchmark_id": "other-conc",
+            },
+        ],
+    }
+
+
+@pytest.mark.parametrize("advisory_enabled", [True, False])
+def test_report_agentx_comparison_reads_persisted_target(report_performance_state, tmp_path, advisory_enabled):
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    state = report_performance_state
+    state.benchmark_mode = "agentx"
+    state.tp, state.conc = 2, 4
+    state.current_best.update(total_throughput=800.0, e2e_norm_intvty_p90=5.0)
+    state.target_advisory_enabled = advisory_enabled
+    target = {
+        "benchmark_mode": "agentx",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [{"conc": 4, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "source": "measured"}],
+    }
+    assert research_hints.write_competitor_target(tmp_path, target)
+    reference = _agentx_reference()
+    reference["all_concurrencies"] = []
+    before = deepcopy(reference)
+    summary = rp._build_summary_dict(state, {}, [], external_baseline=reference, session_dir=tmp_path)
+    comparison = summary["external_baseline"]["comparison"]
+    assert comparison == research_hints.gap_for_state(research_hints.load_competitor_target(tmp_path), state)
+    assert comparison["throughput_gap_pct"] == 50.0
+    assert comparison["interactivity_gap_pct"] == 75.0
+    assert comparison["primary_gap"] == "latency"
+    assert reference == before
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "+75.0%" in md
+    assert "9999" not in md
+
+
+def test_report_does_not_rebuild_missing_competitor_target(report_performance_state, tmp_path, caplog):
+    summary = rp._build_summary_dict(
+        report_performance_state, {}, [], external_baseline=_agentx_reference(), session_dir=tmp_path
+    )
+    comparison = summary["external_baseline"]["comparison"]
+    assert comparison["status"] == "unavailable"
+    assert comparison["reason"] == "target_unavailable"
+    assert "gap vs target" not in "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "target_unavailable" in caplog.text
+    assert str(tmp_path) in caplog.text
+
+
+def test_agentx_report_keeps_no_data_reason_without_computing_gap(report_performance_state):
+    reference = {
+        **_agentx_reference(),
+        "status": "no_match",
+        "reason": "fetch_error",
+        "best": None,
+        "all_concurrencies": [],
+    }
+    summary = rp._build_summary_dict(report_performance_state, {}, [], external_baseline=reference)
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
+    assert "fetch_error" in md
+    assert "gap vs target" not in md
+
+
 # ---- _format_completeness_annotations ----
 def test_completeness_annotations_empty():
     assert rp._format_completeness_annotations({}) == []

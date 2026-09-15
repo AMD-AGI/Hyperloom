@@ -17,6 +17,7 @@ from kernelforge.knowledge import warmstart_policy
 from kernelforge.knowledge.experience_reader import sanitize_read_error
 from kernelforge.knowledge.experience_store import knowledge_config_from_runtime
 from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
 from kernelforge.rewrite_by_flydsl import driver_contract
 from kernelforge.rewrite_by_flydsl.identity import (
     resolve_identity,
@@ -121,7 +122,7 @@ def _read_top_candidates(
     if not gpu_type:
         return _ReadPlan(None, [], "missing_gpu_type", "")
     try:
-        _, canonical_id, signature, implementation = resolve_identity(
+        _, canonical_id, _signature, _implementation = resolve_identity(
             spec,
             framework=framework,
             gpu=gpu_type,
@@ -132,15 +133,12 @@ def _read_top_candidates(
             value = candidate.knowledge.get("value")
             if not isinstance(value, dict):
                 continue
-            recorded = str(value.get("implementation_signature") or "")
             candidates.append(
                 {
                     "canonical_id": canonical_id,
                     "session_id": candidate.session_id,
                     "solution_slug": f"{canonical_id}/{candidate.session_id}",
                     "speedup": candidate.speedup,
-                    "implementation_match": bool(recorded and recorded == signature),
-                    "consumer_implementation_identity": implementation,
                     "attrs": value,
                 }
             )
@@ -174,6 +172,22 @@ def _candidate_content(plan: _ReadPlan, candidate: dict[str, Any]) -> bytes:
         )
     except Exception:  # noqa: BLE001 - an unreadable artifact is just a miss
         return b""
+
+
+def scored_speedup(
+    case_ms: dict[str, float] | None,
+    baseline_case_ms: dict[str, float] | None,
+) -> float | None:
+    """Speedup on the arena's metric, or ``None`` when the cases cannot be paired.
+
+    The equal-weight mean over per-case ratios is what grades the run, so it is also what orders a warm-start field
+    and what a published record claims. A ratio of the two aggregate times answers a different question and disagrees
+    by up to 2x on a shape sweep spanning two orders of magnitude.
+    """
+    try:
+        return calculate_mean_case_speedup(case_ms, baseline_case_ms)
+    except CaseCoverageError:
+        return None
 
 
 def _reference_context(references: list[dict]) -> str:
@@ -215,19 +229,26 @@ async def try_flydsl_kb_warmstart(
     driver_path: str,
     config: Config,
     *,
-    source_ms: float | None,
+    source_case_ms: dict[str, float],
     framework: str = "",
     top_k: int | None = None,
     validation_timeout_sec: int = 1800,
     stop_at_unix: float | None = None,
 ) -> RewriteKbReadResult:
-    """Measure the admissible candidates and skip PORT with the fastest.
+    """Measure the admissible candidates and skip PORT with the best scoring one.
 
     Correctness admits a candidate; a measurement on this task's own driver chooses between the admitted ones, since a
     claim was computed over whatever cases its producing task scored and so cannot order candidates for *this* task.
+    The measurement is scored the way the arena scores, so the candidate adopted here is the one the run is graded on.
     ``warmstart_policy`` bounds the search on both the claim floor and wall time.
+
+    Admission is one question a measurement cannot answer for itself: does the artifact expose the builder symbol
+    this task's driver imports. Everything else is settled by running it. The current driver validates the candidate
+    against the current source and then times it, so a port that survives is reusable whatever revision, source
+    layout or implementation signature produced it -- and one that does not is rejected on evidence rather than on
+    a guess about its provenance. This matches the loop-layer warm start, which has always measured a candidate
+    whose implementation signature disagreed instead of refusing it.
     """
-    del source_ms  # The claim is not the gate; this task's own timing is.
     plan = _read_top_candidates(
         spec,
         config,
@@ -239,8 +260,6 @@ async def try_flydsl_kb_warmstart(
         read_error=plan.read_error,
     )
     original = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
-    source_hash = _sha256(spec.source_kernel)
-    driver_hash = _sha256(driver_path)
     references: list[dict] = []
 
     # Survivors of the whole gauntlet, with what this task's driver timed them
@@ -282,15 +301,7 @@ async def try_flydsl_kb_warmstart(
             "speedup": candidate["speedup"],
         }
         reason = ""
-        if candidate.get("implementation_match") is not True:
-            reason = "implementation_mismatch"
-        elif attrs.get("schema_version") != _SCHEMA_VERSION or attrs.get("rewrite_kind") != _REWRITE_KIND:
-            reason = "wrong_solution_kind"
-        elif attrs.get("source_sha256") != source_hash:
-            reason = "source_changed"
-        elif attrs.get("driver_sha256") != driver_hash:
-            reason = "driver_contract_changed"
-        elif attrs.get("builder_symbol") != spec.builder_symbol:
+        if attrs.get("builder_symbol") != spec.builder_symbol:
             reason = "builder_contract_changed"
         content = _candidate_content(plan, candidate)
         if not reason and not content.strip():
@@ -317,27 +328,34 @@ async def try_flydsl_kb_warmstart(
                     else:
                         remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
                         candidate_ms = None
+                        speedup = None
                         if remaining is None or remaining > 0:
                             benched = driver_contract.preflight_candidate(
                                 spec,
                                 driver_path,
                                 timeout_sec=_stage_timeout(_BENCH_TIMEOUT_SEC, search_deadline, remaining),
                             )
-                            candidate_ms = benched.timing_ms if benched.ok else None
-                        snr = validation.results[-1].snr_db if validation.results else None
-                        attempt.update(reason="measured", best_ms=candidate_ms)
-                        result.attempts.append(attempt)
-                        measured.append(
-                            {
-                                "index": index,
-                                "candidate": candidate,
-                                "content": content,
-                                "ms": candidate_ms,
-                                "snr_db": snr,
-                                "attempt": attempt,
-                            }
-                        )
-                        continue
+                            if benched.ok:
+                                candidate_ms = benched.timing_ms
+                                speedup = scored_speedup(benched.case_ms, source_case_ms)
+                        if speedup is None:
+                            reason = "unscorable_measurement"
+                        else:
+                            snr = validation.results[-1].snr_db if validation.results else None
+                            attempt.update(reason="measured", best_ms=candidate_ms, speedup=speedup)
+                            result.attempts.append(attempt)
+                            measured.append(
+                                {
+                                    "index": index,
+                                    "candidate": candidate,
+                                    "content": content,
+                                    "ms": candidate_ms,
+                                    "speedup": speedup,
+                                    "snr_db": snr,
+                                    "attempt": attempt,
+                                }
+                            )
+                            continue
             except Exception as error:  # noqa: BLE001 - candidate becomes reference
                 reason = f"validation_error:{type(error).__name__}"
 
@@ -353,15 +371,11 @@ async def try_flydsl_kb_warmstart(
         )
 
     if measured:
-        # Fastest on this task's own driver. A survivor whose benchmark failed is still adoptable -- it passed
-        # correctness -- but it ranks behind every timed one, because nothing is known about its speed.
-        winner = min(
+        # Best scoring on this task's own driver. A survivor whose benchmark failed never reaches this list: passing
+        # correctness says the kernel computes the right answer, not that the timing behind a claim can be reproduced.
+        winner = max(
             measured,
-            key=lambda item: (
-                item["ms"] is None,
-                item["ms"] if item["ms"] is not None else 0.0,
-                item["index"],
-            ),
+            key=lambda item: (item["speedup"], -item["index"]),
         )
         Path(spec.flydsl_kernel).write_bytes(winner["content"])
         for item in measured:
@@ -391,6 +405,7 @@ def write_flydsl_kb_solution(
     *,
     source_ms: float | None,
     flydsl_best_ms: float | None,
+    speedup: float | None,
     best_commit: str = "",
     framework: str = "",
     snr_db: float | None = None,
@@ -399,7 +414,9 @@ def write_flydsl_kb_solution(
 ) -> dict:
     """Record a validated FlyDSL port as a candidate under its identity.
 
-    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``session_key`` names the
+    Correctness alone qualifies a port; only the champion pointer is gated on speedup. ``speedup`` is the arena's
+    equal-weight mean over per-case ratios, so a consumer ranking records is ranking on the number they will be
+    graded on; the two wall times travel with it as raw evidence, not as the claim. ``session_key`` names the
     session this record belongs to, so a caller publishing repeatedly through one session replaces its own record
     rather than burying the identity's history under a sibling per publication. ``content_override`` supplies the
     kernel bytes for a caller publishing while an agent is still editing the workspace. ``snr_db`` is the accuracy
@@ -412,7 +429,6 @@ def write_flydsl_kb_solution(
     gpu_type = str(config.gpu_type or "").strip()
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
-    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
     try:
         content = content_override if content_override is not None else Path(spec.flydsl_kernel).read_bytes()
         identity, canonical_id, signature, implementation = resolve_identity(

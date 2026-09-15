@@ -5,6 +5,14 @@
 
 from __future__ import annotations
 
+import importlib.util
+import io
+import json
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from hyperloom.inference_optimizer.agentx.mapping import map_aiperf, pct, stat
@@ -95,7 +103,7 @@ def test_map_total_tput_fallback_from_in_plus_out():
 
 
 def test_e2e_norm_intvty_p90_reads_p10_slow_tail():
-    """Must read P10 (slow tail) not P90: P10 of OSL/E2EL_s is 1/P90(E2EL/OSL), upstream's definition."""
+    """Scoring and comparison use the summary rate P10, not P90."""
     s = _sample()
     r = map_aiperf(s)
     assert r["e2e_norm_intvty_p90"] == pytest.approx(22.6)  # p10, not p90=447.2
@@ -230,3 +238,60 @@ def test_a_non_list_invalid_reason_is_coerced_to_one():
         "metadata": {"submission_valid": False, "submission_invalid_reasons": "unsafe_override"},
     }
     assert map_aiperf(export)["submission_invalid_reasons"] == ["unsafe_override"]
+
+
+@pytest.mark.parametrize("standalone", [False, True], ids=["installed-package", "standalone-fallback"])
+@pytest.mark.parametrize(
+    "records",
+    [
+        None,
+        '{"metrics": {"request_latency": 1000, "time_to_first_token": 10, '
+        '"input_sequence_length": 128, "output_sequence_length": 10}}\n',
+        '{"metrics":\n',
+    ],
+    ids=["missing-records", "valid-records", "malformed-records"],
+)
+def test_file_mapper_uses_only_summary(monkeypatch, tmp_path, capsys, standalone, records):
+    from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    if standalone:
+        monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
+    spec = importlib.util.spec_from_file_location("_summary_asset_mapper", agentx_asset_dir() / "map_aiperf.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source = tmp_path / "profile_export_aiperf.json"
+    source.write_text(json.dumps(_sample()), encoding="utf-8")
+    records_path = source.with_name("profile_export.jsonl")
+    if records is not None:
+        records_path.write_text(records, encoding="utf-8")
+    output = tmp_path / "inferencex_result.json"
+    with patch("builtins.open", wraps=open) as builtin_open, patch("io.open", wraps=io.open) as io_open:
+        module.main(str(source), str(output))
+    for call in builtin_open.call_args_list + io_open.call_args_list:
+        assert Path(call.args[0]) != records_path
+
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert "comparison_metrics" not in result
+    assert result["e2e_norm_intvty_p90"] == 22.6
+    assert result == map_aiperf(_sample())
+    assert json.loads(capsys.readouterr().out) == result
+
+
+def test_deployed_mapper_maps_summary_without_installed_hyperloom(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.agentx.deploy import deploy_agentx_assets
+
+    monkeypatch.delenv("AGENTX_NONCANONICAL_REASONS", raising=False)
+    deployed = deploy_agentx_assets(tmp_path / "benchmarks")
+    script = next(path for path in deployed if path.name == "map_aiperf.py")
+    source = tmp_path / "profile_export_aiperf.json"
+    source.write_text(json.dumps(_sample()), encoding="utf-8")
+    output = tmp_path / "result.json"
+    proc = subprocess.run([sys.executable, "-I", str(script), str(source), str(output)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert "comparison_metrics" not in result
+    assert result["e2e_norm_intvty_p90"] == 22.6
+    assert result == map_aiperf(_sample())
+    assert json.loads(proc.stdout) == result

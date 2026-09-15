@@ -229,6 +229,24 @@ def test_load_v18_seeds_the_stall_counter_from_the_shared_streak(tmp_path):
     assert migrated.stall.unresolved_stall_iters == 4
 
 
+def test_load_v19_migrates_without_a_recorded_search_start_score(tmp_path):
+    """Every workspace in the field holds a v19 checkpoint, and the loop loads it whether or not it is resuming."""
+    store = LoopStateStore(str(tmp_path))
+    payload = RunState().to_dict()
+    payload["schema_version"] = 19
+    payload.pop("search_start_mean_case_speedup")
+    root = tmp_path / "forge_experiments"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "run_state.json").write_text(json.dumps(payload))
+
+    migrated = store.load()
+
+    assert migrated.schema_version == SCHEMA_VERSION
+    # Absent rather than 1.0: a campaign that never had a caller-supplied anchor never measured this, and only
+    # incremental reporting reads it -- the KEEP bar is derived from the incumbent's own per-case times.
+    assert migrated.search_start_mean_case_speedup is None
+
+
 def test_a_keep_clears_both_stall_counters():
     """One measured improvement ends the stall episode outright."""
     state = RunState()

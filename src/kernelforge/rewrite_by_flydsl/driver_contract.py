@@ -23,6 +23,7 @@ REF_MODE_UNSUPPORTED = "ref_mode_unsupported"
 REF_MODE_FAILED = "ref_mode_failed"
 REF_MODE_TIMEOUT = "ref_mode_timeout"
 REF_TIMING_UNPARSEABLE = "ref_timing_unparseable"
+REF_CASE_TIMINGS_MISSING = "ref_case_timings_missing"
 CANDIDATE_MODE_UNSUPPORTED = "candidate_mode_unsupported"
 CANDIDATE_MODE_FAILED = "candidate_mode_failed"
 CANDIDATE_MODE_TIMEOUT = "candidate_mode_timeout"
@@ -81,6 +82,7 @@ class DriverReading:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     snr_db: float | None = None
     allclose: bool | None = None
 
@@ -103,6 +105,7 @@ class PreflightReport:
     timing_ms: float | None = None
     timing_metric: str = ""
     case_ids: tuple[str, ...] = ()
+    case_ms: dict[str, float] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -126,9 +129,13 @@ def read_driver_output(text: str) -> DriverReading:
             reading.timing_metric = metric
 
     case_ids: list[str] = []
-    for case_id, _ms in _CASE_MS_RE.findall(text or ""):
+    for case_id, raw in _CASE_MS_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
+        try:
+            reading.case_ms[case_id] = float(raw)
+        except ValueError:
+            continue
     for case_id in _CASE_COMMENT_RE.findall(text or ""):
         if case_id not in case_ids:
             case_ids.append(case_id)
@@ -265,6 +272,7 @@ def _timing_report(reading: DriverReading) -> PreflightReport:
         timing_ms=reading.timing_ms,
         timing_metric=reading.timing_metric,
         case_ids=reading.case_ids,
+        case_ms=dict(reading.case_ms),
     )
     if reading.timing_metric == DEPRECATED_TIMING_METRIC:
         report.warnings.append(
@@ -319,6 +327,17 @@ def preflight_reference(
         return _failed(
             REF_TIMING_UNPARSEABLE,
             f"the driver reported no {CANONICAL_TIMING_METRIC} in {REF_BENCH_FLAG}: {run.tail}",
+        )
+    # Every speedup this run publishes is an equal-weight mean over per-case ratios, so the source side of that ratio
+    # is a required output of the reference mode, not a nicety. Without it the run can still time the source in
+    # aggregate and would go on to publish a number measured against something else entirely, so it is refused here,
+    # before any budget is spent.
+    if not reading.case_ms:
+        return _failed(
+            REF_CASE_TIMINGS_MISSING,
+            f"the driver timed the source in {REF_BENCH_FLAG} but printed no "
+            f"'case_ms: <case_id> <ms>' line, and the per-case times are what "
+            f"every reported speedup divides by: {run.tail}",
         )
     return _timing_report(reading)
 
