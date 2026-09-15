@@ -19,7 +19,6 @@ class IntentType(str, Enum):
     UPDATE_STATE = "update_state"
     ALERT = "alert"
     REQUEST = "request"
-    RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"
     # Robustness never emits this; kept in the mirror for the contract test.
     EXTEND_LEASE = "extend_lease"
@@ -476,7 +475,6 @@ INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
 _REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.REQUEST: ("target_agent", "kind"),
-    IntentType.RESPONSE: ("in_reply_to", "kind"),
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.SPECIALIST_DONE: (

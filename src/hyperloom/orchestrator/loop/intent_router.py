@@ -57,7 +57,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
-    IntentType.RESPONSE: "_handle_response",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -1061,7 +1060,7 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        # Always record the request on the bus for the kernel reactor / replay.
+        # Always record the request on the bus for replay.
         request_msg = Message.new(
             source,
             target_agent,
@@ -1283,23 +1282,6 @@ class IntentRouter:
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
-
-    async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester."""
-        in_reply_to = intent.payload["in_reply_to"]
-        # Locate the original requester so we can address the response.
-        original = await self.bus.lookup_by_id(in_reply_to)
-        target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                target,
-                "response",
-                dict(intent.payload),
-                in_reply_to=in_reply_to,
-                priority=1,
-            )
-        )
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""

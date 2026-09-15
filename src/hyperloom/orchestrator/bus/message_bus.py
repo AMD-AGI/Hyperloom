@@ -69,7 +69,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "strategy_change",
         }
     ),
-    "kernel_agent": frozenset({"request"}),
 }
 
 

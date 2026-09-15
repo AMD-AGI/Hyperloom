@@ -84,7 +84,6 @@ def test_update_state_passes(policy: PolicyAware):
     [
         IntentType.PROPOSE_ACTION,
         IntentType.REQUEST,
-        IntentType.RESPONSE,
         IntentType.REVIEW_VERDICT,
     ],
 )
