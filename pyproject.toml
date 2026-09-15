@@ -450,6 +450,8 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
+    "-vv",
+    "-o", "faulthandler_timeout=180",
     "-m", "not critic_agent_e2e and not robustness_agent_e2e and not targeted_build_e2e",
     "--cov=.", "--cov-report=",
 ]
