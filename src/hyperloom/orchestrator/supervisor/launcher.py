@@ -80,8 +80,8 @@ def spawn_supervisor(
         env: Environment to read the switches from; defaults to ``os.environ``.
 
     Returns:
-        subprocess.Popen | None: The supervisor process, or ``None`` when
-        :data:`SUPERVISOR_ENABLE_ENV` switched it off.
+        subprocess.Popen | None: The supervisor process, or ``None`` unless
+        :data:`SUPERVISOR_ENABLE_ENV` opts into it.
 
     Raises:
         OSError: If the supervisor could not be started.
@@ -90,8 +90,11 @@ def spawn_supervisor(
     # Its environment is scrubbed of control-plane credentials and start-up
     # hooks, which would otherwise be readable from ``/proc/<pid>/environ``.
     environ = scrub_benchmark_process_env(dict(os.environ if env is None else env))
-    if not _truthy(environ.get(SUPERVISOR_ENABLE_ENV, "1")):
-        log.info("supervisor: disabled by %s", SUPERVISOR_ENABLE_ENV)
+    # Off by default: the stall window only measures the age of a timestamp the
+    # reconciler refreshes at the top of every tick, so it detects a wedged
+    # coordinator but not one that ticks without making progress.
+    if not _truthy(environ.get(SUPERVISOR_ENABLE_ENV, "0")):
+        log.info("supervisor: not enabled (%s)", SUPERVISOR_ENABLE_ENV)
         return None
     argv = [
         sys.executable,
