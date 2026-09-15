@@ -143,37 +143,25 @@ AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
 # stop_reason vocab
 STOP_REASON_VOCAB: frozenset[str] = frozenset(
     {
-        # Legacy sentinels — kept for backward compat (resume from old sessions).
         "target_reached",
         "time_exhausted",
         "max_ticks",
-        "policy_loop",
         "baseline_failed",
         "emergency",
         "coordinator_exception",
         "signal",
         "unknown",
         "custom",
-        # Newer reasons.
-        "crash_threshold_exceeded",
         "robustness_escalated",
-        "user_stop_requested",
         "prelude_baseline_failed",
         "prelude_cold_anchor_low_budget",
-        "prelude_policy_loop",
         "time_exhausted_during_prelude",
-        "recipe_kb_t0_failed",
-        "recipe_kb_drain_failed",
-        "recipe_kb_commit_failed",
         "warm_replay_rollback_failed",
         "active_inferencex_checkout_missing",
-        "plateau_explore",
-        "plateau_kernel",
         "no_kernel_skipped",
         "sweep_done",
         "sweep_failed",
         "framework_agent_phase_done",
-        "framework_agent_plateau",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
         "global_converged",
         # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
@@ -185,9 +173,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "model_config_incompatible",
         # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
         "baseline_arg_error",
-        # Enablement gave up without a booting baseline: a revalidation the
-        # round depended on never promoted.
-        "enablement_stalled",
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
         "enablement_attempts_exhausted",

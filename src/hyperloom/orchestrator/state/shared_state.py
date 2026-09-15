@@ -1535,7 +1535,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         While this guard is active a ``skip_to_close`` hint is dropped; a
         not-yet-enabled run may only terminate via honest paths that do not route
-        through ``skip_to_close`` (``enablement_stalled``,
+        through ``skip_to_close`` (``enablement_attempts_exhausted``,
         ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
         aborts).
 
