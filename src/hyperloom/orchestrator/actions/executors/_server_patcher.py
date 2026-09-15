@@ -112,12 +112,29 @@ _PATCH_TREE_REL = ("examples", "custom_workflows", "inference_analysis")
 # Both patch trees this module applies are SGLang's, and each ships its subdirs under this prefix.
 _PATCH_SUBDIR_PREFIX = "sglang"
 
+#: Suffix of the patch sets cut against SGLang's release branch rather than its
+#: point-release tag. The two differ in the files a patch expects, so a build off
+#: the release branch only applies cleanly against this variant.
+_RELEASE_BRANCH_SUFFIX = "sgldev"
 
-def _versioned_patches_subdir_name(version: str) -> str | None:
-    """Map an SGLang version to the per-version patch subdir name (e.g."""
+
+def _is_release_branch_build(version: str) -> bool:
+    """Whether a version string names a build off SGLang's release branch.
+
+    setuptools_scm marks those with a ``.dev`` segment, a ``+g<sha>`` local part,
+    or both (``0.5.18.dev20260825+g0c7ff19e3b``); a point release carries neither.
+    """
     text = (version or "").strip()
     if not text:
-        return None
+        return False
+    return ".dev" in text or bool(re.search(r"\+g[0-9a-f]{7,}", text))
+
+
+def _versioned_patches_subdir_names(version: str) -> list[str]:
+    """Patch subdir names to try for an SGLang version, best match first."""
+    text = (version or "").strip()
+    if not text:
+        return []
     # Strip dev/local suffixes so point-release tags still resolve.
     head = text.split("-", 1)[0].split("+", 1)[0]
     parts = head.split(".") if head else []
@@ -129,8 +146,17 @@ def _versioned_patches_subdir_name(version: str) -> str | None:
         else:
             break
     if len(numeric) < 2:
-        return None
-    return f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
+        return []
+    base = f"{_PATCH_SUBDIR_PREFIX}_" + "_".join(numeric)
+    if _is_release_branch_build(version):
+        return [f"{base}_{_RELEASE_BRANCH_SUFFIX}", base]
+    return [base]
+
+
+def _versioned_patches_subdir_name(version: str) -> str | None:
+    """The preferred patch subdir name for a version, or ``None`` if unparseable."""
+    names = _versioned_patches_subdir_names(version)
+    return names[0] if names else None
 
 
 def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
@@ -147,6 +173,11 @@ def _subdir_version_tuple(name: str) -> tuple[int, ...] | None:
     return tuple(numeric) if len(numeric) >= 2 else None
 
 
+def _subdir_is_release_branch(name: str) -> bool:
+    """Whether a patch subdir name is the release-branch variant."""
+    return name.endswith(f"_{_RELEASE_BRANCH_SUFFIX}")
+
+
 def _resolve_versioned_patches_dir(
     patches_root: Path,
     version: str,
@@ -156,8 +187,7 @@ def _resolve_versioned_patches_dir(
     def _qualifies(d: Path) -> bool:
         return any(d.glob("*.patch"))
 
-    subdir_name = _versioned_patches_subdir_name(version)
-    if subdir_name is not None:
+    for subdir_name in _versioned_patches_subdir_names(version):
         candidate = patches_root / subdir_name
         if candidate.is_dir() and _qualifies(candidate):
             return candidate
@@ -168,13 +198,20 @@ def _resolve_versioned_patches_dir(
     running = _version_tuple(version)
     if running is None:
         return None
+    # Keyed by version alone, the plain and release-branch subdirs of one version
+    # collide and directory order decides the winner; prefer the variant matching
+    # the running build instead.
+    want_branch = _is_release_branch_build(version)
     available: dict[tuple[int, ...], Path] = {}
-    for d in patches_root.iterdir():
+    for d in sorted(patches_root.iterdir()):
         if not d.is_dir() or not _qualifies(d):
             continue
         vt = _subdir_version_tuple(d.name)
-        if vt:
-            available[vt] = d
+        if not vt:
+            continue
+        if vt in available and _subdir_is_release_branch(d.name) is not want_branch:
+            continue
+        available[vt] = d
     if not available:
         return None
     if len(running) >= 2:
