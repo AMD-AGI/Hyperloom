@@ -51,8 +51,15 @@ When waits or prefetches change output repeatability, read the
 It distinguishes per-wave memory completion from cross-wave synchronization
 before overwriting a shared tile. The repaired Stage1 passed the canonical gate
 and measured a 1.86% E2E gain on one bracketed eight-GPU workload. The card also
-records the limited model-quality evaluation and a separate Stage2 rejection
-whose nondeterministic compiler control failed the same relative-error test.
+records the limited model-quality evaluation. For BF16 atomic reductions, read
+the [Stage2 validation case](cases/kimi_k3_moe_a16w4_atomic_stage2_gfx950.md):
+an unchanged compiler control failed the initial finite-max comparison, while
+a separately frozen source-calibrated contract and isolated expert contributions
+passed. Bounded precision and unchanged output repeatability are different claims.
+The combined repaired-Stage1/Stage2 serving trial measured 2.26% against the
+faster source control (2.40% against pooled source). Fixed-count full-question
+replicas did not reproduce a persistent model-quality loss; the card retains
+the initial MMLU miss, changed numerical contract and limits of that evidence.
 
 ## Case knowledge: Neha / Evolve
 
