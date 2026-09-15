@@ -30,6 +30,7 @@ _OWNER_PATTERNS: tuple[str, ...] = (
     "sglang.srt",
     "vllm.entrypoints",
     "vllm serve",
+    "atom.entrypoints",
     "EngineCore",
     "Magpie",
     "benchmark_serving",
@@ -258,10 +259,16 @@ class RecoverExecutor:
         if not candidates:
             return []
         killed: list[dict[str, Any]] = []
+        atom_members: dict[int, dict[int, int]] = {}
         for entry in candidates:
             pid = entry["pid"]
             cmd = str(entry.get("cmd", ""))
-            pattern = next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            is_atom = self._is_atom_server(cmd)
+            pattern = (
+                "atom.entrypoints"
+                if is_atom
+                else next((marker for marker in self.OWNER_PATTERNS if marker in cmd), None)
+            )
             if pattern is None:
                 log.warning(
                     "recover_executor: pid %d is not a recognized session owner; not signalling",
@@ -271,6 +278,27 @@ class RecoverExecutor:
                 continue
             entry["pattern"] = pattern
             pgid = entry.get("pgid")
+            if is_atom and os.name == "posix" and isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp():
+                members = self._atom_group_members(pgid)
+                # Capture identities while the recorded ATOM leader can still
+                # establish ownership; its anonymous workers may outlive TERM.
+                if (
+                    pid not in members
+                    or not self._is_atom_server(self._pid_cmdline(pid))
+                    or self._process_identity(pid) != (pgid, members[pid])
+                ):
+                    # A recorded pgid is stale data: the kernel may already have handed it
+                    # to somebody else. Only the recorded leader, still in that group and
+                    # still reading as an ATOM server, can authorize signalling it. Keep
+                    # the pidfile so a later pass retries rather than losing the record.
+                    log.warning(
+                        "recover_executor: ATOM owner identity could not be confirmed for pid %d; "
+                        "not signalling process group %s",
+                        pid,
+                        pgid,
+                    )
+                    continue
+                atom_members[pid] = members
             sent = (
                 self._send_group_signal(int(pgid), signal.SIGTERM) or self._send_signal(pid, signal.SIGTERM)
                 if isinstance(pgid, int)
@@ -283,9 +311,42 @@ class RecoverExecutor:
             return []
         # Wait then SIGKILL survivors of the TERMed set (no re-discover).
         time.sleep(self.SERVER_KILL_WAIT_S)
+        killed_workers: list[dict[str, Any]] = []
         for entry in killed:
             pid = entry["pid"]
             pgid = entry.get("pgid")
+            # The snapshot is what makes the anonymous workers reachable by identity, but it
+            # cannot see a rank forked after it was taken.
+            for member_pid, starttime in atom_members.get(pid, {}).items():
+                member_cmd = self._pid_cmdline(member_pid)
+                if self._process_identity(member_pid) != (pgid, starttime):
+                    continue
+                if not self._send_signal(member_pid, signal.SIGKILL):
+                    continue
+                if member_pid == pid:
+                    entry["signal"] = "KILL"
+                else:
+                    killed_workers.append(
+                        {
+                            "pid": member_pid,
+                            "pgid": pgid,
+                            "cmd": member_cmd,
+                            "pid_file": entry.get("pid_file"),
+                            "pattern": entry.get("pattern"),
+                            "signal": "KILL",
+                        }
+                    )
+            if pid in atom_members and isinstance(pgid, int):
+                # A rank forked after the snapshot is in neither the recorded set nor, by
+                # then, anything that still reads as an owner: the leader we just killed was
+                # the only member carrying the entrypoint in its cmdline. Ownership was
+                # established before TERM, so clear the group on that evidence rather than
+                # re-deriving it from a cmdline that no longer exists.
+                self._send_group_signal(pgid, signal.SIGKILL)
+                # That kill targeted members this pass never enumerated, so it proves
+                # nothing about whether the group is gone. Keep the pidfile as a handle
+                # for the next pass instead of recording the group as finished.
+                continue
             if isinstance(pgid, int):
                 still_owned = bool(self._process_group_owner_cmd(pgid))
                 alive = self._process_group_alive(pgid)
@@ -302,7 +363,47 @@ class RecoverExecutor:
             if sent:
                 entry["signal"] = "KILL"
             self._remove_finished_pidfile(entry, force=bool(sent))
-        return killed
+        return killed + killed_workers
+
+    @staticmethod
+    def _is_atom_server(cmd: str) -> bool:
+        """Identify the module entrypoint rather than framework names in its arguments.
+
+        Every ``-m`` is checked, not just the first: a launcher prefix carries its own
+        (``numactl -m 0 python3 -m atom.entrypoints.openai_server``) and matching only
+        the first one reads the launcher's argument instead of the module.
+        """
+        args = cmd.split()
+        return any(
+            arg == "-m" and args[i + 1 :][:1] == ["atom.entrypoints.openai_server"] for i, arg in enumerate(args)
+        )
+
+    @staticmethod
+    def _process_identity(pid: int) -> tuple[int, int] | None:
+        """Return a live process's group and start time, or no usable identity."""
+        try:
+            fields = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if fields[0] == "Z":
+                return None
+            return int(fields[2]), int(fields[19])
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _atom_group_members(self, pgid: int) -> dict[int, int]:
+        """Snapshot members of a recognized ATOM group before its leader exits."""
+        try:
+            entries = list(Path("/proc").iterdir())
+        except OSError:
+            return {}
+        members: dict[int, int] = {}
+        for entry in entries:
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            identity = self._process_identity(pid)
+            if identity is not None and identity[0] == pgid:
+                members[pid] = identity[1]
+        return members
 
     def _send_group_signal(self, pgid: int, sig: signal.Signals) -> bool:
         """Signal an owned process group without touching our own group."""
