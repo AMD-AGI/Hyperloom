@@ -404,30 +404,47 @@ def _claim_attempt_index(attempts: Path) -> int:
     return index
 
 
-def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+#: Capture-failure categories. ``instrumentation`` is the profiler's own shape discovery colliding with capture --
+#: the same server args capture cleanly with no profiler attached, so the fix belongs to the instrumentation.
+#: ``config`` is the server args themselves failing to capture. Roofline reports the category instead of acting on
+#: it; only baseline still uses the boolean, to decide its one-shot retry.
+CUDA_GRAPH_CAPTURE_INSTRUMENTATION = "instrumentation"
+CUDA_GRAPH_CAPTURE_CONFIG = "config"
+
+
+def _classify_cuda_graph_capture_failure(*texts: str) -> tuple[str, str]:
+    """Classify a capture failure as ``(category, matched_marker)``; empty category means no marker matched.
+
+    The marker is reported alongside the category because the match is a string heuristic: an offline reader has to
+    be able to see what fired and overrule it.
+    """
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
     # Profile-cuda-graph assert wins over the assertionerror gate.
     if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
-        return True
+        return CUDA_GRAPH_CAPTURE_INSTRUMENTATION, " + ".join(_CUDA_GRAPH_PROFILE_ASSERT_MARKERS)
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
     blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
     saw_pure_weak = False
     for idx, line in enumerate(lowered):
-        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
-        if is_strong:
+        strong = next((m for m in _CUDA_GRAPH_STRONG_MARKERS if m in line), "")
+        if strong:
             lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
             hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
             if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
-                return True
+                return CUDA_GRAPH_CAPTURE_CONFIG, strong
             continue
         if _CUDA_GRAPH_WEAK_MARKER in line:
             saw_pure_weak = True
     if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
-        return True
-    return False
+        return CUDA_GRAPH_CAPTURE_CONFIG, _CUDA_GRAPH_WEAK_MARKER
+    return "", ""
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+    return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
 # Startup-time "the GPUs are already occupied" refusals.
