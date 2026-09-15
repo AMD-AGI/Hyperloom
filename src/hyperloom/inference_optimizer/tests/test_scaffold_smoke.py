@@ -158,13 +158,11 @@ async def test_sqlite_connection_transaction_rollback_on_error(tmp_path):
         with pytest.raises(sqlite3.IntegrityError):
             async with sc.transaction() as cur:
                 cur.execute(
-                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                    "payload, ts) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                     ("dup", "A", "B", "t", "{}", "t"),
                 )
                 cur.execute(
-                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, "
-                    "payload, ts) VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO events(msg_id, from_agent, to_agent, topic, payload, ts) VALUES (?,?,?,?,?,?)",
                     ("dup", "A", "B", "t", "{}", "t"),
                 )
         rows = await sc.fetchall("SELECT msg_id FROM events")

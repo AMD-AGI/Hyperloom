@@ -1554,8 +1554,7 @@ def test_probe_queries_resolve_against_the_real_coordinator_schema(tmp_path):
             ("tsk-a", "run_benchmark", "running", "{}", "idem-a", "t0", "t1"),
         )
         conn.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-            "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
             ("m-1", "orchestration", "*", "heartbeat", None, '{"n": 1}', "t1"),
         )
         conn.commit()
