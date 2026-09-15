@@ -48,7 +48,7 @@ from ..state.optimization_journal import (
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_FRAMEWORK_AGENT
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
@@ -1381,6 +1381,9 @@ class WritebackCollaborator:
             # and so does a session that never admitted the eval lane — nothing
             # would re-run the eval, so holding the budget just stalls the run.
             eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
+            # Baseline failures are the ENABLEMENT phase's input, not a reason to stop
+            # the run; its own attempt cap bounds it.
+            in_enablement = str(self.shared_state.phase or "").strip().upper() == PHASE_ENABLEMENT
             if eval_failed:
                 self._persist_eval_failure(result_payload)
             if stopped_by_the_run:
@@ -1426,7 +1429,7 @@ class WritebackCollaborator:
                 # that failed some other way is no evidence the arguments were
                 # fixed.
                 self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress:
+                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not in_enablement:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1436,6 +1439,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not eval_pending_suppress
+                and not in_enablement
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
@@ -5746,7 +5750,7 @@ class WritebackCollaborator:
         import shutil
         import signal
 
-        from ..framework.targeted_build import kill_build_pgroup
+        from ..enablement.runtime.targeted_build import kill_build_pgroup
 
         state = self.shared_state
         pending = getattr(state, "pending_targeted_build", {}) or {}

@@ -61,7 +61,7 @@ _PHASE_HEADERS: dict[str, str] = {
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
 _EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
-_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
+_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE", "ENABLEMENT"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
@@ -236,9 +236,11 @@ def _section_phase_semantics(
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
-            "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
-            "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
+            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
+            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
+            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
+            "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
             "current phase exhausted; the Coordinator validates the hint vocab",

@@ -380,11 +380,11 @@ def check_server_argv(
     Returns:
         ArgvVerdict: The verdict, and the argv that should now launch.
     """
-    from hyperloom.orchestrator.framework.adapters import get_adapter
+    from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
     probe = probe if probe is not None else _default_probe
     name = framework.strip().lower()
-    parser_source = get_adapter(name).argv_parser_source()
+    parser_source = parser_source_for(name)
     if not parser_source:
         return ArgvVerdict(
             status=UNAVAILABLE,

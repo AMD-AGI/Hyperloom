@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.orchestrator.phases import framework as _phase_framework
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -31,6 +31,8 @@ def test_every_phase_gets_a_budget_share_and_the_shares_sum_to_one():
     overhead = budget[_phase_state.PHASE_PRELUDE] + budget[_phase_state.PHASE_CLOSE]
     assert work >= 0.8
     assert overhead <= 0.1
+    # ENABLEMENT is not counted in work (it precedes the optimization phases).
+    assert _phase_state.PHASE_ENABLEMENT in budget
 
 
 # --------------------------------------------------------------------------- # Shared stub for the arm behavior
@@ -219,7 +221,7 @@ class _PumpStub(_Stub):
         super().__init__(tmp_path, **kwargs)
         # Discovery has come back empty its full retry budget, so the upstream lane declines and the tick reaches the
         # arm below it.
-        self.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+        self.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         return ""
@@ -232,9 +234,9 @@ class _PumpStub(_Stub):
         (0, True, "candidate_discovery"),
         (0, False, "candidate_discovery"),
         # Discovery spent its retries. The arm takes over...
-        (_fa_client.DISCOVER_FAILURE_RETRY_LIMIT, True, "framework_local_explore"),
+        (_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT, True, "framework_local_explore"),
         # ...and with the arm off there is nothing left, so the source arm reports itself dry instead of idling.
-        (_fa_client.DISCOVER_FAILURE_RETRY_LIMIT, False, "phase_done"),
+        (_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT, False, "phase_done"),
     ],
 )
 def test_an_empty_pool_walks_discovery_then_the_arm_then_done(
@@ -355,7 +357,7 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     """Retries must not collide on one key, or the streak can never advance."""
     stub = _Stub(tmp_path, authoring=True, local_explore=False)
     keys = []
-    for empties in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+    for empties in range(_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT):
         stub.shared_state.framework_agent_empty_discoveries = empties
         assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
         keys.append(stub.tasks.created[-1]["idempotency_key"])
@@ -365,7 +367,7 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     assert len(set(keys)) == len(keys)
 
     # Budget spent: the lane declines so the rungs below it are reachable.
-    stub.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    stub.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
 
 
@@ -401,7 +403,7 @@ def test_a_lane_that_cannot_run_retires_on_its_own_budget(tmp_path: Path):
     task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
     keys = []
 
-    for _ in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+    for _ in range(_phase_framework.DISCOVER_FAILURE_RETRY_LIMIT):
         assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
         keys.append(stub.tasks.created[-1]["idempotency_key"])
         stub.tasks._queued.clear()

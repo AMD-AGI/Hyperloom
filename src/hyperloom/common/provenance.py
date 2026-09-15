@@ -60,7 +60,7 @@ RESOLVED_FRAMEWORK_ENV: str = "HYPERLOOM_RESOLVED_FRAMEWORK"
 
 #: Runtime-arch overrides only. ``PYTORCH_ROCM_ARCH`` is deliberately absent:
 #: it names the archs a wheel is *compiled* for, not the installed device, and
-#: ``framework/targeted_build.py`` sets it for exactly that purpose.
+#: ``enablement/runtime/targeted_build.py`` sets it for exactly that purpose.
 _GFX_ENVS = ("HYPERLOOM_GFX_ARCH", "GFX_ARCH")
 _GRAPH_MODE_ENVS = ("HYPERLOOM_GRAPH_MODE", "GRAPH_MODE")
 _SERVER_ARGS_ENVS = ("HYPERLOOM_SERVER_ARGS", "SERVER_ARGS")

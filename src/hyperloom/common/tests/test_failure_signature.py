@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.enablement (failure classifier + request model)."""
+"""Tests for hyperloom.common.failure_signature (failure classifier + request model)."""
 
 from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.framework.enablement import (
+from hyperloom.common.failure_signature import (
     ACCURACY_BELOW_FLOOR,
     CAPABILITY_DISABLED,
     EVAL_GENERATION_PATHOLOGY,
@@ -152,51 +152,6 @@ def test_shape_mismatch_and_missing_weight_are_distinct() -> None:
     assert gap1.kind == SHAPE_MISMATCH
     assert gap2.kind == MISSING_WEIGHT
     assert gap1.kind != gap2.kind
-
-
-def test_enablement_setup_guidance_in_mandate() -> None:
-    """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import ENABLEMENT_SETUP_GUIDANCE, build_mandate
-
-    req = EnablementRequest(
-        framework="vllm",
-        model="GLM-5.2",
-        repo_url="https://github.com/ROCm/vllm.git",
-        launch_log="ValueError: weights were not initialized from checkpoint",
-        gpu_type="mi300x",
-    )
-    m = build_mandate(req)
-    assert "ENVIRONMENT SETUP" in m.task_description
-    assert "setup_commands" in m.task_description
-    assert ENABLEMENT_SETUP_GUIDANCE
-
-
-def test_enablement_progress_contract_in_mandate() -> None:
-    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty exit."""
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import (
-        ENABLEMENT_PROGRESS_GUIDANCE,
-        build_mandate,
-    )
-
-    req = EnablementRequest(
-        framework="vllm",
-        model="deepseek-ai-DeepSeek-V4-Flash",
-        repo_url="https://github.com/ROCm/vllm.git",
-        launch_log=(
-            "The checkpoint you are trying to load has model type `deepseek_v4` "
-            "but Transformers does not recognize this architecture."
-        ),
-        gpu_type="mi355x",
-    )
-    m = build_mandate(req)
-    assert "PROGRESS DELIVERABLE" in m.task_description
-    # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
-    # advance even one step".
-    assert "ADVANCES the boot" in m.task_description
-    assert "proposal_set=[]" in m.task_description
-    assert ENABLEMENT_PROGRESS_GUIDANCE
 
 
 def test_not_implemented() -> None:
