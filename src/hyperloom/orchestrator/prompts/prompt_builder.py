@@ -466,12 +466,13 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "gate; a variant copied verbatim off the untested queue is "
             "re-labelled from the queue entry either way, so an omitted or "
             "wrong value costs nothing but a less readable audit trail). "
-            "SIZE: target 4 variants, hard maximum 6. Variants run serially "
+            "SIZE: target 4 variants, hard maximum 8. Variants run serially "
             "on a single benchmark lane at ~13min each, so a 4-variant round "
-            "is about an hour of GPU. Submit a 5th or 6th only when it still "
-            "beats the median of the four you already have; a grid the round "
-            "cannot finish is truncated from the end, dropping whatever you "
-            "ranked last rather than whatever is worth least."
+            "is about an hour of GPU and an 8-variant round is most of a "
+            "shift. Submit a 5th through 8th only when it still beats the "
+            "median of the four you already have; a grid the round cannot "
+            "finish is truncated from the end, dropping whatever you ranked "
+            "last rather than whatever is worth least."
         )
     if name == "sweep":
         return (
@@ -725,7 +726,7 @@ def _idea_generation_lines() -> list[str]:
         "",
         "Draw first from `=== Untested proposals (current cycle) ===`; the",
         "five moves above are for topping the grid up to its target of 4",
-        "(hard maximum 6) once the queue is drained of anything worth running.",
+        "(hard maximum 8) once the queue is drained of anything worth running.",
         "",
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",

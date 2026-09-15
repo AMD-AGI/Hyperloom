@@ -95,14 +95,14 @@ def test_the_queue_header_is_byte_identical():
 def test_the_queue_says_nothing_about_a_predictor():
     block = _specialist_state().to_untested_proposals_summary()
     lowered = block.lower()
-    for token in ("first-pass", "primatune", "votes=", "mandate"):
+    for token in ("predictor", "primatune", "votes=", "mandate"):
         assert token not in lowered, token
 
 
 def test_the_orchestration_system_prompt_says_nothing_about_a_predictor():
     """The static asset carries no predictor-specific wording at all.
 
-    Anything the LLM needs to know about a first-pass row travels with the row,
+    Anything the LLM needs to know about a predictor row travels with the row,
     in the rendered block header, so this stays true whether or not a predictor
     is configured.
     """
@@ -110,7 +110,7 @@ def test_the_orchestration_system_prompt_says_nothing_about_a_predictor():
 
     text = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
     assert "primatune" not in text.lower()
-    assert "first-pass" not in text.lower()
+    assert "predictor" not in text.lower()
 
 
 def test_a_constant_priority_leaves_the_ranking_untouched():

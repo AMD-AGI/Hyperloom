@@ -566,7 +566,7 @@ class _RenderMixin:
             # block tells orchestration to dispatch as one grid, and an
             # overflow row is an ordinary suggestion rather than part of it.
             batch_id = str(row.get("batch_id") or "") if row.get("batch") else ""
-            parts.append(f"[first-pass:{batch_id}]" if batch_id else "[first-pass]")
+            parts.append(f"[predictor-batch:{batch_id}]" if batch_id else "[predictor-overflow]")
         if "votes" in row:
             parts.append(f"votes={row['votes']}/{row['samples']}")
         if row["atomic"]:
@@ -694,16 +694,16 @@ class _RenderMixin:
         if any(row.get("first_pass") for row in shown) or mandate:
             out = [
                 "Executable proposals that no explore round has benched.",
-                "Ranked first-pass predictions first, then by gap severity and recency. Compose the",
-                "next `explore` grid from these; dispatch an ATOMIC entry verbatim as one variant —",
+                "Ranked trained-predictor proposals first, then by gap severity and recency. Compose",
+                "the next `explore` grid from these; dispatch an ATOMIC entry verbatim as one variant —",
                 "never split or re-derive its flags.",
-                "A `[first-pass:<id>]` row belongs to one predictor batch, already sized to your",
+                "A `[predictor-batch:<id>]` row belongs to one predictor batch, already sized to your",
                 "grid target, so a batch is a ready-made grid if you want one. `votes=k/n` is how",
                 "many of the predictor's own samples proposed that row.",
-                "The predictor is re-asked only when the optimization stack moves, so a first-pass",
+                "The predictor is re-asked only when the optimization stack moves, so a predictor",
                 "row you pass over now is very likely never measured in this cycle — that is the",
                 "cost of skipping one, and if you do skip one, say why in your rationale.",
-                "A `[first-pass]` row without an id is batch overflow: available, not part of the unit.",
+                "A `[predictor-overflow]` row is batch overflow: available, not part of the unit.",
             ]
         else:
             out = [
@@ -714,7 +714,7 @@ class _RenderMixin:
         out.append("")
         for batch in self._first_pass_batches():
             out.append(
-                f"First-pass batch {batch['id']} (cycle {batch['cycle']}): "
+                f"Predictor batch {batch['id']} (cycle {batch['cycle']}): "
                 f"{batch['total']} rows, {batch['total'] - batch['unbenched']} benched so far."
             )
         out.extend(self._untested_proposal_line(row) for row in shown)
@@ -725,7 +725,7 @@ class _RenderMixin:
             out.extend(
                 [
                     "",
-                    "First-pass source-change mandate (prose, not a variant). To act on it, dispatch",
+                    "Predictor source-change mandate (prose, not a variant). To act on it, dispatch",
                     "`delegate{action_name='specialist', params={scope:'freeform', mode:'patch', "
                     f"primatune_mandate_id:'{mandate['mandate_id']}', task_description:'<one line>'}}}}`.",
                     "Carry the id verbatim: the Coordinator substitutes the mandate's own text over",

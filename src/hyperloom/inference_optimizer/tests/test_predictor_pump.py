@@ -367,7 +367,8 @@ class TestRanking:
         nothing there and they are what the batch refills from once the
         exclusion filter has thinned it. Only rows past *that* are surplus.
         """
-        answer = _sampled(*[({f"--f{i}": "1"}, {}, 8 - i) for i in range(8)])
+        returned = pp.MAX_QUEUED + 2
+        answer = _sampled(*[({f"--f{i}": "1"}, {}, returned - i) for i in range(returned)])
         _stub(monkeypatch, answer)
         phase = _Phase()
         _run(phase)
@@ -378,8 +379,124 @@ class TestRanking:
             pp.MAX_QUEUED - pp.MAX_PROPOSALS
         )
         dropped = _rounds(phase)[0]["dropped"]
-        assert len(dropped) == 8 - pp.MAX_QUEUED
+        assert len(dropped) == returned - pp.MAX_QUEUED
         assert {d["dropped_reason"] for d in dropped} == {"over_surface_cap"}
+
+
+class TestStackSubtraction:
+    """The service answers with a launch recipe; the queue carries the delta.
+
+    On a deep stack the answer restates most of the champion. Over 46 real
+    proposals, 74 of 152 knobs were an exact echo and exactly one was an
+    override, so the echo has to go and the override has to stay.
+    """
+
+    GEMMA_CC = (
+        '--compilation-config {"splitting_ops":[],"pass_config":'
+        '{"fuse_qk_norm_rope_kvcache":true,"rope_kvcache_fusion_max_token_num":16384}}'
+    )
+    GEMMA_ENVS = {
+        "VLLM_ATTENTION_BACKEND": "ROCM_AITER_UNIFIED_ATTN",
+        "VLLM_ROCM_USE_AITER": "1",
+        "VLLM_ROCM_USE_AITER_MHA": "0",
+        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "1",
+    }
+
+    def test_an_exact_echo_is_removed(self):
+        """Gemma-4-31B round 2 Q0: 174 chars of which 41 were the change."""
+        args, envs, echoed = pp._subtract_stack(
+            f"{self.GEMMA_CC} --kv-cache-dtype fp8_e4m3 --block-size 32",
+            dict(self.GEMMA_ENVS),
+            f"--gpu-memory-utilization 0.90 {self.GEMMA_CC}",
+            dict(self.GEMMA_ENVS),
+        )
+        assert args == "--kv-cache-dtype fp8_e4m3 --block-size 32"
+        assert envs == {}
+        assert echoed == [
+            "--compilation-config",
+            "env:VLLM_ATTENTION_BACKEND",
+            "env:VLLM_ROCM_USE_AITER",
+            "env:VLLM_ROCM_USE_AITER_MHA",
+            "env:VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
+        ]
+
+    def test_an_override_survives(self):
+        """Same flag, different value, is the whole point of a variant."""
+        args, envs, echoed = pp._subtract_stack(
+            "--block-size 32 --kv-cache-dtype fp8",
+            {"VLLM_ROCM_USE_AITER": "0"},
+            "--block-size 64",
+            {"VLLM_ROCM_USE_AITER": "1"},
+        )
+        assert args == "--block-size 32 --kv-cache-dtype fp8"
+        assert envs == {"VLLM_ROCM_USE_AITER": "0"}
+        assert echoed == []
+
+    def test_an_all_echo_proposal_reduces_to_nothing(self, active, monkeypatch):
+        """Subtracted to empty, it is what ``already_on_stack`` has always meant."""
+        args, envs, echoed = pp._subtract_stack(
+            self.GEMMA_CC, dict(self.GEMMA_ENVS), self.GEMMA_CC, dict(self.GEMMA_ENVS)
+        )
+        assert (args, envs) == ("", {})
+        assert echoed
+
+        _stub(monkeypatch, _answer(server_args={"--kv-cache-dtype": "fp8"}, envs=dict(self.GEMMA_ENVS)))
+        phase = _Phase(
+            current_best={"extra_server_args": "--kv-cache-dtype fp8", "extra_envs": dict(self.GEMMA_ENVS)}
+        )
+        _run(phase)
+        assert _rounds(phase) == []
+
+    def test_a_bare_switch_and_an_equals_form_both_pair(self):
+        """`--async-scheduling` pairs with "" and `--a=1` splits on the sign."""
+        args, envs, echoed = pp._subtract_stack(
+            "--async-scheduling --block-size=64 --kv-cache-dtype fp8",
+            {},
+            "--async-scheduling --block-size=64",
+            {},
+        )
+        assert args == "--kv-cache-dtype fp8"
+        assert echoed == ["--async-scheduling", "--block-size"]
+
+    def test_an_empty_stack_leaves_the_proposal_untouched(self):
+        """Cycle 0 stack depth 0: every proposal is already a pure delta."""
+        args, envs, echoed = pp._subtract_stack("--kv-cache-dtype fp8", {"X": "1"}, "", {})
+        assert (args, envs, echoed) == ("--kv-cache-dtype fp8", {"X": "1"}, [])
+
+    def test_the_queued_row_records_what_it_subtracted(self, active, monkeypatch):
+        """``stack_echo`` is audit only, so a finished board can price the echo."""
+        _stub(
+            monkeypatch,
+            _answer(server_args={"--kv-cache-dtype": "fp8"}, envs={"VLLM_ROCM_USE_AITER": "1"}),
+        )
+        phase = _Phase(current_best={"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}})
+        _run(phase)
+        row = _queued(phase)[0]
+        assert row["extra_args"] == "--kv-cache-dtype fp8"
+        assert row["extra_envs"] == {}
+        assert row["stack_echo"] == ["env:VLLM_ROCM_USE_AITER"]
+
+    def test_subtraction_collapses_rows_that_differed_only_in_echo(self, active, monkeypatch):
+        """Gemma's real waste: three queue slots spent on one lever.
+
+        Q0/Q3/D0 of round 2 all moved ``--kv-cache-dtype`` and differed only in
+        how much champion they restated. Undeducted they read as three families
+        and took three slots; deducted they are one family and the cap is freed
+        for a lever nothing else offered.
+        """
+        _stub(
+            monkeypatch,
+            _sampled(
+                ({"--kv-cache-dtype": "fp8_e4m3"}, dict(self.GEMMA_ENVS), 3),
+                ({"--kv-cache-dtype": "fp8"}, {}, 2),
+                ({"--block-size": "32"}, dict(self.GEMMA_ENVS), 1),
+            ),
+        )
+        phase = _Phase(current_best={"extra_envs": dict(self.GEMMA_ENVS)})
+        _run(phase)
+        assert _args_of(phase) == ["--kv-cache-dtype fp8_e4m3", "--block-size 32"]
+        dropped = _rounds(phase)[0]["dropped"]
+        assert [d["dropped_reason"] for d in dropped] == ["same_flag_family"]
 
 
 class TestSkipChain:
@@ -521,7 +638,7 @@ class TestQueueRow:
         block = phase.shared_state.to_untested_proposals_summary()
         # Batch members carry their round id; the tag is what the block tells
         # orchestration to dispatch as one grid.
-        assert "[first-pass:c0-s0-r0] votes=5/5 +args=--kv-cache-dtype fp8" in block
+        assert "[predictor-batch:c0-s0-r0] votes=5/5 +args=--kv-cache-dtype fp8" in block
         first_pass_at = block.index("--kv-cache-dtype fp8")
         specialist_at = block.index("--max-num-seqs 512")
         assert first_pass_at < specialist_at
@@ -529,7 +646,7 @@ class TestQueueRow:
     def test_each_row_says_which_knobs_it_moves(self, active, monkeypatch):
         """`why=` distinguishes the rows instead of repeating one constant.
 
-        Every prediction used to render `why=first-pass tuning prediction`, so
+        Every prediction used to render `why=predictor tuning proposal`, so
         a batch was a wall of identical justifications next to specialist rows
         carrying bespoke sentences -- top of the queue, nothing to choose
         between them. The knobs a row moves are what it actually argues for.
@@ -541,9 +658,9 @@ class TestQueueRow:
         phase = _Phase()
         _run(phase)
         block = phase.shared_state.to_untested_proposals_summary()
-        assert "why=first-pass: --kv-cache-dtype" in block
-        assert "why=first-pass: --max-num-seqs, env:VLLM_USE_V1" in block
-        assert "why=first-pass tuning prediction" not in block
+        assert "why=predictor: --kv-cache-dtype" in block
+        assert "why=predictor: --max-num-seqs, env:VLLM_USE_V1" in block
+        assert "why=predictor tuning proposal" not in block
 
     def test_a_gap_less_row_is_labelled_with_its_bottleneck(self, active, monkeypatch):
         """The severity slot carries the bottleneck, not `sev?`.
@@ -593,7 +710,7 @@ class TestQueueRow:
         phase = _Phase()
         _run(phase)
         block = phase.shared_state.to_untested_proposals_summary()
-        assert "First-pass batch c0-s0-r0 (cycle 0): 4 rows, 0 benched so far." in block
+        assert "Predictor batch c0-s0-r0 (cycle 0): 4 rows, 0 benched so far." in block
         assert "a batch is a ready-made grid if you want one" in block
         assert "very likely never measured in this cycle" in block
         assert "IN FULL" not in block
@@ -607,8 +724,8 @@ class TestQueueRow:
         # Row lines only: the header explains the untagged form, so counting
         # the whole block would score its own prose.
         lines = [line for line in block.splitlines() if line.startswith("•")]
-        tagged = [line for line in lines if "[first-pass:c0-s0-r0]" in line]
-        untagged = [line for line in lines if "[first-pass]" in line]
+        tagged = [line for line in lines if "[predictor-batch:c0-s0-r0]" in line]
+        untagged = [line for line in lines if "[predictor-overflow]" in line]
         assert len(tagged) == pp.MAX_PROPOSALS, block
         assert len(untagged) == pp.MAX_QUEUED - pp.MAX_PROPOSALS, block
         # The summary counts the batch, not the overflow.
@@ -628,7 +745,7 @@ class TestQueueRow:
 
         phase.shared_state.macro_cycle = 1
         block = phase.shared_state.to_untested_proposals_summary()
-        assert "--kv-cache-dtype fp8" in block, "first-pass row vanished at the rollover"
+        assert "--kv-cache-dtype fp8" in block, "predictor row vanished at the rollover"
         assert "(cycle 0)" in block, "the batch line should say which cycle it came from"
 
     def test_a_specialist_row_does_not_outlive_its_cycle(self, active, monkeypatch):

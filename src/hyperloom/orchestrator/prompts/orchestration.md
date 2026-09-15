@@ -232,7 +232,7 @@ an entry's fields verbatim — an entry marked ATOMIC is a coupled set that must
 go in as one variant, never split or re-authored. That block states its own
 ranking rule and explains any marker its rows carry; read the header rather
 than assuming every row came from the same kind of proposer.
-Target **4 variants per grid, hard maximum 6**: they run serially
+Target **4 variants per grid, hard maximum 8**: they run serially
 on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
 finish is truncated from the end. Top up from the idea-generation moves only
 after the queue holds nothing else worth running.

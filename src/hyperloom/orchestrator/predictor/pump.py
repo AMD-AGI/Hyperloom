@@ -75,6 +75,7 @@ from hyperloom.orchestrator.predictor.attempted import (
     PROVENANCE,
     QUEUE_DOMAIN,
     QUEUE_PRIORITY,
+    delta_pairs,
     queued_unbenched,
 )
 from hyperloom.orchestrator.predictor import config as predictor_config
@@ -293,6 +294,92 @@ def _stack_base(state: Any | None) -> tuple[str, dict[str, str]]:
     return args, envs
 
 
+def _subtract_stack(
+    extra_args: str,
+    extra_envs: dict[str, str],
+    base_args: str,
+    base_envs: dict[str, str],
+) -> tuple[str, dict[str, str], list[str]]:
+    """Drop the part of a proposal the champion already sets to the same value.
+
+    The service is handed the applied stack and answers with a full launch
+    recipe rather than a delta, so a proposal on a deep stack restates most of
+    it. Measured over 46 proposals on this fleet, 74 of 152 knobs (49%) were an
+    exact echo of the champion, and on the two slots with a wide champion the
+    echo was nearly all of the width: Gemma-4-31B's round-2 proposals carried
+    5-8 knobs of which 1-3 were new, and gpt-oss-120b's carried 7-10 of which
+    1-2 were new. Nothing downstream was wrong -- the launch merges last-wins,
+    so an echoed pair is a no-op -- but three things read the proposal as if
+    every knob were a change: ``_family_key`` counted echoed flags as family
+    members (three Gemma rows that differ only in echo occupied three queue
+    slots for one lever), the queue line showed a 1-knob change as a 174-char
+    wall, and the fingerprint could not match the same delta authored bare.
+
+    Only an EXACT (name, value) match is removed. A same-name-different-value
+    pair is the proposal overriding the champion -- the whole point of a
+    variant -- and removing it would silently turn a real change into a no-op.
+    One of the 152 knobs was such an override.
+
+    Echoing also pins a stale value: a proposal that restates the champion as
+    it stood when the predictor was asked fights a KEEP that lands before the
+    variant launches. Subtracting leaves the launch free to inherit whatever
+    the champion is at launch time, which is what a delta should do.
+
+    Args:
+        extra_args (str): The proposal's launch flags.
+        extra_envs (dict[str, str]): The proposal's environment variables.
+        base_args (str): The champion's effective launch flags.
+        base_envs (dict[str, str]): The champion's environment variables.
+
+    Returns:
+        tuple: ``(args, envs, echoed)`` -- the proposal reduced to what it
+            actually changes, plus the names it echoed, recorded for audit.
+    """
+    base_pairs = dict(delta_pairs(base_args, base_envs))
+    if not base_pairs:
+        return extra_args, extra_envs, []
+
+    echoed: list[str] = []
+    # Walked in the answer's own token order, rather than rebuilt from the pair
+    # set, so a surviving flag keeps the spelling and the position the service
+    # gave it. A JSON value is one token here because it carries no spaces;
+    # that is the same tokenization ``canonical_fingerprint`` uses, and the two
+    # must agree or a subtracted row stops matching its own fingerprint.
+    tokens = str(extra_args or "").split()
+    kept_tokens: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token.startswith("-"):
+            kept_tokens.append(token)
+            continue
+        if "=" in token:
+            name, _, value = token.partition("=")
+            paired: list[str] = [token]
+        else:
+            name, value, paired = token, "", [token]
+            if index < len(tokens) and not tokens[index].startswith("-"):
+                value = tokens[index]
+                paired.append(value)
+                index += 1
+        if base_pairs.get(name) == value:
+            echoed.append(name)
+            continue
+        kept_tokens.extend(paired)
+
+    kept_envs: dict[str, str] = {}
+    for name, value in (extra_envs or {}).items():
+        if base_pairs.get(f"env:{name}") == str(value):
+            echoed.append(f"env:{name}")
+            continue
+        kept_envs[str(name)] = str(value)
+
+    if not echoed:
+        return extra_args, extra_envs, []
+    return " ".join(kept_tokens), kept_envs, sorted(echoed)
+
+
 def _merge_launch(
     base_args: str, extra_args: str, base_envs: dict[str, str], extra_envs: dict[str, str]
 ) -> tuple[str, dict[str, str]]:
@@ -480,16 +567,16 @@ def _row_reason(extra_args: str, extra_envs: dict[str, str]) -> str:
         extra_envs (dict[str, str]): The proposal's environment variables.
 
     Returns:
-        str: ``first-pass: <knobs>``, or the bare label when the family is
+        str: ``predictor: <knobs>``, or the bare label when the family is
             empty (an all-removal proposal has nothing to name).
     """
     names = sorted(_family_key(extra_args, extra_envs))
     if not names:
-        return "first-pass tuning prediction"
+        return "predictor tuning proposal"
     shown = ", ".join(names[:4])
     if len(names) > 4:
         shown += f" (+{len(names) - 4})"
-    return f"first-pass: {shown}"
+    return f"predictor: {shown}"
 
 
 def _family_key(extra_args: str, extra_envs: dict[str, str]) -> frozenset[str]:
@@ -581,6 +668,11 @@ def _proposal_rows(
     for index, action in enumerate(answer.config_actions):
         extra_args = _flags_text(action)
         extra_envs = _envs_for_framework(action.envs, framework)
+        # Before every fingerprint, family key and skip test below, so all
+        # three see what the proposal changes rather than what it restates.
+        # After ``_vote_counts`` above, which keys on the raw action: a
+        # subtracted row no longer matches any sample and would score zero.
+        extra_args, extra_envs, echoed = _subtract_stack(extra_args, extra_envs, base_args, base_envs)
         reason = _skip_reason(
             extra_args,
             extra_envs,
@@ -615,6 +707,11 @@ def _proposal_rows(
         }
         if samples is not None:
             row["samples"] = samples
+        if echoed:
+            # Recorded, never rendered: the queue line states the change, and
+            # how much stack the service restated is a property of the answer
+            # worth having when the board is read off state.json alone.
+            row["stack_echo"] = echoed
         eligible.append(row)
 
     # Highest consensus first; Python's stable sort leaves the service's
