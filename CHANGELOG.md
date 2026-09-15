@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Bare-metal `vllm` default bumped from `0.28.0` to `0.29.0` (still `rocm723`).**
+  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
+  `docs/install/install.md`, the example `SKILL.md` recipes, and
+  `assets/slurm/models.tsv` now all name `vllm==0.29.0+rocm723` /
+  `vllm/vllm-openai-rocm:v0.29.0`. The pinned TraceLens ref already ships
+  `config_vllm_v0.29.0.patch` (#1487). `VLLM_ROCM_VARIANT` is unchanged.
+  Overridable via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
+
 - **One rule now picks the agent backend, in both packages: a configured
   credential first, then an installed SDK, with Claude ahead of Codex.** Four
   places answered this question and three of them disagreed.
