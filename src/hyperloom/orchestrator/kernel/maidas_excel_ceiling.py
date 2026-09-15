@@ -24,9 +24,15 @@ from .roofline_ceiling import RooflineBreakdown
 logger = logging.getLogger(__name__)
 
 
-@lru_cache(maxsize=8)
-def _load_allscenarios(path: str):
-    """Load and concatenate the ``AllScenarios`` sheet from one xlsx or a dir."""
+@lru_cache(maxsize=16)
+def _load_sheet(path: str, sheet: str):
+    """Load and concatenate one named sheet from a single xlsx or a directory.
+
+    Returns a concatenated DataFrame, or ``None`` if pandas is unavailable, the
+    path is not a readable xlsx/dir, or no file carries the sheet (workbooks
+    missing it are skipped). Shared by every MAIDAS reader so the file/dir and
+    fail-soft semantics live in exactly one place.
+    """
     try:
         import pandas as pd
     except Exception:  # noqa: BLE001 - pandas is optional at runtime
@@ -44,12 +50,17 @@ def _load_allscenarios(path: str):
     frames = []
     for f in files:
         try:
-            frames.append(pd.read_excel(f, sheet_name="AllScenarios"))
+            frames.append(pd.read_excel(f, sheet_name=sheet))
         except Exception:  # noqa: BLE001 - skip unreadable/foreign workbooks
             continue
     if not frames:
         return None
     return pd.concat(frames, ignore_index=True)
+
+
+def _load_allscenarios(path: str):
+    """The per-config decode/prefill summary sheet (L1 ceiling source)."""
+    return _load_sheet(path, "AllScenarios")
 
 
 #: Map Hyperloom precision/dtype tags (its ``_DTYPE_BYTES`` / ``_QUANT_WEIGHT_BYTES``
@@ -205,4 +216,149 @@ def maidas_breakdown_from_excel(path: str, runtime: Any) -> RooflineBreakdown | 
         cmp_tok_per_sec=0.0,
         peak_tok_per_sec=peak,
         bound_kind="memory",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# L2: per-op PerfModel breakdown sourced from the ``Verbose_Data`` sheet.
+# ``arch`` / ``soc name`` are matched verbatim against the run soc, exactly like
+# the L1 adapter matches ``AllScenarios.soc`` — any GPU-name normalization must
+# live in the shared ``_soc_token`` so L1 and L2 stay consistent.
+# --------------------------------------------------------------------------- #
+def _maidas_hw_consts(path: str, soc: str) -> tuple[float, float]:
+    """``(hbm_bw_gbps, peak_tflops)`` for *soc* from the per-scenario HW columns.
+
+    The ``uct_decode`` sheet carries one HW row per soc; picking the wrong row
+    would use another GPU's bandwidth/FLOPS, so we filter on ``soc name``.
+    """
+    df = _load_sheet(path, "uct_decode")
+    if df is None or "soc name" not in getattr(df, "columns", []):
+        return 0.0, 0.0
+    row = df[df["soc name"].astype(str).str.lower() == soc]
+    if row.empty:
+        return 0.0, 0.0
+    try:
+        return float(row.iloc[0].get("hbm_mem_bw") or 0.0), \
+            float(row.iloc[0].get("mfma_flops") or 0.0) / 1e12
+    except Exception:  # noqa: BLE001
+        return 0.0, 0.0
+
+
+def _select_layer_block(vd, soc: str, phase: str, seq_len: int, batch: int):
+    """Top-level rows of the single transformer block matching the run, or None.
+
+    ``Verbose_Data`` repeats ONE block per swept batch (parents carry ``M=0``;
+    only ``*/GEMM`` children carry the batch), tagged by ``arch`` (soc) and
+    ``phase`` (``<phase>_<seq_len>``). We slice to (soc, phase), split into
+    per-block segments (a block restarts at the first op name), tag each block by
+    its max GEMM ``M`` (= batch), keep the one where ``M == batch``, and return
+    its top-level ops (``layer`` without ``/``) — the finest level that sums
+    without double-counting parent+child.
+    """
+    if not {"arch", "phase", "layer", "M", "time_us"}.issubset(set(vd.columns)):
+        return None
+    seg = vd[(vd["arch"].astype(str).str.lower() == soc)
+             & (vd["phase"].astype(str) == f"{phase}_{int(seq_len)}")]
+    if seg.empty:
+        return None
+    seg = seg.reset_index(drop=True)
+    first = str(seg["layer"].iloc[0])
+    blk = (seg["layer"].astype(str) == first).cumsum()
+    for _, block in seg.groupby(blk):
+        gemm = block[block["layer"].astype(str).str.contains("/GEMM")]
+        if not gemm.empty and int(gemm["M"].max()) == batch:
+            top = block[~block["layer"].astype(str).str.contains("/")]
+            return top[top["time_us"] > 0]
+    return None
+
+
+def maidas_perfmodel_from_excel(path: str, runtime: Any, *, num_layers: int):
+    """MAIDAS-sourced L2 ``PerfModelBreakdown`` for *runtime*, or ``None``.
+
+    Builds Hyperloom's bottom-up per-op breakdown from ``Verbose_Data`` so L2 is
+    consistent with the L1 ``avg_lat`` ceiling instead of Hyperloom's independent
+    PerfModel. Per-op fields come straight from MAIDAS: ``ideal_us`` = compute
+    time, ``read_us+write_us`` = memory time, ``time_us`` = op time; each is a
+    single transformer block, scaled by ``num_layers`` for the whole model.
+    Fail-soft: any miss (no sheet, no matching block, or a >10% divergence from
+    the L1 ceiling) returns ``None`` so the caller keeps the native PerfModel.
+    """
+    from .roofline_ceiling import OpBreakdown, PerfModelBreakdown  # reuse L2 types
+
+    vd = _load_sheet(path, "Verbose_Data")
+    if vd is None or getattr(vd, "empty", True) or num_layers <= 0:
+        return None
+    soc = _soc_token(runtime.gpu_type)
+    gbs = int(runtime.concurrency or 0)
+    if gbs <= 0:
+        return None
+
+    dec = _select_layer_block(vd, soc, "decode", runtime.osl or 0, gbs)
+    if dec is None or dec.empty:
+        return None
+    bw_gbps, peak_tflops = _maidas_hw_consts(path, soc)
+    bw_bps = bw_gbps * 1e9
+
+    # Whole-model us = per-block us x num_layers.
+    t_us = float(dec["time_us"].sum()) * num_layers
+    cmp_us = float(dec["ideal_us"].sum()) * num_layers
+    mem_us = float((dec["read_us"] + dec["write_us"]).sum()) * num_layers
+    if t_us <= 0:
+        return None
+
+    def _tps(us: float) -> float:
+        return gbs * 1e6 / us if us > 0 else 0.0
+
+    decode_peak = _tps(t_us)
+
+    # Consistency gate: the Verbose-derived peak must agree with the L1 avg_lat
+    # ceiling; a divergence means wrong block/scaling -> fall back to native L2.
+    l1 = maidas_breakdown_from_excel(path, runtime)
+    if l1 is not None and l1.peak_tok_per_sec > 0:
+        rel = abs(decode_peak - l1.peak_tok_per_sec) / l1.peak_tok_per_sec
+        if rel > 0.10:
+            logger.warning(
+                "MAIDAS L2 decode=%.1f tok/s diverges %.0f%% from L1 ceiling=%.1f "
+                "(soc=%s gbs=%s osl=%s) -> using native PerfModel",
+                decode_peak, rel * 100, l1.peak_tok_per_sec, soc, gbs, runtime.osl,
+            )
+            return None
+
+    block_t = float(dec["time_us"].sum()) or 1.0
+    ops: list[OpBreakdown] = []
+    for _, r in dec.iterrows():
+        rmem = float(r["read_us"] + r["write_us"]) * num_layers
+        flops = float(r["tflops"]) * 1e12 * (float(r["time_us"]) * 1e-6) * num_layers
+        bytes_moved = rmem * 1e-6 * bw_bps
+        ops.append(OpBreakdown(
+            name=str(r["layer"]),
+            flops=flops,
+            bytes_moved=bytes_moved,
+            ai=(flops / bytes_moved if bytes_moved else 0.0),
+            time_s=float(r["time_us"]) * num_layers / 1e6,
+            bound=("compute" if float(r["ideal_us"]) >= float(r["read_us"] + r["write_us"])
+                   else "memory"),
+            pct_time=float(r["time_us"]) / block_t,
+        ))
+
+    pre = _select_layer_block(vd, soc, "prefill", runtime.isl or 0, gbs)
+    prefill_peak = 0.0
+    if pre is not None and not pre.empty:
+        pt = float(pre["time_us"].sum()) * num_layers
+        prefill_peak = int(runtime.isl or 0) * gbs * 1e6 / pt if pt > 0 else 0.0
+
+    logger.info(
+        "MAIDAS L2 PerfModel USED | soc=%s gbs=%s osl=%s | decode peak=%.2f "
+        "mem=%.2f cmp=%.2f tok/s | %d ops",
+        soc, gbs, runtime.osl, decode_peak, _tps(mem_us), _tps(cmp_us), len(ops),
+    )
+    return PerfModelBreakdown(
+        decode_tok_per_s=decode_peak,
+        prefill_tok_per_s=prefill_peak,
+        decode_mem_tok_per_s=_tps(mem_us),
+        decode_cmp_tok_per_s=_tps(cmp_us),
+        ops=ops,
+        bound_kind="memory" if mem_us > cmp_us else "compute",
+        hbm_bw_gbps=bw_gbps,
+        peak_achievable_tflops=peak_tflops,
     )
