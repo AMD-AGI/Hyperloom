@@ -772,6 +772,44 @@ def _final_content_snapshot(
         return snapshot_dir
 
 
+def _preapplied_snapshot_payload(payload: dict) -> dict:
+    """Capture an already-applied worktree as the apply's final-content snapshot.
+
+    A controller publication is git-applied before the validator runs, so the
+    patch's final bytes are on disk already. Handing them over as a snapshot
+    keeps the diff a manifest of changed paths only, which is what lets the
+    normal apply run its backup, invalidation, fan-out and rebuild.
+
+    Args:
+        payload (dict): Integrate payload naming the patch and its repo root.
+
+    Returns:
+        dict: The payload with ``snapshot_dir`` pointing at the captured files.
+
+    Raises:
+        RuntimeError: If the repo root is unknown or a written path is missing
+            from the worktree. Either would let apply fall back to treating the
+            diff itself as replacement source.
+    """
+    patch_path = Path(str(payload.get("patch_path") or ""))
+    repo_root = Path(str(payload.get("repo") or payload.get("kernel_repo") or ""))
+    if not repo_root.is_dir():
+        raise RuntimeError(f"pre-applied patch needs its repo root, got {repo_root!s:.200}")
+    descriptors = _load_apply_tool().parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors="replace"))
+    snapshot = patch_path.parent / "preapplied_snapshot"
+    for descriptor in descriptors:
+        if descriptor.get("op") != "write":
+            continue
+        relative = str(descriptor.get("path") or "")
+        source = repo_root / relative
+        if not source.is_file():
+            raise RuntimeError(f"pre-applied patch writes {relative}, which is absent from {repo_root}")
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+    return {**payload, "snapshot_dir": str(snapshot)}
+
+
 def _maybe_apply_kernel_patch(
     payload: dict,
     *,
@@ -6112,6 +6150,7 @@ async def integrate_handler(
     payload: dict,
     *,
     session_dir: Path,
+    preapplied_git_patch: bool = False,
 ) -> HandlerResult:
     """Apply a kernel patch + re-baseline + KEEP/REVERT decision.
 
@@ -6237,6 +6276,19 @@ async def integrate_handler(
                 "error_class": "untrusted_preapplied_manifest",
                 "error": f"invalid pre-applied manifest: {manifest_path}",
             }
+        )
+    elif preapplied_git_patch:
+        # A controller publication is git-applied to the worktree before the
+        # validator runs, so its final bytes are already on disk; apply reads them
+        # as a snapshot instead of mistaking the diff for replacement source.
+        # Skipping the apply outright would also skip the cache invalidation,
+        # multi-node fan-out and rebuild the measurement depends on.
+        # Only an in-process caller can set this: an agent's integrate params
+        # land in ``payload`` verbatim, so the payload cannot carry the trust.
+        apply_result = _maybe_apply_kernel_patch(
+            _preapplied_snapshot_payload(payload),
+            session_dir=session_dir,
+            kernel_id=kernel_id,
         )
     else:
         apply_result = _maybe_apply_kernel_patch(
@@ -6588,11 +6640,15 @@ async def integrate_handler(
         if decision == "KEEP"
         else _maybe_revert_kernel_patch(apply_result)
     )
-    finalize_result = (
-        _maybe_finalize_kernel_patch(apply_result)
-        if decision == "KEEP"
-        else {"status": "skipped", "reason": "non-KEEP decision"}
-    )
+    if decision != "KEEP":
+        finalize_result = {"status": "skipped", "reason": "non-KEEP decision"}
+    elif preapplied_git_patch:
+        # Only the caller's own commit makes a pre-applied KEEP durable, so the
+        # caller owns finalize. Dropping the backups here would strand the
+        # fanned-out pod-side patch if that commit then failed.
+        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
+    else:
+        finalize_result = _maybe_finalize_kernel_patch(apply_result)
     revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
     top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
         decision=decision,

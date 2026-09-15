@@ -76,6 +76,10 @@ class DriverPreflight:
     def reference_case_ids(self) -> tuple[str, ...]:
         return self.reference.case_ids if self.reference is not None else ()
 
+    @property
+    def source_case_ms(self) -> dict[str, float]:
+        return dict(self.reference.case_ms) if self.reference is not None else {}
+
 
 @dataclass
 class DriverPreparationResult:

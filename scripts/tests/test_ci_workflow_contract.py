@@ -47,6 +47,28 @@ def test_matrix_matches_configured_shards_and_workers():
     assert "max-parallel" not in WORKFLOW["jobs"]["test"]["strategy"]
 
 
+@pytest.mark.parametrize(
+    ("upload_name", "artifact_name"),
+    [
+        ("Upload shard coverage data", "covdata-py${{ matrix.python-version }}-shard${{ matrix.shard }}"),
+        ("Upload shard durations", "durations-shard${{ matrix.shard }}"),
+    ],
+)
+def test_reruns_replace_only_their_own_shard_artifact(upload_name, artifact_name):
+    upload = step("test", upload_name)
+    assert upload["uses"] == "actions/upload-artifact@v7"
+    assert upload["with"]["name"] == artifact_name
+    assert upload["with"].get("overwrite") is True
+    assert upload["with"]["include-hidden-files"] is True
+    if upload_name == "Upload shard coverage data":
+        assert upload["if"] == "always()"
+        assert upload["with"]["path"].splitlines() == [
+            ".coverage.shard${{ matrix.shard }}",
+            "shard-status/*.outcome",
+            "shard-status/*.failed",
+        ]
+
+
 def test_matrix_uses_one_resolved_duration_seed():
     prepare = WORKFLOW["jobs"]["prepare-durations"]
     resolve = step("prepare-durations", "Resolve test duration seed")

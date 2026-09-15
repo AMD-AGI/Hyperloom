@@ -595,7 +595,8 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     monkeypatch.setattr(task_preparer, "_git_changed_since", lambda *_args: ["driver.py"])
 
     def fake_git(_workspace, *args):
-        if args and args[0] == "commit":
+        # The subcommand is not args[0]: commits carry inline ``-c`` identity.
+        if "commit" in args:
             git_state["committed"] = True
         return 0, ""
 
