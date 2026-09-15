@@ -9,8 +9,10 @@ import argparse
 import statistics
 
 import torch
+import flydsl.compiler as flyc
 
-from kernel import N, VectorAdd
+from kernel import N, VectorAdd, _vector_add
+from kernelforge.loop.numerical import emit_evidence, measure_outputs
 
 CASES = [("random", 42, 0.1), ("unit", 19, 1.0), ("near_zero", 29, 1e-5), ("zero", 31, 0.0)]
 
@@ -62,6 +64,44 @@ def correctness(kernel):
     print(f"SNR: {min(snrs):.3f} dB")
     print("allclose: True")
     print("graph_capture: PASS")
+    numerical_correctness(kernel)
+
+
+def numerical_correctness(kernel):
+    rows = []
+    for name, seed, scale in CASES:
+        args = inputs(seed, scale)
+        reference = (args[0] + args[1]).clone()
+        source = flyc.compile(_vector_add, *args, N, torch.cuda.current_stream())
+
+        def source_run():
+            args[2].fill_(float("nan"))
+            source(*args, N, torch.cuda.current_stream())
+            return args[2]
+
+        def candidate_run():
+            args[2].fill_(float("nan"))
+            kernel(*args)
+            return args[2]
+
+        graph = torch.cuda.CUDAGraph()
+        kernel(*args)
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            kernel(*args)
+
+        def replay(captured_graph=graph):
+            args[2].fill_(float("nan"))
+            captured_graph.replay()
+            return args[2]
+
+        for mode, run in (("eager", candidate_run), ("graph", replay)):
+            row = {"id": f"{name}/{mode}"}
+            for role, callback in (("source_before", source_run), ("candidate", run), ("source_after", source_run)):
+                row[role] = measure_outputs(callback, reference, repetitions=5)
+            rows.append(row)
+        del graph
+    emit_evidence(rows)
 
 
 def benchmark(kernel, warmup, iters, case="", repeat=1):

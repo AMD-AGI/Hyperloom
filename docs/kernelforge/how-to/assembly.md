@@ -95,6 +95,72 @@ commit. Preparation failures restore the original files and Git state. Resume
 requires that record and an unchanged launcher/manifest. Old PORT campaign records
 are not migrated; start a fresh campaign from their selected source instead.
 
+## Numerical acceptance
+
+An assembly campaign requires `config.yaml` with both canonical commands and a
+`numerical_validation` contract. It is enforced on the source, the compiler
+roundtrip, and every candidate that would otherwise be kept. Missing contracts
+or measurements block acceptance. Older preparation records without this
+contract cannot resume; prepare a fresh campaign with the expanded driver.
+
+The protected task configuration specifies coverage and error limits before
+optimization. For an exact vector add, for example:
+
+```yaml
+numerical_validation:
+  schema_version: 1
+  repetitions: 5
+  cases:
+    random/output/eager:
+      max_oracle_error: 0.0
+      max_error_ratio: 1.0
+      error_floor: 0.0
+```
+
+List every required input/seed, output and execution mode as a distinct case.
+Include graph replay when the serving path uses it. Existing checks for indices,
+padding, input preservation, changed inputs and supported streams still belong
+in the authoritative correctness suite. The framework checks declared coverage;
+it cannot infer missing workload cases from arbitrary Python or an assembly ABI.
+
+The correctness commands must emit exactly one record through
+`kernelforge.loop.numerical.emit_evidence(cases)`. Each case contains its `id`
+and `source_before`, `candidate`, and `source_after` measurements. Use
+`measure_outputs(callback, reference, repetitions=5)` for each measurement. The
+callback runs the chosen implementation and returns the tensor to check; reset
+accumulating or dirty output buffers as the operator requires. Compile and warm
+up before sampling. The original source callable must bypass the ASM binding;
+using the candidate as its own source defeats the independent reference.
+
+The helper synchronizes GPU work and clones each output into separate CPU
+storage. `oracle_errors` contains normalized RMS error against one fixed
+reference; `repeat_errors` compares successive outputs with the same
+normalization. An all-zero reference uses absolute L2 error. Source and candidate
+must both be finite and meet `max_oracle_error`. In addition, candidate oracle
+error and repeat error must each stay within
+`max(max_source_error * max_error_ratio, error_floor)`, using the larger error
+from the two bracketing source measurements. Repetitions must match the contract
+and number at least three. A deterministic operator can require zero error;
+an atomic reduction needs task-specific tolerances established from independent
+source measurements. There is no universal repeat-output dB cutoff.
+
+Forge binds the record to the fresh validation invocation and stores its
+contract digest with the result. Preparation also records the configuration
+digest, which must remain unchanged on resume. The optimizer cannot relax this
+contract to save a faster candidate. Other backends can declare the same
+contract through their canonical suite.
+
+A candidate-to-oracle SNR of 31 dB can clear a 30 dB mathematical floor while
+its repeated outputs agree at only 27 dB and the source agrees at 45 dB.
+These are different comparisons. Repeating a scalar SNR test does not measure
+this instability. The source-relative checks reject this pattern even when
+the original scalar pre-filter passes.
+
+Passing this kernel contract does not certify model quality. Evaluate E2E
+finalists on fixed model inputs and quality tasks, and retain their source and
+candidate revisions. A throughput-only experiment is not model-validated
+acceptance.
+
 ## Assembly-only search and result selection
 
 Only the declared `.s` is editable. The frontend, launcher, provenance manifest,

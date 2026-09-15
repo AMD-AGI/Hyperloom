@@ -184,6 +184,12 @@ def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_
         raise AssemblyPreparationError("assembly preparation record does not match this campaign")
     if kernel != assembly and record.get("launcher_sha256") != _digest(kernel):
         raise AssemblyPreparationError("the verified Python launcher changed after preparation")
+    if not record.get("acceptance_config_sha256") or record["acceptance_config_sha256"] != _digest(
+        workspace / "config.yaml"
+    ):
+        raise AssemblyPreparationError(
+            "assembly resume requires the unchanged numerical acceptance contract; start a fresh campaign"
+        )
     if record.get("source_sha256") != _digest(path.parent / ("source" + kernel.suffix)):
         raise AssemblyPreparationError("the original source reference changed after preparation")
     manifest = record.get("binding_manifest")
@@ -243,10 +249,14 @@ async def prepare_assembly(
         if not source_report.results or not source_report.all_passed:
             raise AssemblyPreparationError(source_report.failed_output or "original source correctness failed")
         acceptance = await accept_candidate(
-            str(workspace), timeout_cap_sec=_timeout(deadline), candidate_label="assembly source baseline"
+            str(workspace),
+            timeout_cap_sec=_timeout(deadline),
+            candidate_label="assembly source baseline",
+            kernel_backend="assembly",
         )
         if not acceptance.passed:
             raise AssemblyPreparationError(acceptance.detail)
+        source_numerical_evidence = acceptance.numerical_evidence
         source_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
         if not source_bench.get("success") or not source_bench.get("case_times"):
             raise AssemblyPreparationError("original source benchmark failed")
@@ -262,7 +272,10 @@ async def prepare_assembly(
             kernel_path.write_text(candidate_source, encoding="utf-8")
         report = await verify_assembly(kernel_path, assembly, driver, config.gpu_target, threshold, deadline)
         acceptance = await accept_candidate(
-            str(workspace), timeout_cap_sec=_timeout(deadline), candidate_label="assembly compiler roundtrip"
+            str(workspace),
+            timeout_cap_sec=_timeout(deadline),
+            candidate_label="assembly compiler roundtrip",
+            kernel_backend="assembly",
         )
         if not acceptance.passed:
             raise AssemblyPreparationError(acceptance.detail)
@@ -295,6 +308,9 @@ async def prepare_assembly(
             "correctness": report.summary(),
             "canonical_correctness": acceptance.detail,
             "canonical_unverified_reason": acceptance.unverified_reason,
+            "acceptance_config_sha256": _digest(workspace / "config.yaml"),
+            "source_numerical_evidence": source_numerical_evidence,
+            "roundtrip_numerical_evidence": acceptance.numerical_evidence,
             "build_failure_probe_passed": True,
             "execution_probe_passed": True,
         }

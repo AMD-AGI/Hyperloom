@@ -2431,6 +2431,28 @@ async def test_canonical_suite_passing_keeps_the_faster_candidate(tmp_path, monk
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["missing", "unstable", "valid"])
+async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, monkeypatch, kind):
+    from kernelforge.tests.test_numerical_contract import _task, evidence
+
+    if kind != "missing":
+        _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
+    loop, _ = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
+    loop.ic.kernel_backend = "assembly"
+    loop.ic.pristine_baseline_wall_ms = 1.0
+
+    result = await loop.run_one_iteration(1)
+
+    assert result.kept is (kind == "valid")
+    assert result.validation_passed is (kind == "valid")
+    if kind != "missing":
+        assert result.bench_detail["numerical_validation"]["contract_sha256"]
+    if kind == "unstable":
+        assert result.validation_outcome == "numerical_correctness_failure"
+        assert "repeat_errors" in result.validation_summary
+
+
+@pytest.mark.asyncio
 async def test_canonical_suite_output_reporting_failure_reverts(tmp_path, monkeypatch):
     workspace = _canonical_workspace(tmp_path, "print('mla-decode-bs64-kv8192: FAILED')")
     loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)

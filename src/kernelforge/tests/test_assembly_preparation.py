@@ -9,10 +9,12 @@ import asyncio
 import hashlib
 import json
 import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from kernelforge.assembly import prepare
 from kernelforge.loop.validation import ValidationReport, ValidationResult
@@ -47,6 +49,31 @@ def campaign(tmp_path, monkeypatch):
     kernel.write_text(SOURCE)
     driver = tmp_path / "driver.py"
     driver.write_text("# fixed independent oracle\n")
+    numerical = {"finite": True, "oracle_errors": [0] * 3, "repeat_errors": [0] * 2}
+    (tmp_path / "numerical_reference.py").write_text(
+        "import json,os\n"
+        + "record="
+        + repr(
+            {
+                "schema_version": 1,
+                "cases": [{"id": "one", "source_before": numerical, "candidate": numerical, "source_after": numerical}],
+            }
+        )
+        + "\nrecord['request_id']=os.environ['FORGE_NUMERICAL_REQUEST']\nprint('__FORGE_NUMERICAL__'+json.dumps(record))\n"
+    )
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "compile_command": [f'"{sys.executable}" driver.py'],
+                "correctness_command": [f'"{sys.executable}" numerical_reference.py'],
+                "numerical_validation": {
+                    "schema_version": 1,
+                    "repetitions": 3,
+                    "cases": {"one": {"max_oracle_error": 0, "max_error_ratio": 1, "error_floor": 0}},
+                },
+            }
+        )
+    )
     git(tmp_path, "add", ".")
     git(tmp_path, "commit", "-m", "original")
     options = dict(
@@ -212,14 +239,37 @@ def test_failed_preparation_restores_files_and_git(campaign, monkeypatch, failur
 
 def test_canonical_rejection_prevents_publication(campaign):
     root, options = campaign
-    (root / "config.yaml").write_text(
-        "compile_command: ['true']\ncorrectness_command: [\"! grep -q '_forge_assembly' kernel.py\"]\n"
-    )
+    settings = yaml.safe_load((root / "config.yaml").read_text())
+    settings["correctness_command"].insert(0, "! grep -q '_forge_assembly' kernel.py")
+    (root / "config.yaml").write_text(yaml.safe_dump(settings))
     git(root, "add", "config.yaml")
     git(root, "commit", "-m", "canonical acceptance")
     with pytest.raises(prepare.AssemblyPreparationError, match="correctness"):
         asyncio.run(prepare.prepare_assembly(**options))
     assert (root / "kernel.py").read_text() == SOURCE
+
+
+def test_missing_numerical_contract_prevents_assembly_preparation(campaign):
+    root, options = campaign
+    settings = yaml.safe_load((root / "config.yaml").read_text())
+    del settings["numerical_validation"]
+    (root / "config.yaml").write_text(yaml.safe_dump(settings))
+    git(root, "add", "config.yaml")
+    git(root, "commit", "-m", "legacy driver")
+    with pytest.raises(prepare.AssemblyPreparationError, match="numerical_validation"):
+        asyncio.run(prepare.prepare_assembly(**options))
+    assert not (root / "kernel.s").exists()
+
+
+def test_resume_rejects_weakened_numerical_contract(campaign):
+    root, options = campaign
+    record = asyncio.run(prepare.prepare_assembly(**options))
+    assert record["roundtrip_numerical_evidence"]["contract_sha256"]
+    settings = yaml.safe_load((root / "config.yaml").read_text())
+    settings["numerical_validation"]["cases"]["one"]["max_oracle_error"] = 1
+    (root / "config.yaml").write_text(yaml.safe_dump(settings))
+    with pytest.raises(prepare.AssemblyPreparationError, match="unchanged numerical acceptance"):
+        asyncio.run(prepare.prepare_assembly(**options, resume=True))
 
 
 def test_existing_assembly_and_scope(campaign):

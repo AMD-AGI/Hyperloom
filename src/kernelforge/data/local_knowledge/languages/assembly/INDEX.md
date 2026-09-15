@@ -2,7 +2,7 @@
 title: AMDGPU assembly workflow
 kind: index
 scope: languages/assembly
-updated: 2026-09-14
+updated: 2026-09-15
 ---
 
 <!--
@@ -36,6 +36,15 @@ A deliberate build failure must propagate through the protected driver, and a
 no-op assembly must fail correctness on fresh outputs beyond compiler warmup. Record
 source, unchanged roundtrip and optimized ASM separately. Preparation is not a
 KEEP; return the source when instruction optimization has no accepted benefit.
+
+Before optimization, supply the protected `config.yaml` numerical contract and
+fresh structured source/candidate measurements from the correctness driver.
+Forge requires complete declared coverage and both absolute mathematical and
+source-relative repeat-output error bounds before an ASM KEEP. A 30 dB
+candidate-to-oracle pass does not imply that two candidate outputs agree at
+30 dB. Use synchronized independent snapshots; timing repetitions are not
+repeatability evidence. Do not loosen the contract after seeing a faster result.
+Model quality and E2E throughput remain separate finalist checks.
 
 ## Case knowledge: Neha / Evolve
 

@@ -4,3 +4,18 @@ compile_command:
   - python driver.py --mode profile
 correctness_command:
   - python driver.py --mode test
+numerical_validation:
+  schema_version: 1
+  repetitions: 5
+  cases:
+    random/eager: &exact
+      max_oracle_error: 0.0
+      max_error_ratio: 1.0
+      error_floor: 0.0
+    random/graph: *exact
+    unit/eager: *exact
+    unit/graph: *exact
+    near_zero/eager: *exact
+    near_zero/graph: *exact
+    zero/eager: *exact
+    zero/graph: *exact

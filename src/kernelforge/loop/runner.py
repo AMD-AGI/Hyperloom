@@ -3780,16 +3780,21 @@ class IterationLoop(AnalysisRuntimeMixin):
             improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
 
         # Step 7: the arena's own verdict.
+        canonical_summary = ""
         if improved:
             canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,
                 timeout_cap_sec=self.ic.validate_stage_timeout_sec,
                 candidate_label=f"iteration {iteration}",
+                kernel_backend=self.ic.kernel_backend,
             )
             # The suite only runs for a candidate the round produced, so it is part of that round's measurement and
             # has to be priced into the next round's admission alongside the validate-and-bench cycle.
             self._observe_measurement(canonical_started)
+            canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
+            if canonical.numerical_evidence is not None:
+                bench_result["numerical_validation"] = canonical.numerical_evidence
             if not canonical.passed:
                 return IterationResult(
                     iteration=iteration,
@@ -3814,7 +3819,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             iteration=iteration,
             duration_sec=duration,
             validation_passed=True,
-            validation_summary=report.summary(),
+            validation_summary=report.summary() + canonical_summary,
             wall_ms=selected_raw_mean_ms,
             mean_case_speedup=mean_case_speedup,
             snr_db=snr_db,
