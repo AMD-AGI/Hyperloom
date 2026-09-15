@@ -36,7 +36,7 @@ def _seed_coordinator_db(session_dir: Path, rows: list[dict]) -> Path:
         for i, row in enumerate(rows):
             conn.execute(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
+                "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
                 (
                     f"msg-{i}",
                     row["agent"],
@@ -44,7 +44,6 @@ def _seed_coordinator_db(session_dir: Path, rows: list[dict]) -> Path:
                     row["topic"],
                     None,
                     json.dumps(row["payload"]),
-                    2,
                     "",
                 ),
             )
@@ -1555,9 +1554,8 @@ def test_probe_queries_resolve_against_the_real_coordinator_schema(tmp_path):
             ("tsk-a", "run_benchmark", "running", "{}", "idem-a", "t0", "t1"),
         )
         conn.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-            "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
-            ("m-1", "orchestration", "*", "heartbeat", None, '{"n": 1}', 2, "t1"),
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+            ("m-1", "orchestration", "*", "heartbeat", None, '{"n": 1}', "t1"),
         )
         conn.commit()
     finally:
@@ -1579,8 +1577,8 @@ def test_read_coordinator_events_returns_newest_window_in_asc_order(tmp_path: Pa
         for i, topic in enumerate(["e1", "e2", "e3"], start=1):
             conn.execute(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                "in_reply_to, payload, priority, ts) VALUES (?,?,?,?,?,?,?,?)",
-                (f"m-{i}", "orchestration", "*", topic, None, "{}", 2, f"t{i}"),
+                "in_reply_to, payload, ts) VALUES (?,?,?,?,?,?,?)",
+                (f"m-{i}", "orchestration", "*", topic, None, "{}", f"t{i}"),
             )
         conn.commit()
     finally:

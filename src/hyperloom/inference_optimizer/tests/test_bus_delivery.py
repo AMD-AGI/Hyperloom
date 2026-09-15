@@ -31,7 +31,7 @@ async def test_sender_does_not_receive_own_message(bus: MessageBus) -> None:
 
 @pytest.mark.asyncio
 async def test_unsubscribed_topic_not_delivered(bus: MessageBus) -> None:
-    """``request`` is subscribed by kernel_agent only."""
+    """``request`` is written for replay only; no role subscribes to it."""
     await bus.append_and_seq(Message.new("coordinator", "*", "request", {"kind": "integrate"}))
     assert await bus.replay_for("orchestration", after_seq=0) == []
 

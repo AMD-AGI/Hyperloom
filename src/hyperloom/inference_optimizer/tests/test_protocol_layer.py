@@ -126,14 +126,6 @@ async def test_message_bus_unknown_topic_rejected(db):
 
 
 @pytest.mark.asyncio
-async def test_message_bus_priority_out_of_range(db):
-    bus = MessageBus(db)
-    msg = Message.new("orchestration", "critic", "observation", {}, priority=99)
-    with pytest.raises(ValueError, match="priority must be 0..3"):
-        await bus.append_and_seq(msg)
-
-
-@pytest.mark.asyncio
 async def test_message_bus_tail_filters_by_to_agent_with_broadcast(db):
     bus = MessageBus(db)
     await bus.append_and_seq(

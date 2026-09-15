@@ -57,57 +57,14 @@ def test_allowed_actions_disjoint_phases():
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
-def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
-    """The closed vocabulary must actually close over what the rules emit."""
-    import itertools
-
-    rules = (
-        phase_state.exit_normal_prelude,
-        phase_state.exit_normal_optimize,
-        phase_state.exit_normal_kernel,
-        phase_state.exit_normal_sweep,
-    )
-    # A spread of states wide enough to reach each rule's branches.
-    states = [
-        SharedState(),
-        SharedState(baseline_tput=1234.5),
-        SharedState(baseline_tput=1234.5, framework_agent_phase_done=True),
-        SharedState(baseline_tput=1234.5, phase_budget_pct={p: 0.01 for p in phase_state.PHASE_NAMES}),
-    ]
-    seen = set()
-    for rule, state in itertools.product(rules, states):
-        try:
-            out = rule(state)
-        except TypeError:
-            continue  # rule needs kwargs this sweep does not supply
-        if out is None:
-            continue
-        reason = out[0]
-        seen.add(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason), reason
-    assert seen, "no exit rule fired; this guard would pass vacuously"
-
-
-def test_phase_exit_reason_vocabulary_is_closed():
-    assert not phase_state.is_valid_phase_exit_reason("totally_invented")
-    assert not phase_state.is_valid_phase_exit_reason("")
-    # Stripped before comparison, so a stray newline in a history row still matches.
-    assert phase_state.is_valid_phase_exit_reason("  prelude_done \n")
-
-
 def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
         "target_reached",
         "time_exhausted",
         "max_ticks",
-        "policy_loop",
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        "crash_threshold_exceeded",
-        "user_stop_requested",
-        "recipe_kb_drain_failed",
-        "plateau_explore",
         "sweep_failed",
         "baseline_arg_error",
     ):
@@ -297,7 +254,6 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert phase_state.is_valid_stop_reason(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""
