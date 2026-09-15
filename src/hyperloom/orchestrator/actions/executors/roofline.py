@@ -364,16 +364,16 @@ class RooflineExecutor:
         # Track the last failure kind so the no-trace contract is preserved (profile_no_trace_failed) instead of
         # collapsing into profile_failed.
         last_phase = "profile"
-        # After a cuda-graph capture crash the next attempt boots eager so the torch-profiler stream capture cannot
-        # collide.
+        # After a cuda-graph capture crash the next attempt boots without capture so the torch-profiler stream
+        # capture cannot collide.
         disable_cuda_graph = os.environ.get("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "").strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-        # Resolve framework so the eager fallback picks the correct flag (vLLM --enforce-eager, sglang
-        # --disable-cuda-graph).
+        # Resolve framework so the fallback picks the correct flag (vLLM
+        # --compilation-config.cudagraph_mode NONE, sglang --disable-cuda-graph).
         framework = self._resolve_framework(ctx)
         from .baseline import (
             _disable_cuda_graph_flag,
@@ -956,8 +956,9 @@ class RooflineExecutor:
                     "trace_analyze returned 0 hot kernels: the profile trace "
                     "has no execute_*/user_annotation events, so per-kernel "
                     "device time is folded into hipGraphLaunch wrappers under "
-                    "cuda-graph capture (#431). Re-profile in eager mode "
-                    "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
+                    "cuda-graph capture (#431). Re-profile without capture "
+                    "(append --disable-cuda-graph to EXTRA_SGLANG_ARGS, or "
+                    "--compilation-config.cudagraph_mode NONE to "
                     "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
                     "a capture-fold fallback over capture_traces/."
                 ),
