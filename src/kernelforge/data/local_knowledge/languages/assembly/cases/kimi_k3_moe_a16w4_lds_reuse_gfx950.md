@@ -125,10 +125,12 @@ exceeded the declared 1.0 source-relative bound. The unchanged compiler-assembly
 control also failed that comparison. Stage2 uses BF16 atomic accumulation;
 finite-sample maxima from nondeterministic controls need calibration before
 they can distinguish regressions reliably. Restoring atomic address order and
-serializing the atomic issues did not pass the current contract. No tolerances
-were relaxed, no Stage2 candidate was accepted, and no repaired combined E2E
-or combined 512-question result exists. Do not add the separate Stage1/Stage2
-ratios or treat this rejection as a mathematical 30 dB failure.
+serializing the atomic issues did not pass that contract. Those failures remain
+in the record. The [Stage2 validation case](kimi_k3_moe_a16w4_atomic_stage2_gfx950.md)
+describes a subsequent source-calibrated bounded-precision contract and exact
+isolated expert comparisons. It explicitly distinguishes that new acceptance
+from unchanged repeatability. Do not add separate Stage1/Stage2 ratios or treat
+the initial rejection as a mathematical 30 dB failure.
 
 ## Provenance and transfer limits
 
