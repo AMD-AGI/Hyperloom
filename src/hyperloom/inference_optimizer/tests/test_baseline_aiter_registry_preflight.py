@@ -244,3 +244,98 @@ def test_the_preflight_runs_before_the_config_is_materialized():
 
     ordered = [name for _lineno, name in sorted(called)]
     assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_config_with_envs"]
+    assert registry_mismatch_modules(observed) == ("module_gemm_a8w8_blockscale_bpreshuffle",)
+    # A cktile kernel carries its libtype in its own name.
+    assert registry_mismatch_modules("kernel 'a8w8_blockscale_cktile_x' is not present") == (
+        "module_gemm_a8w8_blockscale_cktile",
+    )
+    # Nothing named, nothing to unlink — the env-keyed drop stays the only behaviour.
+    assert registry_mismatch_modules("Capture cuda graph failed: HIP error") == ()
+
+
+def test_named_modules_are_unlinked_on_top_of_the_env_s_own(tmp_path, monkeypatch):
+    """The two sources add up; neither replaces the other."""
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    jit = tmp_path / "jit"
+    jit.mkdir()
+    for stem in ("module_gemm_a8w8", "module_gemm_a8w8_blockscale_bpreshuffle"):
+        (jit / f"{stem}.so").write_bytes(b"\x7fELF")
+    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+
+    outcome = _aiter_jit.drop_serving_so_for_envs(
+        {"AITER_CONFIG_GEMM_A8W8": "/tuned/a8w8.csv"},
+        backup_dir=tmp_path / "backup",
+        also_modules=("module_gemm_a8w8_blockscale_bpreshuffle",),
+    )
+
+    assert not (jit / "module_gemm_a8w8.so").exists()
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+    assert outcome["action"] == "invalidate"
+
+
+def _fake_aiter_tree(root, *, csv_rows: str, so_contains: bytes) -> object:
+    """A minimal aiter package: jit/ beside configs/, one shipped table."""
+    jit = root / "aiter" / "jit"
+    jit.mkdir(parents=True)
+    (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").write_bytes(b"\x7fELF" + so_contains)
+    shipped = root / "aiter" / "configs" / "model_configs"
+    shipped.mkdir(parents=True)
+    (shipped / "a8w8_blockscale_bpreshuffle_tuned_gemm_dsv3.csv").write_text(
+        "M,N,K,kernelName,libtype\n" + csv_rows, encoding="utf-8"
+    )
+    return jit
+
+
+def test_audit_rebuilds_a_module_that_aiter_s_own_table_outran(tmp_path, monkeypatch):
+    """A shipped table for another model still fails every boot in this session.
+
+    aiter merges configs/ and configs/model_configs/ at import regardless of what a
+    round tuned, so a DeepSeek table naming a kernel this install never compiled takes
+    down the first lane to boot -- and the env-keyed checks never look at it.
+    """
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    jit = _fake_aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_never_built,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_something_else",
+    )
+    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+    monkeypatch.setattr(_aiter_jit, "_invalidate_jit_build", lambda d, dest: {"status": "clean"})
+
+    outcome = _aiter_jit.audit_serving_so_against_aiter_configs(backup_dir=tmp_path / "backup")
+
+    assert outcome["action"] == "invalidate"
+    assert outcome["csvs_checked"] == 1
+    assert [Path(p).name for p in outcome["removed"]] == ["module_gemm_a8w8_blockscale_bpreshuffle.so"]
+    assert not (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+
+
+def test_audit_leaves_a_consistent_install_alone(tmp_path, monkeypatch):
+    """The audit runs on every KERNEL entry, so a healthy tree must cost nothing."""
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    jit = _fake_aiter_tree(
+        tmp_path,
+        csv_rows="16,512,2048,a8w8_blockscale_bpreshuffle_built,ck\n",
+        so_contains=b"a8w8_blockscale_bpreshuffle_built",
+    )
+    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+
+    outcome = _aiter_jit.audit_serving_so_against_aiter_configs(backup_dir=tmp_path / "backup")
+
+    assert outcome["action"] == "skip"
+    assert (jit / "module_gemm_a8w8_blockscale_bpreshuffle.so").exists()
+
+
+def test_audit_is_a_noop_without_a_configs_dir(tmp_path, monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _aiter_jit
+
+    jit = tmp_path / "aiter" / "jit"
+    jit.mkdir(parents=True)
+    monkeypatch.setattr(_aiter_jit, "_resolve_serving_jit_dir", lambda: jit)
+
+    outcome = _aiter_jit.audit_serving_so_against_aiter_configs()
+
+    assert outcome["action"] == "noop"

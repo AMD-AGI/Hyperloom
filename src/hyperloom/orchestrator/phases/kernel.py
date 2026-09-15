@@ -251,6 +251,39 @@ class KernelPhase(PhaseHandler):
         identity = self.shared_state.profile_workload_identity
         return identity(recorded) != identity(self.shared_state.profile_workload_context())
 
+    async def _audit_aiter_serving_so(self) -> None:
+        """Reconcile aiter's shipped tuned CSVs with its compiled modules, once.
+
+        The env-keyed checks each lane runs only compare the CSVs that lane names, but
+        aiter merges its own tables at import -- DeepSeek, GLM, other models' -- and one
+        of those naming a kernel absent from the compiled ``.so`` fails every boot in
+        the session no matter what the lane tuned. It is an install-level fact, fixed
+        once here so every lane that follows inherits a consistent tree.
+        """
+        from ..actions.executors._aiter_jit import audit_serving_so_against_aiter_configs
+
+        try:
+            outcome = await asyncio.to_thread(
+                audit_serving_so_against_aiter_configs,
+                backup_dir=self.session_dir / "runs" / "aiter_jit_backup",
+            )
+        except OSError as exc:
+            log.warning("KERNEL entry: aiter serving .so audit failed: %s", exc)
+            return
+        action = str(outcome.get("action") or "")
+        if action == "invalidate":
+            log.info(
+                "KERNEL entry: aiter audit dropped %d module(s) whose kernels its own CSVs outran (%d CSVs checked)",
+                len(outcome.get("removed") or []),
+                int(outcome.get("csvs_checked") or 0),
+            )
+        else:
+            log.info(
+                "KERNEL entry: aiter audit %s (%d CSVs checked)",
+                action or "noop",
+                int(outcome.get("csvs_checked") or 0),
+            )
+
     async def _maybe_reprofile_for_kernel(self) -> None:
         """Reprofile inline when projected tput diverges from the last measured trace, so the phase targets the live bottleneck."""
         before = self._last_measured_roofline_tput()
@@ -615,6 +648,7 @@ class KernelPhase(PhaseHandler):
 
         # Refresh the snapshot before GEMM tuning targets the bottleneck.
         await self._maybe_reprofile_for_kernel()
+        await self._audit_aiter_serving_so()
         log.info(
             "KERNEL entry: running GEMM tuning before source-level kernel_opt",
         )
