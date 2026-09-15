@@ -277,7 +277,7 @@ async def test_two_dispatches_are_two_rounds_on_one_event(_bound_session):
 
 
 @pytest.mark.asyncio
-async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
+async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     lane = _lane(_bound_session)
     task_id = await lane._maybe_enqueue_enablement_specialist()
 
@@ -292,15 +292,18 @@ async def test_a_kept_round_closes_the_lane_it_landed(_bound_session):
         }
     )
 
+    # A KEEP opens the revalidation window, so the lane event stays open until
+    # the revalidation baseline promotes.
     events = _events(_bound_session)
     assert len(events) == 1
-    assert events[0]["status"] == "succeeded"
-    ext = events[0]["ext"]
+    assert events[0]["status"] == "running"
+    ext = _ext()
     assert ext["attempts"]["landed"] == 1
-    assert ext["attempts"]["rows"][0]["failure_kind"] == "missing_model_arch"
-    assert ext["result"]["outcome"] == enablement_event.OUTCOME_SUCCEEDED
-    assert ext["result"]["kept_patches"] == ["/s/patches/arch.diff"]
-    assert ext["result"]["framework_root"] == "/fw/sglang"
+    row = ext["attempts"]["rows"][0]
+    assert row["failure_kind"] == "missing_model_arch"
+    assert row["status"] == "kept"
+    assert row["validation_pending"] is True
+    assert row["landed"] is False
 
 
 @pytest.mark.asyncio
@@ -344,8 +347,8 @@ async def test_the_stall_cap_closes_the_lane_as_failed(_bound_session):
 
 
 @pytest.mark.asyncio
-async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
-    lane = _lane(_bound_session, origin="eval")
+async def test_a_kept_round_does_not_close_the_lane(_bound_session):
+    lane = _lane(_bound_session)
     lane.shared_state.enablement.last_specialist_task_id = "spec-1"
 
     await lane._maybe_rearm_enablement(
@@ -365,8 +368,6 @@ async def test_an_eval_origin_keep_does_not_close_the_lane(_bound_session):
     assert row["status"] == "kept"
     assert row["validation_pending"] is True
     assert row["landed"] is False
-    # Nothing was there to copy, so the row names nothing rather than the
-    # ``runs/`` path the round reported.
     assert row["files"] == []
     assert row["accepted_config_path"] is None
 
@@ -603,4 +604,5 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     await lane._maybe_rearm_enablement({"enablement": True, "status": "kept", "specialist_task_id": task_id})
 
     assert task_id
-    assert lane.shared_state.enablement.succeeded is True
+    assert lane.shared_state.enablement.validation_pending is True
+    assert lane.shared_state.enablement.succeeded is False

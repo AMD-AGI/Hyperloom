@@ -568,17 +568,14 @@ class EnablementLane(CoordinatorCollaborator):
                 # Replaced, not merged: what the KEEP bench launched already supersedes every advanced round that fed
                 # into it.
                 state.enablement.accepted_config = dict(effective)
-            if state.enablement.origin == "eval":
-                # The patch passed the gate, but tput and accuracy only become
-                # official once a genuine baseline promotes: hold ``succeeded``
-                # and open the revalidation window instead.
-                state.enablement.validation_pending = True
-                # A fresh generation so the new window's idempotency key cannot
-                # reuse a prior terminal TaskRegistry row.
-                state.enablement.revalidation_generation += 1
-                state.enablement.revalidation_task_id = ""
-            else:
-                state.enablement.succeeded = True
+            # Hold succeeded until the revalidation baseline promotes so every
+            # KEEP is validated against a real measurement, not the bench the
+            # patch round itself ran.
+            state.enablement.validation_pending = True
+            # A fresh generation so the new window's idempotency key cannot
+            # reuse a prior terminal TaskRegistry row.
+            state.enablement.revalidation_generation += 1
+            state.enablement.revalidation_task_id = ""
         elif status == "advanced" or bool(res.get("advanced")):
             # Forward progress on a serial enablement: stack the progressing patches + setup commands and pivot to the
             # newly-revealed gap.
@@ -736,9 +733,8 @@ def _record_enablement_round(
         succeeded=succeeded,
         validation_pending=bool(lane.validation_pending),
     )
-    # An eval-origin KEEP is not a terminal: the patch is provisional until a
-    # genuine baseline re-measures accuracy, and the window it opens is what
-    # eventually closes the lane. Only a boot-origin KEEP lands here.
+    # A KEEP opens a revalidation window, so succeeded is only set by the
+    # promote path, not here. This branch fires only after the stall cap.
     if succeeded:
         outcome, reason = enablement_event.OUTCOME_SUCCEEDED, str(res.get("status") or "")
     elif stop_reason:

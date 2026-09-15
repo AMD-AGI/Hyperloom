@@ -3551,22 +3551,23 @@ class WritebackCollaborator:
                     promoting_tid,
                 )
             self.shared_state.baseline_failure_streak = 0
-            # A genuine baseline may revalidate an eval-origin enablement.
+            # A genuine baseline is what revalidates an enablement KEEP.
             if bool(getattr(self.shared_state.enablement, "validation_pending", False)):
                 if is_revalidation:
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
-                    if accuracy_meets_floor(acc, floor):
+                    eval_off = bool(getattr(self.shared_state, "eval_disabled", False))
+                    if accuracy_meets_floor(acc, floor) or eval_off:
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
                         await self._settle_enablement_round(BOOTED, reason="revalidation_promoted")
-                        # This promote is the eval-origin lane's terminal: the
-                        # KEEP that preceded it was provisional, so the round
-                        # that landed it did not close the lane.
+                        # This promote is the lane's terminal: the KEEP that
+                        # preceded it was provisional, so the round that landed
+                        # it did not close the lane.
                         enablement_event.record_revalidation_outcome(
                             generation=generation,
                             promoted=True,

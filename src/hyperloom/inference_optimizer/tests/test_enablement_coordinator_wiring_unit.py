@@ -630,26 +630,11 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rearm_kept_is_terminal(monkeypatch):
-    fake = _enqueue_self()
+async def test_rearm_kept_opens_revalidation_window(monkeypatch):
+    fake = _enqueue_self(enablement_revalidation_generation=1)
     await _hold_round(fake, "spec-1")
     await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
-    assert fake.shared_state.enablement.succeeded is True
-    settled = await fake.rounds.get("enablement-spec-1")
-    assert settled is not None and settled.outcome == "booted"
-    # A subsequent enqueue attempt is a no-op.
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-
-
-@pytest.mark.asyncio
-async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(enablement_origin="eval", enablement_revalidation_generation=1)
-    await _hold_round(fake, "spec-1")
-    await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
-    # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
+    # A KEEP always opens the revalidation window; succeeded is set by promote.
     assert fake.shared_state.enablement.validation_pending is True
     assert fake.shared_state.enablement.succeeded is False
     # The authoring round is over, so the revalidation can take the machine.
@@ -944,7 +929,8 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch):
             "setup_commands_applied": ["apt-get install -y gh", "pip install vllm==0.24"],
         }
     )
-    assert fake.shared_state.enablement.succeeded is True
+    assert fake.shared_state.enablement.validation_pending is True
+    assert fake.shared_state.enablement.succeeded is False
     assert fake.shared_state.enablement.setup_commands == [
         "apt-get install -y gh",
         "pip install vllm==0.24",

@@ -1491,7 +1491,7 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
 
 
 @pytest.mark.asyncio
-async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(session_dir):
+async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1509,6 +1509,28 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
         assert c.shared_state.enablement.succeeded is True
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.origin == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval_disabled(session_dir):
+    """When the session has eval disabled, a revalidation baseline promotes on throughput alone."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.eval_disabled = True
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
+        c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 900.0, "completed_requests": 8},
+            task=_mk_task("baseline", "t-reval-noeval"),
+        )
+        assert c.shared_state.baseline_tput == 900.0
+        assert c.shared_state.enablement.succeeded is True
+        assert c.shared_state.enablement.validation_pending is False
     finally:
         await c.stop()
 
