@@ -107,6 +107,30 @@ def test_a_sibling_round_s_connection_noise_does_not_demote_a_real_accuracy_fail
     assert ex._is_server_unreachable_eval_failure(result) is False
 
 
+def test_evidence_that_lives_only_in_this_round_s_log_still_classifies(tmp_path):
+    """The markers are frequently absent from ``result['error']``.
+
+    That is the whole reason ``_is_eval_rooted_failure`` scans logs at all. When the
+    eval-rooted verdict came from a log, the connection refusal that caused it sits in
+    the same log -- so reading only ``result`` leaves the torn-down server routed to the
+    enablement lane, which is the failure this classification exists to prevent. Scan
+    this round's own directory: near enough to see its evidence, narrow enough not to
+    inherit a sibling round's.
+    """
+    round_dir = tmp_path / "task" / "measure_round"
+    (round_dir / "benchmark_atom_1").mkdir(parents=True)
+    (round_dir / "benchmark_atom_1" / "benchmark_stderr.log").write_text(
+        "ERROR: run_eval failed with exit code 1\n"
+        "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099 "
+        "ssl:default [Connect call failed ('0.0.0.0', 41099)]\n",
+        encoding="utf-8",
+    )
+    result = {"status": "failed", "output_dir": str(round_dir), "error": "benchmark exited 1"}
+    ex = _bare_executor()
+    assert ex._is_eval_rooted_failure(result) is True
+    assert ex._is_server_unreachable_eval_failure(result) is True
+
+
 def test_only_a_genuine_baseline_may_establish_the_quality_reference():
     assert baseline_mod._should_establish_quality_ref("baseline") is True
     # replay_warm_recipe reuses this executor but is a candidate: letting it redefine the reference would mask its own

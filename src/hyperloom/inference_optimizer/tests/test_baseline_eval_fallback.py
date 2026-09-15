@@ -763,6 +763,40 @@ def test_salvage_sibling_attempt_accuracy_prevents_stop(tmp_path):
     assert "baseline_accuracy_salvaged_from_sibling_attempt" in result.get("nonfatal_warnings", [])
 
 
+def test_an_unreachable_server_does_not_discard_a_salvaged_under_floor_accuracy(tmp_path):
+    """A salvaged score is a real verdict; the unreachable short-circuit must not eat it.
+
+    The short-circuit exists because a broken measurement says nothing about accuracy.
+    But the salvage runs first, and a sibling round that DID reach a verdict can supply
+    one. Returning on the marker alone throws that away, so a genuinely under-floor
+    model anchors nothing and the run continues with no verdict at all.
+    """
+    # Enablement is what puts a real floor under the score: without it any positive
+    # accuracy counts as usable and the salvage returns before this branch is reached.
+    runs_baseline = tmp_path / "runs" / "baseline"
+    _write_gsm8k_results(runs_baseline / "786a793e" / "measure_round", 0.12)
+    deciding = runs_baseline / "retry2_bootsafe"
+    deciding.mkdir(parents=True, exist_ok=True)
+
+    executor = BaselineExecutor()
+    rec = _StopRecorder("eval")
+    result = {
+        "status": "failed",
+        "run_eval_disabled": False,
+        "output_dir": str(deciding),
+        # Verbatim shape: the client's request is refused first, and only then does
+        # run_eval report a non-zero exit -- so both markers are present.
+        "error": (
+            "aiohttp.client_exceptions.ClientConnectorError: Cannot connect to host 0.0.0.0:41099\n"
+            "ERROR: run_eval failed with exit code 1\n"
+        ),
+    }
+    executor._maybe_stop_on_missing_baseline_accuracy(_stop_ctx("vllm", rec), result)
+
+    assert result["accuracy"] == pytest.approx(0.12)
+    assert result.get("baseline_eval_failed") is True, "the salvaged under-floor score must still be stamped"
+
+
 def test_salvage_uses_a_warmup_score_when_it_is_the_only_one(tmp_path):
     """A warmup-round eval is a valid accuracy source, so the run must not stop."""
     runs_baseline = tmp_path / "runs" / "baseline"

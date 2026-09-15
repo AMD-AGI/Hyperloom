@@ -2051,14 +2051,45 @@ class BaselineExecutor:
         Evidence of a refused connection says the eval never reached a verdict, so the run carries no information
         about accuracy or about a missing framework capability -- the two things the enablement lane exists to chase.
 
-        Read only from this result, deliberately not through ``_failure_carries_markers``: that climbs out of a round
-        directory and scans every log under the shared task root, so a warmup round whose server crashed would decide
-        the classification of a measure round that did reach a verdict -- demoting a real accuracy failure out of the
-        enablement lane, the inverse of what this check is for.
+        Deliberately not routed through ``_failure_carries_markers``: that climbs out of a round directory to the
+        shared task root, so a warmup round whose server crashed would decide the classification of a measure round
+        that did reach a verdict -- demoting a real accuracy failure out of the enablement lane, the inverse of what
+        this check is for. Scan this round's own directory instead. The markers are frequently absent from
+        ``result['error']`` -- that is why the eval-rooted check reads logs at all -- and when the eval-rooted verdict
+        came from a log, the refusal that caused it is in the same log.
         """
         texts = [str(result.get("error") or "")]
         texts.extend(str(warning) for warning in result.get("nonfatal_warnings") or [])
-        return any(marker in text for text in texts for marker in _EVAL_SERVER_UNREACHABLE_MARKERS)
+        if any(marker in text for text in texts for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+            return True
+        out_dir = result.get("output_dir")
+        if not out_dir:
+            return False
+        root = Path(out_dir)
+        if not root.is_dir():
+            return False
+        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+        seen = 0
+        try:
+            for path in root.rglob("*.log"):
+                if path.name not in log_names:
+                    continue
+                seen += 1
+                if seen > 64:  # bound the scan on pathological trees
+                    break
+                try:
+                    with path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
+                        chunk = f.read().decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+                    return True
+        except OSError:
+            return False
+        return False
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
@@ -2464,9 +2495,14 @@ class BaselineExecutor:
 
         # An eval that never reached a verdict because the server was unreachable produced no accuracy signal, so
         # neither the stop below nor the enablement routing has anything to act on; stamping either would put an
-        # accuracy-flavoured verdict on evidence that says only that the measurement broke. The salvage above still
-        # runs first -- a sibling round may have measured an accuracy this one could not.
-        if result.get("status") != "succeeded" and self._is_server_unreachable_eval_failure(result):
+        # accuracy-flavoured verdict on evidence that says only that the measurement broke. But when the salvage
+        # above did find a measured accuracy, there IS a signal -- a real one, from a round that reached a verdict --
+        # and returning here would throw it away, leaving a genuinely under-floor model anchoring nothing.
+        if (
+            salvaged is None
+            and result.get("status") != "succeeded"
+            and self._is_server_unreachable_eval_failure(result)
+        ):
             return
 
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
