@@ -2165,7 +2165,7 @@ def _preflight(
             check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
         if _magpie_backend_active and check is not None and check.returncode != 0:
             magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
+            magpie_ref = os.environ.get("MAGPIE_REF", "d4de63dffe8df0229a88d4c364442051387ec00e")
             magpie_spec = os.environ.get(
                 "MAGPIE_PACKAGE_SPEC",
                 f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
