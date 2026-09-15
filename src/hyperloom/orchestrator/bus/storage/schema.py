@@ -60,7 +60,6 @@ _DDL = [
         topic         TEXT    NOT NULL,
         in_reply_to   TEXT,
         payload       TEXT    NOT NULL,
-        priority      INTEGER NOT NULL,
         ts            TEXT    NOT NULL
     )
     """,

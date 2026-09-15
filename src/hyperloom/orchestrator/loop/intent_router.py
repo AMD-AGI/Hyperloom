@@ -551,7 +551,6 @@ class IntentRouter:
             "*",
             "proposal",
             {**payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
         from .coordinator import PendingProposal
@@ -732,7 +731,6 @@ class IntentRouter:
                 pending.from_agent,
                 "review_verdict",
                 rebroadcast_payload,
-                priority=0 if verdict == "reject" else 1,
                 in_reply_to=pending.proposal_msg_id,
             )
         )
@@ -1066,7 +1064,6 @@ class IntentRouter:
             target_agent,
             "request",
             dict(intent.payload),
-            priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
@@ -1090,7 +1087,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -1116,7 +1112,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -1229,7 +1224,6 @@ class IntentRouter:
                         "source": cache_hit_source or "programmatic_handler",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
@@ -1278,7 +1272,6 @@ class IntentRouter:
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -1401,7 +1394,6 @@ class IntentRouter:
                 "*",
                 "strategy_change",
                 payload,
-                priority=0,
             )
         )
         from ..phases.machine_state import (
@@ -1513,15 +1505,13 @@ class IntentRouter:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity."""
-        prio = 0 if intent.payload.get("severity") == "high" else 1
+        """Broadcast an alert message."""
         await self.bus.append_and_seq(
             Message.new(
                 source,
                 "*",
                 "alert",
                 dict(intent.payload),
-                priority=prio,
             )
         )
 
