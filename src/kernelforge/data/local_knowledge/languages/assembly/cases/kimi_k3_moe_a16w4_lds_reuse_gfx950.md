@@ -2,7 +2,7 @@
 title: Kimi-K3 A16W4 stage1 - LDS reuse race and numerical repair
 kind: case
 gens: [gfx950]
-status: repaired ASM passed canonical numerical acceptance; model E2E pending
+status: repaired Stage1 passed canonical acceptance; 1.86% E2E gain on one workload
 updated: 2026-09-15
 ---
 
@@ -90,9 +90,45 @@ the unchanged 30 dB mathematical floor. Candidate worst mathematical SNR was
 and zero output padding were checked independently.
 
 Three preliminary paired microbenchmarks measured approximately 1.101x, 1.101x
-and 1.106x against optimized FlyDSL. These are screening measurements. They do
-not establish a repaired model-serving gain. The old invalid combined result
-must not be attributed to this repair or carried forward as its E2E result.
+and 1.106x against optimized FlyDSL. The old invalid combined result must not be
+attributed to this repair or carried forward as its E2E result.
+
+## Fresh Stage1-only model measurement
+
+An eight-MI355X SGLang 0.5.17 run compared original MoE, optimized FlyDSL,
+optimized FlyDSL with repaired Stage1 ASM, and optimized FlyDSL again. Stage2
+remained FlyDSL in the ASM leg. Only the two MoE source patches were reverted
+in the original-MoE leg; shared attention/KDA changes stayed fixed.
+
+Each leg ran two throughput measurements, each with 192 requests, 196608 output
+tokens, ISL 8192 / OSL 1024, concurrency 64, warmup 8 and seed 42. Per-rank
+dispatch audits passed for all eight workers. Measurements were:
+
+| Version | Mean output tok/s | GSM8K / 256 | MMLU / 256 |
+| --- | ---: | ---: | ---: |
+| Original MoE | 452.8584 | 248 | 233 |
+| Optimized FlyDSL, before | 477.9388 | 247 | 234 |
+| Repaired Stage1 ASM | 486.8766 | 247 | 233 |
+| Optimized FlyDSL, after | 478.0268 | 248 | 233 |
+
+The ASM gain was **1.8607%** against the pooled FlyDSL source measurements and
+**1.8513%** against the final source measurement. Source drift was **0.0184%**.
+FlyDSL plus the Stage1 repair was **7.5119%** above original MoE in this setup.
+All fixed-input model answers were valid and untruncated. Source itself moved
+by one answer on each task; candidate totals fell within those observed ranges.
+These 512 questions do not establish unchanged model quality on all workloads,
+and one bracketed workload does not establish gains for other serving settings.
+
+A separate attempt to add Stage2 stopped at its canonical gate. Stage2's
+mathematical SNR remained at least 44.96 dB, but per-case oracle/repeat errors
+exceeded the declared 1.0 source-relative bound. The unchanged compiler-assembly
+control also failed that comparison. Stage2 uses BF16 atomic accumulation;
+finite-sample maxima from nondeterministic controls need calibration before
+they can distinguish regressions reliably. Restoring atomic address order and
+serializing the atomic issues did not pass the current contract. No tolerances
+were relaxed, no Stage2 candidate was accepted, and no repaired combined E2E
+or combined 512-question result exists. Do not add the separate Stage1/Stage2
+ratios or treat this rejection as a mathematical 30 dB failure.
 
 ## Provenance and transfer limits
 
@@ -107,7 +143,9 @@ Evidence is retained under
 ablations, assembly, patch, frozen contract, protected driver and fresh verdict.
 The repaired `.s` SHA-256 is
 `7cee6ec838bd3707f901172ec73050c63deed4493983cf35138ae5aef6225820`.
-Fresh model quality and E2E evaluation is separate from this kernel acceptance.
+The completed Stage1-only model evidence is in `stage1-repair-e2e/` next to
+`stage1-diagnosis/`; the rejected Stage2 gate and controls are in
+`combined-repair-e2e/`.
 
 Do not generalize these fences or timings to another specialization, assume
 every native compiler output is race-free, or relax a numerical contract to

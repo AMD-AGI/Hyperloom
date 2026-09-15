@@ -49,8 +49,10 @@ Model quality and E2E throughput remain separate finalist checks.
 When waits or prefetches change output repeatability, read the
 [A16W4 LDS reuse repair](cases/kimi_k3_moe_a16w4_lds_reuse_gfx950.md).
 It distinguishes per-wave memory completion from cross-wave synchronization
-before overwriting a shared tile. It records a numerical repair that passed the
-canonical gate; its model E2E result remains separate and pending.
+before overwriting a shared tile. The repaired Stage1 passed the canonical gate
+and measured a 1.86% E2E gain on one bracketed eight-GPU workload. The card also
+records the limited model-quality evaluation and a separate Stage2 rejection
+whose nondeterministic compiler control failed the same relative-error test.
 
 ## Case knowledge: Neha / Evolve
 
