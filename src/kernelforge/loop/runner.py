@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import shutil
 import signal
 import tempfile
 import textwrap
@@ -763,7 +764,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not index.is_absolute():
                 index = Path(self.ic.workspace_dir) / index
             candidate_index = Path(temporary) / "index"
-            candidate_index.write_bytes(index.read_bytes())
+            # Git uses the index mtime to detect same-size edits with unchanged file timestamps.
+            shutil.copy2(index, candidate_index)
             env = {"GIT_INDEX_FILE": str(candidate_index)}
             git("add", "--", *admitted, cwd=self.ic.workspace_dir, env=env)
             return read_changes(env)

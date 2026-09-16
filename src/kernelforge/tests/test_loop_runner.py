@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -324,6 +325,23 @@ def test_pending_keep_includes_new_assembly_in_recovery_and_publication(tmp_path
     subprocess.run(["git", "apply", "-"], cwd=restored, input=pending["publication_patch"], text=True, check=True)
     assert (restored / "kernel.py").read_bytes() == kernel.read_bytes()
     assert (restored / "kernel.s").read_bytes() == (workspace / "kernel.s").read_bytes()
+
+
+def test_candidate_snapshot_preserves_racy_git_index_detection(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.ic = replace(loop.ic, commit_new_paths=["*.s"])
+    kernel = workspace / "kernel.py"
+    stamp = kernel.stat().st_mtime_ns - 2_000_000_000
+    subprocess.run(["git", "config", "core.trustctime", "false"], cwd=workspace, check=True)
+    os.utime(kernel, ns=(stamp, stamp))
+    subprocess.run(["git", "update-index", "--refresh"], cwd=workspace, check=True)
+    os.utime(workspace / ".git/index", ns=(stamp, stamp))
+    kernel.write_text("def kernel():\n    return 2\n")
+    os.utime(kernel, ns=(stamp, stamp))
+    (workspace / "kernel.s").write_text("s_endpgm\n")
+    patch, changed = loop._candidate_changes(loop._git("rev-parse", "HEAD"))
+    assert set(changed) == {"kernel.py", "kernel.s"}
+    assert "return 2" in patch
 
 
 def test_resume_replays_nonkeep_event_ahead_of_state(tmp_path, monkeypatch):
