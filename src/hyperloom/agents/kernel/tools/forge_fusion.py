@@ -628,6 +628,9 @@ def main(argv: list[str] | None = None) -> int:
         "fusion.patch",
     ):
         (output_root / stale_name).unlink(missing_ok=True)
+    for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
+        for stale in output_root.glob(stale_glob):
+            stale.unlink(missing_ok=True)
     timeout_sec = _timeout_sec(payload)
     try:
         proc = _run_with_tree_timeout(cmd, timeout_sec)

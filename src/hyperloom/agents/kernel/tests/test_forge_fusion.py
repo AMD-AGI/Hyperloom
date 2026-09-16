@@ -363,6 +363,59 @@ def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch,
     assert result["decision"] == "REVERT"
 
 
+def test_main_timeout_does_not_salvage_a_stale_campaign_patch(tmp_path, monkeypatch, capsys):
+    """The output dir is keyed on the task, so the previous run's per-campaign work is still there.
+
+    The stale sweep predates the per-campaign fallback and only names the aggregate
+    artifacts, so a run that times out before writing anything of its own reports the last
+    run's keeper as its result.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_stale.patch").write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_stale.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=9.99)), encoding="utf-8"
+    )
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert rc == 124
+    assert result["kept"] is False, "a stale campaign patch is not this run's result"
+    assert result["decision"] == "REVERT"
+
+
+def test_main_timeout_does_not_salvage_a_stale_published_best(tmp_path, monkeypatch, capsys):
+    """A loop result left pointing at the shadow repo's published best is stale the same way."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _published_best_manifest(tmp_path / "shadow", speedup=9.99, patch_body="diff --git a/s.py b/s.py\n")
+    loop = _campaign_loop_result(total_speedup=9.99)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_stale.json").write_text(json.dumps(loop), encoding="utf-8")
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert rc == 124
+    assert result["kept"] is False, "a stale published best is not this run's result"
+    assert result["decision"] == "REVERT"
+
+
 def test_run_with_tree_timeout_captures_output():
     cp = forge_fusion._run_with_tree_timeout(
         [
