@@ -227,10 +227,35 @@ async def test_overlapping_edits_are_left_to_a_resolver(repo: Path, patches: Pat
 
 
 def _resolver_returning(text: str):
+    """A resolver that replaces every conflicted region with *text*."""
+
     async def resolve(**_: object) -> str:
         return text
 
     return resolve
+
+
+async def test_resolver_is_shown_one_region_and_its_context(repo: Path, patches: Path) -> None:
+    """The model decides the conflicted lines; it never sees the file to rewrite."""
+    landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
+    incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
+    _land(repo, landed)
+    seen: list[dict[str, str]] = []
+
+    async def resolve(**kwargs: str) -> str:
+        seen.append(kwargs)
+        return "    return x * 4 * 8\n    return x * 8\n"
+
+    await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=resolve)
+
+    assert len(seen) == 1
+    region = seen[0]["region"]
+    assert region.splitlines()[0].startswith("<<<<<<<")
+    assert "return x * 4" in region and "return x * 8" in region
+    # The untouched body of the file is context, never part of the answer.
+    assert "def report(values):" not in region
+    assert "import os" in seen[0]["context_before"]
+    assert "def report(values):" in seen[0]["context_after"]
 
 
 async def test_resolver_output_lands_when_it_keeps_both_sides(repo: Path, patches: Path) -> None:
@@ -242,12 +267,7 @@ async def test_resolver_output_lands_when_it_keeps_both_sides(repo: Path, patche
         repo,
         incoming,
         landed_patches=[landed],
-        resolver=_resolver_returning(
-            _BASE.replace(
-                "    return x * 2",
-                '    if os.environ.get("LANE_TWO"):\n        return x * 8\n    return x * 4',
-            )
-        ),
+        resolver=_resolver_returning('    if os.environ.get("LANE_TWO"):\n        return x * 8\n    return x * 4\n'),
     )
 
     assert outcome.applied, outcome.error
@@ -255,6 +275,30 @@ async def test_resolver_output_lands_when_it_keeps_both_sides(repo: Path, patche
     merged = (repo / _MODULE).read_text(encoding="utf-8")
     assert "return x * 4" in merged
     assert "return x * 8" in merged
+    # Everything outside the region is still the file the lanes started from.
+    assert merged.replace('    if os.environ.get("LANE_TWO"):\n        return x * 8\n', "") == _BASE.replace(
+        "return x * 2", "return x * 4"
+    )
+    compile(merged, _MODULE, "exec")
+
+
+async def test_a_dedented_first_line_is_put_back_where_the_markers_were(repo: Path, patches: Path) -> None:
+    """Models indent the body of a region but start line one at the marker's column."""
+    landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
+    incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
+    _land(repo, landed)
+
+    outcome = await apply_patch_resolving_conflicts(
+        repo,
+        incoming,
+        landed_patches=[landed],
+        resolver=_resolver_returning('if os.environ.get("LANE_TWO"):\n        return x * 8\n    return x * 4\n'),
+    )
+
+    assert outcome.applied, outcome.error
+    merged = (repo / _MODULE).read_text(encoding="utf-8")
+    assert '    if os.environ.get("LANE_TWO"):\n' in merged
+    compile(merged, _MODULE, "exec")
 
 
 async def test_resolver_dropping_the_incoming_side_is_rejected(repo: Path, patches: Path) -> None:
@@ -266,7 +310,7 @@ async def test_resolver_dropping_the_incoming_side_is_rejected(repo: Path, patch
         repo,
         incoming,
         landed_patches=[landed],
-        resolver=_resolver_returning(_BASE.replace("return x * 2", "return x * 4")),
+        resolver=_resolver_returning("    return x * 4\n"),
     )
 
     assert not outcome.applied
@@ -283,7 +327,7 @@ async def test_resolver_dropping_a_landed_keep_is_rejected(repo: Path, patches: 
         repo,
         incoming,
         landed_patches=[landed],
-        resolver=_resolver_returning(_BASE.replace("return x * 2", "return x * 8")),
+        resolver=_resolver_returning("    return x * 8\n"),
     )
 
     assert not outcome.applied
@@ -315,7 +359,7 @@ async def test_resolver_shadowing_a_module_symbol_is_rejected(repo: Path, patche
     outcome = await apply_patch_resolving_conflicts(
         repo,
         incoming,
-        resolver=_resolver_returning(_BASE + "\n\ndef compute(x):\n    return x * 8\n"),
+        resolver=_resolver_returning("    return x * 4\n\n\ndef compute(x):\n    return x * 8\n"),
     )
 
     assert not outcome.applied
@@ -331,7 +375,7 @@ async def test_unparsable_resolution_is_rejected(repo: Path, patches: Path) -> N
     outcome = await apply_patch_resolving_conflicts(
         repo,
         incoming,
-        resolver=_resolver_returning("def compute(x)\n    return x\n"),
+        resolver=_resolver_returning("    return x * 8\n    if (\n"),
     )
 
     assert not outcome.applied

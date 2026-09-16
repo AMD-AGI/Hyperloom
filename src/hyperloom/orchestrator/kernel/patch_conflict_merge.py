@@ -53,8 +53,11 @@ STRATEGY_THREE_WAY = "three_way"
 STRATEGY_UNION = "union_disjoint"
 STRATEGY_LLM = "llm"
 
-_LLM_TIMEOUT_S = 300.0
-_LLM_MAX_TOKENS = 32000
+_LLM_TIMEOUT_S = 120.0
+_LLM_CONNECT_TIMEOUT_S = 15.0
+_LLM_MAX_TOKENS = 8000
+#: Lines of unconflicted source shown either side of a region, for context.
+_CONTEXT_LINES = 40
 
 _MARKER_RE = re.compile(r"^(<<<<<<< |\|\|\|\|\|\|\||=======$|>>>>>>> )", re.MULTILINE)
 _CONFLICT_RE = re.compile(
@@ -62,16 +65,18 @@ _CONFLICT_RE = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
-_RESOLVER_SYSTEM = """You resolve a git merge conflict between two independently measured GPU kernel optimizations.
+_RESOLVER_SYSTEM = """You resolve one conflicted region of a git merge between two independently measured GPU kernel optimizations.
 
 Both sides were benchmarked and both must survive. This is a union of two optimizations, never a choice between them.
 
+The region is given with three sections: `ours`, the merge `base` both sides started from, and `theirs`. The lines shown either side of it are context; they are not yours to change.
+
 Rules:
-1. Reply with the complete resolved file and nothing else: no prose, no code fences.
-2. Remove every conflict marker.
-3. Keep every behavioral change from both sides. Where the sides insert independent definitions at the same anchor, keep both.
-4. Never leave two module-level definitions of one name. If both sides define a helper identically, keep one copy; if they define it differently, reconcile them into a single definition that satisfies both call sites.
-5. Change nothing outside the conflicted regions."""
+1. Reply with the lines that replace the region, and nothing else: no prose, no code fences, no conflict markers.
+2. Keep every behavioral change from both sides. Where the sides insert independent definitions at the same anchor, keep both; where they rewrote one line, compose their effects instead of choosing a winner.
+3. Reproduce each side's added lines verbatim wherever composing them allows it. A resolution that paraphrases a benchmarked line away is discarded unread.
+4. Never leave two definitions of one name. If both sides define a helper identically, keep one copy; if they define it differently, reconcile them into a single definition that satisfies both call sites.
+5. Indent as the region does. The reply is spliced in exactly where the markers are."""
 
 
 @dataclass(frozen=True)
@@ -97,13 +102,15 @@ class PatchMergeOutcome:
 
 
 class ConflictResolver(Protocol):
-    """Resolves one conflicted file. Returns the merged text, or ``None``."""
+    """Resolves one conflicted region. Returns its replacement, or ``None``."""
 
     async def __call__(
         self,
         *,
         relative_path: str,
-        conflicted_text: str,
+        region: str,
+        context_before: str,
+        context_after: str,
         ours_label: str,
         theirs_label: str,
         intent: str,
@@ -263,39 +270,55 @@ def llm_resolution_available() -> bool:
     return bool(anthropic_transport_ready())
 
 
+def _blank_trimmed(lines: list[str]) -> list[str]:
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
+
+
 def _strip_code_fence(text: str) -> str | None:
-    """Unwrap a fenced reply, for a model that ignores the no-fences rule."""
-    body = (text or "").strip()
-    if not body:
-        return None
-    if body.startswith("```"):
-        lines = body.splitlines()
-        end = len(lines) - 1
-        while end > 0 and not lines[end].startswith("```"):
-            end -= 1
-        body = "\n".join(lines[1:end])
-        if not body.strip():
-            return None
-    return body if body.endswith("\n") else body + "\n"
+    """Unwrap a fenced reply, for a model that ignores the no-fences rule.
+
+    Only blank lines are trimmed. The reply is spliced in where the markers
+    were, so the indentation of its first line of source is part of the answer.
+    """
+    lines = _blank_trimmed((text or "").splitlines())
+    if lines and lines[0].lstrip().startswith("```"):
+        closing = next(
+            (index for index in range(len(lines) - 1, 0, -1) if lines[index].lstrip().startswith("```")),
+            len(lines),
+        )
+        lines = _blank_trimmed(lines[1:closing])
+    return "\n".join(lines) + "\n" if lines else None
 
 
 def _anthropic_resolver() -> ConflictResolver:
     async def resolve(
         *,
         relative_path: str,
-        conflicted_text: str,
+        region: str,
+        context_before: str,
+        context_after: str,
         ours_label: str,
         theirs_label: str,
         intent: str,
     ) -> str | None:
-        from hyperloom.common.llm_config import aanthropic_completion, resolve_forge_llm_model
+        from hyperloom.common.llm_config import (
+            aanthropic_completion,
+            build_http_timeout,
+            resolve_forge_llm_model,
+        )
 
         prompt = (
             f"File: {relative_path}\n"
             f"`ours` is the optimization already landed: {ours_label}\n"
             f"`theirs` is the optimization being landed now: {theirs_label}\n"
             f"{intent}\n\n"
-            "Conflicted source:\n\n```\n" + conflicted_text + "\n```"
+            f"Lines before the region:\n```\n{context_before}\n```\n\n"
+            f"Conflicted region:\n```\n{region}```\n\n"
+            f"Lines after the region:\n```\n{context_after}\n```"
         )
         result = await aanthropic_completion(
             component="forge",
@@ -304,11 +327,73 @@ def _anthropic_resolver() -> ConflictResolver:
             system=_RESOLVER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_LLM_MAX_TOKENS,
+            # Both transports: the HTTP client reads ``timeout`` and would
+            # otherwise fall back to httpx's five-second default, which no
+            # generation of this size finishes inside.
+            timeout=build_http_timeout(connect=_LLM_CONNECT_TIMEOUT_S, read=_LLM_TIMEOUT_S),
             timeout_s=_LLM_TIMEOUT_S,
         )
         return _strip_code_fence(result.text or "")
 
     return resolve
+
+
+def _indent_of(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def _restored_first_indent(region: str, reply: str) -> str:
+    """Give the reply's first line the indent the region's first line had.
+
+    A model reproduces the rest of a region at the file's own indentation but
+    starts line one at the column the ``<<<<<<<`` it replaces began at. Only
+    that line is touched, and only to lengthen an indent the region's own first
+    line already starts with, so a correctly indented reply is returned as-is.
+    """
+    body = [line for line in region.splitlines() if line.strip() and not _MARKER_RE.match(line)]
+    wanted = _indent_of(body[0]) if body else ""
+    if not wanted or not reply.strip():
+        return reply
+    present = _indent_of(reply.splitlines()[0])
+    return wanted[len(present) :] + reply if wanted.startswith(present) else reply
+
+
+async def _resolve_regions(
+    text: str,
+    *,
+    relative: str,
+    resolver: ConflictResolver,
+    ours_label: str,
+    theirs_label: str,
+    intent: str,
+) -> tuple[str, str]:
+    """Splice a resolution into every conflict region. Returns (text, error).
+
+    One call per region, carrying the surrounding source as context. Sending
+    the whole file instead would ask the model to reproduce thousands of
+    unconflicted lines to decide a handful, which no generation budget covers
+    and which puts every one of those lines at risk of being rewritten.
+    """
+    pieces: list[str] = []
+    cursor = 0
+    for match in _CONFLICT_RE.finditer(text):
+        proposed = await resolver(
+            relative_path=relative,
+            region=match.group(0),
+            context_before="\n".join(text[: match.start()].splitlines()[-_CONTEXT_LINES:]),
+            context_after="\n".join(text[match.end() :].splitlines()[:_CONTEXT_LINES]),
+            ours_label=ours_label,
+            theirs_label=theirs_label,
+            intent=intent,
+        )
+        if not proposed:
+            return "", f"{relative}: resolver returned nothing"
+        spliced = _restored_first_indent(match.group(0), proposed)
+        pieces.append(text[cursor : match.start()])
+        pieces.append(spliced if spliced.endswith("\n") else spliced + "\n")
+        cursor = match.end()
+    pieces.append(text[cursor:])
+    return "".join(pieces), ""
 
 
 async def _resolve_conflicts(
@@ -328,26 +413,26 @@ async def _resolve_conflicts(
 
     strategy = STRATEGY_UNION
     for relative in conflicted:
-        marked = _rewrite_with_base_markers(repo, relative)
-        resolved, unioned, overlapping = _union_disjoint(marked)
+        resolved, unioned, overlapping = _union_disjoint(_rewrite_with_base_markers(repo, relative))
+        if unioned:
+            steps.append(f"{relative}: kept both sides of {unioned} disjoint insertion(s)")
         if overlapping or _MARKER_RE.search(resolved):
             if resolver is None:
                 return strategy, f"{relative}: {overlapping} overlapping region(s), no resolver available"
             try:
-                proposed = await resolver(
-                    relative_path=relative,
-                    conflicted_text=marked,
+                resolved, error = await _resolve_regions(
+                    resolved,
+                    relative=relative,
+                    resolver=resolver,
                     ours_label=ours_label,
                     theirs_label=theirs_label,
                     intent=intent,
                 )
-            except (LLMConfigError, httpx.HTTPError, asyncio.TimeoutError) as error:
-                return strategy, f"{relative}: resolver call failed ({error!r})"
-            if not proposed:
-                return strategy, f"{relative}: resolver returned nothing"
-            resolved, strategy = proposed, STRATEGY_LLM
-        elif unioned:
-            steps.append(f"{relative}: kept both sides of {unioned} disjoint insertion(s)")
+            except (LLMConfigError, httpx.HTTPError, asyncio.TimeoutError) as failure:
+                return strategy, f"{relative}: resolver call failed ({failure!r})"
+            if error:
+                return strategy, error
+            strategy = STRATEGY_LLM
 
         rejection = _reject_reason(repo, relative, resolved)
         if rejection:
