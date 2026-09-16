@@ -19,9 +19,10 @@ summarizes the headline capabilities.
 The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
 is a patch release on top of 1.1.0. The session record does not move, so a
 session recorded by 1.1.0 resumes on this build. The command line and the
-environment contract do: one optimizer option, one console script and seven
-environment variables that 1.1.0 accepted are gone, and one option is added.
-See "Before upgrading from 1.1.0" below.
+environment contract do: one optimizer option, one console script and eight
+environment variables that 1.1.0 accepted are gone, one variable's accepted
+values narrow, and one option is added. See "Before upgrading from 1.1.0"
+below.
 
 Most of it is the Recipe knowledge base telling the truth: the prior work a
 session had actually earned was not reaching the model at all. The other
@@ -45,15 +46,25 @@ invoking it fails with `command not found` rather than a parser error. Call
 `kernelforge`, which has been the name since v1.0.0b2; the retired spelling is
 in [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
 
-Seven environment variables 1.1.0 read are also gone, and these fail differently
+Eight environment variables 1.1.0 read are also gone, and these fail differently
 from the options above: nothing refuses them. A box that still exports them
 starts normally and behaves as though they were never set, so they have to be
 found by reading launch scripts and `.env` rather than by watching a run fail.
 
 | Removed variable | What to do |
 |---|---|
-| `FORGE_CLAUDE_MODEL`, `FORGE_CODEX_MODEL` | Set `CLAUDE_MODEL` / `CODEX_MODEL` instead. Forge now walks Hyperloom's ladder and nothing above it, so one spelling configures both. |
+| `FORGE_CLAUDE_MODEL`, `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL` | Set `CLAUDE_MODEL` / `CODEX_MODEL` instead. Forge now walks Hyperloom's ladder and nothing above it, so one spelling configures both. A box left on the old names does not fail; it falls through to the provider default. |
 | `HYPERLOOM_SKIP_COLLECTIVE`, `HYPERLOOM_COLLECTIVE_ONLY`, `HYPERLOOM_COLLECTIVE_KEEP_PCT`, `FORGE_COLLECTIVE_TIMEOUT`, `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Delete them. They steered the collective optimization lane, which is now part of the rewrite controller; communication operators are picked up as ordinary rewrite candidates and need no separate switches. |
+
+One more variable survives with a narrower accepted set rather than being
+removed. `HYPERLOOM_REASONING_EFFORT` no longer takes `minimal` or `none`; the
+ladder is `low | medium | high | xhigh | max`. The two sides that read it
+disagree about a value outside that ladder, which is why it needs naming here:
+Forge refuses at startup (`'minimal' is not a reasoning effort`), while
+Hyperloom's own `chat.completions` drops the field and takes the gateway
+default, deeper and more expensive than `minimal` was. A deployment sitting on
+either value has to move to `low` by hand, and only one half of the run will
+say so.
 
 ### 1.1.1 highlights
 
