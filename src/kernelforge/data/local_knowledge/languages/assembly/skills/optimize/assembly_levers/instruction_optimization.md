@@ -65,6 +65,4 @@ a warm-cache gain can reverse when expert weights leave cache. Preserve the
 ABI's output initialization in eager and graph execution. Retain regressions
 and report kernel measurements separately from serving throughput and latency.
 
-The A8W4 experiment's full artifacts are under
-`/shared_nfs/chenyi/forge-neha-repro-20260911/moe-forge-r3b`.
 The Evolve links are published kernels, not a recovered agent implementation.

@@ -177,6 +177,25 @@ def test_real_acceptance_enforces_the_contract(tmp_path, kind):
         assert result.outcome in ("unverified", "invalid_result")
 
 
+@pytest.mark.parametrize("kind", ["numerical_failure", "text_only_failure", "missing_evidence", "crash"])
+def test_reported_failure_never_hides_numerical_evidence_or_authorizes_acceptance(tmp_path, kind):
+    record = (
+        None if kind == "missing_evidence" else evidence(candidate_repeat_db=27 if kind == "numerical_failure" else 45)
+    )
+    _task(tmp_path, record)
+    path = tmp_path / "driver.py"
+    path.write_text(
+        path.read_text() + "\nprint('FAIL')\n" + ("raise RuntimeError('crash')\n" if kind == "crash" else "")
+    )
+    result = _accept(tmp_path)
+    assert not result.passed
+    if kind == "numerical_failure":
+        assert result.outcome == "numerical_correctness_failure"
+        assert result.numerical_evidence
+    else:
+        assert not result.numerical_evidence
+
+
 def test_measurements_own_output_storage_and_detect_oscillation():
     torch = pytest.importorskip("torch")
     reference = torch.ones(4)

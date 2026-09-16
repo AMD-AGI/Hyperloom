@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Language moves must survive the full implementer prompt and its canonical gate."""
+"""Source campaigns retain their language; assembly campaigns retain their binding."""
 
 from __future__ import annotations
 
@@ -16,18 +16,25 @@ from kernelforge.config import Config
 from kernelforge.orchestrator import agent
 
 
-@pytest.mark.parametrize("kernel_backend", ["flydsl"])
+@pytest.mark.parametrize(
+    "kernel_backend", ["flydsl", "triton", "gluon", "hip", "ck", "aiter", "hipblaslt", "fusion", "assembly"]
+)
 @pytest.mark.parametrize(
     "program",
     ["Optimize the kernel.", "Optimize the kernel. This task requires the implementation to remain in FlyDSL."],
 )
-def test_gated_implementer_allows_backend_language_moves_subject_to_task_contract(
-    tmp_path, monkeypatch, kernel_backend, program
-):
+def test_gated_implementer_scopes_assembly_to_its_own_campaign(tmp_path, monkeypatch, kernel_backend, program):
     kernel = tmp_path / "kernel.py"
     kernel.write_text("import flydsl.compiler as flyc\n")
     driver = tmp_path / "driver.py"
     driver.write_text("raise AssertionError('prompt tests must not execute the driver')\n")
+    source_files = []
+    if kernel_backend == "assembly":
+        assembly = tmp_path / "kernel.s"
+        assembly.write_text("# prepared assembly\n")
+        subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+        source_files = [str(assembly)]
     specs = []
 
     class RecordingBackend:
@@ -54,6 +61,7 @@ def test_gated_implementer_allows_backend_language_moves_subject_to_task_contrac
         kernel_backend_name=kernel_backend,
         insession_gate=True,
         driver_script=str(driver),
+        source_files=source_files,
     )
     asyncio.run(agent_fn(str(kernel), ""))
 
@@ -62,14 +70,17 @@ def test_gated_implementer_allows_backend_language_moves_subject_to_task_contrac
     prompt = " ".join(spec.system_prompt.split())
     assert "ONE self-correcting session" in prompt
     assert f"Backend Expertise ({kernel_backend})" in prompt
-    assert "kernelforge.assembly" in prompt
     assert program in prompt
-    assert "Implementation language may change through the supported routes in the selected backend expertise" in prompt
-    assert "unless the task explicitly restricts languages" in prompt
-    assert "public callable, launch ABI, and the unchanged driver's correctness contract" in prompt
-    assert "Keep the kernel in its original backend/DSL" not in prompt
-    assert "do not rewrite in another language" not in prompt
-    assert "outside the campaign's explicit --commit-new-path allowlist" in prompt
+    assert "Implementation language may change" not in prompt
+    if kernel_backend == "assembly":
+        assert "Optimize only the selected assembly; keep the frontend, launcher and ABI frozen" in prompt
+    else:
+        assert "Keep the kernel in its original backend/DSL (do not rewrite in another language)" in prompt
+        assert "outside the campaign's explicit --commit-new-path allowlist" in prompt
+    if kernel_backend == "flydsl":
+        assert "forge-loop --kernel-backend assembly" in prompt
+        assert "Do not install an assembly replacement" in prompt
+        assert "with_assembly" not in prompt
     assert spec.driver_script == str(driver)
     assert spec.hooks is not None and len(spec.hooks.stop) == 1
 

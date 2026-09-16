@@ -15,10 +15,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
+
 from kernelforge.assembly.capture import bind_compile
 from kernelforge.assembly.compiler import _validate_source
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.canonical_correctness import accept_candidate
+from kernelforge.loop.numerical import validate_contract, validate_source_independence
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import bench_wallclock, calculate_mean_case_speedup
 
@@ -124,26 +127,7 @@ async def _validate(driver: str, threshold: float, deadline: float) -> Validatio
     return await run_validation_pipeline(driver, snr_threshold=threshold, timeout_per_stage=_timeout(deadline))
 
 
-async def verify_assembly(
-    kernel: Path, assembly: Path, driver: str, target: str, threshold: float, deadline: float
-) -> ValidationReport:
-    """Require correctness and prove that a fresh driver consumes the editable source."""
-    source = assembly.read_bytes()
-    _validate_source(source.decode("utf-8"), target)
-    correct = await _validate(driver, threshold, deadline)
-    if not correct.results or not correct.all_passed:
-        raise AssemblyPreparationError(correct.failed_output or "assembly correctness failed")
-    marker = "FORGE_ASSEMBLY_BUILD_PROBE"
-    try:
-        assembly.write_bytes(source + f'\n.error "{marker}"\n'.encode())
-        probe = await _validate(driver, threshold, deadline)
-    finally:
-        assembly.write_bytes(source)
-    if probe.all_passed or marker not in probe.failed_output:
-        raise AssemblyPreparationError(
-            "driver did not propagate the deliberate assembly build failure; reject cached binaries or source fallback"
-        )
-    text = source.decode("utf-8")
+def _no_op_source(text: str) -> str:
     symbols = re.findall(r"^\s*\.amdhsa_kernel\s+(\S+)\s*$", text, re.MULTILINE)
     for symbol in symbols:
         text, count = re.subn(
@@ -164,8 +148,30 @@ async def verify_assembly(
         text,
         flags=re.MULTILINE,
     )
+    return text
+
+
+async def verify_assembly(
+    kernel: Path, assembly: Path, driver: str, target: str, threshold: float, deadline: float
+) -> ValidationReport:
+    """Require correctness and prove that a fresh driver consumes the editable source."""
+    source = assembly.read_bytes()
+    _validate_source(source.decode("utf-8"), target)
+    correct = await _validate(driver, threshold, deadline)
+    if not correct.results or not correct.all_passed:
+        raise AssemblyPreparationError(correct.failed_output or "assembly correctness failed")
+    marker = "FORGE_ASSEMBLY_BUILD_PROBE"
     try:
-        assembly.write_text(text, encoding="utf-8")
+        assembly.write_bytes(source + f'\n.error "{marker}"\n'.encode())
+        probe = await _validate(driver, threshold, deadline)
+    finally:
+        assembly.write_bytes(source)
+    if probe.all_passed or marker not in probe.failed_output:
+        raise AssemblyPreparationError(
+            "driver did not propagate the deliberate assembly build failure; reject cached binaries or source fallback"
+        )
+    try:
+        assembly.write_text(_no_op_source(source.decode("utf-8")), encoding="utf-8")
         execution_probe = await _validate(driver, threshold, deadline)
     finally:
         assembly.write_bytes(source)
@@ -185,10 +191,34 @@ async def verify_assembly(
     return restored
 
 
+async def _verify_numerical_source(workspace: Path, assembly: Path, baseline: dict, deadline: float) -> dict:
+    source = assembly.read_bytes()
+    try:
+        assembly.write_text(_no_op_source(source.decode("utf-8")), encoding="utf-8")
+        result = await accept_candidate(
+            str(workspace),
+            timeout_cap_sec=_timeout(deadline),
+            candidate_label="assembly numerical execution probe",
+            kernel_backend="assembly",
+        )
+    finally:
+        assembly.write_bytes(source)
+    if result.outcome != "numerical_correctness_failure" or not result.numerical_evidence:
+        raise AssemblyPreparationError(
+            "numerical execution probe requires complete measured candidate failure: " + result.detail
+        )
+    contract = validate_contract(yaml.safe_load((workspace / "config.yaml").read_text())["numerical_validation"])
+    try:
+        validate_source_independence(result.numerical_evidence, baseline, contract)
+    except ValueError as error:
+        raise AssemblyPreparationError(str(error)) from error
+    return result.numerical_evidence
+
+
 def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_commit: str, target: str) -> dict:
     record: dict = json.loads(path.read_text(encoding="utf-8"))
     if (
-        record.get("schema_version") != 3
+        record.get("schema_version") != 4
         or record.get("status") != "ready"
         or record.get("kernel") != kernel.relative_to(workspace).as_posix()
         or record.get("assembly") != assembly.relative_to(workspace).as_posix()
@@ -291,6 +321,7 @@ async def prepare_assembly(
                 raise AssemblyPreparationError("initial assembly differs from compiler output")
             kernel_path.write_text(candidate_source, encoding="utf-8")
         report = await verify_assembly(kernel_path, assembly, driver, config.gpu_target, threshold, deadline)
+        numerical_probe = await _verify_numerical_source(workspace, assembly, source_numerical_evidence, deadline)
         acceptance = await accept_candidate(
             str(workspace),
             timeout_cap_sec=_timeout(deadline),
@@ -309,7 +340,7 @@ async def prepare_assembly(
         if _git(workspace, "diff", "--cached", "--name-only"):
             _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
         record = {
-            "schema_version": 3,
+            "schema_version": 4,
             "status": "ready",
             "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
             "kernel": paths[0],
@@ -331,6 +362,7 @@ async def prepare_assembly(
             "acceptance_config_sha256": _digest(workspace / "config.yaml"),
             "source_numerical_evidence": source_numerical_evidence,
             "roundtrip_numerical_evidence": acceptance.numerical_evidence,
+            "numerical_execution_probe_evidence": numerical_probe,
             "build_failure_probe_passed": True,
             "execution_probe_passed": True,
         }

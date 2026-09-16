@@ -185,6 +185,7 @@ async def _run_canonical_suite(
 
     passed_steps: list[str] = []
     numerical_output: list[str] = []
+    reported_failure = None
     request_id = uuid.uuid4().hex
     for step in suite.steps:
         timeout_sec = min(step.timeout_sec, timeout_cap_sec)
@@ -216,11 +217,13 @@ async def _run_canonical_suite(
                     output=output[-_OUTPUT_TAIL_CHARS:],
                 )
             if step.reports_failure(output):
-                return CanonicalCorrectnessResult(
+                reported_failure = CanonicalCorrectnessResult(
                     passed=False,
                     detail=(f"{step.label}: {command!r} reported failure in its output"),
                     output=output[-_OUTPUT_TAIL_CHARS:],
                 )
+                if suite.numerical_contract is None:
+                    return reported_failure
         passed_steps.append(f"{step.label}: {len(step.commands)} command(s) under {timeout_sec}s")
 
     evidence = None
@@ -239,6 +242,8 @@ async def _run_canonical_suite(
                 passed=False, detail=detail, outcome="numerical_correctness_failure", numerical_evidence=evidence
             )
         passed_steps.append(detail)
+    if reported_failure is not None:
+        return reported_failure
     return CanonicalCorrectnessResult(passed=True, detail="; ".join(passed_steps), numerical_evidence=evidence)
 
 

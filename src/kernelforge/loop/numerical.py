@@ -96,6 +96,34 @@ def judge_evidence(output: str, contract: dict, request_id: str) -> tuple[bool, 
     return not failures, detail, evidence
 
 
+def validate_source_independence(probe: dict, baseline: dict, contract: dict) -> None:
+    """Check already-validated no-op evidence against the original source envelope.
+
+    Every candidate case must expose the no-op while both source legs remain
+    healthy. Identical errors in a correct compiler roundtrip are legitimate.
+    """
+    if probe["contract_sha256"] != baseline["contract_sha256"] or probe["contract_sha256"] != contract_digest(contract):
+        raise ValueError("numerical execution probe changed the numerical contract")
+    original = {row["id"]: row for row in baseline["cases"]}
+    for row in probe["cases"]:
+        name = row["id"]
+        limits = contract["cases"][name]
+        candidate = row["candidate"]
+        if candidate["finite"] and max(candidate["oracle_errors"]) <= limits["max_oracle_error"]:
+            raise ValueError(f"numerical execution probe {name}: candidate did not expose the no-op")
+        for role in ("source_before", "source_after"):
+            source = row[role]
+            if not source["finite"] or max(source["oracle_errors"]) > limits["max_oracle_error"]:
+                raise ValueError(f"numerical execution probe {name}/{role}: source failed with candidate disabled")
+            for metric in ("oracle_errors", "repeat_errors"):
+                initial = max(max(original[name][leg][metric]) for leg in ("source_before", "source_after"))
+                bound = max(initial * limits["max_error_ratio"], limits["error_floor"])
+                if max(source[metric]) > bound:
+                    raise ValueError(
+                        f"numerical execution probe {name}/{role}: {metric} exceeded the original source envelope"
+                    )
+
+
 def measure_outputs(run: Callable, reference: Any, *, repetitions: int) -> dict:
     """Measure one tensor using synchronized, independently owned CPU snapshots.
 

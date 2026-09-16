@@ -20,14 +20,18 @@ if not torch.version.hip or not torch.cuda.is_available():
 triton = pytest.importorskip("triton")
 tl = pytest.importorskip("triton.language")
 
-from kernelforge.assembly.prepare import prepare_assembly
+from kernelforge.assembly.prepare import AssemblyPreparationError, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import bench_wallclock
 
 
-@pytest.mark.parametrize("frontend", ["triton", "gluon", "hip"])
-def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend):
+@pytest.mark.parametrize(
+    "frontend,wiring",
+    [(name, "independent") for name in ("triton", "gluon", "hip")]
+    + [("triton", role) for role in ("source_before", "source_after", "candidate")],
+)
+def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend, wiring):
     example = Path(__file__).resolve().parents[3] / "examples/triton2asm-vector-add"
     workspace = tmp_path / "campaign"
     shutil.copytree(example, workspace)
@@ -48,6 +52,15 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend):
         path.write_text(source)
     if frontend == "hip":
         _hip_workspace(workspace)
+    if wiring != "independent":
+        path = workspace / "driver.py"
+        text = path.read_text()
+        callback = "source_run" if wiring == "candidate" else "run"
+        text = text.replace(
+            "row[role] = measure_outputs(callback, reference, repetitions=5)",
+            f"row[role] = measure_outputs({callback} if role == {wiring!r} else callback, reference, repetitions=5)",
+        )
+        path.write_text(text)
 
     def git(*args, cwd=workspace):
         return subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True, text=True).stdout.strip()
@@ -60,8 +73,9 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend):
     base = git("rev-parse", "HEAD")
     target = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
     driver = str(workspace / "driver.py")
-    record = asyncio.run(
-        prepare_assembly(
+
+    async def run_preparation():
+        return await prepare_assembly(
             config=Config(workspace=str(workspace), gpu_target=target),
             kernel=str(workspace / "kernel.py"),
             driver=driver,
@@ -70,9 +84,21 @@ def test_compiler_capture_wrong_instruction_and_replay(tmp_path, frontend):
             threshold=50.0,
             deadline=time.time() + 1800,
         )
-    )
+
+    if wiring != "independent":
+        with pytest.raises(AssemblyPreparationError, match="numerical execution probe"):
+            asyncio.run(run_preparation())
+        assert git("rev-parse", "HEAD") == base
+        assert not (workspace / "kernel.s").exists()
+        assert not (workspace / "forge_experiments/assembly_preparation/result.json").exists()
+        return
+    record = asyncio.run(run_preparation())
     assert record["origin"] == frontend + "_compiler"
     assert record["build_failure_probe_passed"] and record["execution_probe_passed"]
+    for row in record["numerical_execution_probe_evidence"]["cases"]:
+        assert not row["candidate"]["finite"]
+        assert row["source_before"]["finite"] and row["source_after"]["finite"]
+        assert row["source_before"]["oracle_errors"] == row["source_after"]["oracle_errors"] == [0] * 5
     assembly = workspace / "kernel.s"
     original = assembly.read_text()
     edited, count = re.subn(r"\bv_add_f32(?P<encoding>_e32|_e64)?\b", r"v_sub_f32\g<encoding>", original)

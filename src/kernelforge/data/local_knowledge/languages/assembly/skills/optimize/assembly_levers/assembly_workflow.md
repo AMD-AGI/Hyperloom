@@ -35,7 +35,10 @@ minimal runnable examples are `examples/flydsl2asm-vector-add/` and
 3. Prove replacement identity: a deliberate assembler error must propagate;
    a no-op candidate must produce a measured SNR or allclose failure on fresh
    outputs beyond compiler warmup. Timeouts, crashes and missing metrics do not
-   prove execution. Restore the source and validate it again.
+   prove execution. The canonical numerical suite must also expose the no-op
+   in every declared candidate case while both source legs stay within their
+   original oracle/repeat-error envelope. Initialize fresh outputs and emit full
+   evidence on mismatches. Restore the source and validate it again.
 4. Change one instruction-level hypothesis at a time. Keep frontend definitions,
    ABI, launch geometry, streams, oracle and measurement conditions fixed.
 5. Run correctness, repeated timing and the canonical numerical suite before
@@ -54,7 +57,7 @@ Do not loosen a contract to admit a faster candidate.
 
 Keep the launcher, provenance manifest and selected `.s` together for clean
 replay. Do not publish temporary code objects, compiler caches or benchmark logs
-as implementation files. Resume requires schema-3 preparation evidence and
+as implementation files. Resume requires schema-4 preparation evidence and
 unchanged frozen inputs, including tracked reference helpers; only the selected
 assembly may change.
 

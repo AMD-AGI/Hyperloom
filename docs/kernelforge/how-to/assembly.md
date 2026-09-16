@@ -144,12 +144,21 @@ failed builds and invalid candidates never fall back to the frontend. These chec
 verify integration as well as numerical correctness; the original compiler's
 correctness alone cannot prove the replacement was loaded.
 
+The same no-op is also run through the canonical numerical suite. Every declared
+case must expose the disabled candidate, while both source legs remain finite
+and within the original source's oracle/repeat-error envelope. Missing evidence,
+a candidate measured as the source, or a source leg affected by candidate edits
+rejects preparation. Initialize fresh outputs so that a no-op is observable even
+for zero-valued cases, and emit complete numerical evidence before exiting
+normally on a measured mismatch. Equal errors in a correct roundtrip, including
+all-zero errors, are valid and are not used to infer shared execution.
+
 `forge_experiments/assembly_preparation/result.json` records source and roundtrip
 timings, source/launcher/assembly hashes, the binding manifest, and preparation
-commit. Preparation failures restore the original files and Git state. Resume
-requires a schema-3 record and unchanged frozen inputs, including tracked reference
+commit, plus the numerical execution-probe evidence. Preparation failures restore
+the original files and Git state. Resume requires a schema-4 record and unchanged frozen inputs, including tracked reference
 helpers, compared with the preparation commit. Only the selected `.s` may change.
-Older preparation records lack the measured execution proof and are not migrated; start a fresh
+Older preparation records lack the source-independence proof and are not migrated; start a fresh
 campaign from their selected source instead.
 
 ## Numerical acceptance

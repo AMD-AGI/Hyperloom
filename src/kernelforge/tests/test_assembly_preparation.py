@@ -61,7 +61,10 @@ def campaign(tmp_path, monkeypatch):
                 "cases": [{"id": "one", "source_before": numerical, "candidate": numerical, "source_after": numerical}],
             }
         )
-        + "\nrecord['request_id']=os.environ['FORGE_NUMERICAL_REQUEST']\nprint('__FORGE_NUMERICAL__'+json.dumps(record))\n"
+        + "\nfrom pathlib import Path\nassembly=Path('kernel.s')\n"
+        + "if assembly.exists() and 'FORGE_ASSEMBLY_EXECUTION_PROBE' in assembly.read_text():\n"
+        + "    record['cases'][0]['candidate']['oracle_errors']=[1]*3\n"
+        + "record['request_id']=os.environ['FORGE_NUMERICAL_REQUEST']\nprint('__FORGE_NUMERICAL__'+json.dumps(record))\n"
     )
     (tmp_path / "config.yaml").write_text(
         yaml.safe_dump(
@@ -122,6 +125,10 @@ def test_capture_keeps_frontend_and_original_baseline(campaign):
     assert result["origin"] == "flydsl_compiler"
     assert result["build_failure_probe_passed"]
     assert result["execution_probe_passed"]
+    probe = result["numerical_execution_probe_evidence"]["cases"][0]
+    assert probe["source_before"]["oracle_errors"] == [0] * 3
+    assert probe["source_after"]["oracle_errors"] == [0] * 3
+    assert probe["candidate"]["oracle_errors"] == [1] * 3
     assert result["roundtrip_mean_case_speedup"] == 0.5
     assert "import flydsl.compiler as flyc" in (root / "kernel.py").read_text()
     assert "return _forge_assembly(*args)" in (root / "kernel.py").read_text()
@@ -135,6 +142,34 @@ def test_capture_keeps_frontend_and_original_baseline(campaign):
     prepare.seed_source_baseline(config, result)
     assert config.baseline_case_times == {"one": 1.0}
     assert not hasattr(config, "warm_start_commit")
+
+
+@pytest.mark.parametrize(
+    "wiring", ["source_before", "source_after", "masked_candidate", "unstable_source", "missing_evidence", "crash"]
+)
+def test_numerical_probe_rejects_miswired_measurements(campaign, wiring):
+    root, options = campaign
+    path = root / "numerical_reference.py"
+    change = {
+        "source_before": "record['cases'][0]['source_before'] = record['cases'][0]['candidate']",
+        "source_after": "record['cases'][0]['source_after'] = record['cases'][0]['candidate']",
+        "masked_candidate": "record['cases'][0]['candidate']['oracle_errors'] = [0]*3",
+        "unstable_source": "record['cases'][0]['source_before']['repeat_errors'] = [1]*2",
+        "missing_evidence": "raise SystemExit(0)",
+        "crash": "raise RuntimeError('numerical driver crashed')",
+    }[wiring]
+    text = path.read_text().replace(
+        "    record['cases'][0]['candidate']['oracle_errors']=[1]*3",
+        "    record['cases'][0]['candidate']['oracle_errors']=[1]*3\n    " + change,
+    )
+    path.write_text(text)
+    git(root, "add", path.name)
+    git(root, "commit", "-m", "miswire numerical driver")
+    with pytest.raises(prepare.AssemblyPreparationError, match="numerical execution probe"):
+        asyncio.run(prepare.prepare_assembly(**options))
+    assert (root / "kernel.py").read_text() == SOURCE
+    assert not (root / "kernel.s").exists()
+    assert not (root / "forge_experiments/assembly_preparation/result.json").exists()
 
 
 @pytest.mark.parametrize("comment", ["; @add", "// compiler label"])
@@ -354,10 +389,11 @@ def test_resume_freezes_reference_helpers_from_preparation(campaign, committed):
         asyncio.run(prepare.prepare_assembly(**options, resume=True))
 
 
-def test_resume_rejects_preparation_without_measured_execution_proof(campaign):
+@pytest.mark.parametrize("old_schema", [2, 3])
+def test_resume_rejects_preparation_without_measured_execution_proof(campaign, old_schema):
     root, options = campaign
     record = asyncio.run(prepare.prepare_assembly(**options))
-    record["schema_version"] = 2
+    record["schema_version"] = old_schema
     (root / "forge_experiments/assembly_preparation/result.json").write_text(json.dumps(record))
     with pytest.raises(prepare.AssemblyPreparationError, match="prepare a fresh campaign"):
         asyncio.run(prepare.prepare_assembly(**options, resume=True))

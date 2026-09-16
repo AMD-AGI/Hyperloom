@@ -97,13 +97,11 @@ quality-only replicas (source/combined/combined/source) scored 246/233, 248/234,
 throughput prelude and reused the same 512 questions. They do not prove model
 quality equivalence or erase Stage2's greater repeat variability.
 
-## Exact artifacts
+## Historical artifact identities
 
-Evidence root: `/shared_nfs/chenyi/forge-kimi-k3-asm-12h-20260914/`.
-Use `stage1-diagnosis/repaired-canonical/` and `stage1-repair-e2e/` for Stage1;
-`combined-repair-e2e/` retains rejected Stage2 controls;
-`stage2-calibrated-v2-20260915/` contains the frozen contract and holdouts;
-`combined-validated-e2e/` and `combined-quality-replications/` hold model evidence.
+These hashes identify the historical experiment, whose artifacts are not bundled
+with Forge. The case provides optimization and validation lessons, not an
+installable candidate. A new campaign needs its own source, driver and contract.
 
 | Artifact | SHA-256 |
 | --- | --- |
@@ -111,6 +109,5 @@ Use `stage1-diagnosis/repaired-canonical/` and `stage1-repair-e2e/` for Stage1;
 | Repaired Stage1 assembly | `7cee6ec838bd3707f901172ec73050c63deed4493983cf35138ae5aef6225820` |
 | Stage2 assembly | `102314728bfbe53c09b407de9a6a0430ee47122747c34147e0a606edc743dafb` |
 
-Verify these artifacts and their frozen drivers/contracts before replay.
 Use the current [campaign workflow](assembly_workflow.md) for a new search;
 the historical experiment does not waive its preparation or acceptance checks.
