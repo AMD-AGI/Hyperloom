@@ -5,6 +5,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Removed
+
+- **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
+  inbox subscription with `IntentType.RESPONSE`, `Message.priority`,
+  `IntentSpec.builder`, the `PHASE_EXIT_REASONS` vocabulary, and 11 stop
+  reasons no code path can produce.** Each had writers, or a schema column, or
+  a test suite holding it up — everything except a production reader.
+
+  `IntentType.RESPONSE` was dispatched, policy-gated and validated end to end
+  while the `kernel_agent` process that would consume it is never instantiated.
+  The `request` / `response` topics and `kernel_agent` as a routing target are
+  untouched; only the subscription and the intent type go. `Message.priority`
+  had 15 writers and no reader, no index and no `ORDER BY`.
+  `IntentSpec.builder` kept two unwired builders looking alive — their
+  validators stay, because the role may still emit both intent types, just not
+  through a builder. `PHASE_EXIT_REASONS` was a closed 37-member vocabulary
+  with no production reader at all, unlike its load-bearing twin
+  `STOP_REASON_VOCAB`, which gates `machine.py`, `close.py` and
+  `set_stop_reason`: a phase exit reason only reaches `phase_history` for a
+  human to read, so a typo there cannot misroute anything.
+
+  The 11 stop reasons were not "not yet triggered". The crash-threshold path
+  sets `emergency`, and `compute_plateau_explore` / `compute_plateau_kernel`
+  return booleans, so no exit rule ever named `plateau_explore` or
+  `plateau_kernel`. The comment calling these legacy sentinels kept for
+  resuming old sessions did not survive checking, and goes with them:
+  `SharedState.from_dict` restores `stop_reason` as a dataclass field,
+  bypassing `set_stop_reason`, and `_global_terminal` returns unrecognised
+  values verbatim under `vocab: "unknown"` — vocabulary membership was never
+  what let an old session report its terminal. `enablement_stalled` remains a
+  legal value in the enablement timeline event namespace, which is a different
+  vocabulary and is untouched.
+
+  **Resuming across the change needs nothing from the operator.**
+  `CREATE TABLE IF NOT EXISTS` leaves `priority INTEGER NOT NULL` on a
+  `coordinator.db` written before this release, where a column with no default
+  would refuse every append the new code writes, so `ensure_schema` drops it on
+  the way in. An in-flight session resumes with its event history intact.
+
+  The rewrite kernel lane is a **refactor, not a removal**. `allocate()` built
+  a `LaneAllocation` for a lane whose budget the rewrite route never read — it
+  sizes itself against the wall clock — but the `0.5` was load-bearing as a
+  divisor, holding the other two lanes down to 0.3 and 0.2 of the phase. It
+  becomes `REWRITE_RESERVE_SHARE`, taken off the top before the two real lanes
+  divide the rest, and each lane's share of the phase is unchanged.
+
 ## [v1.1.1] - 2026-09-16
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the

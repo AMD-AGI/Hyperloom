@@ -724,7 +724,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_single_verdict": "router",
         "_handle_delegate": "router",
         "_handle_request": "router",
-        "_handle_response": "router",
         "_handle_extend_lease": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",

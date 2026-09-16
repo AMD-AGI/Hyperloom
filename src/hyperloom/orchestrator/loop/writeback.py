@@ -533,7 +533,6 @@ class WritebackCollaborator:
                     "hint": denied.hint,
                     "reason": str(denied),
                 },
-                priority=0,
             )
         )
         resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
