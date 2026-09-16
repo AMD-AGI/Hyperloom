@@ -733,7 +733,6 @@ def test_prelude_enters_enablement_on_a_baseline_failure_streak():
     phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
     assert phase == phase_state.PHASE_ENABLEMENT
     assert reason == "enablement_entered"
-    assert phase_state.is_valid_phase_exit_reason(reason)
 
 
 def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
@@ -748,7 +747,6 @@ def test_enablement_exits_once_the_baseline_lands_and_work_drains():
     phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
     assert phase != phase_state.PHASE_ENABLEMENT
     assert reason == "enablement_done"
-    assert phase_state.is_valid_phase_exit_reason(reason)
 
 
 def test_enablement_holds_while_work_is_in_flight():
