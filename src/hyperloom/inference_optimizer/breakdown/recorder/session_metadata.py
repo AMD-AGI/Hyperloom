@@ -182,7 +182,11 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
         "tick_count": int(getattr(state, "tick", 0) or 0),
         "recovery": _recovery(state),
     }
-    payload: dict[str, Any] = {"session": session, "task_config": _launch_config(state)}
+    payload: dict[str, Any] = {
+        "session": session,
+        "task_config": _launch_config(state),
+        "grading": _grading(state),
+    }
     architecture = _architecture(
         getattr(state, "model_info", None) or {},
         model_class=_text(getattr(state, "model_class", "")),
@@ -190,6 +194,38 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     if architecture:
         payload["task_config"]["architecture"] = architecture
     rec.record_upsert_singleton(SECTION, payload)
+
+
+def _grading(state: Any) -> dict[str, Any]:
+    """Declare the axis this session was configured to grade on, and the band it grades under.
+
+    An AgentX replay is ranked on the slow-tail interactivity percentile with throughput held as a guard; a synthetic
+    run is ranked on output throughput alone. On the canonical corpus the two axes differ by roughly two orders of
+    magnitude, so a consumer that cannot tell them apart will happily sort one against the other -- and nothing else
+    in this document carries the distinction, because every throughput field in it is the output axis by
+    construction and ``benchmark_mode`` never reaches the breakdown at all.
+
+    This is the session-level setting and only that. What the run actually decided a given promotion on is a
+    different fact, recorded on the promotion itself and published as ``outcome.validation.graded_on``: a session
+    configured for interactivity still grades an individual comparison on output whenever either side of it cannot
+    supply the axis pair. Resolving one of the two from the other would put a label on a figure it does not describe.
+
+    Read from the live state rather than resolved here, which is why this reaches the export with no environment read
+    anywhere on the path: ``SharedState.grading`` was resolved once at seed, where the run could still see its own
+    configuration.
+    """
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+    from hyperloom.orchestrator.state.shared_state import resolved_grading
+
+    on_intvty, noise_pct = resolved_grading(state)
+    return {
+        "benchmark_mode": _text(getattr(state, "benchmark_mode", "")) or "synthetic",
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        # The throughput guard that rides along with the interactivity objective. ``noise_pct`` is null on a session
+        # seeded before the band was recorded: the band it applied is unknown, and today's default is not evidence
+        # of it.
+        "tput_guard": {"enabled": on_intvty, "noise_pct": noise_pct},
+    }
 
 
 def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
