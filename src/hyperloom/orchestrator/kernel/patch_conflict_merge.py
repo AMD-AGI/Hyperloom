@@ -298,7 +298,7 @@ def _anthropic_resolver() -> ConflictResolver:
             "Conflicted source:\n\n```\n" + conflicted_text + "\n```"
         )
         result = await aanthropic_completion(
-            component="controller_integration",
+            component="forge",
             operation="patch_conflict_merge",
             model=resolve_forge_llm_model("claude"),
             system=_RESOLVER_SYSTEM,
