@@ -208,7 +208,6 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     # The flags live on the ``optimize`` subparser, so walk the tree.
     pending = [_build_parser()]
     quoted: dict[str, float] = {}
-    uncapped: set[str] = set()
     while pending:
         for action in pending.pop()._actions:
             choices = getattr(action, "choices", None)
@@ -219,11 +218,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
             if not match:
                 continue
             default_text = re.search(r"Default:\s*([0-9.]+)\.", action.help or "")
-            if default_text is None:
-                # A phase with no default cap must say so rather than quote a number.
-                assert "Uncapped by default" in (action.help or ""), action.dest
-                uncapped.add(match.group(1).upper())
-                continue
+            assert default_text, f"{action.dest} help does not quote a default"
             quoted[match.group(1).upper()] = float(default_text.group(1))
 
     assert quoted, "no phase-budget flags found; this guard would pass vacuously"
@@ -233,6 +228,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
     real["KERNEL"] = real.pop("KERNEL_AGENT")
 
+    # A capped phase has a flag quoting its default; an uncapped one has no flag
+    # at all, since nothing would enforce what it set.
     assert quoted == real
-    # A flag whose phase carries no default must be the one that says so.
-    assert uncapped == {ps.PHASE_ENABLEMENT}
+    assert ps.PHASE_ENABLEMENT not in ps.DEFAULT_PHASE_BUDGET_PCT

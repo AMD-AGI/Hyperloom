@@ -459,7 +459,10 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--max-hours",
         type=float,
-        default=DEFAULT_MAX_HOURS,
+        # No argparse default: ``--resume-from`` must tell "the operator asked
+        # for this many hours" from "the operator said nothing", and a default
+        # would make an explicit value indistinguishable from absence.
+        default=None,
         help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
     )
     opt.add_argument(
@@ -1255,16 +1258,6 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Wall-clock budget cap for PRELUDE as a fraction of --max-hours. Default: 0.03.",
-    )
-    opt.add_argument(
-        "--max-minutes-enablement-pct",
-        "--phase-budget-enablement-pct",
-        dest="phase_budget_enablement_pct",
-        type=float,
-        default=None,
-        help="Wall-clock budget cap for ENABLEMENT as a fraction of --max-hours. "
-        "Uncapped by default: a combo that cannot run has nothing to optimise, "
-        "so the phase is bounded by its attempt cap and the session clock.",
     )
     opt.add_argument(
         "--max-minutes-framework-pct",

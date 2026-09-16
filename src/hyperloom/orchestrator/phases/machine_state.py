@@ -248,7 +248,8 @@ def is_valid_stop_reason(value: str) -> bool:
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
 # budget apportions optimisation effort, and a combo that cannot run has nothing
-# to optimise. An absent key means no cap, which is not the same as a zero one.
+# to optimise. It carries no cap at all -- ``compute_next_phase`` does not
+# consult ``phase_cap_exceeded`` for it -- and so has no override flag either.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share.

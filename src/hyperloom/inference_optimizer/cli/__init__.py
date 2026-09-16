@@ -123,6 +123,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from .parser import (
+    DEFAULT_MAX_HOURS,
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
     _redact_unknown_args as _redact_unknown_args,
@@ -981,9 +982,9 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     """Widen the per-variant time budgets for AgentX's much longer runs."""
     if not _agentx_enabled():
         return
-    if float(getattr(args, "max_hours", 0) or 0) == 2.0:
+    if getattr(args, "max_hours", None) == DEFAULT_MAX_HOURS:
         print(
-            "NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of 2.0. "
+            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
@@ -1067,10 +1068,13 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
-    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict."""
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    ENABLEMENT has no flag: nothing enforces a cap for it, since
+    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
-        PHASE_ENABLEMENT,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
@@ -1080,7 +1084,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     phase_budget_pct: dict[str, float] = {}
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
-        ("phase_budget_enablement_pct", PHASE_ENABLEMENT),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
         ("phase_budget_sweep_pct", PHASE_SWEEP),
@@ -1336,10 +1339,11 @@ _OBJECTIVE_KIND_TO_FLAG: Mapping[str, str] = {
 def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mapping[str, Any]) -> list[str]:
     """Fill the budget and the stop target from the archive when this resume omitted them.
 
-    Neither survives the flags alone: ``--max-hours`` has a real default, so a
-    bare resume would shorten a longer session and close the leg as
-    ``time_exhausted``, and the target flags default to ``None``, so it would
-    drop the objective. The Robustness Monitor auto-resumes with no flags at all.
+    A bare resume would otherwise rebuild both from the flags: the budget would
+    shorten a longer session and close the leg as ``time_exhausted``, and the
+    objective would be dropped. The Robustness Monitor auto-resumes with no
+    flags at all. An omitted ``--max-hours`` arrives as ``None``, so a smaller
+    explicit budget still tightens the leg, which is what ``_start_run`` reads.
 
     Args:
         args: Parsed arguments for this resume; an explicit flag always wins.
@@ -1350,15 +1354,11 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     Returns:
         Lines to print, each already prefixed with ``  → ``.
     """
-    from .parser import DEFAULT_MAX_HOURS
-
     lines: list[str] = []
     persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
-    if float(getattr(args, "max_hours", 0) or 0) == DEFAULT_MAX_HOURS and persisted_minutes > 0:
+    if getattr(args, "max_hours", None) is None and persisted_minutes > 0:
         args.max_hours = persisted_minutes / 60.0
-        lines.append(
-            f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted; not the {DEFAULT_MAX_HOURS}h default)"
-        )
+        lines.append(f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted)")
 
     # Restored as a set: a target named on this resume replaces the persisted
     # objective outright rather than joining it, which build_objective refuses.
@@ -1654,6 +1654,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # one place that covers both.
     _preflight_agentx_backend(args)
     _apply_agentx_budget_profile(args)
+    # A fresh launch has nothing to restore, so settle the budget before the
+    # manifest and the workload env read it. A resume keeps ``None`` until
+    # ``_restore_budget_and_objective`` has had its chance at the session's own.
+    if not args.resume_from and args.max_hours is None:
+        args.max_hours = DEFAULT_MAX_HOURS
 
     if args.resume_from:
         # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
@@ -1936,6 +1941,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
         for line in _restore_budget_and_objective(args, state, manifest):
             print(line)
+        if args.max_hours is None:
+            args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.

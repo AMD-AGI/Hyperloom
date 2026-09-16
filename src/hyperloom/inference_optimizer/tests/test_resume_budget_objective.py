@@ -20,8 +20,10 @@ class _State:
 
 
 def _args(**overrides: Any) -> argparse.Namespace:
+    # ``max_hours=None`` is what an omitted ``--max-hours`` parses to; a float
+    # here means the operator named one.
     ns = argparse.Namespace(
-        max_hours=DEFAULT_MAX_HOURS,
+        max_hours=None,
         target_gain=None,
         target_tput=None,
         target_baseline_dir=None,
@@ -46,6 +48,18 @@ def test_an_explicit_flag_on_the_resume_wins() -> None:
     _restore_budget_and_objective(args, _State(1440), {"objective": {"kind": "gain_pct", "value": 300.0}})
     assert args.max_hours == 8.0
     assert args.target_gain == 50.0
+
+
+def test_an_explicit_budget_equal_to_the_default_still_wins() -> None:
+    """A leg asking for the default hour count must tighten, not inherit.
+
+    ``--max-hours`` carries no argparse default precisely so this value is
+    distinguishable from absence; ``_start_run`` runs the leg against the
+    smaller of the two.
+    """
+    args = _args(max_hours=DEFAULT_MAX_HOURS)
+    _restore_budget_and_objective(args, _State(480), {"objective": {"kind": "time_only", "value": None}})
+    assert args.max_hours == DEFAULT_MAX_HOURS
 
 
 def test_one_explicit_target_replaces_the_persisted_objective_outright() -> None:
@@ -77,9 +91,13 @@ def test_a_time_only_session_restores_the_budget_and_no_target() -> None:
     assert args.target_gain is None
 
 
-def test_an_unusable_archive_leaves_the_defaults_alone() -> None:
-    """A manifest without an objective, and a state without a budget, both degrade quietly."""
+def test_an_unusable_archive_restores_nothing() -> None:
+    """A manifest without an objective, and a state without a budget, both degrade quietly.
+
+    ``max_hours`` stays unset so the caller can still supply
+    :data:`DEFAULT_MAX_HOURS`; restoring it here would claim the archive named one.
+    """
     args = _args()
     assert _restore_budget_and_objective(args, _State(0), {}) == []
-    assert args.max_hours == DEFAULT_MAX_HOURS
+    assert args.max_hours is None
     assert args.target_gain is None
