@@ -691,8 +691,7 @@ def _setup_worktree(
     worktree_path: Path,
     branch: str,
 ) -> tuple[Path | None, str]:
-    """Create a fresh git worktree at ``worktree_path`` branched off
-    ``base``'s HEAD.
+    """Create a worktree from ``base``'s HEAD with pinned submodules initialized.
 
     Best-effort: on git error returns ``(None, err)`` so the caller can
     proceed without isolation or hard-fail.
@@ -707,7 +706,22 @@ def _setup_worktree(
         git failure.
     """
     if worktree_path.exists():
-        # Resume / retry: reuse an existing worktree.
+        if (worktree_path / ".gitmodules").is_file():
+            try:
+                status = subprocess.run(
+                    ["git", "-C", str(worktree_path), "submodule", "status", "--recursive"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60.0,
+                    check=False,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                return None, f"git submodule status failed to spawn: {exc!r}"
+            if status.returncode != 0:
+                return None, f"git submodule status rc={status.returncode}"
+            if any(line.startswith(("-", "U")) for line in status.stdout.splitlines()):
+                return None, "existing worktree has uninitialized or conflicted submodules"
+        # Resume / retry: preserve specialist edits, including submodule commits.
         log.warning(
             "specialist worktree already exists at %s; reusing",
             worktree_path,
@@ -736,6 +750,19 @@ def _setup_worktree(
         return None, f"git worktree add failed to spawn: {exc!r}"
     if cp.returncode != 0:
         return None, (f"git worktree add rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}")
+    if (worktree_path / ".gitmodules").is_file():
+        try:
+            cp = subprocess.run(
+                ["git", "-C", str(worktree_path), "submodule", "update", "--init", "--recursive", "--checkout"],
+                capture_output=True,
+                text=True,
+                timeout=300.0,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            return None, f"git submodule initialization failed to spawn: {exc!r}"
+        if cp.returncode != 0:
+            return None, f"git submodule initialization rc={cp.returncode}: stderr={cp.stderr.strip()[:400]!r}"
     return worktree_path, ""
 
 
