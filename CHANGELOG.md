@@ -5,6 +5,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **An accuracy eval that failed because the server was gone was read as a
+  missing framework capability.** `run_eval` reports a vanished server and a
+  model that scored badly the same way -- a non-zero exit -- so the eval-rooted
+  branch stamped both as an eval-failure contract and handed them to the
+  enablement lane. Measured: a baseline whose throughput pass had already
+  completed lost its server mid-eval, the client's next request was refused,
+  and the run then spent five specialist rounds hunting a capability gap the
+  evidence never supported before stopping on the stall cap with a terminal
+  reason that named enablement rather than the server. A refused connection is
+  now separated out: the baseline still fails, nothing is salvaged and the
+  accuracy gate is untouched, but it counts as an ordinary baseline failure so
+  the existing total-failure backstop ends the run on the cause it actually
+  had. Framework-agnostic; the eval path is shared by vLLM, SGLang and ATOM.
+
+- **`--framework atom` defaults the kernel backend to forge.** The kernel phase
+  runs on atom, but GEAK -- the backend every framework gets unless the
+  environment opts into forge -- is on weaker ground there: its extraction rules
+  forbid guessing a rewrite seam on a quantized, non-vLLM backend and require
+  resolving one from the live server, which is unproven on atom. The default phase split gives that phase half the session, so
+  defaulting to GEAK on atom meant defaulting to half a session of nothing,
+  while the CLI printed that kernel-agent was "wired for atom". On atom an unset
+  `KERNEL_OPT_BACKEND_ORDER` is now filled in with `forge` before the session
+  records its backend, and the choice is reported at launch. A value the
+  operator set is kept, so running GEAK on atom deliberately stays possible; the
+  CLI warns that its seam resolution is unproven there. `--no-kernel` skips the
+  defaulting entirely. Only the `framework == "atom"` branch is touched; SGLang
+  and vLLM keep GEAK.
+
+- **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
+  The serving-process checks now accept `atom.entrypoints`. Recovery records
+  the members of a recognized ATOM process group before sending TERM, then
+  checks each recorded PID, group and start time before sending KILL. This
+  allows anonymous workers to be reaped after their leader exits without
+  treating a reused PID or a newly discovered process as an owned worker.
+  A rank that forked after the snapshot is in neither the recorded set nor any
+  cmdline that still reads as an owner, so a confirmed group also receives a
+  closing group KILL; measured on an 8-rank bring-up, those ranks otherwise
+  survived holding their cards. That kill reaches members this pass never
+  enumerated, so it is not treated as proof the group exited. Ownership must be
+  confirmed first: when the recorded leader is absent from the group, no longer
+  reads as an ATOM server, or no longer matches the group and start time
+  recorded for it, nothing is signalled at all and the pidfile is kept for a
+  later pass -- a recorded pgid the kernel has since recycled would otherwise
+  take the teardown meant for ours.
+  Recovery retains the pidfile while the group is still alive and reports the
+  worker PIDs actually signalled. Measured on one MI355X serving
+  Qwen3-14B-FP8: against a fully booted server recovery reaped the leader and
+  three anonymous workers and the card went from 87% to 0% VRAM; fired mid-boot
+  it left no engine process behind. Normal warmup/measure reuse and the existing
+  vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
+  anonymous workers whose leader had already exited before recovery began;
+  the generic subprocess teardown and third-party benchmark scripts are unchanged.
+
 ### Removed
 
 - **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
