@@ -385,13 +385,30 @@ def _patch_target_file(patch_path: Path) -> str:
     return match.group(1) if match else ""
 
 
-def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
-    """Collect the per-recipe keepers a run exported before it was killed.
+def _published_best_patch(best_manifest: Path) -> Path | None:
+    """Return the patch the shadow repo published for a campaign's best iteration."""
+    try:
+        manifest = json.loads(best_manifest.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    rel = str(manifest.get("patch_path") or "")
+    if not rel:
+        return None
+    # ``patch_path`` is relative to the experiments root, which holds the ``best/`` the manifest sits in.
+    patch = best_manifest.parent.parent / rel
+    return patch if patch.is_file() else None
 
-    ``on_keep`` exports ``fusion_<pattern_id>.patch`` the moment a recipe is kept and
-    ``run_campaign`` writes ``forge_loop_<pattern_id>.json`` beside it, but the aggregate
-    ``fusion_manifest.json`` only lands once every campaign has returned. A run killed in
-    between leaves proven work on disk with nothing pointing at it.
+
+def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
+    """Collect the per-recipe keepers a killed run left proof of.
+
+    ``run_campaign`` writes ``forge_loop_<pattern_id>.json`` as each campaign returns and
+    publishes its winning iteration to the shadow repo's ``forge_experiments/best/``, while
+    ``on_keep`` exports ``fusion_<pattern_id>.patch`` only once the loop gates the keeper and
+    the aggregate ``fusion_manifest.json`` only once every campaign has returned. A run
+    killed at any of those points leaves proven work with nothing the aggregate can see.
 
     Args:
         root: The fusion output directory.
@@ -401,21 +418,24 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
         first.
     """
     rows: list[dict[str, Any]] = []
-    for patch_file in sorted(root.glob("fusion_*.patch")):
-        stem = patch_file.name[len("fusion_") : -len(".patch")]
-        loop_file = root / f"forge_loop_{stem}.json"
-        if not loop_file.is_file():
-            continue
+    for loop_file in sorted(root.glob("forge_loop_*.json")):
+        stem = loop_file.name[len("forge_loop_") : -len(".json")]
         try:
             loop = json.loads(loop_file.read_text(encoding="utf-8", errors="replace"))
         except (OSError, json.JSONDecodeError):
             continue
         if not isinstance(loop, dict) or not loop.get("improved"):
             continue
+        best_manifest = str(loop.get("best_manifest") or "")
+        patch_file = root / f"fusion_{stem}.patch"
+        if not patch_file.is_file():
+            published = _published_best_patch(Path(best_manifest)) if best_manifest else None
+            if published is None:
+                continue
+            patch_file = published
         target_file = _patch_target_file(patch_file)
         if not target_file:
             continue
-        best_manifest = str(loop.get("best_manifest") or "")
         rows.append(
             {
                 "kernel_name": stem,
