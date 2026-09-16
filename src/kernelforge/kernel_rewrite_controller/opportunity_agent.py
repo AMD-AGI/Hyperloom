@@ -30,6 +30,7 @@ from kernelforge.agent_backends.session_resume import (
 )
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.scheduler import ANALYSIS_BUDGET_SEC
@@ -376,8 +377,7 @@ pull-request search splits that spelling into terms, and a name normalized
 before it arrives has no boundaries left to split on.
 All identity values must use normalized lowercase ASCII. For example, write
 `"gpu": "mi355x"`, never `"MI355X"`. identity.backend describes the
-kernel-building expertise, not the platform; it must be one of `ck`, `flydsl`,
-`triton`, `gluon`, `aiter`, `hip`, `hipblaslt`, or `fusion`. Do not publish an
+kernel-building expertise, not the platform; it must be one of {kernel_backends}. Do not publish an
 operator whose implementation language has no matching registered backend.
 kernel_path and every source_files entry must be tracked, repo-relative files in
 the single repo_root at its current HEAD. Put cross-repository source references
@@ -415,7 +415,7 @@ draft: rewrite its `task.json` as `{"withdrawn": "<why>"}`. You have no way to
 delete a directory, so this is how a draft is taken back, and a withdrawn one
 is neither published nor held against you. You cannot end the session while a
 refused draft is neither fixed nor withdrawn.
-"""
+""".replace("{kernel_backends}", ", ".join(f"`{backend}`" for backend in KERNEL_BACKENDS))
 
 
 def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:

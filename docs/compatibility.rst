@@ -75,7 +75,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.1.1             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -195,7 +195,7 @@ Hyperloom does not install ROCm or torch itself.
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
      - 0.5.18 (rocm724), pinned to commit ``0c7ff19e3b73``
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.4 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm724``), so the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
+     - Installed in ``shared`` mode (reuses the host torch). The wheel target is derived from the ROCm build of the installed torch rather than defaulted, so a ROCm 7.2.x stack resolves ``SGLANG_ROCM_EXTRA=rocm724`` and the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch, which is taken for any Python other than 3.10 and for a ROCm stack no published wheel targets; on Python 3.10 with a derived target the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
    * - vLLM
      - v0.29.0 (rocm723), isolated venv
      - Installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
@@ -211,3 +211,12 @@ surrounding torch, Triton, and AITER builds.
 These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
 ``VLLM_ROCM_VARIANT``) for hosts that need a different pinned stack.
+
+The table above is the validated combination, and ROCm 7.2.x under a single
+``/opt/rocm`` prefix is the layout to prefer. A host where ROCm arrives as
+TheRock's pip wheels instead, split across the ``_rocm_sdk_*`` namespace
+packages, is handled rather than validated: the bare-metal installer probes
+those packages for library resolution and, before a framework source build,
+supplies the devel headers and toolchain root from them, so setup does not fail
+on that layout. Only ROCm 7.0.x and 7.2.x have a published ``amd-sglang`` wheel;
+any other stack falls back to a source install. See :doc:`/install/install`.
