@@ -124,6 +124,10 @@ class EnablementRound:
     # Version assertions observed AT the KEEP, after every mutation that reaches
     # the launched image.
     installed_versions_at_keep: dict = field(default_factory=dict)
+    # Compiled extensions the linked build produced for the framework package
+    # that the framework root does not carry. A build installs nothing itself:
+    # its outputs travel only as artifacts a specialist declares one by one.
+    build_extensions_not_carried: list = field(default_factory=list)
     # {interpreter_tag, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
 

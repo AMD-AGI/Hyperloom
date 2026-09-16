@@ -285,6 +285,10 @@ def collect_model_info(
 _ENABLEMENT_LOG_EXCERPT_CHARS = 2000
 
 
+#: Distinguishes "this state never recorded the field" from a recorded ``None``.
+_ABSENT = object()
+
+
 def _eg(state: dict, name: str, default: Any = None) -> Any:
     """Read an enablement round field from a v4 nested or v3 flat state dict."""
     nested = state.get("enablement")
@@ -380,6 +384,7 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "accepted_config_source",
     "accepted_stack_targets",
     "base_sha",
+    "build_extensions_not_carried",
     "build_manifest",
     "environment_closure",
     "framework_root",
@@ -508,6 +513,15 @@ def _collect_recipe(
     ):
         if value:
             out[key] = value
+    _carry = _eg(state, "build_extensions_not_carried", _ABSENT)
+    if _carry is not _ABSENT:
+        # Assigned outside the loop above, which drops anything falsy: this
+        # observation is a tri-state where ``None`` (the build's outputs could
+        # not be read) and ``[]`` (they were all carried) mean opposite things,
+        # and dropping either would read as the safe one. Read through a
+        # sentinel default so a session that predates the observation stays
+        # absent instead of arriving as an unreadable build.
+        out["build_extensions_not_carried"] = _carry
     decision = evaluate_replay_sufficiency(
         enablement,
         steps=steps,

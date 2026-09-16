@@ -1384,6 +1384,8 @@ def test_reason_code_vocabulary_matches_the_closed_contract():
         "build_attempt_unjoined",
         "build_inputs_incomplete",
         "build_not_replayed",
+        "build_extensions_not_carried",
+        "build_carry_unverified",
         "environment_closure_absent",
         "closure_scope_incomplete",
         "assertions_not_at_keep",
@@ -2129,3 +2131,103 @@ def test_a_build_no_kept_round_asked_for_stays_unlinked():
 
     assert not [s for s in steps if s["kind"] == "build"]
     assert "build_not_replayed" in _codes(_decide(state))
+
+
+def test_extensions_the_build_made_but_nobody_carried_are_named():
+    """The gap that survived a replay and broke it hours later.
+
+    A build installs nothing itself: its compiled extensions reach the framework
+    root only as artifacts a specialist declares, one file at a time. One run
+    declared one of four; the round booted, benchmarked and was kept, and the
+    recipe replayed into an image that served 155 requests before a code path
+    reached `_moe_C.topk_softplus_sqrt` -- an op the built extension exports and
+    the one actually loaded does not.
+    """
+    state = {"build_extensions_not_carried": ["_moe_C.abi3.so", "_rocm_C.abi3.so"]}
+    decision = _decide(state, section=state)
+
+    scopes = [r["scope"] for r in decision["reasons"] if r["code"] == "build_extensions_not_carried"]
+    assert scopes == ["_moe_C.abi3.so", "_rocm_C.abi3.so"]
+    assert decision["status"] == "insufficient"
+
+
+def test_a_build_whose_extensions_all_landed_is_not_named():
+    assert "build_extensions_not_carried" not in _codes(_decide({}, section={"build_extensions_not_carried": []}))
+
+
+def test_a_malformed_carry_record_names_nothing():
+    """Fail open on shape: a reason invented from junk is worse than none."""
+    for junk in ("not-a-list", 7, {"a": 1}):
+        section = {"build_extensions_not_carried": junk}
+        assert "build_extensions_not_carried" not in _codes(_decide({}, section=section)), junk
+
+
+def test_malformed_elements_do_not_become_reasons():
+    """A list is not a licence to stringify whatever is in it."""
+    section = {"build_extensions_not_carried": [None, 7, {}, "", "   ", "_moe_C.abi3.so"]}
+    reasons = _decide({}, section=section)["reasons"]
+
+    scopes = [r["scope"] for r in reasons if r["code"] == "build_extensions_not_carried"]
+    assert scopes == ["_moe_C.abi3.so"]
+
+
+def test_a_build_whose_outputs_could_not_be_read_blocks_replay():
+    """Not evidence of carriage: silence here would certify an unchecked recipe."""
+    decision = _decide({}, section={"build_extensions_not_carried": None})
+
+    assert "build_carry_unverified" in _codes(decision)
+    assert decision["status"] == "insufficient"
+
+
+def test_a_session_that_never_recorded_the_check_names_nothing():
+    """Absent is not None: a session with no build records no observation."""
+    assert "build_carry_unverified" not in _codes(_decide({}, section={}))
+
+
+def _persisted(result_value, *, present=True):
+    """Push a KEEP result through the lane's persistence and read it back."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.enablement.lane import _stack_keep_recipe_records
+
+    enablement = SimpleNamespace(
+        build_extensions_not_carried=[],
+        launch_argv_refused=False,
+        **{name: {} for name in ("accepted_stack_targets", "patch_targets", "launch_evidence",
+                                 "environment_closure", "installed_versions_at_keep",
+                                 "roots", "patch_roots", "base_sha", "source_snapshots")},
+    )
+    res = {"enablement_build_extensions_not_carried": result_value} if present else {}
+    _stack_keep_recipe_records(SimpleNamespace(enablement=enablement), res)
+    return enablement.build_extensions_not_carried
+
+
+def test_an_unverifiable_carry_survives_persistence_and_blocks_replay():
+    """The tri-state must reach the rules intact.
+
+    Every other observed field is persisted as ``value or {}``. Routing this one
+    the same way turns "could not be read" into an empty mapping, which reads as
+    a clean scan -- certifying the recipe the observation exists to refuse.
+    """
+    stored = _persisted(None)
+
+    assert stored is None, "None must not be coerced to an empty mapping"
+    assert "build_carry_unverified" in _codes(_decide({}, section={"build_extensions_not_carried": stored}))
+
+
+def test_a_clean_scan_survives_persistence_as_itself():
+    stored = _persisted([])
+
+    assert stored == []
+    codes = _codes(_decide({}, section={"build_extensions_not_carried": stored}))
+    assert "build_carry_unverified" not in codes
+    assert "build_extensions_not_carried" not in codes
+
+
+def test_named_gaps_survive_persistence():
+    stored = _persisted(["_moe_C.abi3.so"])
+
+    assert stored == ["_moe_C.abi3.so"]
+    reasons = _decide({}, section={"build_extensions_not_carried": stored})["reasons"]
+    scopes = [r["scope"] for r in reasons if r["code"] == "build_extensions_not_carried"]
+    assert scopes == ["_moe_C.abi3.so"]

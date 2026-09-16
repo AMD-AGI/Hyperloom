@@ -54,6 +54,13 @@ _KEEP_OBSERVED_FIELDS = (
     "installed_versions_at_keep",
 )
 
+#: Observed fields whose value is meaningful beyond truthiness, so the
+#: truthy-or-empty coercion the others get would destroy them. ``None`` here
+#: says the observation could not be made, which the sufficiency rules read as
+#: a reason to refuse -- collapsing it into an empty mapping would read as a
+#: clean scan and certify exactly what the observation exists to withhold.
+_KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried",)
+
 
 #: Shortest lease a renewal may stamp.
 _MIN_LEASE_SEC = 300.0
@@ -689,6 +696,10 @@ def _stack_keep_recipe_records(state: Any, res: dict[str, Any]) -> None:
             setattr(state.enablement, field_name, value)
     for field_name in _KEEP_OBSERVED_FIELDS:
         setattr(state.enablement, field_name, res.get(f"enablement_{field_name}") or {})
+    for field_name in _KEEP_TRISTATE_FIELDS:
+        key = f"enablement_{field_name}"
+        if key in res:
+            setattr(state.enablement, field_name, res[key])
     state.enablement.launch_argv_refused = bool(res.get("enablement_launch_argv_refused"))
 
 
