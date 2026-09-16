@@ -19,27 +19,25 @@ summarizes the headline capabilities.
 The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
 is a patch release on top of 1.1.0. The session record does not move, so a
 session recorded by 1.1.0 resumes on this build. The command line and the
-environment contract do: two optimizer options, one console script and seven
+environment contract do: one optimizer option, one console script and seven
 environment variables that 1.1.0 accepted are gone, and one option is added.
 See "Before upgrading from 1.1.0" below.
 
-Most of it is the Recipe knowledge base telling the truth. A warm-start hit
-could hand a session a config measured on a differently shaped card, and the
-prior work a session had actually earned was not reaching the model at all. The
-other corrections are in agent-backend selection, which three places answered
+Most of it is the Recipe knowledge base telling the truth: the prior work a
+session had actually earned was not reaching the model at all. The other
+corrections are in agent-backend selection, which three places answered
 differently, and in the supervisor watchdog, whose restarts are now resumable
 and bounded.
 
 ### Before upgrading from 1.1.0
 
-Two optimizer options 1.1.0 accepted are removed. The parser is strict, so
-neither is an ignored token: a launch or resume command that still carries one
-exits with `unrecognized arguments` before the session starts. Check operator
-scripts before upgrading.
+One optimizer option 1.1.0 accepted is removed. The parser is strict, so it is
+not an ignored token: a launch or resume command that still carries it exits
+with `unrecognized arguments` before the session starts. Check operator scripts
+before upgrading.
 
 | Removed option | What to do |
 |---|---|
-| `--recipe-kb-strict-fingerprint` | Delete it. It was declared in the parser and read nowhere in 1.1.0, so nothing depended on its value. |
 | `--breakdown-include-transcripts` | Delete it. The Session Breakdown section it inlined into is gone, so there is nothing left to inline; specialist transcripts are still written to disk and carried as `transcript_path`. |
 
 The deprecated KernelForge console-script alias is also gone, so a script
@@ -58,14 +56,6 @@ found by reading launch scripts and `.env` rather than by watching a run fail.
 | `HYPERLOOM_SKIP_COLLECTIVE`, `HYPERLOOM_COLLECTIVE_ONLY`, `HYPERLOOM_COLLECTIVE_KEEP_PCT`, `FORGE_COLLECTIVE_TIMEOUT`, `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Delete them. They steered the collective optimization lane, which is now part of the rewrite controller; communication operators are picked up as ordinary rewrite candidates and need no separate switches. |
 
 ### 1.1.1 highlights
-
-- **A partitioned card is a different machine in the KB key.** The
-  compute-partition mode and single-node expert parallelism were absent from the
-  `canonical_id`, so a run in SPX and a run in CPX shared one identity and an
-  `exact` hit at confidence 1.0 could replay a config recorded with eight times
-  the partitions. `kb_hardware_slug` now carries both suffixes at any node
-  count. Every suffix is omitted at its default value, so existing keys stay
-  byte-identical and no published row moves.
 
 - **The warm-start block, the KB's lessons, and its pitfalls reach the model
   again.** All three read field shapes no writer produces. An exact hit carrying
@@ -107,8 +97,7 @@ found by reading launch scripts and `.env` rather than by watching a run fail.
   pinned TraceLens ref ships the matching profiler-config patch.
   `VLLM_VERSION` and `VLLM_ROCM_VARIANT` override it as before.
 
-- **Dead surfaces are removed**: `--recipe-kb-strict-fingerprint`, which
-  was declared in the parser and read nowhere; the pre-rename KernelForge
+- **Dead surfaces are removed**: the pre-rename KernelForge
   console script kept as an alias since v1.0.0b2, superseded by `kernelforge`
   (see [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md)
   for the retired spelling); and its `learning/` tuning database with the
