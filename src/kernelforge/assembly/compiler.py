@@ -97,15 +97,10 @@ def assemble(
 ) -> Path:
     """Build an HSACO from full assembly and return its absolute path.
 
-    The toolchain directory must contain ROCm's llvm-mc and ld.lld. The
-    requested target, including xnack/sramecc features, must match the source's
-    .amdgcn_target. Descriptors and metadata are passed through byte-for-byte.
-    Assembly and linking share one timeout and always run against fresh staged
-    files; no cache is used. On failure this raises without returning an output.
-    A previous output is preserved until a new code object is atomically ready;
-    callers must propagate failures rather than load that previous output.
-
-    This does not convert instruction-only disassembly or launch a GPU kernel.
+    ROCm ``llvm-mc`` and ``ld.lld`` must match the source's full target features.
+    Fresh, uncached stages share one timeout and preserve metadata byte-for-byte.
+    The output is replaced atomically; failures raise and leave any prior file untouched.
+    Instruction-only disassembly and GPU launch are outside this function.
     """
     if not math.isfinite(timeout_sec) or timeout_sec <= 0:
         raise AssemblyError("timeout_sec must be positive and finite")

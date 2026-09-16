@@ -48,16 +48,11 @@ def _dimensions(values: tuple[int, int, int], name: str) -> tuple[int, int, int]
 class HipKernel:
     """Own one freshly loaded kernel; the caller supplies its verified ABI.
 
-    Initialize the intended HIP device before construction. Pointer arguments
-    are device addresses, not tensors. No tensor shape, stride, dtype, symbol,
-    argument layout, or launch geometry is inferred from a source language.
-    Match these to the AMDHSA metadata and validate them in the kernel driver.
-
-    Build/load before graph capture. Every launch receives fresh arguments and
-    an explicit stream handle. Retain this object while any captured graph can
-    run; call close only after GPU work finishes and those graphs are retired.
-    Module unloading is explicit to avoid invalidating an in-flight graph from
-    a Python finalizer. The HIP context releases unclosed modules at process exit.
+    Initialize the target device first and match explicit device pointers, argument
+    layout, symbol and launch geometry to AMDHSA metadata; no tensor metadata is inferred.
+    Build before graph capture;
+    launches receive fresh arguments and an explicit stream. Keep the object alive
+    through all GPU and captured-graph use, then close it explicitly.
     """
 
     def __init__(self, code_object: Path | str, symbol: str, argument_types: Sequence[ArgumentType]) -> None:

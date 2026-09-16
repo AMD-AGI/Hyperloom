@@ -69,15 +69,10 @@ def with_assembly(
 ) -> CompiledFunction:
     """Return an independently owned callable using an edited AMDHSA assembly file.
 
-    ``compiled`` is the result of ``flydsl.compiler.compile(launcher, *args)``.
-    The returned callable accepts the same positional arguments, including the
-    stream. Create it once before graph capture or timing, and run the complete
-    correctness driver before treating it as a candidate.
-
-    This adapter uses FlyDSL's CompiledFunction/CompiledArtifact interface as
-    shipped in 0.2.0 and 0.2.4. It never patches the compiler or changes a JIT cache entry.
-    Every call assembles the current source and creates a separate execution
-    engine, so both the reference and earlier variants remain usable.
+    ``compiled`` comes from ``flydsl.compiler.compile``; the result keeps its
+    argument and stream ABI. FlyDSL 0.2.0/0.2.4 variants get separate engines,
+    without compiler patches or JIT-cache mutation. Build before timing or graph
+    capture and run the full correctness driver before accepting a candidate.
     """
     try:
         from flydsl._mlir import ir

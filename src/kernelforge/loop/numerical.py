@@ -99,9 +99,8 @@ def judge_evidence(output: str, contract: dict, request_id: str) -> tuple[bool, 
 def measure_outputs(run: Callable, reference: Any, *, repetitions: int) -> dict:
     """Measure one tensor using synchronized, independently owned CPU snapshots.
 
-    The callback resets output if the kernel ABI requires it and returns the
-    tensor to judge. Errors use the fixed reference L2 norm; an all-zero
-    reference uses absolute L2 error. Call once per output, input and mode.
+    ``run`` resets ABI-owned output when needed. Errors use the fixed reference
+    L2 norm, or absolute L2 for an all-zero reference. Call per output, input and mode.
     """
     import torch
 

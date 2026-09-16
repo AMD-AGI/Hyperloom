@@ -157,8 +157,7 @@ class TestEditSurfaceAndSweepContract:
 
     @pytest.fixture()
     def source_loop_prompts(self, forge_loop_prompts):
-        # Assembly has a fixed launcher and one editable .s; Python sweep knobs
-        # and the shared repository-wide edit contract do not apply to it.
+        # Assembly edits one .s behind a fixed launcher, without Python sweep knobs.
         return {name: prompt for name, prompt in forge_loop_prompts.items() if name != "assembly"}
 
     def test_assembly_has_a_fixed_edit_surface(self, forge_loop_prompts):

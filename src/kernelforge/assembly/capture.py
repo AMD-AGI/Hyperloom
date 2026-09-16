@@ -94,11 +94,10 @@ def _fingerprint(compiled) -> str:
 
 
 class FlyDSLAssembly:
-    """Export or rebuild one specialization without changing its host call specification.
+    """Export or rebuild one specialization at its original compile boundary.
 
-    Constructed by the preparation host. Export is temporary; the committed binding
-    always rebuilds the selected .s and never falls back to frontend execution.
-    Call at the original compilation boundary, outside timing and graph capture.
+    Normal execution always rebuilds the selected assembly without a frontend fallback.
+    Keep this outside timing and graph capture.
     """
 
     def __init__(self, module: str, assembly: str, target: str, *, export: bool = False):
