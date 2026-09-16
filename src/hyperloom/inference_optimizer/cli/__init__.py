@@ -982,7 +982,10 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     """Widen the per-variant time budgets for AgentX's much longer runs."""
     if not _agentx_enabled():
         return
-    if getattr(args, "max_hours", None) == DEFAULT_MAX_HOURS:
+    # ``--max-hours`` carries no argparse default, so absence reads as ``None``
+    # here: this runs before either path settles the budget. An explicit value
+    # is a deliberate choice even when it equals the default, and gets no note.
+    if getattr(args, "max_hours", None) is None:
         print(
             f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "

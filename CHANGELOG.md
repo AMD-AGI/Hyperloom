@@ -18,10 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **No wall-clock budget is apportioned to it.** `DEFAULT_PHASE_BUDGET_PCT` has
   no ENABLEMENT key, and an absent key means no cap rather than a zero one: a
   budget apportions optimisation effort, and a combo that cannot run has
-  nothing to optimise yet. The other phases keep the percentages they had, so
-  the table now sums to 0.95 and bring-up is bounded by the run's wall clock
-  and by `ENABLEMENT_MAX_ATTEMPTS` instead. The phase's terminal exit is
-  `enablement_attempts_exhausted`, which `enablement/lane.py` sets.
+  nothing to optimise yet. `PHASE_FRAMEWORK_AGENT` drops 0.40 → 0.38 and
+  `PHASE_KERNEL_AGENT` 0.50 → 0.47, so the table now sums to 0.95 and bring-up
+  is bounded by the run's wall clock and by `ENABLEMENT_MAX_ATTEMPTS` instead.
+  The phase's terminal exit is `enablement_attempts_exhausted`, which
+  `enablement/lane.py` sets.
 
   **Runnability is decided from the measurement, not from a log scan.** A combo
   counts as served once it has produced positive throughput and completed
