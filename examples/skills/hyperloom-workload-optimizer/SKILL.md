@@ -33,7 +33,7 @@ for credentials and run mode, the demo skills for a workload preset, and
 runtime, so they always match the installed version.
 
 This is the agent-facing form of the human quickstart in
-[examples/README.md](../../examples/README.md).
+[examples/README.md](../../README.md).
 
 ## Out of scope for this skill
 
