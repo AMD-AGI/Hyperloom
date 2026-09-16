@@ -277,6 +277,10 @@ pip install --quiet 'click<8.3.0' 'ray[default]==2.44.1'
 ray --version
 ```
 
+Where 2.44.1 has no wheel (cp314 postdates it), install `'ray[default]>=2.44.1'`
+without the `click` ceiling; see
+[Ray `--num-gpus` rejected](troubleshooting.md#ray---num-gpus-rejected).
+
 ---
 
 ## Upgrading

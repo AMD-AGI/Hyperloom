@@ -131,6 +131,16 @@ ray --version
 The same fix applies when `ray --version` itself fails after a pod or
 venv rebuild.
 
+On an interpreter with no 2.44.1 wheel (cp314 postdates that release), install
+the lowest published version above it instead and leave the `click` ceiling off
+— it guards 2.44.1's CLI alone, and forcing it onto a newer Ray downgrades a
+`click` that works:
+
+```bash
+pip install --quiet 'ray[default]>=2.44.1'
+ray --version
+```
+
 ---
 
 ## Ray tasks stuck pending forever
