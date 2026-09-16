@@ -1386,6 +1386,8 @@ def test_reason_code_vocabulary_matches_the_closed_contract():
         "build_not_replayed",
         "build_extensions_not_carried",
         "build_carry_unverified",
+        "lever_has_no_reader",
+        "levers_unverified",
         "environment_closure_absent",
         "closure_scope_incomplete",
         "assertions_not_at_keep",
@@ -2231,3 +2233,38 @@ def test_named_gaps_survive_persistence():
     reasons = _decide({}, section={"build_extensions_not_carried": stored})["reasons"]
     scopes = [r["scope"] for r in reasons if r["code"] == "build_extensions_not_carried"]
     assert scopes == ["_moe_C.abi3.so"]
+
+
+def test_levers_with_no_reader_block_the_replay():
+    """A recipe that exports an env nothing consults reproduces nothing by it."""
+    section = {"levers_without_readers": ["VLLM_HL_MQA_LOGITS_HEAD_CHUNK"]}
+    reasons = _decide({}, section=section)["reasons"]
+
+    scopes = [r["scope"] for r in reasons if r["code"] == "lever_has_no_reader"]
+    assert scopes == ["VLLM_HL_MQA_LOGITS_HEAD_CHUNK"]
+
+
+def test_an_unscannable_tree_leaves_the_levers_unverified():
+    assert "levers_unverified" in _codes(_decide({}, section={"levers_without_readers": None}))
+
+
+def test_levers_all_read_name_nothing():
+    codes = _codes(_decide({}, section={"levers_without_readers": []}))
+
+    assert "lever_has_no_reader" not in codes
+    assert "levers_unverified" not in codes
+
+
+def test_a_session_predating_the_lever_scan_names_nothing():
+    codes = _codes(_decide({}, section={}))
+
+    assert "lever_has_no_reader" not in codes
+    assert "levers_unverified" not in codes
+
+
+def test_malformed_lever_records_name_nothing():
+    for junk in ("not-a-list", 7, {"a": 1}):
+        assert "lever_has_no_reader" not in _codes(_decide({}, section={"levers_without_readers": junk})), junk
+    section = {"levers_without_readers": [None, 7, "", "  ", "VLLM_HL_X"]}
+    scopes = [r["scope"] for r in _decide({}, section=section)["reasons"] if r["code"] == "lever_has_no_reader"]
+    assert scopes == ["VLLM_HL_X"]

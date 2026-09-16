@@ -59,7 +59,7 @@ _KEEP_OBSERVED_FIELDS = (
 #: says the observation could not be made, which the sufficiency rules read as
 #: a reason to refuse -- collapsing it into an empty mapping would read as a
 #: clean scan and certify exactly what the observation exists to withhold.
-_KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried",)
+_KEEP_TRISTATE_FIELDS = ("build_extensions_not_carried", "levers_without_readers")
 
 
 #: Shortest lease a renewal may stamp.

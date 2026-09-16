@@ -45,6 +45,8 @@ REASON_BLOCKS: dict[str, str] = {
     "build_not_replayed": BLOCKS_REPLAY,
     "build_extensions_not_carried": BLOCKS_REPLAY,
     "build_carry_unverified": BLOCKS_REPLAY,
+    "lever_has_no_reader": BLOCKS_REPLAY,
+    "levers_unverified": BLOCKS_REPLAY,
     "build_inputs_incomplete": BLOCKS_REPLAY,
     "environment_closure_absent": BLOCKS_REPLAY,
     "closure_scope_incomplete": BLOCKS_REPLAY,
@@ -603,6 +605,27 @@ def _carried_extension_reasons(section: Mapping[str, Any]) -> list[dict[str, Any
     ]
 
 
+def _lever_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Name accepted env levers the framework tree has no reader for.
+
+    Setting one on a replay reproduces nothing: the patch that introduced the
+    knob is not among the ones being replayed, so the recipe carries an
+    instruction with no effect and says nothing about it.
+    """
+    if "levers_without_readers" not in section:
+        return []
+    unread = section["levers_without_readers"]
+    if unread is None:
+        return [_reason("levers_unverified", "levers_without_readers")]
+    if not isinstance(unread, (list, tuple)):
+        return []
+    return [
+        _reason("lever_has_no_reader", name.strip())
+        for name in unread
+        if isinstance(name, str) and name.strip()
+    ]
+
+
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Judge the KEEP-time environment closure and assertion observation."""
     reasons: list[dict[str, Any]] = []
@@ -768,6 +791,7 @@ def evaluate_replay_sufficiency(
     reasons.extend(_setup_reasons(enablement))
     reasons.extend(_build_reasons(enablement, steps))
     reasons.extend(_carried_extension_reasons(section))
+    reasons.extend(_lever_reasons(section))
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_payloads is not None:
