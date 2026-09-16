@@ -101,8 +101,9 @@ def test_correctness_allclose_and_maxdiff(tmp_path):
     assert result["max_diff"] == 1.2e-05
 
 
-def test_correctness_no_metric(tmp_path):
-    drv = _write_driver(tmp_path, "d.py", "print('nothing useful')\n")
+@pytest.mark.parametrize("output", ["nothing useful", "max_diff: 0.5"])
+def test_correctness_no_metric(tmp_path, output):
+    drv = _write_driver(tmp_path, "d.py", f"print({output!r})\n")
     result = asyncio.run(run_correctness(drv))
     assert result["passed"] is False
     assert result["outcome"] == "invalid_result"
