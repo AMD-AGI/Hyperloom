@@ -135,6 +135,25 @@ The backend runs `install_baremetal.sh` in five phases:
 5. **Runtime env**: Persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
+The installer never installs ROCm itself; the host or image provides the runtime
+and a ROCm-built torch. Two framework-install details are worth knowing:
+
+- **vLLM and OpenMPI**: vLLM's ROCm torch build links `libmpi.so.40`, which most
+  container base images do not ship. Phase 2 installs an OpenMPI runtime first,
+  best-effort, trying `libopenmpi3t64` (Ubuntu 24.04's 64-bit `time_t` name) and
+  `libopenmpi3`. It skips silently when the library already resolves, when `apt`
+  is unavailable, or when not running as root.
+- **ROCm as pip wheels**: ROCm can arrive as TheRock's wheels instead of a single
+  `/opt/rocm` prefix, split across the `_rocm_sdk_core`, `_rocm_sdk_libraries`
+  and `_rocm_sdk_devel` namespace packages. Phase 1 then probes all three,
+  including their `rocm_sysdeps` and `host-math` subdirectories, so the gate does
+  not report libraries as missing that the loader does resolve at runtime. Before
+  a source build, which needs hipBLAS/hipSPARSE/thrust headers, the installer
+  adds `rocm-sdk-devel` pinned to the installed `rocm-sdk-core` version, expands
+  it with `rocm-sdk init`, and exports the root `rocm-sdk path --root` reports so
+  the compiler and its include tree come from the same package. All of this is a
+  no-op on a standard `/opt/rocm` image.
+
 ### Scenario B: Bare metal + Docker
 
 Use this when the workload will run inside a ROCm container. This is the
@@ -198,10 +217,13 @@ Bare-metal setup might also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
 tag or commit; when unset the installer selects the newest tag compatible with
 the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
-is controlled by `SGLANG_ROCM_EXTRA` (default `rocm724`) and
-`SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
-`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
-workload skill's `install.sh`.
+is controlled by `SGLANG_ROCM_EXTRA` and `SGLANG_ROCM_PYPI_VERSION`. Both are
+unset by default and derived from the ROCm build of the installed torch
+(`torch.version.hip` 7.0.x to `rocm700`, 7.2.x to `rocm724`); an exported value
+still wins. A stack no published wheel targets derives nothing and takes the
+source install. Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`,
+`TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload skill's
+`install.sh`.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)

@@ -23,7 +23,7 @@ from hyperloom.orchestrator.supervisor.watch import DEFAULT_POLL_SEC, DEFAULT_TI
 
 log = logging.getLogger(__name__)
 
-#: Set to ``0``/``false`` to run without a supervisor at all.
+#: Set to ``1``/``true`` to run a supervisor at all; off by default.
 SUPERVISOR_ENABLE_ENV = "HYPERLOOM_SUPERVISOR"
 
 #: Overrides the stall window, in seconds.
