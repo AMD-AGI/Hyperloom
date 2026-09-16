@@ -72,8 +72,8 @@ does not repair a clobbered register or replace the required memory waits.
 ## Experiment in Forge
 
 1. Start from the current kernel's verified assembly baseline using
-   [the workflow](../INDEX.md) and, for a standalone module,
-   [the integration guide](../guides/hip_module_validation.md).
+   [the workflow](../../../INDEX.md) and, for a standalone module,
+   [the integration guide](../../profile/hip_module_validation.md).
 2. If profiling points to dependent special-function arithmetic, try
    interleaving independent exponentials while preserving numerical semantics.
    Check the ISA hazards for every operand; the source's comments about

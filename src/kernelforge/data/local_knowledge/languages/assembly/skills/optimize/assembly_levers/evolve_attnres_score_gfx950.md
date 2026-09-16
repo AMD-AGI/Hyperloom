@@ -220,8 +220,8 @@ operands of each consumer before removing waits or changing scheduling.
 
 1. Establish the original kernel's correctness and timing with the protected
    driver. For an existing supported FlyDSL callable, first pass the unedited
-   assembly roundtrip in [the workflow](../INDEX.md). This standalone Triton
-   replacement instead needs the [HIP module integration checks](../guides/hip_module_validation.md).
+   assembly roundtrip in [the workflow](../../../INDEX.md). This standalone Triton
+   replacement instead needs the [HIP module integration checks](../../profile/hip_module_validation.md).
 2. Inspect whether the current ISA has independent reductions and serializes
    them. Try interleaving those chains as one candidate. Evaluate changes to
    the LDS reduction separately so the winning mechanism is attributable.

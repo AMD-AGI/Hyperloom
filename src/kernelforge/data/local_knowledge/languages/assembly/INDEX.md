@@ -1,8 +1,8 @@
 ---
-title: AMDGPU assembly workflow
+title: AMDGPU assembly knowledge map
 kind: index
 scope: languages/assembly
-updated: 2026-09-15
+updated: 2026-09-16
 ---
 
 <!--
@@ -10,7 +10,7 @@ SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 SPDX-License-Identifier: MIT
 -->
 
-# AMDGPU assembly workflow
+# AMDGPU assembly knowledge map
 
 Use assembly to test a specific compiler limitation: instruction scheduling,
 register pressure, spills, barriers, or waits. Structural changes belong first
@@ -18,48 +18,46 @@ in a separate FlyDSL, Triton/Gluon, or HIP campaign; recapture compiler output a
 such a change. Inside an assembly optimization loop, only its selected `.s` is editable. Read the actual GPU's ISA and memory-ordering documentation from
 the hardware knowledge map before changing synchronization or register usage.
 
-## Campaign phase contract
+## Reading order
 
-`forge-loop --kernel-backend assembly` captures compiler output programmatically,
-verifies rebuilding/loading through the existing launcher, and permits only the
-selected `.s` to change. There is no correctness-only LLM rewrite or default
-handwritten seed. Automatic capture currently supports one explicit
-`flydsl.compiler.compile(...)` call and one specialization; unsupported frontends
-must first supply a verified assembly binding. Do not improvise a source rewrite.
-The minimal example is `examples/flydsl2asm-vector-add/`.
+As with the other language knowledge folders, load `INDEX.md` first and follow
+its links to the relevant API reference or task playbook. Compiler and runtime
+facts live in `API_docs/`; validation and optimization procedures live in `skills/`.
+The measured cases document assembly-specific techniques and their limits,
+not a duplicate catalog of backend-independent operator contracts.
 
-A source backend can run first, then its best implementation can enter a fresh
-assembly campaign as an optional second stage. Keep its source result as the
-baseline. Do not run this stage unconditionally for every language: Triton/Gluon,
-HIP and operator libraries need distinct extraction/replacement adapters.
-A deliberate build failure must propagate through the protected driver, and a
-no-op assembly must fail correctness on fresh outputs beyond compiler warmup. Record
-source, unchanged roundtrip and optimized ASM separately. Preparation is not a
-KEEP; return the source when instruction optimization has no accepted benefit.
+| Task | Read |
+| --- | --- |
+| Run a compiler-output assembly campaign; understand KEEP and numerical gates | [Assembly workflow](skills/optimize/assembly_levers/assembly_workflow.md) |
+| Capture complete `.s` and build a code object | [Compilation and build](API_docs/compilation_and_build.md) |
+| Retain the FlyDSL ABI or load an explicit HIP kernel | [Runtime API](API_docs/runtime_api.md) |
+| Verify candidate identity, correctness, streams, graphs and timing | [HIP module validation](skills/profile/hip_module_validation.md) |
+| Diagnose LDS reuse and cross-wave synchronization errors | [A16W4 Stage1 repair](skills/optimize/assembly_levers/kimi_k3_moe_a16w4_lds_reuse_gfx950.md) |
+| Separate BF16 atomic variability from a candidate regression | [A16W4 Stage2 controls](skills/optimize/assembly_levers/kimi_k3_moe_a16w4_atomic_stage2_gfx950.md) |
+| Select an instruction change using measured evidence | The case routes below |
 
-Before optimization, supply the protected `config.yaml` numerical contract and
-fresh structured source/candidate measurements from the correctness driver.
-Forge requires complete declared coverage and both absolute mathematical and
-source-relative repeat-output error bounds before an ASM KEEP. A 30 dB
-candidate-to-oracle pass does not imply that two candidate outputs agree at
-30 dB. Use synchronized independent snapshots; timing repetitions are not
-repeatability evidence. Do not loosen the contract after seeing a faster result.
-Model quality and E2E throughput remain separate finalist checks.
+## Folder structure and file roles
 
-When waits or prefetches change output repeatability, read the
-[A16W4 LDS reuse repair](cases/kimi_k3_moe_a16w4_lds_reuse_gfx950.md).
-It distinguishes per-wave memory completion from cross-wave synchronization
-before overwriting a shared tile. The repaired Stage1 passed the canonical gate
-and measured a 1.86% E2E gain on one bracketed eight-GPU workload. The card also
-records the limited model-quality evaluation. For BF16 atomic reductions, read
-the [Stage2 validation case](cases/kimi_k3_moe_a16w4_atomic_stage2_gfx950.md):
-an unchanged compiler control failed the initial finite-max comparison, while
-a separately frozen source-calibrated contract and isolated expert contributions
-passed. Bounded precision and unchanged output repeatability are different claims.
-The combined repaired-Stage1/Stage2 serving trial measured 2.26% against the
-faster source control (2.40% against pooled source). Fixed-count full-question
-replicas did not reproduce a persistent model-quality loss; the card retains
-the initial MMLU miss, changed numerical contract and limits of that evidence.
+```text
+languages/assembly/
+├── INDEX.md
+├── API_docs/
+│   ├── compilation_and_build.md
+│   └── runtime_api.md
+└── skills/
+    ├── profile/
+    │   └── hip_module_validation.md
+    └── optimize/
+        └── assembly_levers/
+            ├── assembly_workflow.md
+            ├── aiter_w4a16_roundtrip_gfx950.md
+            ├── evolve_attnres_score_gfx950.md
+            ├── evolve_attnres_combine_gfx950.md
+            ├── kimi_k3_moe_a8w4_gfx950.md
+            ├── kimi_k3_moe_a16w4_lds_reuse_gfx950.md
+            ├── kimi_k3_moe_a16w4_atomic_stage2_gfx950.md
+            └── qwen3_qk_rope_gfx950.md
+```
 
 ## Case knowledge: Neha / Evolve
 
@@ -70,9 +68,9 @@ or search controller, which are not available in these sources.
 
 | Symptom or decision | Read | Transferable lesson |
 | --- | --- | --- |
-| Two reductions over the same input; dependency-bound wave reduction | [AttnRes score](cases/evolve_attnres_score_gfx950.md) | Interleave independent DPP chains; finish wave partials through compact LDS. |
-| Small softmax followed by a weighted sum; proposed load/barrier overlap | [AttnRes combine](cases/evolve_attnres_combine_gfx950.md) | Schedule independent exponentials; audit live registers before moving loads. |
-| A standalone `.s`/`.co` looks fast but its execution path is unverified | [HIP module integration](guides/hip_module_validation.md) | Verify ABI, candidate identity, stream, oracle, and timing before accepting a result. |
+| Two reductions over the same input; dependency-bound wave reduction | [AttnRes score](skills/optimize/assembly_levers/evolve_attnres_score_gfx950.md) | Interleave independent DPP chains; finish wave partials through compact LDS. |
+| Small softmax followed by a weighted sum; proposed load/barrier overlap | [AttnRes combine](skills/optimize/assembly_levers/evolve_attnres_combine_gfx950.md) | Schedule independent exponentials; audit live registers before moving loads. |
+| A standalone `.s`/`.co` looks fast but its execution path is unverified | [HIP module integration](skills/profile/hip_module_validation.md) | Verify ABI, candidate identity, stream, oracle, and timing before accepting a result. |
 
 These cases replace Triton kernels with handwritten gfx950 assembly. The
 AITER launcher lives under `ops/flydsl/` but uses HIP module APIs directly;
@@ -94,13 +92,13 @@ contract when choosing a case.
 ## Case knowledge: verified FlyDSL roundtrip
 
 For AITER's INT4/BF16 MoE, read the
-[W4A16 stage1 case](cases/aiter_w4a16_roundtrip_gfx950.md). It covers the actual
+[W4A16 stage1 case](skills/optimize/assembly_levers/aiter_w4a16_roundtrip_gfx950.md). It covers the actual
 FlyDSL launcher adapter, weight/scale layouts, negative controls, and a packed
 multiply experiment that passed correctness but produced no useful speedup.
 This is Forge validation evidence, separate from the Evolve source cases.
 
 For the FP8/MXFP4 SiTUv2 path, read the
-[Kimi-K3 MoE stage1 case](cases/kimi_k3_moe_a8w4_gfx950.md).
+[Kimi-K3 MoE stage1 case](skills/optimize/assembly_levers/kimi_k3_moe_a8w4_gfx950.md).
 It validates one FlyDSL 0.3.2 roundtrip, explains the required sorted activation
 scale layout, and retains five initial instruction candidates with no stable
 winner. A later real Forge campaign reduced 134 VGPRs to 128 through liveness
@@ -115,7 +113,7 @@ also show why a warm-cache gain can reverse after eviction.
 
 ## Case knowledge: Qwen3 model integration
 
-The [Qwen3 Q/K normalization and RoPE case](cases/qwen3_qk_rope_gfx950.md)
+The [Qwen3 Q/K normalization and RoPE case](skills/optimize/assembly_levers/qwen3_qk_rope_gfx950.md)
 connects a standalone handwritten kernel to an existing vLLM model through
 Forge's explicit-ABI HIP loader. It covers graph/worker dispatch verification,
 BF16 intermediate rounding, same-fusion attribution, and the distinction
@@ -124,97 +122,3 @@ fusion/numerical repair from a real Forge agent's staged-VMEM scheduling KEEP,
 clean export replay, independent holdouts, and fault-injection REVERT. This is
 a standalone HIP integration, not a FlyDSL source change. A kernel KEEP alone
 does not establish an additional model-serving gain.
-
-## Source and toolchain
-
-An editable AMDHSA assembly file contains `.amdgcn_target`, device symbols,
-`.amdhsa_kernel` descriptors, and `.amdgpu_metadata`. Preserve the complete
-file. `llvm-objdump -d` is useful for inspection but its instruction listing
-alone is not a reassemblable source or a launch ABI description.
-
-The embedded compiler in FlyDSL 0.2.0 and 0.2.4 can emit this file with `FLYDSL_DUMP_IR=1` and
-`FLYDSL_DUMP_DIR=/path/to/attempt/dumps`. Run the original kernel in a fresh
-process with a private `FLYDSL_RUNTIME_CACHE_DIR` so an old disk cache does not
-bypass compilation. Find the matching `*_final_isa.s` under the device-symbol
-directory. Dump one specialization per directory: shape, dtype, compile-time
-constants, target features, and compiler options are part of its identity.
-External LLVM mode can skip the ISA dump; do not substitute disassembly or a
-different specialization when the compiler did not emit assembly.
-
-Reassemble with the same ROCm LLVM toolchain and target ID as the compiler:
-
-```bash
-python -m kernelforge.assembly assemble \
-  --source kernel.s --output build/kernel.hsaco \
-  --gpu-target gfx950 --toolchain-dir /opt/rocm/llvm/bin
-```
-
-The target is an example. Copy the exact target ID from `.amdgcn_target`,
-including `xnack`/`sramecc` features if present. The helper invokes `llvm-mc`
-and `ld.lld`, retaining descriptors and metadata. It assembles the current
-bytes each time and publishes the output only after both commands succeed.
-Propagate errors; a previous output at the same path is not a new candidate.
-
-## FlyDSL launcher adapter
-
-The first adapter supports self-contained FlyDSL kernels using the
-`CompiledFunction`/`CompiledArtifact` interfaces shipped in 0.2.0 and 0.2.4. It clones the
-compiled host module and replaces one GPU code object while retaining the
-original argument packing, device symbol, grid, block, shared-memory setup,
-and stream. It rejects extern-linked kernels and multi-target objects. For
-multiple GPU modules, pass the explicit `binary_name` to choose one.
-
-```python
-from pathlib import Path
-import flydsl.compiler as flyc
-from kernelforge.assembly.flydsl import with_assembly
-
-# example_args contains all original positional arguments, including stream.
-reference = flyc.compile(launch_fn, *example_args)
-candidate = with_assembly(
-    reference,
-    Path(__file__).with_name("kernel.s"),
-    gpu_target="gfx950",
-    toolchain_dir=Path("/opt/rocm/llvm/bin"),
-)
-candidate(*example_args)
-```
-
-Construct the candidate once before timing or graph capture. The returned
-callable takes positional arguments, just like `flyc.compile`'s result;
-preserve any keyword-based public wrapper the driver already uses. Forward
-the stream provided at every invocation. Both reference and candidate remain
-independently usable; the adapter never modifies a global compiler hook or
-FlyDSL cache entry. Rebuild the candidate after an assembly edit; an existing
-callable retains its own previous code object.
-
-Standalone kernels can use `kernelforge.assembly.hip.HipKernel` with explicit
-argument types, launch geometry, and stream. It loads fresh code-object bytes
-per instance, propagates HIP errors, and binds to the current device. It does
-not infer an ABI from the original frontend; the candidate wrapper must verify
-tensor shapes, strides, dtype, resource requirements, and metadata. Retain the
-module while captured graphs can run and unload explicitly only after GPU work
-and graph use finish. See the [HIP guide](guides/hip_module_validation.md).
-Selecting Assembly expertise does not automatically make the FlyDSL adapter
-work with Triton or HIP callables.
-
-## Evidence and artifacts
-
-1. Measure the original high-level implementation with the protected driver.
-2. Run the unmodified assembly through the same callable contract. Require the
-   complete correctness suite before optimizing. Record roundtrip timing; investigate
-   regressions in the binding instead of assuming compilation implies timing parity.
-   The original implementation remains the scoring incumbent.
-3. Make one instruction change and rerun correctness, graph-capture
-   verification, per-case timing, and relevant counters. Keep the same inputs,
-   dtype, tolerances, stream, launch dimensions, and measurement method.
-4. Before trusting the route, use a disposable negative control that changes
-   the output and confirm the unchanged oracle rejects it. Restore that edit.
-5. Keep the launcher and `.s` in source control together. Use explicit
-   source paths during preparation; the host tracks the binding, provenance manifest
-   and compiler-emitted `.s`. During optimization, only the selected `.s` uses the existing KEEP/REVERT path. Do not commit temporary `.o`,
-   `.hsaco`, IR dumps, compiler caches, or benchmark logs.
-
-Assembly does not guarantee a speedup. Report parity, regression, and variance
-as measured. When the limiting factor is an algorithm or layout, start a separate
-high-level campaign, regenerate assembly, and repeat roundtrip validation.

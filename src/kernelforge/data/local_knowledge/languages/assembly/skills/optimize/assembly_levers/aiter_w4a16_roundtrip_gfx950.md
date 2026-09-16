@@ -26,7 +26,7 @@ The installed `moe_gemm_2stage.py` SHA-256 was
 Version numbers alone do not guarantee identical kernel source.
 
 `compile_flydsl_moe_stage1` returns a FlyDSL launcher. Compile it with
-`flyc.compile` and use [the adapter](../INDEX.md#flydsl-launcher-adapter) to
+`flyc.compile` and use [the adapter](../../../INDEX.md#flydsl-launcher-adapter) to
 replace its code object. The inspected launcher takes nine pointers, four
 runtime integers, and a stream. `_s1_args_std` packs those arguments using
 typed pointers. Its output is `[tokens, topk, inter_dim]`, with fused

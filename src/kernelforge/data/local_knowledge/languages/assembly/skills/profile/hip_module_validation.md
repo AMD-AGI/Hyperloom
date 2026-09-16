@@ -37,7 +37,7 @@ Although the Python file is under `aiter/ops/flydsl/`, its execution path loads
 standalone code objects directly. It replaces Triton implementations and does
 not use FlyDSL's compiled host launcher. Forge's `with_assembly` adapter needs
 an actual supported FlyDSL compiled callable; it cannot accept this wrapper
-as if it were one. The [assembler helper](../INDEX.md) can build the source,
+as if it were one. The [assembler helper](../../INDEX.md) can build the source,
 but launcher integration is a separate step.
 
 ## Available Forge loader
@@ -107,8 +107,8 @@ specialization. A harness-only dispatch record is not model-dispatch evidence.
 Retain the source revision, candidate assembly digest, target/toolchain,
 specialization, launch contract, correctness outcome, and per-case timing in
 the campaign's normal artifacts. Independent gfx950 results are now recorded
-in the [score](../cases/evolve_attnres_score_gfx950.md) and
-[combine](../cases/evolve_attnres_combine_gfx950.md) cards. They do not reproduce
+in the [score](../optimize/assembly_levers/evolve_attnres_score_gfx950.md) and
+[combine](../optimize/assembly_levers/evolve_attnres_combine_gfx950.md) cards. They do not reproduce
 the published headline ratios: score regresses, while a locally corrected
 combine has workload-dependent gains. The validation harness preserves the
 upstream snapshots and lives outside the production adapter implementation.
