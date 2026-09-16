@@ -65,6 +65,7 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     try:
         report = asyncio.run(run_validation_pipeline(driver))
         assert not report.all_passed, "independent oracle accepted subtraction"
+        assert report.failed_outcome == "correctness_failure", report.failed_output
     finally:
         source.write_text(original)
 

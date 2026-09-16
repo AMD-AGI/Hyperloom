@@ -36,7 +36,9 @@ def git(root, *args):
 
 
 def report(passed=True, output="OK"):
-    return ValidationReport([ValidationResult(1, "full", passed, output)])
+    return ValidationReport(
+        [ValidationResult(1, "full", passed, output, outcome="pass" if passed else "correctness_failure")]
+    )
 
 
 @pytest.fixture
@@ -182,6 +184,49 @@ def test_driver_must_execute_candidate_beyond_compiler_warmup(campaign, monkeypa
     assert (root / "kernel.py").read_text() == SOURCE
 
 
+@pytest.mark.parametrize(
+    "driver_source, accepted",
+    [
+        ("import time; time.sleep(60)", False),
+        ("raise RuntimeError('hipModuleLoadData failed')", False),
+        ("raise AssertionError('unclassified driver assertion')", False),
+        ("print('no output comparison was performed')", False),
+        ("print('max_diff: 0.5')", False),
+        ("print('SNR: 0.0 dB')", True),
+        ("print('allclose: False')", True),
+    ],
+    ids=["timeout", "load-error", "assertion", "missing-metrics", "max-diff-without-tolerance", "snr", "allclose"],
+)
+def test_execution_probe_requires_a_measured_correctness_failure(campaign, monkeypatch, driver_source, accepted):
+    root, options = campaign
+    scratch = root / "forge_experiments"
+    scratch.mkdir()
+    probe_driver = scratch / "probe_driver.py"
+    probe_driver.write_text(driver_source)
+    validate = prepare._validate
+
+    async def invalid_probe(*args):
+        result = await validate(*args)
+        source = root / "kernel.s"
+        if source.exists() and "FORGE_ASSEMBLY_EXECUTION_PROBE" in source.read_text():
+            return await prepare.run_validation_pipeline(str(probe_driver), timeout_per_stage=1)
+        return result
+
+    monkeypatch.setattr(prepare, "_validate", invalid_probe)
+    if accepted:
+        record = asyncio.run(prepare.prepare_assembly(**options))
+        assert record["execution_probe_passed"]
+        assert (root / "kernel.s").read_text() == ASM
+        return
+    with pytest.raises(prepare.AssemblyPreparationError, match="measured correctness failure"):
+        asyncio.run(prepare.prepare_assembly(**options))
+    assert (root / "kernel.py").read_text() == SOURCE
+    assert not (root / "kernel.s").exists()
+    assert not (root / "kernel.s.json").exists()
+    assert git(root, "rev-parse", "HEAD") == options["base_commit"]
+    assert not (scratch / "assembly_preparation/result.json").exists()
+
+
 @pytest.mark.parametrize("timeout_call", [2, 3])
 def test_probe_restores_source_on_timeout(campaign, monkeypatch, timeout_call):
     root, options = campaign
@@ -269,6 +314,28 @@ def test_resume_rejects_weakened_numerical_contract(campaign):
     settings["numerical_validation"]["cases"]["one"]["max_oracle_error"] = 1
     (root / "config.yaml").write_text(yaml.safe_dump(settings))
     with pytest.raises(prepare.AssemblyPreparationError, match="unchanged numerical acceptance"):
+        asyncio.run(prepare.prepare_assembly(**options, resume=True))
+
+
+@pytest.mark.parametrize("committed", [False, True], ids=["working-tree", "committed"])
+def test_resume_freezes_reference_helpers_from_preparation(campaign, committed):
+    root, options = campaign
+    asyncio.run(prepare.prepare_assembly(**options))
+    reference = root / "numerical_reference.py"
+    reference.write_text(reference.read_text() + "\n# changed reference implementation\n")
+    if committed:
+        git(root, "add", "numerical_reference.py")
+        git(root, "commit", "-m", "change reference")
+    with pytest.raises(prepare.AssemblyPreparationError, match="frozen assembly inputs changed"):
+        asyncio.run(prepare.prepare_assembly(**options, resume=True))
+
+
+def test_resume_rejects_preparation_without_measured_execution_proof(campaign):
+    root, options = campaign
+    record = asyncio.run(prepare.prepare_assembly(**options))
+    record["schema_version"] = 2
+    (root / "forge_experiments/assembly_preparation/result.json").write_text(json.dumps(record))
+    with pytest.raises(prepare.AssemblyPreparationError, match="prepare a fresh campaign"):
         asyncio.run(prepare.prepare_assembly(**options, resume=True))
 
 

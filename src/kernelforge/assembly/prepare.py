@@ -165,6 +165,12 @@ async def verify_assembly(
         raise AssemblyPreparationError(
             "driver accepted no-op assembly; it must test the returned candidate on fresh outputs"
         )
+    if execution_probe.failed_outcome != "correctness_failure":
+        raise AssemblyPreparationError(
+            "no-op assembly requires a measured correctness failure (SNR or allclose); "
+            f"{execution_probe.failed_outcome or 'unclassified failure'} does not prove execution: "
+            + execution_probe.failed_output
+        )
     restored = await _validate(driver, threshold, deadline)
     if not restored.results or not restored.all_passed:
         raise AssemblyPreparationError(restored.failed_output or "restored assembly failed correctness")
@@ -174,14 +180,16 @@ async def verify_assembly(
 def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_commit: str, target: str) -> dict:
     record: dict = json.loads(path.read_text(encoding="utf-8"))
     if (
-        record.get("schema_version") != 2
+        record.get("schema_version") != 3
         or record.get("status") != "ready"
         or record.get("kernel") != kernel.relative_to(workspace).as_posix()
         or record.get("assembly") != assembly.relative_to(workspace).as_posix()
         or record.get("source_base_commit") != base_commit
         or record.get("gpu_target") != target
     ):
-        raise AssemblyPreparationError("assembly preparation record does not match this campaign")
+        raise AssemblyPreparationError(
+            "assembly preparation record does not match this campaign; prepare a fresh campaign"
+        )
     if kernel != assembly and record.get("launcher_sha256") != _digest(kernel):
         raise AssemblyPreparationError("the verified Python launcher changed after preparation")
     if not record.get("acceptance_config_sha256") or record["acceptance_config_sha256"] != _digest(
@@ -196,6 +204,10 @@ def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_
     if manifest and record.get("binding_manifest_sha256") != _digest(_inside(workspace, manifest)):
         raise AssemblyPreparationError("the compiler binding manifest changed after preparation")
     _git(workspace, "merge-base", "--is-ancestor", record["preparation_commit"], "HEAD")
+    changed = _git(workspace, "diff", "--name-only", "-z", record["preparation_commit"], "--", ".").split("\0")
+    frozen_changes = [name for name in changed if name and name != assembly.relative_to(workspace).as_posix()]
+    if frozen_changes:
+        raise AssemblyPreparationError("frozen assembly inputs changed after preparation: " + ", ".join(frozen_changes))
     return record
 
 
@@ -289,7 +301,7 @@ async def prepare_assembly(
         if _git(workspace, "diff", "--cached", "--name-only"):
             _git(workspace, "commit", "-m", "forge: bind compiler assembly to original launcher")
         record = {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": "ready",
             "origin": "flydsl_compiler" if capture else "existing_assembly",
             "kernel": paths[0],

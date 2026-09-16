@@ -82,7 +82,11 @@ mode that does not emit ISA is rejected instead of substituting disassembly.
 The host runs the unchanged driver's correctness suite and the task's canonical
 `config.yaml` commands. It also inserts a deliberate assembler error, requires a
 fresh driver to propagate it, and tests a no-op assembly negative control.
-The driver must reject that no-op before restoration validates again. FlyDSL
+The driver must reject that no-op with a measured SNR or `allclose: False` result
+and exit normally before restoration validates again. Timeouts, build/load errors,
+unclassified assertions and missing metrics cannot prove that the candidate ran.
+A driver that normally raises on output mismatch must report that comparison
+as a metric for this check; other runtime errors must still propagate. FlyDSL
 `compile(...)` executes the source once during compilation, so the driver must
 exercise the returned candidate on fresh outputs beyond that warmup. Missing source,
 failed builds and invalid candidates never fall back to the frontend. These checks
@@ -92,8 +96,10 @@ correctness alone cannot prove the replacement was loaded.
 `forge_experiments/assembly_preparation/result.json` records source and roundtrip
 timings, source/launcher/assembly hashes, the binding manifest, and preparation
 commit. Preparation failures restore the original files and Git state. Resume
-requires that record and an unchanged launcher/manifest. Old PORT campaign records
-are not migrated; start a fresh campaign from their selected source instead.
+requires a schema-3 record and unchanged frozen inputs, including tracked reference
+helpers, compared with the preparation commit. Only the selected `.s` may change.
+Older preparation records lack the measured execution proof and are not migrated; start a fresh
+campaign from their selected source instead.
 
 ## Numerical acceptance
 

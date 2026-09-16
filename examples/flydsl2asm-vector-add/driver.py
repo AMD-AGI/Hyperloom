@@ -26,18 +26,17 @@ def inputs(seed, scale):
 
 def check(args):
     a, b, output = args
-    torch.testing.assert_close(output, a + b, rtol=0, atol=0)
-    return 300.0
+    return torch.equal(output, a + b)
 
 
 def correctness(kernel):
-    snrs = []
+    checks = []
     for _, seed, scale in CASES:
         args = inputs(seed, scale)
         saved = [value.clone() for value in args[:2]]
         kernel(*args)
         torch.cuda.synchronize()
-        snrs.append(check(args))
+        checks.append(check(args))
         for value, original in zip(args[:2], saved):
             assert torch.equal(value, original), "input changed"
 
@@ -47,7 +46,7 @@ def correctness(kernel):
     with torch.cuda.stream(stream):
         kernel(*args)
     stream.synchronize()
-    snrs.append(check(args))
+    checks.append(check(args))
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
         kernel(*args)
@@ -59,11 +58,13 @@ def correctness(kernel):
     with torch.cuda.stream(stream):
         graph.replay()
     stream.synchronize()
-    snrs.append(check(args))
+    checks.append(check(args))
     del graph
-    print(f"SNR: {min(snrs):.3f} dB")
-    print("allclose: True")
-    print("graph_capture: PASS")
+    passed = all(checks)
+    if passed:
+        print("SNR: 300.000 dB")
+    print(f"allclose: {passed}")
+    print(f"graph_capture: {'PASS' if passed else 'FAIL'}")
     numerical_correctness(kernel)
 
 
