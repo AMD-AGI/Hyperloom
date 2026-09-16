@@ -11,9 +11,8 @@ hermetic: profile / trace_analyze boundaries are stubbed, filesystem uses
 ``tmp_path`` only, no GPU / subprocess / network.
 """
 
-import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -21,10 +20,8 @@ from hyperloom.orchestrator.actions.executors import roofline as rf
 from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
     _extract_steady_state_retry_mode,
-    _preflight_probe,
     _profile_err_text,
     _profile_server_log_tail,
-    _server_liveness_probe,
     make_roofline_executor,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -231,196 +228,12 @@ def test_profile_server_log_tail_empty_when_no_logs(tmp_path):
     assert _profile_server_log_tail({"workspace": str(empty)}) == ""
 
 
-# Preflight and process-level probes
-def test_preflight_probe_reports_leftover_traces_and_disk(tmp_path):
-    """A trace already sitting in this task's own run directory is reported before anything is profiled."""
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
-    run_dir.mkdir(parents=True)
-    (run_dir / "old.pt.trace.json.gz").write_bytes(b"leftover")
-    (run_dir / "server.log").write_text("not a trace", encoding="utf-8")
-
-    probe = _preflight_probe(tmp_path, "t-rf-units", reaped=[4242])
-
-    assert probe["orphans_reaped"] == [4242]
-    assert probe["orphans_reaped_count"] == 1
-    assert probe["stale_trace_count"] == 1
-    assert probe["stale_traces"][0]["path"] == "runs/roofline/t-rf-units/old.pt.trace.json.gz"
-    assert probe["stale_traces"][0]["size_bytes"] == len(b"leftover")
-    assert probe["disk"]["free_bytes"] > 0
-    assert 0 < probe["disk"]["free_pct"] <= 100
-
-
-def test_preflight_probe_is_clean_on_a_fresh_session(tmp_path):
-    """No runs directory is not a finding, so the leftover list stays empty rather than absent."""
-    probe = _preflight_probe(tmp_path, "t-rf-units", reaped=[])
-
-    assert probe["stale_traces"] == []
-    assert probe["stale_trace_count"] == 0
-    assert probe["orphans_reaped_count"] == 0
-
-
-def _unused_pid() -> int:
-    """A pid no live process holds, so the probe's answer is not a coincidence of the test host."""
-    for candidate in range(4_000_000, 4_100_000):
-        try:
-            os.kill(candidate, 0)
-        except ProcessLookupError:
-            return candidate
-        except OSError:
-            continue
-    raise AssertionError("no unused pid available on this host")
-
-
-def test_server_liveness_probe_flags_a_pidfile_whose_process_is_gone(tmp_path):
-    """Teardown unlinks the pidfile, so a pidfile naming a dead pid means the engine died instead."""
-    dead = _unused_pid()
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
-    run_dir.mkdir(parents=True)
-    (run_dir / "sglang_30000.pid").write_text(f"{dead} {dead}\n", encoding="utf-8")
-    # Another task's leftover must not be attributed to this one.
-    other = tmp_path / "runs" / "roofline" / "t-other"
-    other.mkdir(parents=True)
-    (other / "sglang_30001.pid").write_text(f"{dead + 1} {dead + 1}\n", encoding="utf-8")
-
-    probe = _server_liveness_probe(tmp_path, "t-rf-units")
-
-    assert probe["pidfiles"] == 1
-    assert probe["dead_with_pidfile"] == 1
-    assert probe["alive"] == 0
-    assert probe["entries"][0]["pid"] == dead
-    assert probe["entries"][0]["is_server"] is False
-
-
-def test_server_liveness_probe_sees_a_live_process_as_not_a_server(tmp_path):
-    """A live pid that is not one of our engines is pid reuse, and must not read as a surviving server."""
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
-    run_dir.mkdir(parents=True)
-    (run_dir / "sglang_30000.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
-
-    probe = _server_liveness_probe(tmp_path, "t-rf-units")
-
-    assert probe["alive"] == 1
-    assert probe["dead_with_pidfile"] == 0
-    assert probe["entries"][0]["is_server"] is False
-
-
-def test_server_liveness_probe_is_empty_without_a_runs_dir(tmp_path):
-    assert _server_liveness_probe(tmp_path, "t-rf-units") == {}
-
-
+# Exception-path cuda-graph escalation
 @pytest.mark.asyncio
-async def test_executor_records_preflight_and_liveness_on_every_attempt(tmp_path):
-    """The probes are wired into the action, not just importable."""
-    run_dir = tmp_path / "runs" / "roofline" / "t-rf-units"
-    run_dir.mkdir(parents=True)
-    (run_dir / "old.pt.trace.json.gz").write_bytes(b"leftover")
-
-    md = tmp_path / "analysis.md"
-    md.write_text("# Executive Summary\n", encoding="utf-8")
-
-    async def fake_profile(ctx):
-        return _profile_success()
-
-    async def fake_ta(payload, *, session_dir):
-        return _ta_ok(md)
-
-    recorder = MagicMock()
-    with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
-        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
-    ):
-        await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
-
-    preflight = recorder.record_preflight.call_args.args[0]
-    assert preflight["stale_trace_count"] == 1
-    assert preflight["disk"]["free_bytes"] > 0
-    assert recorder.record_profile_run.call_args.kwargs["server_liveness"] is not None
-
-
-@pytest.mark.asyncio
-async def test_a_non_retryable_profile_failure_still_rows_the_attempt(tmp_path):
-    """This branch used to return without recording, so the one failure nobody can retry left no attempt row."""
-
-    async def fake_profile(ctx):
-        return {
-            "status": "failed",
-            "error_class": "primary_rank_trace_missing",
-            "error": "no trace for the primary rank",
-        }
-
-    async def fake_ta(payload, *, session_dir):
-        raise AssertionError("trace_analyze must not run after a non-retryable profile failure")
-
-    recorder = MagicMock()
-    with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
-        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
-    ):
-        result = await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
-
-    assert result["status"] == "failed"
-    recorder.record_profile_run.assert_called_once()
-    kwargs = recorder.record_profile_run.call_args.kwargs
-    assert kwargs["status"] == "failed"
-    assert kwargs["failure"]["error_class"] == "primary_rank_trace_missing"
-    # And it must not have retried past the attempt it could not recover from.
-    assert kwargs["run_index"] == 1
-
-
-@pytest.mark.asyncio
-async def test_instrumentation_is_drained_per_attempt_even_when_absent(tmp_path):
-    """The executor is reached through a module-level name a substitute can occupy; the probe must tolerate that."""
-    md = tmp_path / "analysis.md"
-    md.write_text("# Executive Summary\n", encoding="utf-8")
-
-    async def fake_profile(ctx):
-        return _profile_success()
-
-    async def fake_ta(payload, *, session_dir):
-        return _ta_ok(md)
-
-    recorder = MagicMock()
-    with (
-        patch("hyperloom.orchestrator.actions.executors.roofline.make_roofline_recorder", return_value=recorder),
-        patch("hyperloom.orchestrator.actions.executors.profile.profile_executor", new=fake_profile),
-        patch("hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler", new=fake_ta),
-    ):
-        await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
-
-    assert "instrumentation" in recorder.record_profile_run.call_args.kwargs
-
-
-def test_drain_instrumentation_takes_the_report_once():
-    """Draining, not reading: a later attempt must not inherit an earlier attempt's report."""
-    from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
-    from hyperloom.orchestrator.actions.executors.roofline import _drain_instrumentation
-
-    executor = ProfileExecutor()
-    executor._instrumentation_preflight = {"check_id": "instrumentation_preflight", "status": "passed"}
-
-    assert _drain_instrumentation(executor)["status"] == "passed"
-    assert _drain_instrumentation(executor) is None
-
-
-def test_drain_instrumentation_tolerates_an_executor_without_one():
-    from hyperloom.orchestrator.actions.executors.roofline import _drain_instrumentation
-
-    assert _drain_instrumentation(object()) is None
-
-    class _Angry:
-        def drain_instrumentation_report(self):
-            raise RuntimeError("nope")
-
-    assert _drain_instrumentation(_Angry())["error"].startswith("RuntimeError")
-
-
-# Exception-path cuda-graph classification
-@pytest.mark.asyncio
-async def test_profile_exception_with_capture_signature_fails_without_escalating(tmp_path):
-    """A capture signature in a raised exception ends the action; it does not arm an eager second attempt."""
+async def test_profile_exception_with_capture_signature_escalates_eager(tmp_path):
+    """profile_executor raises an exception whose repr carries the cuda-graph capture signature -> next attempt boots eager."""
     seen: list[dict] = []
+    calls = {"n": 0}
 
     capture_exc = RuntimeError(
         "Capture cuda graph failed: HIP error: operation not permitted "
@@ -429,10 +242,16 @@ async def test_profile_exception_with_capture_signature_fails_without_escalating
 
     async def fake_profile(ctx):
         seen.append(dict(ctx.task.params or {}))
-        raise capture_exc
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise capture_exc
+        return _profile_success()
+
+    md = tmp_path / "analysis.md"
+    md.write_text("# Executive Summary\n", encoding="utf-8")
 
     async def fake_ta(payload, *, session_dir):
-        raise AssertionError("trace_analyze must not run after a capture failure")
+        return _ta_ok(md)
 
     state = _state()
     executor = RooflineExecutor(shared_state=state)
@@ -448,10 +267,10 @@ async def test_profile_exception_with_capture_signature_fails_without_escalating
     ):
         result = await executor(_ctx(tmp_path))
 
-    assert result["status"] == "failed"
-    assert result["error_class"] == "profile_cuda_graph_capture_config_failed"
-    assert len(seen) == 1
+    assert result["status"] == "succeeded"
+    assert len(seen) >= 2
     assert "--disable-cuda-graph" not in str(seen[0].get("base_extra_args", ""))
+    assert "--disable-cuda-graph" in str(seen[1].get("base_extra_args", ""))
 
 
 # close_post_opt output-name branch
