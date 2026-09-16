@@ -115,19 +115,6 @@ def recipe_canonical_id(
     )
 
 
-def _partition_mode_slug(mode: str) -> str:
-    """Slug for a compute-partition mode that actually divides the card, else ``""``.
-
-    SPX collapses to ``""`` along with an unpublished mode, because one partition is the whole card: that is what a
-    row recorded before the mode was published was necessarily running on, so suffixing it would re-key the existing
-    corpus to say something its key already said.
-    """
-    from hyperloom.common.gpu_partition import MODE_PARTITION_COUNTS
-
-    canonical = str(mode or "").strip().upper()
-    return canonical.lower() if MODE_PARTITION_COUNTS.get(canonical, 1) > 1 else ""
-
-
 def kb_hardware_slug(
     gpu_type: str,
     *,
@@ -138,36 +125,16 @@ def kb_hardware_slug(
     pd_decode_nodes: int = 0,
     tp: int = 0,
     ep: int = 0,
-    partition_mode: str = "",
     backend: str = "",
 ) -> str:
-    """Topology-aware hardware dimension for the recipe ``canonical_id``.
-
-    ``ep`` and ``partition_mode`` suffix at any node count, because neither is decided by the node count: a card
-    divided into CPX partitions is a different machine than a whole one, and experts split across ranks is a
-    different formation than dense. Both are fixed at launch rather than explored, so a ``best_config`` tuned under
-    one is invalid under the other -- which is the same argument ``_tp{tp}`` already makes. Encoding them here makes
-    the mismatch unrepresentable instead of something a reader has to notice and refuse.
-
-    Every suffix is omitted for the default shape (``ep <= 1``, SPX or unpublished mode), so a key recorded before
-    these dimensions existed stays byte-identical and nothing in the corpus moves.
-    """
+    """Topology-aware hardware dimension for the recipe ``canonical_id``."""
     base = (gpu_type or "").strip()
-    try:
-        ep_i = int(ep)
-    except (TypeError, ValueError):
-        ep_i = 0
-    part = _partition_mode_slug(partition_mode)
     try:
         n = int(nodes)
     except (TypeError, ValueError):
         return base
     if n < 2:
-        # Single node still carries the shape suffixes, but nothing else: world size, PD split, tp and backend all
-        # describe a cluster. ``tp`` is deliberately absent -- almost every single-node run sets it, so encoding it
-        # would re-key the whole corpus rather than only the rows whose shape currently collides.
-        slug = f"{base}_ep{ep_i}" if ep_i > 1 else base
-        return f"{slug}_{part}" if part else slug
+        return base
     try:
         ws = n * int(gpus_per_node)
     except (TypeError, ValueError):
@@ -189,10 +156,12 @@ def kb_hardware_slug(
         tp_i = 0
     if tp_i > 0:
         slug = f"{slug}_tp{tp_i}"
+    try:
+        ep_i = int(ep)
+    except (TypeError, ValueError):
+        ep_i = 0
     if ep_i > 1:
         slug = f"{slug}_ep{ep_i}"
-    if part:
-        slug = f"{slug}_{part}"
     be = _slug(backend, "")
     if be:
         slug = f"{slug}_{be}"

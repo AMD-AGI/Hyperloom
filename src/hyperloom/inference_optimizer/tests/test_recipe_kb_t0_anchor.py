@@ -50,7 +50,6 @@ class _FakeSharedState:
     max_model_len: int = 0
     model_class: str = ""
     baseline_workload_extra: dict[str, Any] = field(default_factory=dict)
-    compute_partition: dict[str, Any] = field(default_factory=dict)
 
     def save(self, _path: Path) -> None:  # noqa: D401
         """No-op save — tests don't care about disk persistence here."""
@@ -634,95 +633,3 @@ def test_t0_anchor_claims_only_the_reads_its_own_lookup_made(
     # explicitly: the exact probe has to be readable as having missed before
     # the ladder was walked.
     assert [row["method"] for row in reads["rows"]][:2] == ["get_authoritative_recipe", "get_recipe"]
-
-
-# --- the partition mode is part of the identity, not a read-side comparison --
-
-
-def _seed_actionable_row(kb: RecipeKB, cid: str) -> None:
-    """Seed a row carrying a replayable config plus priors, under one exact identity."""
-    kb.put_recipe(
-        canonical_id=cid,
-        model="M",
-        hardware="MI300X",
-        framework_name="sglang",
-        framework_version="0.4.5",
-        precision="fp8",
-        best_config={"extra_server_args": "--from-an-spx-pod"},
-        pitfalls=[{"description": "watch for X"}],
-        lessons=[{"statement": "Y is the answer", "measured_impact": "+15%"}],
-        provenance={"source": "seed", "generator": "ut"},
-    )
-
-
-def test_a_partitioned_pod_does_not_reach_a_whole_card_row_at_all(
-    kb: RecipeKB,
-    session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The SPX row and the CPX pod are different identities, so there is no hit to refuse."""
-    state = _FakeSharedState()
-    _seed_actionable_row(kb, _expected_cid(state, "M", "MI300X"))
-    monkeypatch.setenv("HYPERLOOM_PARTITION_MODE", "CPX")
-
-    run_t0_anchor(
-        kb,
-        state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
-        session_dir=session_dir,
-    )
-
-    assert state.warm_start_recipe["hw"] == "MI300X_cpx"
-    # Not "demoted": the row was never a candidate, so no config from it can be replayed by any later path.
-    assert state.warm_start_recipe["tier"] in {"miss", "seed_only"}
-    assert "--from-an-spx-pod" not in json.dumps(state.warm_start_context)
-
-
-def test_a_whole_card_pod_still_reaches_the_row_it_recorded(
-    kb: RecipeKB,
-    session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The historical key is unchanged, so an unpartitioned pod keeps its exact hit."""
-    state = _FakeSharedState()
-    _seed_actionable_row(kb, _expected_cid(state, "M", "MI300X"))
-    monkeypatch.delenv("HYPERLOOM_PARTITION_MODE", raising=False)
-
-    run_t0_anchor(
-        kb,
-        state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
-        session_dir=session_dir,
-    )
-
-    assert state.warm_start_recipe["hw"] == "MI300X"
-    assert state.warm_start_recipe["tier"] == "exact"
-    assert state.warm_start_recipe["confidence"] == 1.0
-
-
-def test_spx_is_not_a_different_machine_from_an_unrecorded_mode(
-    kb: RecipeKB,
-    session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A whole card is what every row predating the mode was running on, so SPX must not re-key it."""
-    state = _FakeSharedState()
-    _seed_actionable_row(kb, _expected_cid(state, "M", "MI300X"))
-    monkeypatch.setenv("HYPERLOOM_PARTITION_MODE", "SPX")
-
-    run_t0_anchor(
-        kb,
-        state,
-        workload="M",
-        hw="MI300X",
-        extra_attrs={"framework_name": "sglang"},
-        session_dir=session_dir,
-    )
-
-    assert state.warm_start_recipe["hw"] == "MI300X"
-    assert state.warm_start_recipe["tier"] == "exact"
-    assert state.warm_start_recipe["confidence"] == 1.0

@@ -5,55 +5,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Fixed
-
-- **A partitioned card is now a different machine in the KB key, so a warm-start
-  hit can no longer replay a config tuned on a differently shaped one.** The
-  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
-  architectures, framework version and precision. The compute-partition mode was
-  not among those dimensions, and neither was expert parallelism on a single
-  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
-  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
-  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
-  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
-  the auto-replay a config recorded with eight times the partitions, and the
-  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
-  verify round.
-
-  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
-  not just on a cluster: both are fixed at launch rather than explored, which is
-  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
-  read an SPX row because it is asking a different `canonical_id` — no flag, no
-  demotion, and no second comparison that could be applied to a different row
-  than the one that gets replayed, since `resolve_kb_topology` is the single call
-  both the reader and the writer build the key from. Every suffix is omitted at
-  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
-  this build does not recognise), so existing keys stay byte-identical and
-  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
-  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
-  exactly the rows these suffixes were added for.
-
-  `workload_shape` still publishes `ep` and `partitions` as a description of the
-  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
-  publisher rather than restating it, which is what had been silently dropping
-  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
-  to 1, so publishing it would have every dense run claim a formation it never
-  chose, and one partition is the whole card. The count a launch published wins
-  over one re-derived from the mode name, so there is only ever one derivation to
-  keep in agreement.
-
-### Removed
-
-- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
-  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
-  with the pod — which was never the exposure, since framework version and
-  precision are already identity dimensions. Encoding the partition mode in the
-  key makes the mismatch it would have caught unrepresentable, so a read-side
-  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
-  written into every row's `stack_fingerprint` and compared nowhere at read time;
-  that is a real gap and is tracked separately rather than under a flag whose
-  name says fingerprint and whose behaviour would have been workload shape.
-
 ### Changed
 
 - **Bare-metal `vllm` default bumped from `0.28.0` to `0.29.0` (still `rocm723`).**
