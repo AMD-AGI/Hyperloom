@@ -49,8 +49,9 @@ adapter contract.
 | --- | --- |
 | FlyDSL with one explicit `flydsl.compiler.compile(...)` call | Automatic capture and replacement, using the original compiled-function ABI. |
 | Existing `.s` with a working launcher | Verify its rebuild path and optimize the selected `.s`. |
-| Triton / Gluon | Automatic extraction and replacement adapter not implemented. |
-| HIP / CK / AITER / hipBLASLt / fusion | Require an explicitly extracted kernel and matching launcher; no general library-binary replacement. An individual AITER FlyDSL kernel can meet the FlyDSL contract. |
+| Triton / Gluon with one direct JIT `kernel[grid](...)` launch | Capture compiler `amdgcn` and rebuild an independent compiled kernel, retaining Triton's argument marshaller and current stream. Resolve autotuning/heuristics first. |
+| HIP device source built through `kernelforge.assembly.hip_source.compile_hip` | Capture HIP compiler ISA and replace its code object at the same build boundary. The existing launcher supplies the symbol, ABI, grid, block and stream. |
+| CK / AITER / hipBLASLt / fusion | Select an actual kernel that meets one of these contracts. This does not automatically extract kernels from arbitrary linked libraries or Python extensions. |
 
 That all these implementations eventually execute machine code does not make
 their packaging, specialization, ABI or dispatch interchangeable. Only add a
@@ -58,11 +59,15 @@ backend adapter when it can export and replace the actual executed kernel.
 
 ## Programmatic preparation
 
-Commit the source, driver, and independent reference before starting. For automatic
-capture, the Python module must have one direct FlyDSL compile call using a module
-import or an imported `compile` alias. Compile hints via subscripting, multiple
-compile sites and multiple specializations are currently rejected. Extract a
-minimal single-specialization entry rather than generating another algorithm.
+Commit the source, driver, and independent reference before starting. The Python
+module must expose one supported compile/launch boundary from the table above.
+Multiple specializations require separate campaigns. Extract a minimal entry
+while preserving its algorithm and build options.
+
+### FlyDSL
+
+Use one direct FlyDSL compile call with a module import or imported `compile`
+alias. Compile hints via subscripting and multiple compile sites are rejected.
 
 The host measures and saves the original source, then mechanically wraps only
 the compile call. It captures `*_final_isa.s` from FlyDSL's compiler using private
@@ -78,6 +83,52 @@ specializations fail explicitly. The current adapter requires a self-contained,
 single-target `gpu.binary`; extern links, post-load processors and explicit-module
 artifacts are unsupported. FlyDSL's dump must be available; an external compiler
 mode that does not emit ISA is rejected instead of substituting disassembly.
+
+### Triton and Gluon
+
+The host wraps one `kernel[grid](...)` call without changing the JIT definition,
+grid expression or arguments. The adapter calls JIT `warmup` to compile without
+executing the source, captures `compiled.asm["amdgcn"]`, and constructs an
+independent `CompiledKernel` containing the rebuilt HSACO. Only that candidate is
+launched; source execution would incorrectly double atomic accumulations.
+Triton's launcher retains constexpr handling, argument ordering, launch metadata
+and current-stream forwarding. Its original JIT-cache object is left intact.
+
+The GPU validation environment uses Triton 3.7.0, ROCm 7.2 and MI355X. Other
+compiler versions must pass the same preparation gates before a campaign runs.
+
+The manifest binds the Triton version and compilation hash, including target,
+specialization and options. A different specialization fails before launch.
+Candidates are cached per device in the bound launcher; create a fresh driver
+process after editing `.s`. Warm the candidate before timing and graph capture.
+Shared-memory declarations and the launch ABI remain fixed; register allocation
+and instructions can change. CUDA/PTX, unresolved autotuners, heuristics wrappers
+and arbitrary multi-kernel dispatch are outside this adapter's contract.
+
+### HIP device translation units
+
+For an existing standalone HIP launcher, use one explicit build call:
+
+```python
+from kernelforge.assembly.hip_source import compile_hip
+
+binary = compile_hip(
+    source_path, output_path, gpu_target="gfx950",
+    flags=("-O3", "-DMY_TILE=256"),
+)
+```
+
+This invokes `hipcc --genco` and retains its ISA with `-save-temps=obj`. Supply
+the original source, includes and defines, and keep the output outside tracked
+source files. The launcher can load `binary` with `HipKernel` or an existing HIP
+module loader. Forge mechanically replaces the build call, captures the compiler
+ISA, and rebuilds the selected `.s` for that same loader. It checks the source/build
+identity on subsequent construction. Compilation and loading belong before
+timing and graph capture. The caller still owns the verified symbol, parameter
+layout and launch geometry. This is not a replacement for a library's dispatch or
+a way to infer an ABI from arbitrary C++ structs.
+
+### Shared preparation gates
 
 The host runs the unchanged driver's correctness suite and the task's canonical
 `config.yaml` commands. It also inserts a deliberate assembler error, requires a
@@ -197,9 +248,15 @@ has one specialization, an independent exact oracle, changed inputs, a nondefaul
 stream and graph replay. It demonstrates compiler capture and instruction edits,
 without a handwritten seed or a performance claim.
 
+The [Triton vector-add example](../../../examples/triton2asm-vector-add/README.md)
+uses a normal bracket launch. `test_assembly_triton_gpu.py` exercises Triton,
+Gluon and a standalone HIP build through the same preparation gates, then replays
+each patch in a fresh checkout. These tests require their respective compilers.
+
 ```bash
 pytest -q src/kernelforge/tests/test_assembly_campaign_gpu.py \
-  src/kernelforge/tests/test_assembly_flydsl_gpu.py
+  src/kernelforge/tests/test_assembly_flydsl_gpu.py \
+  src/kernelforge/tests/test_assembly_triton_gpu.py
 ```
 
 These optional tests require ROCm PyTorch, FlyDSL and a compatible GPU. They verify

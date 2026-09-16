@@ -25,6 +25,7 @@ defines the measurement boundary.
 | Illegal accesses depend on allocation | Audit low-half additions and high-half carries, strides, complete buffer extents and LDS descriptors. Test valid views spanning address boundaries and the real caller's allocation sizes. |
 | Stable but systematically different output | Trace runtime scalars such as epsilon, quantization scales, rounding mode and intermediate dtype. Fusion or staging can move a BF16 rounding boundary. Use the independent mathematical oracle and preserve public arguments. |
 | An edit appears ineffective or unexpectedly fast | Rebuild a fresh callable; do not reuse a loaded code object just because its file changed. Check candidate identity, graph capture stream and changed-input replay. Empty graphs and skipped cases are unevaluated. |
+| A prologue no-op still produces correct output | On gfx950, kernarg preloading can enter an aligned LLVM basic block after the prologue. Inspect the descriptor and all executed entry paths. The preparation probe stops compiler basic-block entries as well; a probe that still passes must reject preparation. |
 | Kernel improves but serving does not | Verify model dispatch on every worker and include the complete caller. Compare against equivalent fusion and precision, account for hotspot weight, and inspect TTFT/tail latency as well as token throughput. |
 
 The [A16W4 case](../optimize/assembly_levers/kimi_k3_moe_a16w4_gfx950.md)

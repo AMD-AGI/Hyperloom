@@ -94,7 +94,7 @@ def campaign(tmp_path, monkeypatch):
         if "export=True" in kernel.read_text():
             source.write_text(ASM)
             source.with_suffix(".s.json").write_text(
-                json.dumps({"compiler_assembly_sha256": hashlib.sha256(ASM.encode()).hexdigest()})
+                json.dumps({"frontend": "flydsl", "compiler_assembly_sha256": hashlib.sha256(ASM.encode()).hexdigest()})
             )
         broken = source.exists() and "FORGE_ASSEMBLY_BUILD_PROBE" in source.read_text()
         if source.exists() and "FORGE_ASSEMBLY_EXECUTION_PROBE" in source.read_text():
@@ -135,6 +135,30 @@ def test_capture_keeps_frontend_and_original_baseline(campaign):
     prepare.seed_source_baseline(config, result)
     assert config.baseline_case_times == {"one": 1.0}
     assert not hasattr(config, "warm_start_commit")
+
+
+@pytest.mark.parametrize("comment", ["; @add", "// compiler label"])
+def test_execution_probe_accepts_compiler_label_comments(campaign, monkeypatch, comment):
+    monkeypatch.setattr(sys.modules[__name__], "ASM", ASM.replace("add:", "add: " + comment))
+    _, options = campaign
+    record = asyncio.run(prepare.prepare_assembly(**options))
+    assert record["execution_probe_passed"]
+
+
+def test_execution_probe_stops_preloaded_basic_block_entry(campaign, monkeypatch):
+    assembly = ASM.replace("    s_endpgm", "    s_branch .LBB0_0\n.p2align 8\n.LBB0_0:\n    s_endpgm")
+    monkeypatch.setattr(sys.modules[__name__], "ASM", assembly)
+    root, options = campaign
+    validate = prepare._validate
+
+    async def check_preloaded_entry(*args):
+        path = root / "kernel.s"
+        if path.exists() and "FORGE_ASSEMBLY_EXECUTION_PROBE" in path.read_text():
+            assert ".LBB0_0:\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE" in path.read_text()
+        return await validate(*args)
+
+    monkeypatch.setattr(prepare, "_validate", check_preloaded_entry)
+    assert asyncio.run(prepare.prepare_assembly(**options))["execution_probe_passed"]
 
 
 @pytest.mark.parametrize("changed", ["kernel.py", "kernel.s.json"])

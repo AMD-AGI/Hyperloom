@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Bind one explicit FlyDSL compile call to its compiler-emitted assembly."""
+"""Bind a single frontend compilation or launch to compiler-emitted assembly."""
 
 from __future__ import annotations
 
@@ -40,12 +40,20 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
     """Mechanically wrap one direct compile call, preserving its arguments and launcher."""
     tree = ast.parse(source)
     aliases = set()
+    hip_aliases = set()
     for node in tree.body:
         if isinstance(node, ast.Import):
             aliases.update(
                 (alias.asname or alias.name) + ".compile" for alias in node.names if alias.name == "flydsl.compiler"
             )
+            hip_aliases.update(
+                (alias.asname or alias.name) + ".compile_hip"
+                for alias in node.names
+                if alias.name == "kernelforge.assembly.hip_source"
+            )
         elif isinstance(node, ast.ImportFrom):
+            if node.module == "kernelforge.assembly.hip_source":
+                hip_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "compile_hip")
             if node.module == "flydsl.compiler":
                 aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "compile")
             elif node.module == "flydsl":
@@ -53,19 +61,34 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
                     (alias.asname or alias.name) + ".compile" for alias in node.names if alias.name == "compiler"
                 )
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and ast.unparse(node.func) in aliases]
-    if len(calls) != 1:
+    hip_calls = [
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and ast.unparse(node.func) in hip_aliases
+    ]
+    launches = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript)]
+    if len(calls) == 1 and not hip_calls:
+        function = calls[0].func
+        adapter = "kernelforge.assembly.capture import FlyDSLAssembly"
+        replacement = "_forge_assembly"
+    elif len(hip_calls) == 1 and not calls:
+        function = hip_calls[0].func
+        adapter = "kernelforge.assembly.hip_source import HIPAssembly"
+        replacement = "_forge_assembly"
+    elif not aliases and not hip_aliases and len(launches) == 1:
+        function = launches[0].func.value
+        adapter = "kernelforge.assembly.triton import TritonAssembly"
+        replacement = f"_forge_assembly({ast.unparse(function)})"
+    else:
         raise AssemblyError(
-            "automatic assembly capture requires one direct flydsl.compiler.compile(...) call; "
-            "extract a single compiled specialization first. Triton/HIP/library extraction is not implemented"
+            "automatic assembly capture requires one direct FlyDSL compile call or one Triton/Gluon kernel[grid](...) "
+            "launch, or one compile_hip call; extract a single compiled specialization first"
         )
     if "_forge_assembly" in source:
         raise AssemblyError("reserved assembly binding name already exists; use a fresh source workspace")
-    function = calls[0].func
     lines = source.encode("utf-8").splitlines(keepends=True)
     start = sum(map(len, lines[: function.lineno - 1])) + function.col_offset
     end = sum(map(len, lines[: function.end_lineno - 1])) + function.end_col_offset
     data = source.encode("utf-8")
-    data = data[:start] + b"_forge_assembly" + data[end:]
+    data = data[:start] + replacement.encode("utf-8") + data[end:]
     # Preserve the module docstring and future imports, including their line positions.
     insertion = 0
     for node in tree.body:
@@ -77,7 +100,7 @@ def bind_compile(source: str, assembly: str, target: str, *, export: bool) -> st
             break
     lines = data.decode("utf-8").splitlines(keepends=True)
     binding = (
-        "\nfrom kernelforge.assembly.capture import FlyDSLAssembly as _forge_assembly_type\n"
+        f"\nfrom {adapter} as _forge_assembly_type\n"
         f"_forge_assembly = _forge_assembly_type(__file__, {assembly!r}, {target!r}, export={export!r})\n\n"
     )
     return "".join(lines[:insertion]) + binding + "".join(lines[insertion:])

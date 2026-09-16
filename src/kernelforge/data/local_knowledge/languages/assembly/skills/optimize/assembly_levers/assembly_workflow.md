@@ -15,13 +15,16 @@ SPDX-License-Identifier: MIT
 `forge-loop --kernel-backend assembly` captures compiler output, verifies its
 replacement through the existing launcher, and optimizes only the selected `.s`.
 There is no LLM PORT phase or default handwritten seed. Automatic capture
-supports one direct `flydsl.compiler.compile(...)` call and one specialization.
-Other frontends require a verified assembly binding; their extraction and
-replacement interfaces are not interchangeable.
+supports one FlyDSL `compile(...)`, Triton/Gluon JIT `kernel[grid](...)`, or
+standalone HIP `compile_hip(...)` boundary and one specialization. Resolve
+autotuning and choose the actual kernel before capture. Linked libraries still
+need an explicit extraction and launcher contract; the adapters do not infer
+library dispatch. See the [runtime API](../../../API_docs/runtime_api.md).
 
 A source backend's selected implementation can enter a fresh assembly campaign
 with a separate budget. That source remains the performance baseline. The
-minimal runnable example is `examples/flydsl2asm-vector-add/`.
+minimal runnable examples are `examples/flydsl2asm-vector-add/` and
+`examples/triton2asm-vector-add/`.
 
 ## Preparation and acceptance
 

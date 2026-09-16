@@ -28,7 +28,7 @@ failure diagnostics are separate from performance claims.
 | --- | --- |
 | Prepare an assembly campaign; understand correctness and KEEP | [Campaign workflow](skills/optimize/assembly_levers/assembly_workflow.md) |
 | Capture complete `.s` and assemble a code object | [Compilation and build](API_docs/compilation_and_build.md) |
-| Preserve the FlyDSL ABI or load an explicit HIP kernel | [Runtime API](API_docs/runtime_api.md) |
+| Preserve FlyDSL/Triton/Gluon launchers or load an explicit HIP kernel | [Runtime API](API_docs/runtime_api.md) |
 | Select an instruction or register-lifetime experiment | [Instruction optimization](skills/optimize/assembly_levers/instruction_optimization.md) |
 | Diagnose unstable outputs, addressing or misleading gains | [Debug an assembly kernel](skills/bottleneck/debug-assembly-kernel.md) |
 | Verify execution, the oracle, graphs and measurement | [Candidate validation](skills/profile/hip_module_validation.md) |
@@ -55,4 +55,5 @@ The retained case starts from already optimized FlyDSL. Its final Stage1
 included a manual numerical repair, and Stage2 passed a separately frozen,
 source-calibrated precision contract while retaining greater repeat variability.
 It does not establish that a new autonomous search will reproduce its gains.
-The runnable workflow example is `examples/flydsl2asm-vector-add/`.
+Runnable workflow examples are `examples/flydsl2asm-vector-add/` and
+`examples/triton2asm-vector-add/`.

@@ -1037,7 +1037,7 @@ def forge_loop(
     import hashlib as _hashlib
 
     if return_after_read_kb and kernel_backend == "assembly":
-        raise click.UsageError("--return-after-read-kb is incompatible with assembly PORT")
+        raise click.UsageError("--return-after-read-kb is incompatible with assembly preparation")
     if return_after_read_kb and not experience_kb:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:

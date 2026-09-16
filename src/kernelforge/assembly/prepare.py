@@ -147,7 +147,7 @@ async def verify_assembly(
     symbols = re.findall(r"^\s*\.amdhsa_kernel\s+(\S+)\s*$", text, re.MULTILINE)
     for symbol in symbols:
         text, count = re.subn(
-            rf"^([ \t]*{re.escape(symbol)}:)[ \t]*(?://[^\n]*)?$",
+            rf"^([ \t]*{re.escape(symbol)}:)[ \t]*(?:(?://|;)[^\n]*)?$",
             r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
             text,
             flags=re.MULTILINE,
@@ -156,6 +156,14 @@ async def verify_assembly(
             raise AssemblyPreparationError("cannot locate an assembly entry for the execution-path negative control")
     if not symbols:
         raise AssemblyPreparationError("assembly execution probe requires AMDHSA kernel entries")
+    # gfx950 kernarg preloading can skip the function prologue and start at an
+    # aligned LLVM basic block. Stop those entries too, without changing the ABI.
+    text = re.sub(
+        r"^([ \t]*\.LBB[\w.$]*:)[ \t]*(?:(?://|;)[^\n]*)?$",
+        r"\1\n    s_endpgm // FORGE_ASSEMBLY_EXECUTION_PROBE",
+        text,
+        flags=re.MULTILINE,
+    )
     try:
         assembly.write_text(text, encoding="utf-8")
         execution_probe = await _validate(driver, threshold, deadline)
@@ -241,7 +249,7 @@ async def prepare_assembly(
     relative_assembly = Path(os.path.relpath(assembly, kernel_path.parent)).as_posix()
     if capture:
         if kernel_path.suffix != ".py":
-            raise AssemblyPreparationError("automatic capture requires a Python FlyDSL compile call")
+            raise AssemblyPreparationError("automatic capture requires a Python compile/launch boundary")
         if manifest.exists():
             raise AssemblyPreparationError("assembly manifest already exists; start from the original source")
         export_source = bind_compile(original.decode(), relative_assembly, config.gpu_target, export=True)
@@ -303,7 +311,7 @@ async def prepare_assembly(
         record = {
             "schema_version": 3,
             "status": "ready",
-            "origin": "flydsl_compiler" if capture else "existing_assembly",
+            "origin": provenance["frontend"] + "_compiler" if capture else "existing_assembly",
             "kernel": paths[0],
             "assembly": assembly.relative_to(workspace).as_posix(),
             "gpu_target": config.gpu_target,

@@ -42,7 +42,7 @@ def test_binding_preserves_call_arguments_and_frontend(import_line, call):
 @pytest.mark.parametrize(
     "source",
     [
-        "import triton\nf = kernel[(1,)](x)\n",
+        "import triton\nf = kernel[(1,)](x)\ng = kernel[(2,)](y)\n",
         "import flydsl.compiler as f\na=f.compile(k,x)\nb=f.compile(k,y)\n",
         "import flydsl.compiler as f\na=f.compile[{}](k,x)\n",
     ],
@@ -50,6 +50,20 @@ def test_binding_preserves_call_arguments_and_frontend(import_line, call):
 def test_unsupported_capture_is_explicit(source):
     with pytest.raises(AssemblyError, match="one direct"):
         capture.bind_compile(source, "kernel.s", "gfx950", export=True)
+
+
+@pytest.mark.parametrize("frontend", ["triton", "triton.experimental.gluon"])
+def test_bracket_binding_keeps_grid_arguments_and_frontend(frontend):
+    source = (
+        f"import {frontend} as jitlib\n@jitlib.jit\ndef add(X, N):\n    pass\n"
+        'def launch(x, n):\n    return add[lambda meta: (meta["N"],)](x, N=n, num_warps=4)\n'
+    )
+    bound = capture.bind_compile(source, "kernel.s", "gfx950", export=True)
+    tree = ast.parse(bound)
+    compile(tree, "kernel.py", "exec")
+    assert ast.unparse(tree.body[-2]) == ast.unparse(ast.parse(source).body[-2])
+    assert "_forge_assembly(add)[lambda meta: (meta['N'],)](x, N=n, num_warps=4)" in ast.unparse(tree)
+    assert "TritonAssembly" in bound
 
 
 @pytest.fixture
