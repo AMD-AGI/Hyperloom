@@ -1,18 +1,87 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.0, including the vendored KernelForge kernel-optimization agent, the merged framework optimization phase, agentic-replay grading on total token throughput, compute-partition awareness, and the single concurrency sweep."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.1, a patch release that corrects the Recipe knowledge base warm-start path, unifies agent-backend selection, bounds supervisor watchdog restarts, and bumps the bare-metal vLLM default; plus the 1.1.0 feature release."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.0 (`pyproject.toml`). For the
+The current packaged version is 1.1.1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.1.1 release
+
+The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
+is a patch release on top of 1.1.0. Nothing in the CLI, the environment
+contract, or the session record moves, and a session recorded by 1.1.0 resumes
+on this build.
+
+Most of it is the Recipe knowledge base telling the truth. A warm-start hit
+could hand a session a config measured on a differently shaped card, and the
+prior work a session had actually earned was not reaching the model at all. The
+other corrections are in agent-backend selection, which three places answered
+differently, and in the supervisor watchdog, whose restarts are now resumable
+and bounded.
+
+### 1.1.1 highlights
+
+- **A partitioned card is a different machine in the KB key.** The
+  compute-partition mode and single-node expert parallelism were absent from the
+  `canonical_id`, so a run in SPX and a run in CPX shared one identity and an
+  `exact` hit at confidence 1.0 could replay a config recorded with eight times
+  the partitions. `kb_hardware_slug` now carries both suffixes at any node
+  count. Every suffix is omitted at its default value, so existing keys stay
+  byte-identical and no published row moves.
+
+- **The warm-start block, the KB's lessons, and its pitfalls reach the model
+  again.** All three read field shapes no writer produces. An exact hit carrying
+  a full config printed `(no recipe text — first session for this workload/hw)`,
+  and sections 5b and 5c rendered `(none)` no matter how much a prior session had
+  learned. The block now renders `warm_start_context`, the view `recipe_kb_t0`
+  already persists on every anchor, and a borrowed config is labelled with the
+  model it came from. No recorded knowledge was lost; until now none of it was
+  being shown.
+
+- **One rule picks the agent backend across both packages: a configured
+  credential first, then an installed SDK, with Claude ahead of Codex.** Four
+  places answered this and three disagreed, so `forge-loop` on an OpenAI-only
+  host could resolve to Claude and then fail to authenticate. The Robustness
+  Agent's RCA engine follows the same precedence instead of checking the OpenAI
+  side unconditionally. One consequence worth naming: a deployment whose runtime
+  is logged in by other means is no longer refused up front — `forge-fuse`
+  dropped its `--agent-backend auto` usage error and forge-fusion dropped the
+  `llm_provider_unconfigured` result, leaving the real authentication failure to
+  the preflight that can see it.
+
+- **Supervisor watchdog restarts are resumable and bounded.** A wedged
+  coordinator takes SIGHUP and keeps its interrupted phase segment rather than
+  recording a session outcome; three restart attempts, counted durably before
+  the signal goes out, make the wedge terminal. Separately, the robustness
+  monitor now reads the real stop-reason vocabulary — it had been importing a
+  module that does not exist and silently falling back to a subset missing 16
+  terminal reasons, so a finished session could be relaunched.
+
+- **The bare-metal `vllm` default is `0.29.0+rocm723`, up from `0.27.1`.**
+  `install_baremetal.sh`, the compatibility matrix, the install guide, the
+  example `SKILL.md` recipes, and `assets/slurm/models.tsv` all name it, and the
+  pinned TraceLens ref ships the matching profiler-config patch.
+  `VLLM_VERSION` and `VLLM_ROCM_VARIANT` override it as before.
+
+- **Three dead surfaces are removed**: `--recipe-kb-strict-fingerprint`, which
+  was declared in the parser and read nowhere; the pre-rename KernelForge
+  console script kept as an alias since v1.0.0b2, superseded by `kernelforge`
+  (see [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md)
+  for the retired spelling); and its `learning/` tuning database with the
+  tracker's superseded scoring layer, about 1.4k lines whose writes had already
+  been disabled. The one observable difference: a `forge-loop` run no longer
+  writes lesson markdown under the writable knowledge base's `learned/`
+  directory and no longer prints `Lessons learned: N`. Nothing read that
+  directory.
 
 ## Hyperloom 1.1.0 release
 

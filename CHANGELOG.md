@@ -5,42 +5,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Fixed
-
-- **A partitioned card is now a different machine in the KB key, so a warm-start
-  hit can no longer replay a config tuned on a differently shaped one.** The
-  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
-  architectures, framework version and precision. The compute-partition mode was
-  not among those dimensions, and neither was expert parallelism on a single
-  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
-  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
-  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
-  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
-  the auto-replay a config recorded with eight times the partitions, and the
-  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
-  verify round.
-
-  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
-  not just on a cluster: both are fixed at launch rather than explored, which is
-  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
-  read an SPX row because it is asking a different `canonical_id` — no flag, no
-  demotion, and no second comparison that could be applied to a different row
-  than the one that gets replayed, since `resolve_kb_topology` is the single call
-  both the reader and the writer build the key from. Every suffix is omitted at
-  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
-  this build does not recognise), so existing keys stay byte-identical and
-  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
-  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
-  exactly the rows these suffixes were added for.
-
-  `workload_shape` still publishes `ep` and `partitions` as a description of the
-  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
-  publisher rather than restating it, which is what had been silently dropping
-  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
-  to 1, so publishing it would have every dense run claim a formation it never
-  chose, and one partition is the whole card. The count a launch published wins
-  over one re-derived from the mode name, so there is only ever one derivation to
-  keep in agreement.
+## [v1.1.1] - 2026-09-16
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
+for the user-facing summary.
 
 ### Removed
 
@@ -54,7 +23,58 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that is a real gap and is tracked separately rather than under a flag whose
   name says fingerprint and whose behaviour would have been workload shape.
 
+- **The `learning/` tuning database, the tracker's scoring layer, and the
+  fusion reachability island are gone — KernelForge loses ~1.4k lines of
+  production code.**
+  Each had been superseded in place rather than deleted: `learning/` (4 files)
+  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
+  `False` since `knowledge/experience_sink.py` took over the same job, and its
+  output files had no reader — `IterationLoop`'s `evolver` parameter and
+  `resources.writable_knowledge_root()` go with it. The tracker's
+  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
+  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
+  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
+  carries its own `_is_gate_met` and `best_mean_case_speedup`.
+  `fusion/validate.py` held a closed seven-function island
+  (`unreached_fusion_symbols` and its six private helpers) whose only
+  references were each other's definitions; `fused_symbol_invocation_evidence`,
+  which `fusion/command.py` does call, is untouched.
+
+  The one observable difference is at the end of a `forge-loop` run: it no
+  longer writes lesson markdown under the writable knowledge base's `learned/`
+  directory, and no longer prints `Lessons learned: N`. Nothing read that
+  directory, and the `Transfer rules discovered: N` line beside it was already
+  unreachable because it derives from the tuning DB whose writes are disabled.
+  Everything else here has no reachable call site.
+
+  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
+  it unreachable — its gate fires only for tables the dispatcher has no entry
+  for, while the dispatcher admits exactly one table, so the two predicates
+  accept disjoint sets, and on the path where the gate does fire the runner
+  discards the model-authored tuner at the referee stage. That is a defect in a
+  tier that is supposed to run, not a dead subsystem, and it is being fixed
+  rather than removed.
+
+- **The deprecated `kernel-agents` console script is gone.** The rename to
+  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
+  nothing in this repository, the docs, or the example scripts invoked it, and
+  the orchestrator dispatches `python -m kernelforge.cli` directly. The
+  `kernel_agents.agent_providers` entry-point group stays: it is how
+  third-party provider plugins published before the rename are still
+  discovered, and it is not a CLI surface.
+
 ### Changed
+
+- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
+  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
+  `docs/install/install.md`, the example `SKILL.md` recipes, and
+  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
+  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
+  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
+  (`git apply --check`), so the TraceLens profiler-config patch path is
+  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
+  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
+  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
 
 - **Bare-metal `vllm` default bumped from `0.28.0` to `0.29.0` (still `rocm723`).**
   `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
@@ -114,6 +134,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A partitioned card is now a different machine in the KB key, so a warm-start
+  hit can no longer replay a config tuned on a differently shaped one.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. The compute-partition mode was
+  not among those dimensions, and neither was expert parallelism on a single
+  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
+  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
+  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
+  not just on a cluster: both are fixed at launch rather than explored, which is
+  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
+  read an SPX row because it is asking a different `canonical_id` — no flag, no
+  demotion, and no second comparison that could be applied to a different row
+  than the one that gets replayed, since `resolve_kb_topology` is the single call
+  both the reader and the writer build the key from. Every suffix is omitted at
+  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
+  this build does not recognise), so existing keys stay byte-identical and
+  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
+  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
+  exactly the rows these suffixes were added for.
+
+  `workload_shape` still publishes `ep` and `partitions` as a description of the
+  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
+  to 1, so publishing it would have every dense run claim a formation it never
+  chose, and one partition is the whole card. The count a launch published wins
+  over one re-derived from the mode name, so there is only ever one derivation to
+  keep in agreement.
+
 - **The `=== Warm start ===` block told the model it was starting cold on top of
   a matched recipe.** `to_warm_start_summary` read three fields no writer
   produces — `recipe.get("raw")`, and `raw`/`symptom` on each pitfall — so an
@@ -170,63 +225,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **Operator note**: sessions lost no recorded knowledge, but until now none of
   it was being shown to the agent.
 
-### Changed
-
-- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
-  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
-  `docs/install/install.md`, the example `SKILL.md` recipes, and
-  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
-  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
-  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
-  (`git apply --check`), so the TraceLens profiler-config patch path is
-  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
-  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
-  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
-
-### Removed
-
-- **The `learning/` tuning database, the tracker's scoring layer, and the
-  fusion reachability island are gone — KernelForge loses ~1.4k lines of
-  production code.**
-  Each had been superseded in place rather than deleted: `learning/` (4 files)
-  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
-  `False` since `knowledge/experience_sink.py` took over the same job, and its
-  output files had no reader — `IterationLoop`'s `evolver` parameter and
-  `resources.writable_knowledge_root()` go with it. The tracker's
-  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
-  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
-  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
-  carries its own `_is_gate_met` and `best_mean_case_speedup`.
-  `fusion/validate.py` held a closed seven-function island
-  (`unreached_fusion_symbols` and its six private helpers) whose only
-  references were each other's definitions; `fused_symbol_invocation_evidence`,
-  which `fusion/command.py` does call, is untouched.
-
-  The one observable difference is at the end of a `forge-loop` run: it no
-  longer writes lesson markdown under the writable knowledge base's `learned/`
-  directory, and no longer prints `Lessons learned: N`. Nothing read that
-  directory, and the `Transfer rules discovered: N` line beside it was already
-  unreachable because it derives from the tuning DB whose writes are disabled.
-  Everything else here has no reachable call site.
-
-  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
-  it unreachable — its gate fires only for tables the dispatcher has no entry
-  for, while the dispatcher admits exactly one table, so the two predicates
-  accept disjoint sets, and on the path where the gate does fire the runner
-  discards the model-authored tuner at the referee stage. That is a defect in a
-  tier that is supposed to run, not a dead subsystem, and it is being fixed
-  rather than removed.
-
-- **The deprecated `kernel-agents` console script is gone.** The rename to
-  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
-  nothing in this repository, the docs, or the example scripts invoked it, and
-  the orchestrator dispatches `python -m kernelforge.cli` directly. The
-  `kernel_agents.agent_providers` entry-point group stays: it is how
-  third-party provider plugins published before the rename are still
-  discovered, and it is not a CLI surface.
-
-### Fixed
-
 - **Supervisor watchdog restarts are resumable and bounded.** A wedged
   coordinator receives SIGHUP, preserving the interrupted phase segment without
   creating a session outcome; repeated wedges become terminal after three
@@ -242,8 +240,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   terminal reasons, so a finished session could be relaunched.
 
 ## [v1.1.0] - 2026-09-09
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0)
 for the user-facing summary.
 
@@ -1676,7 +1673,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.1...HEAD
+[v1.1.1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1
 [v1.1.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0
 [v1.0.0b2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2
