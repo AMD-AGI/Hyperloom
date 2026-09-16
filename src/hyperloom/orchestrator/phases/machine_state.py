@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 # Phase identifiers + ordering (monotonic chain)
 PHASE_PRELUDE = "PRELUDE"
+PHASE_ENABLEMENT = "ENABLEMENT"
 PHASE_FRAMEWORK_AGENT = "FRAMEWORK_AGENT"
 PHASE_KERNEL_AGENT = "KERNEL_AGENT"
 PHASE_SWEEP = "SWEEP"
@@ -29,12 +30,17 @@ PHASE_CLOSE = "CLOSE"
 
 PHASE_NAMES: tuple[str, ...] = (
     PHASE_PRELUDE,
+    PHASE_ENABLEMENT,
     PHASE_FRAMEWORK_AGENT,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     PHASE_CLOSE,
 )
 PHASE_INDEX: dict[str, int] = {name: i for i, name in enumerate(PHASE_NAMES)}
+
+# Consecutive FAILED rounds before the lane stops with enablement_attempts_exhausted;
+# abandoned and expired rounds are neutral and do not count towards it.
+ENABLEMENT_MAX_ATTEMPTS: int = 8
 
 
 def phase_index(phase: str) -> int:
@@ -52,6 +58,20 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "roofline",
             "profile",
             "recover",
+        }
+    ),
+    # ``baseline`` is carried so the Coordinator's revalidation survives the
+    # phase-transition sweep, but it is reserved: see PHASE_COORDINATOR_RESERVED.
+    PHASE_ENABLEMENT: frozenset(
+        {
+            "target_analysis",
+            "baseline",
+            "roofline",
+            "profile",
+            "recover",
+            "specialist",
+            "integrate_patch",
+            "targeted_build",
         }
     ),
     # Three levers: configuration grids (``explore``), investigation and authoring (``specialist``), and landing a
@@ -100,6 +120,20 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
 
 
+# Actions a single phase reserves for the Coordinator. The global set above
+# cannot say this: ``baseline`` is what PRELUDE exists to propose, while
+# ENABLEMENT runs it only as the revalidation that closes a KEEP.
+PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
+    PHASE_ENABLEMENT: frozenset({"baseline"}),
+}
+
+
+def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
+    """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
+    reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
+    return (action_name or "").strip() in reserved
+
+
 # Task kinds that mean the KERNEL lane is busy, which is a wider question than what a model may propose: a
 # Coordinator-owned lane is dispatched without ever being proposable, and its task occupies the phase just the same.
 KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
@@ -112,8 +146,9 @@ KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGEN
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
-    actions = PHASE_ALLOWED_ACTIONS.get((phase or "").strip().upper(), frozenset())
-    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE))
+    key = (phase or "").strip().upper()
+    actions = PHASE_ALLOWED_ACTIONS.get(key, frozenset())
+    return tuple(sorted(actions - _NOT_LLM_PROPOSABLE - PHASE_COORDINATOR_RESERVED.get(key, frozenset())))
 
 
 def render_phase_action_bullets(
@@ -211,12 +246,15 @@ def is_valid_stop_reason(value: str) -> bool:
     return (value or "").strip() in STOP_REASON_VOCAB
 
 
-# Default phase budgets (% of wall-clock).
+# Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
+# budget apportions optimisation effort, and a combo that cannot run has nothing
+# to optimise. It carries no cap at all -- ``compute_next_phase`` does not
+# consult ``phase_cap_exceeded`` for it -- and so has no override flag either.
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share.
-    PHASE_FRAMEWORK_AGENT: 0.40,
-    PHASE_KERNEL_AGENT: 0.50,
+    PHASE_FRAMEWORK_AGENT: 0.38,
+    PHASE_KERNEL_AGENT: 0.47,
     PHASE_SWEEP: 0.05,
     PHASE_CLOSE: 0.02,
 }
@@ -583,7 +621,7 @@ def redistribute_budget_pct(
     """Move disabled work-phase shares to enabled work phases.
 
     FRAMEWORK_AGENT, KERNEL_AGENT, and SWEEP absorb proportionally, capped at
-    1.0; PRELUDE and CLOSE never absorb.
+    1.0; PRELUDE, ENABLEMENT, and CLOSE never absorb.
     """
     out = dict(base)
     disabled: list[str] = []
@@ -1786,7 +1824,7 @@ def exit_normal_optimize(
 
 
 def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str:
-    """First active phase after PRELUDE: OPTIMIZE, else KERNEL, else SWEEP (``--no-framework-agent`` / ``--no-kernel`` collapse the chain)."""
+    """First active work phase after PRELUDE or ENABLEMENT: FRAMEWORK_AGENT, else KERNEL_AGENT, else SWEEP."""
     if optimize_enabled:
         return PHASE_FRAMEWORK_AGENT
     if kernel_enabled:
@@ -1801,6 +1839,8 @@ def compute_next_phase(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
     optimize_enabled: bool = True,
+    enablement_enabled: bool = False,
+    enablement_in_flight: bool = False,
 ) -> tuple[str, str, dict[str, Any]] | None:
     """Return ``(next_phase, reason, evidence)`` or ``None``."""
     current = (getattr(state, "phase", "") or "").strip().upper() or PHASE_PRELUDE
@@ -1818,8 +1858,8 @@ def compute_next_phase(
         return PHASE_CLOSE, reason, {"terminal": True, **evidence}
 
     # A met target ends the optimizing phases early; SWEEP is their normal next station, and the curve then measures
-    # the configuration it was met on.
-    if target_was_reached(state) and phase_index(PHASE_PRELUDE) < phase_index(current) < phase_index(PHASE_SWEEP):
+    # the configuration it was met on.  Only phases between PRELUDE and SWEEP are eligible.
+    if target_was_reached(state) and phase_index(PHASE_ENABLEMENT) <= phase_index(current) < phase_index(PHASE_SWEEP):
         return PHASE_SWEEP, "target_reached", {"target_reached_at": str(getattr(state, "target_reached_at", "") or "")}
 
     if current == PHASE_PRELUDE:
@@ -1831,6 +1871,9 @@ def compute_next_phase(
         cold = exit_cold_anchor_prelude(state)
         if cold is not None:
             return PHASE_CLOSE, cold[0], {"terminal": True, **cold[1]}
+        streak = int(getattr(state, "baseline_failure_streak", 0) or 0)
+        if enablement_enabled and streak >= 1:
+            return PHASE_ENABLEMENT, "enablement_entered", {"baseline_failure_streak": streak}
         norm = exit_normal_prelude(state)
         if norm is None:
             # No baseline and no clock left: name the failure instead of letting the run read as an ordinary exit.
@@ -1846,6 +1889,25 @@ def compute_next_phase(
             if target != PHASE_FRAMEWORK_AGENT:
                 evidence["optimize_skipped"] = True
             return target, norm[0], evidence
+        return None
+
+    if current == PHASE_ENABLEMENT:
+        # The three terminals (server_argv_invalid, environment_fault,
+        # enablement_attempts_exhausted) are written to stop_reason by the lane and
+        # routed by ``_global_terminal`` above, so only the normal exit is decided here.
+        # Draining in-flight work is what keeps ``validation_pending`` inside the phase:
+        # a build outliving the round would otherwise reopen it from a later phase.
+        tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        validation_pending = bool(getattr(getattr(state, "enablement", None), "validation_pending", False))
+        if tput > 0.0 and not validation_pending and not enablement_in_flight:
+            target = _post_prelude_target(
+                optimize_enabled=optimize_enabled,
+                kernel_enabled=kernel_enabled,
+            )
+            evidence: dict[str, Any] = {"baseline_tput": tput}
+            if target != PHASE_FRAMEWORK_AGENT:
+                evidence["optimize_skipped"] = True
+            return target, "enablement_done", evidence
         return None
 
     if current == PHASE_FRAMEWORK_AGENT:
@@ -1962,6 +2024,7 @@ LIFECYCLE_STATUS_ENTER = "ENTER"
 # Human-friendly labels for the coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
+    PHASE_ENABLEMENT: "Enablement (make the combo runnable)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
     PHASE_KERNEL_AGENT: "Kernel optimization",
     PHASE_SWEEP: "Concurrency sweep",
@@ -2241,8 +2304,11 @@ __all__ = [
     "LIFECYCLE_STATUS_ERROR",
     "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
+    "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
     "PHASE_CLOSE",
+    "PHASE_COORDINATOR_RESERVED",
+    "PHASE_ENABLEMENT",
     "PHASE_FRAMEWORK_AGENT",
     "PHASE_HUMAN_LABELS",
     "PHASE_INDEX",
@@ -2266,6 +2332,7 @@ __all__ = [
     "bank_phase_segment",
     "compute_next_phase",
     "compute_plateau_explore",
+    "coordinator_reserved_in_phase",
     "framework_agent_consecutive_no_keep",
     "framework_agent_plateau_streak_threshold",
     "compute_plateau_kernel",

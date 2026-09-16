@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from hyperloom.inference_optimizer.reference_script import render_reference_script
-from hyperloom.orchestrator.phases._enablement_artifacts import write_setting_script
+from hyperloom.orchestrator.enablement.artifacts import write_setting_script
 from hyperloom.orchestrator.specialists import patch_safety as _ps
 from hyperloom.orchestrator.specialists.runner import _sibling_checkouts
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound

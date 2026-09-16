@@ -73,13 +73,13 @@ class EnablementBuild(CoordinatorCollaborator):
         if is_multi_node():
             return
         try:
-            from hyperloom.agents.framework.enablement import (
+            from hyperloom.common.failure_signature import (
                 MISSING_MODEL_ARCH,
                 MISSING_WEIGHT,
                 NOT_IMPLEMENTED,
                 is_targeted_build_candidate,
             )
-            from ..framework.build_actions import TargetedBuildAction
+            from .runtime.build_actions import TargetedBuildAction
 
             state = self.shared_state
             # The round's own filed observation; wrapper text is the fallback,
@@ -131,7 +131,7 @@ class EnablementBuild(CoordinatorCollaborator):
             source_pr_url = ""
             # When no operator-pinned/kept ref, try the top discovery candidate.
             if not ref:
-                from ..framework.build_actions import resolve_build_ref
+                from .runtime.build_actions import resolve_build_ref
 
                 _component_hints = {
                     "aiter": ("aiter",),
@@ -240,7 +240,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 _consume_marker()
                 return
 
-            from ..framework.build_actions import (
+            from .runtime.build_actions import (
                 _COMPONENTS,
                 TargetedBuildAction,
                 resolve_build_ref,
@@ -359,7 +359,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 "enablement_launch_log": new_log,
             }
         else:
-            from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
+            from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
 
             task_params = getattr(task, "params", None) or {}
             _action = _TBA.from_state(task_params)
@@ -398,13 +398,9 @@ class EnablementBuild(CoordinatorCollaborator):
         """Turn a succeeded targeted build into a launch probe, or a no-progress round."""
         task_id = str(getattr(task, "task_id", "") or "")
         attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
-        # The build's attempt_root is resolved at pump time and is NOT written back into the task params (they keep
-        # the enqueue-time default "").
-        if not attempt_root and task_id:
-            attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
         br = None
         if attempt_root:
-            from ..framework.targeted_build import _load_result_json
+            from .runtime.targeted_build import _load_result_json
 
             br = _load_result_json(attempt_root)
 

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.framework.build_utils import (
+from hyperloom.orchestrator.enablement.runtime.build_utils import (
     AbiMismatchError,
     check_rocm_toolchain_alignment,
     coerce_build_argv,

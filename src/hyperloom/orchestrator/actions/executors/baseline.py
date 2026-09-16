@@ -20,7 +20,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -66,6 +66,7 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
 # launch needs.
 from ._grid_runner import (
+    SessionDirField,
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
@@ -251,9 +252,12 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
-#: ends are needed: the boot milestones are at the head, the wall at the tail.
+#: Bytes read from each end of a ``server.log`` when observing a bring-up.
 _BRINGUP_LOG_EDGE_BYTES = 65_536
+
+#: Cap on milestone lines carried out of the unread middle; the ladder needs
+#: one witness per milestone.
+_BRINGUP_MIDDLE_MARKER_LINES = 200
 
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
@@ -288,8 +292,39 @@ class BringupLog:
     degraded: str = ""
 
 
+def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
+    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
+    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+
+    handle.seek(start)
+    remaining = max(0, stop - start)
+    kept: list[str] = []
+    carry = b""
+    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
+        chunk = handle.read(min(1 << 20, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        lines = (carry + chunk).split(b"\n")
+        carry = lines.pop()
+        for raw in lines:
+            text = raw.decode("utf-8", "replace")
+            lowered = text.lower()
+            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
+                kept.append(text)
+                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
+                    break
+    return kept
+
+
 def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log's head and tail for bring-up classification.
+    """Read a server log for bring-up classification: both edges, plus milestones.
+
+    The edges carry the failure excerpt. The ladder needs a witness for every
+    milestone the boot passed, and those are not all near one: a build that logs
+    per kernel shape pushes the later rungs megabytes in, which would understate
+    ``stage_reached`` and make two unequal boots compare as equal. So the middle
+    is streamed for milestone lines and they are carried between the edges.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -315,6 +350,7 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
                 return BringupLog(handle.read().decode("utf-8", "replace"))
             handle.seek(0)
             head = handle.read(edge_bytes)
+            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
             handle.seek(size - edge_bytes)
             tail = handle.read(edge_bytes)
     except FileNotFoundError:
@@ -322,7 +358,8 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    return BringupLog(head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace"))
+    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
+    return BringupLog("\n".join(segments))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:
@@ -1597,6 +1634,8 @@ def _rollback_warm_kernel_apply_results(
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -1608,15 +1647,13 @@ class BaselineExecutor:
         cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults."""
-        from ._grid_runner import _resolve_session_dir
-
         # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         self.magpie_python = magpie_python or resolve_benchmark_interpreter()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())

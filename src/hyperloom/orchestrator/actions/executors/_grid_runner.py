@@ -170,6 +170,27 @@ def _resolve_session_dir() -> Path:
     return _sd()
 
 
+class SessionDirField:
+    """An executor's ``session_dir``, resolved on read rather than at construction.
+
+    The executors here are module-level singletons built at import, which is
+    before the CLI pins the session. Resolving in ``__init__`` freezes them on
+    the workspace root that concurrent sessions share.
+    """
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._slot = f"_{name}"
+
+    def __get__(self, obj: Any, objtype: type | None = None) -> Any:
+        if obj is None:
+            return self
+        explicit = getattr(obj, self._slot, None)
+        return explicit if explicit is not None else _resolve_session_dir()
+
+    def __set__(self, obj: Any, value: Path | str | None) -> None:
+        setattr(obj, self._slot, Path(value) if value else None)
+
+
 # SKIP_VARIANTS: comma/whitespace patterns matched (exact or fnmatch) against ``GridVariant.name``.
 
 

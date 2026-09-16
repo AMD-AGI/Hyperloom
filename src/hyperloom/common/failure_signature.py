@@ -445,35 +445,29 @@ class EnablementRequest:
 
 def runnable_decision(
     *,
-    booted: bool | None,
+    served: bool,
     correctness_ok: bool | None,
-    boot_timed_out: bool = False,
 ) -> tuple[bool, str]:
     """Decide whether an enablement patch made the combo *run*.
 
-    ``booted`` is the boot verdict off the attempt's ladder observation, never a
-    throughput number: a server that comes up and serves slowly has been
-    enabled. Whether the boot got *further* than the last one is a separate
-    question, answered by ladder arithmetic over two boot observations.
+    ``served`` is the workload's own measurement: a benchmark only reports one
+    after the client completed requests against the server, so it observes the
+    serving directly rather than inferring it. A log scan cannot: it answers
+    how far a boot climbed and where it stopped, which is the separate question
+    ladder arithmetic over two observations exists for.
 
     Args:
-        booted: Whether the attempt reached a serving server; ``None`` when no
-            observation was recorded and the question was never answered.
+        served: Whether the attempt produced a usable measurement.
         correctness_ok: Minimal-correctness result; ``None`` if not evaluated.
-        boot_timed_out: Whether the attempt was reaped on its wall-clock budget.
 
     Returns:
         tuple[bool, str]: ``(runs, reason)``.
     """
-    if boot_timed_out:
-        return False, "the bring-up was reaped on its budget"
-    if booted is None:
-        return False, "no boot observation was recorded for this attempt"
-    if not booted:
-        return False, "the server did not come up (still not runnable)"
+    if not served:
+        return False, "the workload measured nothing, so the server never served"
     if correctness_ok is False:
-        return False, "the server came up but the minimal correctness check failed"
-    return True, "the server now comes up" + ("" if correctness_ok is None else " and passes minimal correctness")
+        return False, "the server served but the minimal correctness check failed"
+    return True, "the server serves" + ("" if correctness_ok is None else " and passes minimal correctness")
 
 
 # Evidence that a dtype/capability miss is backed by a *compiled* op rather than pure-Python guard logic: a native

@@ -28,6 +28,9 @@ Advisory review. Flag only what static gates can't.
   GEAK/Magpie/TraceLens/framework defect.
 - **Debt growth**: a new feature flag / env toggle used to route around a design
   problem, or a new suppression without a stated reason.
+- **Missing changelog entry**: an observable change — a behaviour, interface, default,
+  flag, or artifact — with no `CHANGELOG.md` entry under `[Unreleased]`, and no note in
+  the description saying why the change is unobservable.
 
 ## What NOT to flag
 

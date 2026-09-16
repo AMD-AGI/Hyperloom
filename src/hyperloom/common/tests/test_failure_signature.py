@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.enablement (failure classifier + request model)."""
+"""Tests for hyperloom.common.failure_signature (failure classifier + request model)."""
 
 from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.framework.enablement import (
+from hyperloom.common.failure_signature import (
     ACCURACY_BELOW_FLOOR,
     CAPABILITY_DISABLED,
     EVAL_GENERATION_PATHOLOGY,
@@ -154,51 +154,6 @@ def test_shape_mismatch_and_missing_weight_are_distinct() -> None:
     assert gap1.kind != gap2.kind
 
 
-def test_enablement_setup_guidance_in_mandate() -> None:
-    """Q3: the authored mandate authorizes env setup and asks to record setup_commands."""
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import ENABLEMENT_SETUP_GUIDANCE, build_mandate
-
-    req = EnablementRequest(
-        framework="vllm",
-        model="GLM-5.2",
-        repo_url="https://github.com/ROCm/vllm.git",
-        launch_log="ValueError: weights were not initialized from checkpoint",
-        gpu_type="mi300x",
-    )
-    m = build_mandate(req)
-    assert "ENVIRONMENT SETUP" in m.task_description
-    assert "setup_commands" in m.task_description
-    assert ENABLEMENT_SETUP_GUIDANCE
-
-
-def test_enablement_progress_contract_in_mandate() -> None:
-    """Serial-enablement contract: the mandate must tell the specialist that a patch which only ADVANCES the boot one step is a valid KEPT deliverable, so a large gap yields incremental progress instead of a wholesale empty exit."""
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import (
-        ENABLEMENT_PROGRESS_GUIDANCE,
-        build_mandate,
-    )
-
-    req = EnablementRequest(
-        framework="vllm",
-        model="deepseek-ai-DeepSeek-V4-Flash",
-        repo_url="https://github.com/ROCm/vllm.git",
-        launch_log=(
-            "The checkpoint you are trying to load has model type `deepseek_v4` "
-            "but Transformers does not recognize this architecture."
-        ),
-        gpu_type="mi355x",
-    )
-    m = build_mandate(req)
-    assert "PROGRESS DELIVERABLE" in m.task_description
-    # The contract must explicitly permit an advance-one-step patch and reserve an empty proposal_set for "cannot
-    # advance even one step".
-    assert "ADVANCES the boot" in m.task_description
-    assert "proposal_set=[]" in m.task_description
-    assert ENABLEMENT_PROGRESS_GUIDANCE
-
-
 def test_not_implemented() -> None:
     """NotImplementedError -> not_implemented with the trailing message."""
     sig = classify_failure("NotImplementedError: sliding window attention on ROCm")
@@ -341,46 +296,43 @@ def test_request_requires_core_fields(missing: str) -> None:
 # --- runnable_decision (the enablement gate) -------------------------------
 
 
-def test_runnable_pass_boot_only() -> None:
-    """The server came up, with no correctness check -> runs."""
-    runs, reason = runnable_decision(booted=True, correctness_ok=None)
+def test_runnable_pass_served_only() -> None:
+    """The workload measured the server, with no correctness check -> runs."""
+    runs, reason = runnable_decision(served=True, correctness_ok=None)
     assert runs is True
-    assert "comes up" in reason
+    assert "serves" in reason
 
 
 def test_runnable_pass_with_correctness() -> None:
-    """Booted + correctness pass -> runs, reason mentions correctness."""
-    runs, reason = runnable_decision(booted=True, correctness_ok=True)
+    """Served + correctness pass -> runs, reason mentions correctness."""
+    runs, reason = runnable_decision(served=True, correctness_ok=True)
     assert runs is True
     assert "correctness" in reason
 
 
-def test_runnable_fail_did_not_boot() -> None:
-    """A boot that did not reach a serving server -> still not runnable."""
-    runs, reason = runnable_decision(booted=False, correctness_ok=None)
+def test_runnable_fail_nothing_measured() -> None:
+    """No measurement means nothing was served, so still not runnable."""
+    runs, reason = runnable_decision(served=False, correctness_ok=None)
     assert runs is False
-    assert "still not runnable" in reason
-
-
-def test_runnable_fail_timeout() -> None:
-    """A bring-up reaped on its budget is a hard fail whatever else was seen."""
-    runs, reason = runnable_decision(booted=True, correctness_ok=True, boot_timed_out=True)
-    assert runs is False
-    assert "reaped on its budget" in reason
-
-
-def test_runnable_fail_without_an_observation() -> None:
-    """No boot observation means the question was never answered, so no KEEP."""
-    runs, reason = runnable_decision(booted=None, correctness_ok=None)
-    assert runs is False
-    assert "no boot observation" in reason
+    assert "measured nothing" in reason
 
 
 def test_runnable_fail_correctness() -> None:
-    """Boots but fails correctness -> rejected."""
-    runs, reason = runnable_decision(booted=True, correctness_ok=False)
+    """Serves but fails correctness -> rejected."""
+    runs, reason = runnable_decision(served=True, correctness_ok=False)
     assert runs is False
     assert "correctness check failed" in reason
+
+
+def test_runnable_does_not_consult_the_boot_ladder() -> None:
+    """A served round is runnable even when no log marker witnessed the boot.
+
+    The ladder reads a capped window of the server log, so a build that logs
+    per kernel shape can push the readiness marker out of view. That must not
+    outrank the measurement the client actually took.
+    """
+    runs, _reason = runnable_decision(served=True, correctness_ok=True)
+    assert runs is True
 
 
 # --- New kinds: tokenizer_error, serve_flag, resource_constraint -----------

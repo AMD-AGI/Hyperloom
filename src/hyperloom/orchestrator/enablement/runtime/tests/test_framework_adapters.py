@@ -8,14 +8,14 @@ from __future__ import annotations
 import subprocess
 
 
-from hyperloom.agents.framework.enablement import (
+from hyperloom.common.failure_signature import (
     MISSING_MODEL_ARCH,
     RESOURCE_CONSTRAINT,
     CapabilityGap,
     FailureSignature,
 )
-from hyperloom.orchestrator.framework import adapters as ad
-from hyperloom.orchestrator.framework.adapters import (
+from hyperloom.orchestrator.enablement.runtime import adapters as ad
+from hyperloom.orchestrator.enablement.runtime.adapters import (
     AtomAdapter,
     NullAdapter,
     SglangAdapter,
@@ -133,7 +133,7 @@ def test_sglang_no_source_no_index_returns_none(monkeypatch):
 
 
 def _wheel_action() -> "ad.EnablementStackAction":
-    from hyperloom.orchestrator.framework.stack_actions import EnablementStackAction
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 
     return EnablementStackAction(
         kind="runtime_candidate",
@@ -196,7 +196,7 @@ def test_vllm_provision_rejects_non_rocm_vllm(tmp_path):
 
 
 def test_vllm_provision_requires_index(tmp_path):
-    from hyperloom.orchestrator.framework.stack_actions import EnablementStackAction
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
 
     action = EnablementStackAction(
         kind="runtime_candidate", framework="vllm", gap_id="g", capability="c", acquisition_method="wheel"
