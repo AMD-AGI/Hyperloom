@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="300" viewBox="0 0 1280 300">
+  <rect width="1280" height="300" rx="12" fill="#111827"/>
+  <g fill="#e5e7eb" font-family="monospace" font-size="17">
+    <text x="28" y="48">$ hyperloom-kth-demo</text>
+    <text x="28" y="75">1. micro_validation: both candidates published with fixture tolerance evidence</text>
+    <text x="28" y="102">2. kth_qualification: Blocked</text>
+    <text x="28" y="129">3. hyperloom_action: evaluation skipped; patch reverted</text>
+    <text x="28" y="156">4. kth_qualification: Eligible for performance evaluation</text>
+    <text x="28" y="183">5. hyperloom_action: fixture performance evaluated; KEEP committed</text>
+    <text x="28" y="210">6. invariant: performance validator called 1 time</text>
+    <text x="28" y="237">$ verdict: completed</text>
+  </g>
+</svg>
