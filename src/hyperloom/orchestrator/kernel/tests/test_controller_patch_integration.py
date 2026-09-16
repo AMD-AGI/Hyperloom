@@ -1192,7 +1192,6 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
             source="writeback",
             measurement_basis="e2e_decision_round",
             graded_objective="output_throughput",
-            measurement={"output_throughput": 110.0},
             ts=state.cumulative_gain_validated_ts,
         )
 
