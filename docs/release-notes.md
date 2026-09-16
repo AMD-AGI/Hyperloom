@@ -17,10 +17,10 @@ summarizes the headline capabilities.
 ## Hyperloom 1.1.1 release
 
 The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
-is a patch release on top of 1.1.0. The environment contract and the session
-record do not move, and a session recorded by 1.1.0 resumes on this build. The
-command line does move: two optimizer options and one console script that 1.1.0
-accepted are gone. See "Before upgrading from 1.1.0" below.
+is a patch release on top of 1.1.0. The session record does not move, so a
+session recorded by 1.1.0 resumes on this build. The command line does move:
+two optimizer options and one console script that 1.1.0 accepted are gone, and
+one option is added. See "Before upgrading from 1.1.0" below.
 
 Most of it is the Recipe knowledge base telling the truth. A warm-start hit
 could hand a session a config measured on a differently shaped card, and the
@@ -83,6 +83,12 @@ in [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md)
   monitor now reads the real stop-reason vocabulary — it had been importing a
   module that does not exist and silently falling back to a subset missing 16
   terminal reasons, so a finished session could be relaunched.
+
+- **`--extend-hours` grants a resumed session more budget.** Elapsed time is
+  summed forward across every leg and never reset, so this is the only way to
+  continue a run that has already spent its budget. The grant is applied on
+  `--resume-from` and recorded in the session state with its reason; it defaults
+  to `0.0`, so an invocation that does not pass it behaves as before.
 
 - **The bare-metal `vllm` default is `0.29.0+rocm723`, up from `0.27.1`.**
   `install_baremetal.sh`, the compatibility matrix, the install guide, the

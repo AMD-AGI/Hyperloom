@@ -23,6 +23,18 @@ for the user-facing summary.
   that is a real gap and is tracked separately rather than under a flag whose
   name says fingerprint and whose behaviour would have been workload shape.
 
+- **`--breakdown-include-transcripts`, and the exported `specialist_runs`
+  section it inlined into.** The option chose between inlining specialist
+  transcript bodies into the Session Breakdown and referencing them by path.
+  Recording the breakdown at author time retired that section outright, so
+  there is nothing left for the option to inline. Transcripts themselves are
+  unaffected: they are still written to disk and travel as `transcript_path`.
+  Unlike `--recipe-kb-strict-fingerprint`, this option was read in v1.1.0, so an
+  invocation passing `true` was getting the bodies; the parser is strict, so the
+  same command line now exits with `unrecognized arguments`.<br/>
+  **Operator note**: a reader of the exported breakdown that looked for
+  `specialist_runs` follows `transcript_path` instead.
+
 - **The `learning/` tuning database, the tracker's scoring layer, and the
   fusion reachability island are gone — KernelForge loses ~1.4k lines of
   production code.**
@@ -62,6 +74,16 @@ for the user-facing summary.
   `kernel_agents.agent_providers` entry-point group stays: it is how
   third-party provider plugins published before the rename are still
   discovered, and it is not a CLI surface.
+
+### Added
+
+- **`--extend-hours`, which grants a resumed session more budget.** Elapsed time
+  is summed forward across every leg and never reset, so this is the only way to
+  lengthen a run that has already spent its budget. On `--resume-from` the value
+  is added through `extend_budget_minutes`, which records the grant and its
+  reason in the session state, and the resume banner reports how many hours it
+  added. It defaults to `0.0`, so an invocation that does not pass it behaves as
+  before.
 
 ### Changed
 
