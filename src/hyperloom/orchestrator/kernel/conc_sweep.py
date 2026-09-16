@@ -17,7 +17,7 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, is_agentx_mode
+from hyperloom.common.perf_metric import graded_metric_key, is_agentx_mode
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     GRID_MODE_DEFAULT,
@@ -51,24 +51,11 @@ from .roofline_ceiling import (
     load_model_meta,
     select_peak_and_bound,
 )
-from ..state.shared_state import SharedState, resolved_grading
+from ..state.shared_state import SharedState
 from ..loop.coordinator_helpers import baseline_benchmark_script
 
 
 log = logging.getLogger(__name__)
-
-
-def _grading_of(state: Any) -> tuple[str, float | None]:
-    """The axis this sweep draws its speedups on, and the noise band its guard reads.
-
-    Resolved through ``resolved_grading`` so the curve and the promotions in one session cannot end up on
-    different axes. The environment-derived ``graded_metric_key`` diverges two ways: it never sees the axis
-    recorded at seed, so a resume whose shell lost ``HYPERLOOM_PERF_METRIC`` redraws the curve on output; and it
-    has no scriptable carve-out, so an image framework -- which reports no interactivity axis at all -- would
-    compare every rung on a field it never measures and report the whole sweep as failed.
-    """
-    on_intvty, noise_pct = resolved_grading(state)
-    return (GRADED_INTVTY if on_intvty else GRADED_OUTPUT), noise_pct
 
 
 SCHEMA_VERSION = "1.0"
@@ -272,9 +259,6 @@ def _build_roofline_ceiling(
                 return None
             return within_roofline_pct(peak=float(t_peak), achieved=float(measured))
 
-        # Output throughput on both arms regardless of the graded axis, and not a bug to be aligned with it: the
-        # peak above is a memory-bandwidth-derived ceiling on output tokens per second, so MBU is only meaningful
-        # against the same quantity.
         bt = (by_conc_b.get(c) or {}).get("output_throughput")
         ot = (by_conc_o.get(c) or {}).get("output_throughput")
         rows.append(
@@ -1188,8 +1172,9 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         b_pts.sort(key=lambda p: p["conc"])
         o_pts.sort(key=lambda p: p["conc"])
 
-        metric_key, guard_noise_pct = _grading_of(state)
-        comparison, summary = conc_pair_comparison(b_pts, o_pts, metric_key=metric_key, guard_noise_pct=guard_noise_pct)
+        comparison, summary = conc_pair_comparison(
+            b_pts, o_pts, metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+        )
         if recorder is not None:
             recorder.record_progress(comparison=comparison, summary=summary)
         p: dict[str, Any] = {
@@ -1584,12 +1569,10 @@ async def run_conc_sweep(
     baseline_points.sort(key=lambda p: p["conc"])
     optimized_points.sort(key=lambda p: p["conc"])
 
-    metric_key, guard_noise_pct = _grading_of(state)
     comparison, summary = conc_pair_comparison(
         baseline_points,
         optimized_points,
-        metric_key=metric_key,
-        guard_noise_pct=guard_noise_pct,
+        metric_key=graded_metric_key(benchmark_mode=str(getattr(state, "benchmark_mode", "") or "")),
     )
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
