@@ -658,7 +658,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
         self._record_phase_entry_evidence(
@@ -1751,7 +1750,6 @@ class KernelPhase(PhaseHandler):
                     "speedup": result.get("throughput_speedup"),
                     "result_path": str(result_path),
                 },
-                priority=1,
             )
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
@@ -3965,7 +3963,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
 
@@ -4083,7 +4080,6 @@ class KernelPhase(PhaseHandler):
                         "result": result,
                         "source": "kernel_entry_auto",
                     },
-                    priority=1,
                 )
             )
         except Exception:  # noqa: BLE001

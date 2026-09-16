@@ -27,54 +27,206 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `record_keep` is now required, so a caller cannot silently reacquire the
   no-ledger path.
 
-- **A partitioned card is now a different machine in the KB key, so a warm-start
-  hit can no longer replay a config tuned on a differently shaped one.** The
-  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
-  architectures, framework version and precision. The compute-partition mode was
-  not among those dimensions, and neither was expert parallelism on a single
-  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
-  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
-  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
-  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
-  the auto-replay a config recorded with eight times the partitions, and the
-  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
-  verify round.
+- **An accuracy eval that failed because the server was gone was read as a
+  missing framework capability.** `run_eval` reports a vanished server and a
+  model that scored badly the same way -- a non-zero exit -- so the eval-rooted
+  branch stamped both as an eval-failure contract and handed them to the
+  enablement lane. Measured: a baseline whose throughput pass had already
+  completed lost its server mid-eval, the client's next request was refused,
+  and the run then spent five specialist rounds hunting a capability gap the
+  evidence never supported before stopping on the stall cap with a terminal
+  reason that named enablement rather than the server. A refused connection is
+  now separated out: the baseline still fails, nothing is salvaged and the
+  accuracy gate is untouched, but it counts as an ordinary baseline failure so
+  the existing total-failure backstop ends the run on the cause it actually
+  had. Framework-agnostic; the eval path is shared by vLLM, SGLang and ATOM.
 
-  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
-  not just on a cluster: both are fixed at launch rather than explored, which is
-  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
-  read an SPX row because it is asking a different `canonical_id` — no flag, no
-  demotion, and no second comparison that could be applied to a different row
-  than the one that gets replayed, since `resolve_kb_topology` is the single call
-  both the reader and the writer build the key from. Every suffix is omitted at
-  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
-  this build does not recognise), so existing keys stay byte-identical and
-  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
-  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
-  exactly the rows these suffixes were added for.
+- **`--framework atom` defaults the kernel backend to forge.** The kernel phase
+  runs on atom, but GEAK -- the backend every framework gets unless the
+  environment opts into forge -- is on weaker ground there: its extraction rules
+  forbid guessing a rewrite seam on a quantized, non-vLLM backend and require
+  resolving one from the live server, which is unproven on atom. The default phase split gives that phase half the session, so
+  defaulting to GEAK on atom meant defaulting to half a session of nothing,
+  while the CLI printed that kernel-agent was "wired for atom". On atom an unset
+  `KERNEL_OPT_BACKEND_ORDER` is now filled in with `forge` before the session
+  records its backend, and the choice is reported at launch. A value the
+  operator set is kept, so running GEAK on atom deliberately stays possible; the
+  CLI warns that its seam resolution is unproven there. `--no-kernel` skips the
+  defaulting entirely. Only the `framework == "atom"` branch is touched; SGLang
+  and vLLM keep GEAK.
 
-  `workload_shape` still publishes `ep` and `partitions` as a description of the
-  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
-  publisher rather than restating it, which is what had been silently dropping
-  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
-  to 1, so publishing it would have every dense run claim a formation it never
-  chose, and one partition is the whole card. The count a launch published wins
-  over one re-derived from the mode name, so there is only ever one derivation to
-  keep in agreement.
+- **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
+  The serving-process checks now accept `atom.entrypoints`. Recovery records
+  the members of a recognized ATOM process group before sending TERM, then
+  checks each recorded PID, group and start time before sending KILL. This
+  allows anonymous workers to be reaped after their leader exits without
+  treating a reused PID or a newly discovered process as an owned worker.
+  A rank that forked after the snapshot is in neither the recorded set nor any
+  cmdline that still reads as an owner, so a confirmed group also receives a
+  closing group KILL; measured on an 8-rank bring-up, those ranks otherwise
+  survived holding their cards. That kill reaches members this pass never
+  enumerated, so it is not treated as proof the group exited. Ownership must be
+  confirmed first: when the recorded leader is absent from the group, no longer
+  reads as an ATOM server, or no longer matches the group and start time
+  recorded for it, nothing is signalled at all and the pidfile is kept for a
+  later pass -- a recorded pgid the kernel has since recycled would otherwise
+  take the teardown meant for ours.
+  Recovery retains the pidfile while the group is still alive and reports the
+  worker PIDs actually signalled. Measured on one MI355X serving
+  Qwen3-14B-FP8: against a fully booted server recovery reaped the leader and
+  three anonymous workers and the card went from 87% to 0% VRAM; fired mid-boot
+  it left no engine process behind. Normal warmup/measure reuse and the existing
+  vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
+  anonymous workers whose leader had already exited before recovery began;
+  the generic subprocess teardown and third-party benchmark scripts are unchanged.
 
 ### Removed
 
-- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
-  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
-  with the pod — which was never the exposure, since framework version and
-  precision are already identity dimensions. Encoding the partition mode in the
-  key makes the mismatch it would have caught unrepresentable, so a read-side
-  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
-  written into every row's `stack_fingerprint` and compared nowhere at read time;
-  that is a real gap and is tracked separately rather than under a flag whose
-  name says fingerprint and whose behaviour would have been workload shape.
+- **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
+  inbox subscription with `IntentType.RESPONSE`, `Message.priority`,
+  `IntentSpec.builder`, the `PHASE_EXIT_REASONS` vocabulary, and 11 stop
+  reasons no code path can produce.** Each had writers, or a schema column, or
+  a test suite holding it up — everything except a production reader.
+
+  `IntentType.RESPONSE` was dispatched, policy-gated and validated end to end
+  while the `kernel_agent` process that would consume it is never instantiated.
+  The `request` / `response` topics and `kernel_agent` as a routing target are
+  untouched; only the subscription and the intent type go. `Message.priority`
+  had 15 writers and no reader, no index and no `ORDER BY`.
+  `IntentSpec.builder` kept two unwired builders looking alive — their
+  validators stay, because the role may still emit both intent types, just not
+  through a builder. `PHASE_EXIT_REASONS` was a closed 37-member vocabulary
+  with no production reader at all, unlike its load-bearing twin
+  `STOP_REASON_VOCAB`, which gates `machine.py`, `close.py` and
+  `set_stop_reason`: a phase exit reason only reaches `phase_history` for a
+  human to read, so a typo there cannot misroute anything.
+
+  The 11 stop reasons were not "not yet triggered". The crash-threshold path
+  sets `emergency`, and `compute_plateau_explore` / `compute_plateau_kernel`
+  return booleans, so no exit rule ever named `plateau_explore` or
+  `plateau_kernel`. The comment calling these legacy sentinels kept for
+  resuming old sessions did not survive checking, and goes with them:
+  `SharedState.from_dict` restores `stop_reason` as a dataclass field,
+  bypassing `set_stop_reason`, and `_global_terminal` returns unrecognised
+  values verbatim under `vocab: "unknown"` — vocabulary membership was never
+  what let an old session report its terminal. `enablement_stalled` remains a
+  legal value in the enablement timeline event namespace, which is a different
+  vocabulary and is untouched.
+
+  **Resuming across the change needs nothing from the operator.**
+  `CREATE TABLE IF NOT EXISTS` leaves `priority INTEGER NOT NULL` on a
+  `coordinator.db` written before this release, where a column with no default
+  would refuse every append the new code writes, so `ensure_schema` drops it on
+  the way in. An in-flight session resumes with its event history intact.
+
+  The rewrite kernel lane is a **refactor, not a removal**. `allocate()` built
+  a `LaneAllocation` for a lane whose budget the rewrite route never read — it
+  sizes itself against the wall clock — but the `0.5` was load-bearing as a
+  divisor, holding the other two lanes down to 0.3 and 0.2 of the phase. It
+  becomes `REWRITE_RESERVE_SHARE`, taken off the top before the two real lanes
+  divide the rest, and each lane's share of the phase is unchanged.
+
+## [v1.1.1] - 2026-09-16
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
+for the user-facing summary.
+
+### Removed
+
+- **`--breakdown-include-transcripts`, and the exported `specialist_runs`
+  section it inlined into.** The option chose between inlining specialist
+  transcript bodies into the Session Breakdown and referencing them by path.
+  Recording the breakdown at author time retired that section outright, so
+  there is nothing left for the option to inline. Transcripts themselves are
+  unaffected: they are still written to disk and travel as `transcript_path`.
+  The option was read in v1.1.0, so an invocation passing `true` was getting the
+  bodies; the parser is strict, so the same command line now exits with
+  `unrecognized arguments`.<br/>
+  **Operator note**: a reader of the exported breakdown that looked for
+  `specialist_runs` follows `transcript_path` instead.
+
+- **The `learning/` tuning database, the tracker's scoring layer, and the
+  fusion reachability island are gone — KernelForge loses ~1.4k lines of
+  production code.**
+  Each had been superseded in place rather than deleted: `learning/` (4 files)
+  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
+  `False` since `knowledge/experience_sink.py` took over the same job, and its
+  output files had no reader — `IterationLoop`'s `evolver` parameter and
+  `resources.writable_knowledge_root()` go with it. The tracker's
+  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
+  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
+  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
+  carries its own `_is_gate_met` and `best_mean_case_speedup`.
+  `fusion/validate.py` held a closed seven-function island
+  (`unreached_fusion_symbols` and its six private helpers) whose only
+  references were each other's definitions; `fused_symbol_invocation_evidence`,
+  which `fusion/command.py` does call, is untouched.
+
+  The one observable difference is at the end of a `forge-loop` run: it no
+  longer writes lesson markdown under the writable knowledge base's `learned/`
+  directory, and no longer prints `Lessons learned: N`. Nothing read that
+  directory, and the `Transfer rules discovered: N` line beside it was already
+  unreachable because it derives from the tuning DB whose writes are disabled.
+  Everything else here has no reachable call site.
+
+  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
+  it unreachable — its gate fires only for tables the dispatcher has no entry
+  for, while the dispatcher admits exactly one table, so the two predicates
+  accept disjoint sets, and on the path where the gate does fire the runner
+  discards the model-authored tuner at the referee stage. That is a defect in a
+  tier that is supposed to run, not a dead subsystem, and it is being fixed
+  rather than removed.
+
+- **The deprecated `kernel-agents` console script is gone.** The rename to
+  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
+  nothing in this repository, the docs, or the example scripts invoked it, and
+  the orchestrator dispatches `python -m kernelforge.cli` directly. The
+  `kernel_agents.agent_providers` entry-point group stays: it is how
+  third-party provider plugins published before the rename are still
+  discovered, and it is not a CLI surface.
+
+- **The collective optimization lane, and the five environment variables that
+  steered it** — `HYPERLOOM_SKIP_COLLECTIVE`, `HYPERLOOM_COLLECTIVE_ONLY`,
+  `HYPERLOOM_COLLECTIVE_KEEP_PCT`, `FORGE_COLLECTIVE_TIMEOUT` and
+  `FORGE_COLLECTIVE_AGENT_TIMEOUT`. A communication operator and a dense
+  operator are the same rewrite job; the only thing separating them was the
+  measurement harness, which belongs to a task's driver rather than to a lane of
+  its own. Everything above that driver was a second copy of what the rewrite
+  controller already does, so it goes with its entry gate, apply checkpoint,
+  recovery module, SharedState campaign ledger and breakdown section. The
+  `nccl_summary` extractor stays: mapping a mangled NCCL symbol back to the
+  framework source that issued it is deterministic work, and the row it produces
+  remains in `kernel_candidates.json` for opportunity analysis to read like any
+  other candidate.<br/>
+  **Operator note**: a removed environment variable is not refused the way a
+  removed command-line option is. None of the five is read anywhere in the tree
+  and none of them warns, so a launcher that still exports them runs with them
+  silently ignored. Drop them from launch scripts and `.env` rather than waiting
+  for a failure to point them out.
+
+### Added
+
+- **`--extend-hours`, which grants a resumed session more budget.** Elapsed time
+  is summed forward across every leg and never reset, so this is the only way to
+  lengthen a run that has already spent its budget. On `--resume-from` the value
+  is added through `extend_budget_minutes`, which records the grant and its
+  reason in the session state, and the resume banner reports how many hours it
+  added. It defaults to `0.0`, so an invocation that does not pass it behaves as
+  before.
 
 ### Changed
+
+- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
+  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
+  `docs/install/install.md`, the example `SKILL.md` recipes, and
+  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
+  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
+  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
+  (`git apply --check`), so the TraceLens profiler-config patch path is
+  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
+  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
+  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
 
 - **Bare-metal `vllm` default bumped from `0.28.0` to `0.29.0` (still `rocm723`).**
   `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
@@ -131,6 +283,137 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   side that did resolve one — what a normalized `DEEPSEEK_API_KEY` produces —
   keeps its RCA engine instead of being dropped to a silent `NoopRcaEngine` by
   a probe for the CLI its HTTP engine never uses.
+
+- **One reasoning-effort vocabulary, and it is the one both surfaces accept.**
+  Three tables disagreed: Hyperloom took `minimal | low | medium | high`, Forge
+  ranked `none | low | medium | high | xhigh | max`, and the Codex backend
+  accepted a third list while folding `max` onto `xhigh`. The disagreement was
+  not cosmetic -- `HYPERLOOM_REASONING_EFFORT=minimal` passed Hyperloom's own
+  filter and then raised inside the Codex backend, so a box configured once
+  crashed the component doing most of the spending.
+  `hyperloom.common.reasoning_effort` now holds the single ladder
+  `low | medium | high | xhigh | max`, measured against both surfaces:
+  `claude --effort` takes `low..xhigh` plus `max`, the OpenAI-compatible
+  gateway takes `none`/`minimal`/`low..xhigh` and returns 400 on `max`.
+  `low`–`xhigh` are levels as written. `max` is a real Claude level, so it is
+  one here too, and `gateway_reasoning_effort` projects it onto `xhigh` -- the
+  gateway's deepest -- for the Codex backend *and* for Hyperloom's own
+  chat.completions: the fold used to live inside the Codex backend only, so the
+  identical value reaching Hyperloom's own calls was a 400. `minimal` and
+  `none` go the other way -- the gateway takes them, the Claude CLI does not
+  know them, and there is no Claude level below `low` to project them onto --
+  so neither is a level.<br/>
+  **A bad value is refused at startup, by name.** `resolve_agent_reasoning_effort`
+  and `Config.__post_init__` raise on an unrecognized effort and say which
+  variable carried it, rather than passing it through for the provider to
+  reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
+  keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
+  non-reasoning models and gateways that reject the field.<br/>
+  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
+  reaches the gateway.** Hyperloom's own chat.completions used to forward
+  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
+  drops it and the call runs at the gateway's default -- deeper and more
+  expensive, with no error to notice. Forge's side of the same variable is loud
+  (it refuses to start), but Hyperloom's cannot be without breaking
+  non-reasoning models, so **a deployment sitting on `minimal` has to move to
+  `low` by hand.**
+
+- **Forge reads Hyperloom's environment contract instead of its own.** Forge
+  does not ship next to Hyperloom any more, it ships inside it, and an operator
+  configuring one box was being asked to learn two vocabularies for the same
+  decision. `Config.from_env` now walks the ladder
+  `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
+  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
+  written out separately because they answer different questions -- Hyperloom's
+  picks the model for its own calls into a campaign, Forge's picks the model an
+  agent session runs -- and the part worth sharing is the variable names, which
+  this change makes identical. Reasoning effort falls back to
+  the project-wide `HYPERLOOM_REASONING_EFFORT` when
+  `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
+  is not silently contradicted by the component doing most of the spending.<br/>
+  **Three surfaces were reading a different ladder than the one they
+  documented.** `forge-fusion`'s `_resolve_agent_choice` and Hyperloom's own
+  `_run_vendor_playbook_loop_via_cli` each read one model variable directly
+  rather than the shared resolver, so a request-level `llm_model` and the
+  environment were ranked differently depending on which surface launched the
+  run. Both now go through the resolver. And
+  `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
+  a subscription token was told it had no Anthropic credentials while the Claude
+  CLI on it would have authenticated fine -- Hyperloom's own credential
+  preflight has always counted that token as a complete Anthropic side.<br/>
+  **BREAKING -- removed, with no deprecation window: `FORGE_CLAUDE_MODEL`,
+  `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL`, and `KERNEL_AGENTS_MODEL`. Forge no
+  longer has a model variable of its own; set `CLAUDE_MODEL` / `CODEX_MODEL`.**
+  The per-provider pair dated from when Forge was a separate project that had
+  to name its own settings; inside Hyperloom it was one component's second
+  spelling of a platform setting, and a deployment that set one and not the
+  other silently ran Forge on a different model than everything else.
+  `FORGE_AGENT_MODEL` was the provider-neutral rung above them, and it has the
+  same problem for the same reason: the Hyperloom-side resolver
+  (`resolve_forge_llm_model`) never read it, so as long as it existed the two
+  ladders agreed only by coincidence. Deleting it is what makes them one
+  ladder. `KERNEL_AGENTS_MODEL` was never set by anything in either repository
+  -- only read -- so it was a rung to explain with nothing to configure. All
+  four are dropped from the resolver on both sides, from the Ray and Slurm
+  environment allowlists, and from both env templates. A box that had been
+  relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
+  through to the provider default rather than failing, so **check your
+  deployment's env rather than waiting for an error.**
+
+- **`auto` resolves the model after the provider, not before.** The model
+  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
+  backend of `auto` answered before the question was settled: `auto` prefers
+  the Claude CLI but falls to codex when it is not installed, and the runtime
+  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
+  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
+  and `Config.agent_runtime` reads the pair once the provider is known. Two
+  further sites built their own runtime and so read neither switch:
+  `fusion/command.py` pinned every fusion session to the default depth
+  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
+  took the provider default model and the default effort. Both now read the
+  same pair and the same effort ladder as `forge-loop`, and a new test asserts
+  the set of modules that build a runtime is closed -- a fresh bypass fails the
+  suite rather than going unnoticed, which is how these two did.<br/>
+  The two provider-*switch* branches had the same defect on their far side.
+  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
+  provider other than the implementer's -- which is the ordinary case, since
+  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
+  all, so the supervisor ran the registry default however `CODEX_MODEL` was
+  set. `make_agent_fn` did the opposite, carrying the already-resolved
+  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
+  defect again one level up. Both now read the pair for the provider they are
+  about to build, and a second test asserts every construction site does.
+
+- **An agent session's reasoning effort is now the operator's decision, not the
+  call site's.** `AgentRunSpec.resolved()` used to let a spec's own
+  `reasoning_effort` outrank the runtime's, and two thirds of the sessions in
+  this repository wrote one -- so an operator who set
+  `FORGE_AGENT_REASONING_EFFORT` watched most of the campaign ignore it and
+  then read the result as evidence about a setting it never ran under. The
+  ranking is inverted and every call-site literal is deleted rather than left
+  in place looking live; the spec's value survives only for a runtime that
+  names no effort, which no provider here builds. Nine sessions that hardcoded
+  `max` now run at the campaign effort (`high` by default), which is also the
+  cheaper direction.<br/>
+  **Context window: not ported.** Upstream appends `[1m]` to every Claude
+  model id. Measured against the gateway Hyperloom points Forge at
+  (`.../api/v1/llm-proxy`), `claude-opus-5` answers 200 while
+  `claude-opus-5[1m]` -- and every other bracketed form, `[200k]` included --
+  answers `400 Invalid model name`; `/v1/models` publishes 23 ids of which none
+  is windowed. So the suffix would fail every Hyperloom-launched session at the
+  startup probe rather than shrink it. Nor is the window something Forge needs
+  for its own sake: it runs no compaction and no token budget, so the suffix
+  was the only thing a window could have driven, and Hyperloom's own
+  `MODEL_CONTEXT_WINDOWS` answers a different question (when to compact the
+  orchestrator's conversation) and never reaches the wire. The whole mechanism
+  is therefore absent -- no `model_context.py`, no `context_window` on the
+  runtime, no environment variable. A test pins that, so a future re-port of
+  upstream fails the suite instead of every session.<br/>
+  **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
+  so it answered "some configuration works" rather than "this one does"; it now
+  asks under the configuration the campaign will run. `[` terminates the model
+  family regex, so an operator who hand-writes `claude-opus-5[1m]` into
+  `CLAUDE_MODEL` is still recognised as running `claude-opus-5`.
 
 ### Fixed
 
@@ -190,63 +473,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **Operator note**: sessions lost no recorded knowledge, but until now none of
   it was being shown to the agent.
 
-### Changed
-
-- **Bare-metal `vllm` default bumped from `0.27.1` to `0.28.0` (still `rocm723`).**
-  `install_baremetal.sh`'s `VLLM_VERSION` default, `docs/compatibility.rst`,
-  `docs/install/install.md`, the example `SKILL.md` recipes, and
-  `assets/slurm/models.tsv` now all name `vllm==0.28.0+rocm723` /
-  `vllm/vllm-openai-rocm:v0.28.0`. Verified against the real upstream
-  `v0.28.0` tag that TraceLens' `config_vllm_v0.28.0.patch` applies cleanly
-  (`git apply --check`), so the TraceLens profiler-config patch path is
-  unaffected by the bump. `VLLM_ROCM_VARIANT` is unchanged: `wheels.vllm.ai`
-  only publishes a `rocm723` build for `0.28.0`, same as `0.27.1`. Overridable
-  via `VLLM_VERSION`/`VLLM_ROCM_VARIANT` as before.
-
-### Removed
-
-- **The `learning/` tuning database, the tracker's scoring layer, and the
-  fusion reachability island are gone — KernelForge loses ~1.4k lines of
-  production code.**
-  Each had been superseded in place rather than deleted: `learning/` (4 files)
-  wrote through `tuning_db.py`, whose `_TUNING_DB_WRITE_ENABLED` has been
-  `False` since `knowledge/experience_sink.py` took over the same job, and its
-  output files had no reader — `IterationLoop`'s `evolver` parameter and
-  `resources.writable_knowledge_root()` go with it. The tracker's
-  `best_iteration` / `summary_table` / `KernelScoringView` cluster in
-  `tracker/schema.py` was the pre-`loop/scoring.py` scorer; production reads
-  only `.iterations` and `.checkpoint` off the tracker, and `loop/runner.py`
-  carries its own `_is_gate_met` and `best_mean_case_speedup`.
-  `fusion/validate.py` held a closed seven-function island
-  (`unreached_fusion_symbols` and its six private helpers) whose only
-  references were each other's definitions; `fused_symbol_invocation_evidence`,
-  which `fusion/command.py` does call, is untouched.
-
-  The one observable difference is at the end of a `forge-loop` run: it no
-  longer writes lesson markdown under the writable knowledge base's `learned/`
-  directory, and no longer prints `Lessons learned: N`. Nothing read that
-  directory, and the `Transfer rules discovered: N` line beside it was already
-  unreachable because it derives from the tuning DB whose writes are disabled.
-  Everything else here has no reachable call site.
-
-  `gemm_tune/tier3/` is deliberately **not** in this list. The same audit found
-  it unreachable — its gate fires only for tables the dispatcher has no entry
-  for, while the dispatcher admits exactly one table, so the two predicates
-  accept disjoint sets, and on the path where the gate does fire the runner
-  discards the model-authored tuner at the referee stage. That is a defect in a
-  tier that is supposed to run, not a dead subsystem, and it is being fixed
-  rather than removed.
-
-- **The deprecated `kernel-agents` console script is gone.** The rename to
-  `kernelforge` shipped in v1.0.0b2 and the alias was kept for one release;
-  nothing in this repository, the docs, or the example scripts invoked it, and
-  the orchestrator dispatches `python -m kernelforge.cli` directly. The
-  `kernel_agents.agent_providers` entry-point group stays: it is how
-  third-party provider plugins published before the rename are still
-  discovered, and it is not a CLI surface.
-
-### Fixed
-
 - **Supervisor watchdog restarts are resumable and bounded.** A wedged
   coordinator receives SIGHUP, preserving the interrupted phase segment without
   creating a session outcome; repeated wedges become terminal after three
@@ -261,9 +487,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   a module that does not exist and silently fell back to a subset missing 16
   terminal reasons, so a finished session could be relaunched.
 
+- **The Codex default named a deployment the gateway does not serve.**
+  `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
+  points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
+  found!` on both ChatCompletions and Responses, while `gpt-5.6-sol` answers
+  200 on both. Both appear in `/v1/models`, so the catalog alone does not
+  separate them -- only a request does. Hyperloom's own install guide already
+  names `gpt-5.6-sol` and states that it is a deployment name rather than a
+  suffixed variant of a bare `gpt-5.6`, so this default disagreed with the
+  documentation shipped beside it: a box that named no model started every
+  Codex session on a rejected id and survived only by falling back to
+  `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
+  a context-window suffix -- bracketed ids remain rejected by this gateway,
+  which is why no window suffix is applied at all.
+
 ## [v1.1.0] - 2026-09-09
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
+See [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0)
 for the user-facing summary.
 
@@ -419,137 +658,6 @@ for the user-facing summary.
   not the benchmark's.
 
 ### Changed
-
-- **One reasoning-effort vocabulary, and it is the one both surfaces accept.**
-  Three tables disagreed: Hyperloom took `minimal | low | medium | high`, Forge
-  ranked `none | low | medium | high | xhigh | max`, and the Codex backend
-  accepted a third list while folding `max` onto `xhigh`. The disagreement was
-  not cosmetic -- `HYPERLOOM_REASONING_EFFORT=minimal` passed Hyperloom's own
-  filter and then raised inside the Codex backend, so a box configured once
-  crashed the component doing most of the spending.
-  `hyperloom.common.reasoning_effort` now holds the single ladder
-  `low | medium | high | xhigh | max`, measured against both surfaces:
-  `claude --effort` takes `low..xhigh` plus `max`, the OpenAI-compatible
-  gateway takes `none`/`minimal`/`low..xhigh` and returns 400 on `max`.
-  `low`–`xhigh` are levels as written. `max` is a real Claude level, so it is
-  one here too, and `gateway_reasoning_effort` projects it onto `xhigh` -- the
-  gateway's deepest -- for the Codex backend *and* for Hyperloom's own
-  chat.completions: the fold used to live inside the Codex backend only, so the
-  identical value reaching Hyperloom's own calls was a 400. `minimal` and
-  `none` go the other way -- the gateway takes them, the Claude CLI does not
-  know them, and there is no Claude level below `low` to project them onto --
-  so neither is a level.<br/>
-  **A bad value is refused at startup, by name.** `resolve_agent_reasoning_effort`
-  and `Config.__post_init__` raise on an unrecognized effort and say which
-  variable carried it, rather than passing it through for the provider to
-  reject once the campaign is hours deep. Hyperloom's own `apply_reasoning_effort`
-  keeps ignoring an unrecognized value, deliberately: it must stay a no-op for
-  non-reasoning models and gateways that reject the field.<br/>
-  **BREAKING -- `HYPERLOOM_REASONING_EFFORT=minimal` (and `=none`) no longer
-  reaches the gateway.** Hyperloom's own chat.completions used to forward
-  `minimal` verbatim; it is not a level any more, so `apply_reasoning_effort`
-  drops it and the call runs at the gateway's default -- deeper and more
-  expensive, with no error to notice. Forge's side of the same variable is loud
-  (it refuses to start), but Hyperloom's cannot be without breaking
-  non-reasoning models, so **a deployment sitting on `minimal` has to move to
-  `low` by hand.**
-
-- **Forge reads Hyperloom's environment contract instead of its own.** Forge
-  does not ship next to Hyperloom any more, it ships inside it, and an operator
-  configuring one box was being asked to learn two vocabularies for the same
-  decision. `Config.from_env` now walks the ladder
-  `hyperloom.common.llm_config.resolve_forge_llm_model` documents --
-  `CLAUDE_MODEL` / `CODEX_MODEL` and nothing above it. The two resolvers are
-  written out separately because they answer different questions -- Hyperloom's
-  picks the model for its own calls into a campaign, Forge's picks the model an
-  agent session runs -- and the part worth sharing is the variable names, which
-  this change makes identical. Reasoning effort falls back to
-  the project-wide `HYPERLOOM_REASONING_EFFORT` when
-  `FORGE_AGENT_REASONING_EFFORT` names none, so a box that states its depth once
-  is not silently contradicted by the component doing most of the spending.<br/>
-  **Three surfaces were reading a different ladder than the one they
-  documented.** `forge-fusion`'s `_resolve_agent_choice` and Hyperloom's own
-  `_run_vendor_playbook_loop_via_cli` each read one model variable directly
-  rather than the shared resolver, so a request-level `llm_model` and the
-  environment were ranked differently depending on which surface launched the
-  run. Both now go through the resolver. And
-  `_credential_shape` did not count `CLAUDE_CODE_OAUTH_TOKEN`, so a box holding
-  a subscription token was told it had no Anthropic credentials while the Claude
-  CLI on it would have authenticated fine -- Hyperloom's own credential
-  preflight has always counted that token as a complete Anthropic side.<br/>
-  **BREAKING -- removed, with no deprecation window: `FORGE_CLAUDE_MODEL`,
-  `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL`, and `KERNEL_AGENTS_MODEL`. Forge no
-  longer has a model variable of its own; set `CLAUDE_MODEL` / `CODEX_MODEL`.**
-  The per-provider pair dated from when Forge was a separate project that had
-  to name its own settings; inside Hyperloom it was one component's second
-  spelling of a platform setting, and a deployment that set one and not the
-  other silently ran Forge on a different model than everything else.
-  `FORGE_AGENT_MODEL` was the provider-neutral rung above them, and it has the
-  same problem for the same reason: the Hyperloom-side resolver
-  (`resolve_forge_llm_model`) never read it, so as long as it existed the two
-  ladders agreed only by coincidence. Deleting it is what makes them one
-  ladder. `KERNEL_AGENTS_MODEL` was never set by anything in either repository
-  -- only read -- so it was a rung to explain with nothing to configure. All
-  four are dropped from the resolver on both sides, from the Ray and Slurm
-  environment allowlists, and from both env templates. A box that had been
-  relying on one of them and does not set `CLAUDE_MODEL` / `CODEX_MODEL` falls
-  through to the provider default rather than failing, so **check your
-  deployment's env rather than waiting for an error.**
-
-- **`auto` resolves the model after the provider, not before.** The model
-  variable is per-provider, so `Config.from_env` reading `CLAUDE_MODEL` for a
-  backend of `auto` answered before the question was settled: `auto` prefers
-  the Claude CLI but falls to codex when it is not installed, and the runtime
-  then carried `claude-opus-5` into the OpenAI-protocol gateway, which answers
-  400 rather than falling back. `resolve_agent_model("auto")` now returns `""`
-  and `Config.agent_runtime` reads the pair once the provider is known. Two
-  further sites built their own runtime and so read neither switch:
-  `fusion/command.py` pinned every fusion session to the default depth
-  regardless of `FORGE_AGENT_REASONING_EFFORT`, and `gemm_tune/tier3/generate.py`
-  took the provider default model and the default effort. Both now read the
-  same pair and the same effort ladder as `forge-loop`, and a new test asserts
-  the set of modules that build a runtime is closed -- a fresh bypass fails the
-  suite rather than going unnoticed, which is how these two did.<br/>
-  The two provider-*switch* branches had the same defect on their far side.
-  `make_supervisor_fn` rebuilds the runtime when `--supervisor-backend` names a
-  provider other than the implementer's -- which is the ordinary case, since
-  that option defaults to `codex` on `forge-rewrite` -- and passed no model at
-  all, so the supervisor ran the registry default however `CODEX_MODEL` was
-  set. `make_agent_fn` did the opposite, carrying the already-resolved
-  `config.agent_model` into the new provider, which is the Claude-id-to-Codex
-  defect again one level up. Both now read the pair for the provider they are
-  about to build, and a second test asserts every construction site does.
-
-- **An agent session's reasoning effort is now the operator's decision, not the
-  call site's.** `AgentRunSpec.resolved()` used to let a spec's own
-  `reasoning_effort` outrank the runtime's, and two thirds of the sessions in
-  this repository wrote one -- so an operator who set
-  `FORGE_AGENT_REASONING_EFFORT` watched most of the campaign ignore it and
-  then read the result as evidence about a setting it never ran under. The
-  ranking is inverted and every call-site literal is deleted rather than left
-  in place looking live; the spec's value survives only for a runtime that
-  names no effort, which no provider here builds. Nine sessions that hardcoded
-  `max` now run at the campaign effort (`high` by default), which is also the
-  cheaper direction.<br/>
-  **Context window: not ported.** Upstream appends `[1m]` to every Claude
-  model id. Measured against the gateway Hyperloom points Forge at
-  (`.../api/v1/llm-proxy`), `claude-opus-5` answers 200 while
-  `claude-opus-5[1m]` -- and every other bracketed form, `[200k]` included --
-  answers `400 Invalid model name`; `/v1/models` publishes 23 ids of which none
-  is windowed. So the suffix would fail every Hyperloom-launched session at the
-  startup probe rather than shrink it. Nor is the window something Forge needs
-  for its own sake: it runs no compaction and no token budget, so the suffix
-  was the only thing a window could have driven, and Hyperloom's own
-  `MODEL_CONTEXT_WINDOWS` answers a different question (when to compact the
-  orchestrator's conversation) and never reaches the wire. The whole mechanism
-  is therefore absent -- no `model_context.py`, no `context_window` on the
-  runtime, no environment variable. A test pins that, so a future re-port of
-  upstream fails the suite instead of every session.<br/>
-  **Probe.** The Claude startup probe pinned effort `low` and a bare model id,
-  so it answered "some configuration works" rather than "this one does"; it now
-  asks under the configuration the campaign will run. `[` terminates the model
-  family regex, so an operator who hand-writes `claude-opus-5[1m]` into
-  `CLAUDE_MODEL` is still recognised as running `claude-opus-5`.
 
 - **AgentX installs its own benchmark client instead of letting an agent guess
   at it.** `HYPERLOOM_AGENTX` declares aiperf as a required, version-pinned
@@ -951,20 +1059,6 @@ for the user-facing summary.
   wrapper's own input JSON is unchanged.
 
 ### Fixed
-
-- **The Codex default named a deployment the gateway does not serve.**
-  `DEFAULT_CODEX_MODEL` was `gpt-5.6`; measured against the gateway Hyperloom
-  points Forge at, that id answers `400 Deployment of "gpt-5.6" ... is not
-  found!` on both ChatCompletions and Responses, while `gpt-5.6-sol` answers
-  200 on both. Both appear in `/v1/models`, so the catalog alone does not
-  separate them -- only a request does. Hyperloom's own install guide already
-  names `gpt-5.6-sol` and states that it is a deployment name rather than a
-  suffixed variant of a bare `gpt-5.6`, so this default disagreed with the
-  documentation shipped beside it: a box that named no model started every
-  Codex session on a rejected id and survived only by falling back to
-  `gpt-5.5`. The default is now `gpt-5.6-sol`. This is a deployment name, not
-  a context-window suffix -- bracketed ids remain rejected by this gateway,
-  which is why no window suffix is applied at all.
 
 - **SWEEP is one concurrency sweep, and it produces the chart a submission is
   read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
@@ -1696,7 +1790,8 @@ user-facing summary.
 - Vendor kernel configuration guidance and updated kernel-manager skills/actions (including local-test flow).
 - Launcher scripts refinements for orchestrator/kernel manager panes.
 
-[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/AMD-AGI/Hyperloom/compare/v1.1.1...HEAD
+[v1.1.1]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1
 [v1.1.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0
 [v1.0.0]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0
 [v1.0.0b2]: https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2

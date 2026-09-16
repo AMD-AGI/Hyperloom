@@ -27,9 +27,8 @@ class IntentType(str, Enum):
     PROPOSE_ACTION = "propose_action"
     UPDATE_STATE = "update_state"
     ALERT = "alert"
-    # Bidirectional agent-to-agent RPC.
+    # Agent-to-agent request; the handler answers inline on the ``response`` topic.
     REQUEST = "request"
-    RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"  # Critic-only
     EXTEND_LEASE = "extend_lease"  # refresh a live task's lease TTL
     # Robustness-only scheduling police.
@@ -55,7 +54,6 @@ _PAYLOAD_REQUIRED: dict[IntentType, tuple[str, ...]] = {
     IntentType.UPDATE_STATE: ("changes",),
     IntentType.ALERT: ("severity", "summary"),
     IntentType.REQUEST: ("target_agent", "kind"),
-    IntentType.RESPONSE: ("in_reply_to", "kind"),
     # verdict/verdict_map mutual exclusion enforced by _validate_review_verdict_payload.
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),

@@ -95,7 +95,6 @@ benchmark:
     OSL: 1024
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
-    HYPERLOOM_TRACELENS_PATCH_STATUS: not_attempted
     PROFILE_EXTRA_BODY: '{"start_step": 6080, "num_steps": 128, "shape_discovery":
       true, "detailed_annotations": true}'
     NUM_PROMPTS: 776

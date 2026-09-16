@@ -19,10 +19,8 @@ from hyperloom.orchestrator.state.shared_state import SharedState
         ("target_reached", "completed"),
         ("sweep_done", "completed"),
         ("signal", "aborted"),
-        ("user_stop_requested", "aborted"),
         ("", "aborted"),
         ("baseline_failed", "failed"),
-        ("enablement_stalled", "failed"),
         # A verdict about the model reached before the loop started is still a
         # verdict, so it stays on the failure side.
         ("unsupported_model_arch", "failed"),

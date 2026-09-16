@@ -154,6 +154,15 @@ _EVAL_FAILURE_MARKERS = (
     "ERROR: run_eval failed",
     "Unknown parameter: --concurrent-requests",
 )
+# Markers showing the eval failed because the server was not reachable, rather than because the model scored badly or
+# the framework lacks a capability. The eval harness reports both the same way -- a non-zero ``run_eval`` -- so without
+# this distinction a torn-down server is indistinguishable from an accuracy gap, and gets routed to the enablement lane
+# to hunt for a capability that was never missing.
+_EVAL_SERVER_UNREACHABLE_MARKERS = (
+    "ClientConnectorError",
+    "Cannot connect to host",
+    "Connect call failed",
+)
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
 # The measured pass ran as the first traffic against a freshly restarted server, because the warmup that exists to
@@ -404,47 +413,30 @@ def _claim_attempt_index(attempts: Path) -> int:
     return index
 
 
-#: Capture-failure categories. ``instrumentation`` is the profiler's own shape discovery colliding with capture --
-#: the same server args capture cleanly with no profiler attached, so the fix belongs to the instrumentation.
-#: ``config`` is the server args themselves failing to capture. Roofline reports the category instead of acting on
-#: it; only baseline still uses the boolean, to decide its one-shot retry.
-CUDA_GRAPH_CAPTURE_INSTRUMENTATION = "instrumentation"
-CUDA_GRAPH_CAPTURE_CONFIG = "config"
-
-
-def _classify_cuda_graph_capture_failure(*texts: str) -> tuple[str, str]:
-    """Classify a capture failure as ``(category, matched_marker)``; empty category means no marker matched.
-
-    The marker is reported alongside the category because the match is a string heuristic: an offline reader has to
-    be able to see what fired and overrule it.
-    """
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph."""
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
     # Profile-cuda-graph assert wins over the assertionerror gate.
     if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
-        return CUDA_GRAPH_CAPTURE_INSTRUMENTATION, " + ".join(_CUDA_GRAPH_PROFILE_ASSERT_MARKERS)
+        return True
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
     blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
     saw_pure_weak = False
     for idx, line in enumerate(lowered):
-        strong = next((m for m in _CUDA_GRAPH_STRONG_MARKERS if m in line), "")
-        if strong:
+        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
+        if is_strong:
             lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
             hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
             if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
-                return CUDA_GRAPH_CAPTURE_CONFIG, strong
+                return True
             continue
         if _CUDA_GRAPH_WEAK_MARKER in line:
             saw_pure_weak = True
     if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
-        return CUDA_GRAPH_CAPTURE_CONFIG, _CUDA_GRAPH_WEAK_MARKER
-    return "", ""
-
-
-def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when a cuda-graph capture marker is recoverable by disabling graph."""
-    return bool(_classify_cuda_graph_capture_failure(*texts)[0])
+        return True
+    return False
 
 
 # Startup-time "the GPUs are already occupied" refusals.
@@ -2053,6 +2045,53 @@ class BaselineExecutor:
         return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
+    def _is_server_unreachable_eval_failure(result: dict[str, Any]) -> bool:
+        """Whether an eval-rooted failure happened because the server had gone away.
+
+        Evidence of a refused connection says the eval never reached a verdict, so the run carries no information
+        about accuracy or about a missing framework capability -- the two things the enablement lane exists to chase.
+
+        Deliberately not routed through ``_failure_carries_markers``: that climbs out of a round directory to the
+        shared task root, so a warmup round whose server crashed would decide the classification of a measure round
+        that did reach a verdict -- demoting a real accuracy failure out of the enablement lane, the inverse of what
+        this check is for. Scan this round's own directory instead. The markers are frequently absent from
+        ``result['error']`` -- that is why the eval-rooted check reads logs at all -- and when the eval-rooted verdict
+        came from a log, the refusal that caused it is in the same log.
+        """
+        texts = [str(result.get("error") or "")]
+        texts.extend(str(warning) for warning in result.get("nonfatal_warnings") or [])
+        if any(marker in text for text in texts for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+            return True
+        out_dir = result.get("output_dir")
+        if not out_dir:
+            return False
+        root = Path(out_dir)
+        if not root.is_dir():
+            return False
+        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+        seen = 0
+        try:
+            for path in root.rglob("*.log"):
+                if path.name not in log_names:
+                    continue
+                seen += 1
+                if seen > 64:  # bound the scan on pathological trees
+                    break
+                try:
+                    with path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
+                        chunk = f.read().decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+                    return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline died on the MoE runner backend in use."""
         return BaselineExecutor._failure_carries_markers(
@@ -2197,54 +2236,69 @@ class BaselineExecutor:
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
+        # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
+        # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
+        # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
+        # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
+        # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
+        # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
-            _, evidence = self._eval_failure_evidence(result)
-            if self._eval_enablement_active(ctx):
-                from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
-
+            if self._is_server_unreachable_eval_failure(result):
                 log.warning(
-                    "baseline_executor: eval-rooted failure; routing to "
-                    "enablement instead of salvaging (RUN_EVAL stays on)."
-                )
-                self._stamp_eval_failure_contract(
-                    ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
-                )
-                return result
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-                log.error(
-                    "baseline_executor: failure is eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark) on a genuine baseline, "
-                    "whose whole purpose is to establish the accuracy "
-                    "reference. NOT retrying with RUN_EVAL=false: a "
-                    "throughput-only baseline cannot satisfy the accuracy gate, "
-                    "so the retry would burn a second full benchmark and the "
-                    "run would stop anyway. Stopping now — fix the accuracy "
-                    "eval (see the benchmark stdout/stderr for the run_eval "
-                    "error) rather than disabling RUN_EVAL."
+                    "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
+                    "the eval reached a verdict; recording an ordinary baseline failure rather than an enablement "
+                    "gap."
                 )
                 result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                result["accuracy_source"] = "eval_unavailable"
-                self._request_eval_rooted_baseline_stop(ctx, result)
-                return result
-            log.warning(
-                "baseline_executor: failure looks eval-rooted (InferenceX "
-                "run_eval aborted the benchmark); retrying once with "
-                "RUN_EVAL=false to salvage the throughput baseline without "
-                "the accuracy gate."
-            )
-            retry = await self._run_pass(
-                ctx,
-                recorder=recorder,
-                attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                force_disable_eval=True,
-            )
-            retry.setdefault("nonfatal_warnings", [])
-            retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-            if retry.get("status") == "succeeded":
-                retry["accuracy_source"] = "eval_unavailable"
-            eval_disabled_by_fallback = True
-            result = retry
+                result["nonfatal_warnings"].append("eval_failed_server_unreachable")
+            else:
+                _, evidence = self._eval_failure_evidence(result)
+                if self._eval_enablement_active(ctx):
+                    from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+                    log.warning(
+                        "baseline_executor: eval-rooted failure; routing to "
+                        "enablement instead of salvaging (RUN_EVAL stays on)."
+                    )
+                    self._stamp_eval_failure_contract(
+                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                    )
+                    return result
+                if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX "
+                        "run_eval aborted the benchmark) on a genuine baseline, "
+                        "whose whole purpose is to establish the accuracy "
+                        "reference. NOT retrying with RUN_EVAL=false: a "
+                        "throughput-only baseline cannot satisfy the accuracy gate, "
+                        "so the retry would burn a second full benchmark and the "
+                        "run would stop anyway. Stopping now — fix the accuracy "
+                        "eval (see the benchmark stdout/stderr for the run_eval "
+                        "error) rather than disabling RUN_EVAL."
+                    )
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
+                    result["accuracy_source"] = "eval_unavailable"
+                    self._request_eval_rooted_baseline_stop(ctx, result)
+                    return result
+                log.warning(
+                    "baseline_executor: failure looks eval-rooted (InferenceX "
+                    "run_eval aborted the benchmark); retrying once with "
+                    "RUN_EVAL=false to salvage the throughput baseline without "
+                    "the accuracy gate."
+                )
+                retry = await self._run_pass(
+                    ctx,
+                    recorder=recorder,
+                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
+                    force_disable_eval=True,
+                )
+                retry.setdefault("nonfatal_warnings", [])
+                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+                if retry.get("status") == "succeeded":
+                    retry["accuracy_source"] = "eval_unavailable"
+                eval_disabled_by_fallback = True
+                result = retry
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
@@ -2438,6 +2492,18 @@ class BaselineExecutor:
             # Salvaged, but unusable (zero or still under the floor): that is a real quality signal, so fall through
             # with the observed value rather than reporting it as a missing measurement.
             acc = acc_val
+
+        # An eval that never reached a verdict because the server was unreachable produced no accuracy signal, so
+        # neither the stop below nor the enablement routing has anything to act on; stamping either would put an
+        # accuracy-flavoured verdict on evidence that says only that the measurement broke. But when the salvage
+        # above did find a measured accuracy, there IS a signal -- a real one, from a round that reached a verdict --
+        # and returning here would throw it away, leaving a genuinely under-floor model anchoring nothing.
+        if (
+            salvaged is None
+            and result.get("status") != "succeeded"
+            and self._is_server_unreachable_eval_failure(result)
+        ):
+            return
 
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.
