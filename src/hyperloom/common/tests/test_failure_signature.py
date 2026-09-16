@@ -360,6 +360,73 @@ def test_serve_flag_invalid_choice() -> None:
     assert sig.kind in (SERVE_FLAG, TOKENIZER_ERROR)
 
 
+def test_kernel_over_the_device_shared_memory_budget() -> None:
+    """A kernel's own launch configuration, not a host that is too small.
+
+    Reached a real replay: the enabled stack booted, served, and lost its engine
+    to this. Classified as unknown it told the specialist nothing; classified as
+    a resource constraint it would have told it the opposite of the truth, since
+    that kind is marked as needing no code change and this one is fixed in the
+    source being edited.
+    """
+    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+
+    sig = classify_failure(
+        "RuntimeError: Worker failed with error 'out of resource: shared memory, "
+        "Required: 98304, Hardware limit: 65536. Reducing block sizes or `num_stages` may help.'"
+    )
+
+    assert sig.kind == KERNEL_RESOURCE_LIMIT
+    assert sig.kind != RESOURCE_CONSTRAINT, "a source change is exactly what this needs"
+
+
+def test_kernel_over_the_device_register_budget() -> None:
+    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+
+    assert classify_failure("out of resource: registers, Required: 512, Hardware limit: 256").kind == (
+        KERNEL_RESOURCE_LIMIT
+    )
+
+
+def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel() -> None:
+    """Rules are evaluated in list order, which FAILURE_KINDS does not govern.
+
+    The HIP rule matches any ``hipError`` token, and this diagnostic carries one
+    alongside the resource wording -- so ordering it after that rule would have
+    classified the most specific case as a missing kernel image.
+    """
+    from hyperloom.agents.framework.enablement import HIP_KERNEL_MISSING, KERNEL_RESOURCE_LIMIT
+
+    sig = classify_failure(
+        "hipErrorLaunchOutOfResources: out of resource: shared memory, "
+        "Required: 98304, Hardware limit: 65536"
+    )
+
+    assert sig.kind == KERNEL_RESOURCE_LIMIT
+    assert sig.kind != HIP_KERNEL_MISSING
+
+
+def test_a_plain_hip_error_is_still_a_missing_kernel() -> None:
+    """The counterpart: the HIP rule keeps everything it had."""
+    from hyperloom.agents.framework.enablement import HIP_KERNEL_MISSING
+
+    assert classify_failure("hipErrorNoBinaryForGpu: no kernel image is available").kind == HIP_KERNEL_MISSING
+
+
+def test_a_host_out_of_memory_is_still_not_a_kernel_budget() -> None:
+    """The two must not blur: one is fixed in source, the other cannot be."""
+    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+
+    for text in (
+        "RuntimeError: HIP out of memory. Tried to allocate 10.54 GiB",
+        "torch.OutOfMemoryError: CUDA out of memory.",
+        "No GPU memory left for the KV cache.",
+    ):
+        kind = classify_failure(text).kind
+        assert kind == RESOURCE_CONSTRAINT, text
+        assert kind != KERNEL_RESOURCE_LIMIT, text
+
+
 def test_resource_constraint_oom() -> None:
     """Out-of-memory -> resource_constraint."""
     sig = classify_failure("RuntimeError: CUDA out of memory. Tried to allocate 20 GiB")

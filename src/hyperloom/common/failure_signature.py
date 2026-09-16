@@ -26,6 +26,12 @@ TOKENIZER_ERROR = "tokenizer_error"
 SERVE_FLAG = "serve_flag"
 # Resource constraints (OOM, TP/GPU count) are NOT code acquisition targets.
 RESOURCE_CONSTRAINT = "resource_constraint"
+# A kernel asking the hardware for more of a fixed per-launch resource than it
+# has -- shared memory, registers. Distinct from RESOURCE_CONSTRAINT, which says
+# the host lacks what the run asked for and no source change will help: this one
+# is a kernel's own launch configuration, and the tool that reports it names the
+# fix ("reducing block sizes or num_stages may help").
+KERNEL_RESOURCE_LIMIT = "kernel_resource_limit"
 # Accuracy-eval triggers (values match _accuracy_gate EVAL_KIND_*): a booting baseline whose accuracy is below the
 # floor, an eval cut short because generation never terminated, and a crashed eval run.
 ACCURACY_BELOW_FLOOR = "accuracy_below_floor"
@@ -38,6 +44,7 @@ FAILURE_KINDS: tuple[str, ...] = (
     MISSING_MODEL_ARCH,
     EVAL_GENERATION_PATHOLOGY,
     ACCURACY_BELOW_FLOOR,
+    KERNEL_RESOURCE_LIMIT,
     RESOURCE_CONSTRAINT,
     HIP_KERNEL_MISSING,
     UNSUPPORTED_DTYPE,
@@ -163,6 +170,25 @@ _RULES: tuple[_Rule, ...] = (
             re.compile(r"baseline[_ ]accuracy[_ ]below[_ ]floor"),
         ),
         confidence=0.9,
+    ),
+    _Rule(
+        # A kernel over the device's per-launch budget. Ordered ahead of both
+        # neighbours it would otherwise be swallowed by: the HIP rule matches
+        # any ``hipError`` token, and ``hipErrorLaunchOutOfResources`` carries
+        # exactly this text; the resource-constraint rule means the host is too
+        # small and marks the gap as needing no code, while this is a launch
+        # configuration in the source the enablement is editing. Rules are
+        # evaluated in list order, which ``FAILURE_KINDS`` does not govern.
+        kind=KERNEL_RESOURCE_LIMIT,
+        bridge_layer="rocm_hip",
+        patterns=(
+            re.compile(r"out of resource:\s*(shared memory|registers)"),
+            re.compile(r"Required:\s*(\d+),\s*Hardware limit:\s*(\d+)"),
+            re.compile(r"[Rr]educing block sizes or `?num_stages`?"),
+            re.compile(r"uses too much shared data"),
+        ),
+        confidence=0.9,
+        symbol_from=_grp,
     ),
     _Rule(
         kind=HIP_KERNEL_MISSING,
@@ -508,6 +534,7 @@ __all__ = [
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",
     "NOT_IMPLEMENTED",
+    "KERNEL_RESOURCE_LIMIT",
     "RESOURCE_CONSTRAINT",
     "SERVE_FLAG",
     "SHAPE_MISMATCH",
