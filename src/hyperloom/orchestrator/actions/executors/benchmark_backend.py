@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -19,6 +20,10 @@ class BenchmarkBackend(Protocol):
     """Builds the benchmark subprocess command for one benchmark run."""
 
     name: str
+
+    def owns_local_server(self, bench: dict) -> bool:
+        """Whether this backend launches the configured serving process itself."""
+        ...
 
     def build_command(
         self,
@@ -35,6 +40,12 @@ class MagpieBackend:
     """Default backend: launches Magpie's local benchmark subprocess."""
 
     name = "magpie"
+
+    def owns_local_server(self, bench: dict) -> bool:
+        """Only built-in scripts have the shared PORT server/client contract."""
+        from ._server_lifecycle import MAGPIE_BUILTIN_SCRIPTS
+
+        return str(bench.get("benchmark_script") or "") in MAGPIE_BUILTIN_SCRIPTS
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
@@ -84,6 +95,10 @@ class BypassBackend:
     # Serving frameworks whose OpenAI server bypass can persist for reuse.
     _LIFECYCLE_FRAMEWORKS = frozenset({"vllm", "atom", "sglang"})
 
+    def owns_local_server(self, bench: dict) -> bool:
+        """Bypass launches supported serving frameworks without a Magpie script."""
+        return str(bench.get("framework") or "").lower() in self._LIFECYCLE_FRAMEWORKS
+
     def lifecycle_eligibility(self, bench: dict) -> dict | None:
         """Decide bypass server_lifecycle eligibility."""
         framework = str(bench.get("framework") or "").lower()
@@ -131,17 +146,17 @@ class BypassBackend:
         ]
 
 
-def resolve_backend_name() -> str:
+def resolve_backend_name(*, env: Mapping[str, str] | None = None) -> str:
     """Resolve the active backend name from the environment."""
-    raw = (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
+    raw = ((os.environ if env is None else env).get(BENCHMARK_BACKEND_ENV) or "").strip().lower()
     if not raw or raw not in KNOWN_BENCHMARK_BACKENDS:
         return DEFAULT_BENCHMARK_BACKEND
     return raw
 
 
-def resolve_backend() -> BenchmarkBackend:
+def resolve_backend(*, env: Mapping[str, str] | None = None) -> BenchmarkBackend:
     """Resolve the active benchmark backend instance."""
-    name = resolve_backend_name()
+    name = resolve_backend_name(env=env)
     if name == "bypass":
         return BypassBackend()
     return MagpieBackend()

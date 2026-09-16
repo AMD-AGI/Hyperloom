@@ -139,6 +139,50 @@ def test_run_benchmark_launches_server_with_current_interpreter(tmp_path, monkey
     assert captured.get("python_exe") == sys.executable
 
 
+def test_single_round_port_overrides_inherited_bypass_port_for_server_and_client(tmp_path, monkeypatch):
+    """Bypass prioritizes its process environment, so config-only port selection is insufficient."""
+    import os
+
+    from hyperloom.orchestrator.actions.executors import _multi_node_env, _server_lifecycle
+
+    inferencex = tmp_path / "InferenceX"
+    inferencex.mkdir()
+    cfg_path = _write_cfg(tmp_path, inferencex)
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "bypass")
+    monkeypatch.setenv("PORT", "8888")
+    monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
+    monkeypatch.setattr(_server_lifecycle, "_pick_free_port", lambda: 41002)
+    launch_env = os.environ.copy()
+    _server_lifecycle.prepare_single_round_port((str(cfg_path), str(cfg_path)), launch_env)
+    monkeypatch.setenv("PORT", launch_env["PORT"])
+    server_commands, client_commands, health_urls = [], [], []
+
+    def launch_server(cmd, env, log):
+        server_commands.append(cmd)
+        return object()
+
+    def ready(url, **kwargs):
+        health_urls.append(url)
+        return True
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", launch_server)
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", ready)
+    _fake_client_run(monkeypatch)
+    fake_client = subprocess.run
+
+    def capture_client(cmd, **kwargs):
+        client_commands.append(cmd)
+        return fake_client(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", capture_client)
+    assert bypass_runner.run_benchmark(cfg_path, tmp_path / "out") == 0
+    assert server_commands[0][server_commands[0].index("--port") + 1] == "41002"
+    assert client_commands[0][client_commands[0].index("--base-url") + 1] == "http://127.0.0.1:41002"
+    assert health_urls == ["http://127.0.0.1:41002"]
+    assert yaml.safe_load(cfg_path.read_text())["benchmark"]["envs"]["PORT"] == 41002
+
+
 def test_server_command_sglang():
     cmd = bypass_engine.build_server_command(
         framework="sglang",

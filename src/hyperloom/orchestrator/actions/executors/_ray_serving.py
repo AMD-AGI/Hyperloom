@@ -237,6 +237,7 @@ def _serving_actor_body() -> Any:
             server_log_path=None,
             server_already_ready=False,
             session_remaining_sec=None,
+            single_round_configs=None,
         ):
             """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
             import subprocess as _sp  # noqa: PLC0415
@@ -257,6 +258,7 @@ def _serving_actor_body() -> Any:
                         server_log_path=server_log_path,
                         server_already_ready=server_already_ready,
                         session_remaining_sec=session_remaining_sec,
+                        single_round_configs=single_round_configs,
                     )
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
@@ -351,6 +353,7 @@ class ServingLease:
         server_log_path: str | None = None,
         server_already_ready: bool = False,
         session_remaining_sec: float | None = None,
+        single_round_configs: tuple[str, str] | None = None,
     ) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener  # noqa: PLC0415
@@ -372,6 +375,7 @@ class ServingLease:
                 server_log_path=server_log_path,
                 server_already_ready=server_already_ready,
                 session_remaining_sec=session_remaining_sec,
+                single_round_configs=single_round_configs,
             )
             return self._collect_round(ref, cmd=cmd, timeout=timeout, cancel_scope=cancel_scope)
 

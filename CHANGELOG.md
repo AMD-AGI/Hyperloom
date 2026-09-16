@@ -34,6 +34,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Single-round benchmarks and profiling runs select their local serving port on
+  the execution host, including Ray workers. The server, clients, and launch
+  evidence use the same port instead of competing for the default port 8888.
+  Persistent server reuse and externally managed endpoints keep their ports.
+
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
   model that scored badly the same way -- a non-zero exit -- so the eval-rooted
