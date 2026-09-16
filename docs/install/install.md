@@ -106,7 +106,10 @@ Requirements:
 - Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
   requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
   ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
-- ROCm runtime and ROCm torch are already installed.
+- ROCm runtime and ROCm torch are already installed. ROCm 7.2.x is the
+  recommended and validated baseline; see
+  {doc}`Compatibility </compatibility>` for the combination the release is
+  tested against. Other ROCm versions are not validated.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup might install one.
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
@@ -143,14 +146,17 @@ and a ROCm-built torch. Two framework-install details are worth knowing:
   best-effort, trying `libopenmpi3t64` (Ubuntu 24.04's 64-bit `time_t` name) and
   `libopenmpi3`. It skips silently when the library already resolves, when `apt`
   is unavailable, or when not running as root.
-- **ROCm as pip wheels**: ROCm can arrive as TheRock's wheels instead of a single
-  `/opt/rocm` prefix, split across the `_rocm_sdk_core`, `_rocm_sdk_libraries`
-  and `_rocm_sdk_devel` namespace packages. Phase 1 then probes all three,
-  including their `rocm_sysdeps` and `host-math` subdirectories, so the gate does
-  not report libraries as missing that the loader does resolve at runtime. Before
-  a source build, which needs hipBLAS/hipSPARSE/thrust headers, the installer
-  adds `rocm-sdk-devel` pinned to the installed `rocm-sdk-core` version, expands
-  it with `rocm-sdk init`, and exports the root `rocm-sdk path --root` reports so
+- **ROCm as pip wheels**: the validated baseline is ROCm 7.2.x under a single
+  `/opt/rocm` prefix, and that is the layout to prefer. ROCm can instead arrive
+  as TheRock's wheels, split across the `_rocm_sdk_core`,
+  `_rocm_sdk_libraries` and `_rocm_sdk_devel` namespace packages. The installer
+  handles that layout so it does not fail setup on it, but such a host is not a
+  tested configuration: Phase 1 probes all three packages, including their
+  `rocm_sysdeps` and `host-math` subdirectories, so the gate does not report
+  libraries as missing that the loader does resolve at runtime; and before a
+  source build, which needs hipBLAS/hipSPARSE/thrust headers, it adds
+  `rocm-sdk-devel` pinned to the installed `rocm-sdk-core` version, expands it
+  with `rocm-sdk init`, and exports the root `rocm-sdk path --root` reports so
   the compiler and its include tree come from the same package. All of this is a
   no-op on a standard `/opt/rocm` image.
 
@@ -218,12 +224,15 @@ Bare-metal setup might also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 tag or commit; when unset the installer selects the newest tag compatible with
 the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
 is controlled by `SGLANG_ROCM_EXTRA` and `SGLANG_ROCM_PYPI_VERSION`. Both are
-unset by default and derived from the ROCm build of the installed torch
-(`torch.version.hip` 7.0.x to `rocm700`, 7.2.x to `rocm724`); an exported value
-still wins. A stack no published wheel targets derives nothing and takes the
-source install. Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`,
-`TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the workload skill's
-`install.sh`.
+unset by default and derived from the ROCm build of the installed torch: only
+ROCm 7.0.x and 7.2.x have a published `amd-sglang` wheel, mapping to `rocm700`
+and `rocm724` respectively, and the recommended 7.2.x stack resolves `rocm724`.
+An exported value still wins. `rocm700` additionally requires Python 3.10 and
+setup fails outright on any other interpreter, because the source install would
+pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
+the source install, which is a fallback rather than a validated path.
+Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
+`GEAK_ROOT`) are added later by the workload skill's `install.sh`.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)

@@ -201,8 +201,11 @@ These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
 ``VLLM_ROCM_VARIANT``) for hosts that need a different pinned stack.
 
-ROCm does not have to live under a single ``/opt/rocm`` prefix. When it arrives
-as TheRock's pip wheels, the bare-metal installer probes the ``_rocm_sdk_*``
-namespace packages for library resolution and, before a framework source build,
-supplies the devel headers and toolchain root from them. See
-:doc:`/install/install`.
+The table above is the validated combination, and ROCm 7.2.x under a single
+``/opt/rocm`` prefix is the layout to prefer. A host where ROCm arrives as
+TheRock's pip wheels instead, split across the ``_rocm_sdk_*`` namespace
+packages, is handled rather than validated: the bare-metal installer probes
+those packages for library resolution and, before a framework source build,
+supplies the devel headers and toolchain root from them, so setup does not fail
+on that layout. Only ROCm 7.0.x and 7.2.x have a published ``amd-sglang`` wheel;
+any other stack falls back to a source install. See :doc:`/install/install`.
