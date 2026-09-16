@@ -434,3 +434,41 @@ def test_a_setting_script_that_is_a_file_is_named(tmp_path):
     state = {"enablement": {"last_specialist_task_id": "spec-1"}}
     section = collect_enablement(tmp_path, state, [])
     assert section["setting_script"] == "reports/enablement/enablement_setting.sh"
+
+
+def _collected_codes(value, *, present=True):
+    """Run real recipe collection and return its replay_sufficiency codes."""
+    state = {"enablement_attempts": 1, "enablement_kept_rounds": [{"patches": [], "artifacts": []}]}
+    if present:
+        state["enablement_build_extensions_not_carried"] = value
+    out = collect_enablement(Path("/tmp/sess"), state, [])
+    return [r["code"] for r in (out.get("replay_sufficiency") or {}).get("reasons") or []]
+
+
+def test_collection_carries_a_named_gap_into_the_decision():
+    """The observation has to reach the emitted section to mean anything.
+
+    It is persisted onto durable state at the KEEP, but the section the rules
+    read is built separately -- and its builder drops falsy values, so a
+    tri-state projected through it loses both of its meaningful states.
+    """
+    assert "build_extensions_not_carried" in _collected_codes(["_moe_C.abi3.so"])
+
+
+def test_collection_carries_an_unverifiable_scan_into_the_decision():
+    assert "build_carry_unverified" in _collected_codes(None)
+
+
+def test_collection_of_a_clean_scan_names_neither():
+    codes = _collected_codes([])
+
+    assert "build_extensions_not_carried" not in codes
+    assert "build_carry_unverified" not in codes
+
+
+def test_a_session_predating_the_observation_names_neither():
+    """An older session never recorded it; absence is not an unreadable build."""
+    codes = _collected_codes(None, present=False)
+
+    assert "build_extensions_not_carried" not in codes
+    assert "build_carry_unverified" not in codes

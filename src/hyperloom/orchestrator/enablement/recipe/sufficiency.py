@@ -43,6 +43,8 @@ REASON_BLOCKS: dict[str, str] = {
     "setup_ledger_truncated": BLOCKS_BOTH,
     "build_attempt_unjoined": BLOCKS_REPLAY,
     "build_not_replayed": BLOCKS_REPLAY,
+    "build_extensions_not_carried": BLOCKS_REPLAY,
+    "build_carry_unverified": BLOCKS_REPLAY,
     "build_inputs_incomplete": BLOCKS_REPLAY,
     "environment_closure_absent": BLOCKS_REPLAY,
     "closure_scope_incomplete": BLOCKS_REPLAY,
@@ -573,6 +575,34 @@ def _executed_build_ids(enablement: Mapping[str, Any]) -> list[str]:
     return out
 
 
+def _carried_extension_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Name the build's compiled extensions the framework root never received.
+
+    A build installs nothing by itself; its outputs reach the framework root
+    only as artifacts a specialist declares, one file at a time. Declaring some
+    of them still boots, benchmarks and keeps -- the ones left behind surface
+    much later as an op the loaded extension does not export, on whichever code
+    path first needs it, and a replay of that recipe reproduces the gap exactly.
+    """
+    if "build_extensions_not_carried" not in section:
+        return []
+    missing = section["build_extensions_not_carried"]
+    if missing is None:
+        # A linked build whose outputs could not be read. Silence here would be
+        # indistinguishable from a scan that found everything carried, which is
+        # the certification this exists to withhold.
+        return [_reason("build_carry_unverified", "build_extensions_not_carried")]
+    if not isinstance(missing, (list, tuple)):
+        return []
+    # Only names: a reason invented from a number or a mapping would refuse a
+    # replay over junk, which is the opposite of what a closed shape is for.
+    return [
+        _reason("build_extensions_not_carried", name.strip())
+        for name in missing
+        if isinstance(name, str) and name.strip()
+    ]
+
+
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Judge the KEEP-time environment closure and assertion observation."""
     reasons: list[dict[str, Any]] = []
@@ -737,6 +767,7 @@ def evaluate_replay_sufficiency(
     reasons.extend(_artifact_reasons(section))
     reasons.extend(_setup_reasons(enablement))
     reasons.extend(_build_reasons(enablement, steps))
+    reasons.extend(_carried_extension_reasons(section))
     reasons.extend(_closure_reasons(section))
     reasons.extend(_credential_reasons(enablement, section, steps))
     if delivered_payloads is not None:

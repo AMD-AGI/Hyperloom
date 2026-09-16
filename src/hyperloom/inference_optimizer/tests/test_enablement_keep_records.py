@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict
@@ -2243,3 +2245,320 @@ def test_a_stack_under_a_nested_apply_root_replays(repo: Path, tmp_path: Path):
         assert replayed_stack_ops(nested, [patch], base_sha=base_sha) == {str(patch): {"made.py": "upsert"}}
     finally:
         os.umask(previous)
+
+
+def _built_attempt(tmp_path: Path, *, package: str, files: dict[str, bytes]) -> Path:
+    """A build attempt root: the output worktree, a cloned dep, and a venv.
+
+    All three shapes occur in production. Only the worktree is the build's
+    output; the other two hold shared objects the framework root is not meant
+    to carry, and the venv's copy of the *same* package is the one a basename
+    scan would wrongly compare against.
+    """
+    root = tmp_path / "builds" / "bA"
+    pkg = root / "candidates" / "00_pr" / "worktree" / package
+    pkg.mkdir(parents=True)
+    for name, blob in files.items():
+        (pkg / name).write_bytes(blob)
+    other = root / "_repos" / "somedep" / "somedep"
+    other.mkdir(parents=True)
+    (other / "_unrelated.abi3.so").write_bytes(b"not ours")
+    venv_pkg = root / "venv" / "lib" / "python3.12" / "site-packages" / package
+    venv_pkg.mkdir(parents=True)
+    (venv_pkg / "_venv_only.abi3.so").write_bytes(b"installed into a venv, never the framework root")
+    (root / "result.json").write_text(
+        json.dumps({"runtime": {"pythonpath_prefixes": [str(root / "candidates" / "00_pr" / "worktree")]}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_extensions_the_build_made_and_the_framework_root_lacks_are_reported(tmp_path: Path):
+    """A build installs nothing: each output travels as a declared artifact.
+
+    Declaring some of them leaves the rest behind, and the round still boots and
+    is kept. Naming them at the KEEP is what lets a replay refuse the recipe
+    instead of reproducing the gap.
+    """
+    attempt = _built_attempt(
+        tmp_path,
+        package="vllm",
+        files={"_C.abi3.so": b"carried", "_moe_C.abi3.so": b"left behind", "_rocm_C.abi3.so": b"left too"},
+    )
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"carried")
+    (root / "_moe_C.abi3.so").write_bytes(b"the base image's own, not the build's")
+    enablement = SimpleNamespace(
+        build_manifest=[
+            {"ok": True, "task_id": "bA", "attempt_root": str(attempt)},
+            {"task_id": "bA", "probe_task_id": "round-1"},
+        ],
+        last_specialist_task_id="",
+        kept_rounds=[{"task_id": "round-1"}],
+    )
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(enablement, root)
+
+    assert missing == ["_moe_C.abi3.so", "_rocm_C.abi3.so"]
+    assert "_unrelated.abi3.so" not in missing, "another repo's extensions are not this package's to carry"
+
+
+def test_a_build_whose_extensions_all_match_reports_none(tmp_path: Path):
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"same"})
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"same")
+    enablement = SimpleNamespace(
+        build_manifest=[
+            {"ok": True, "task_id": "bA", "attempt_root": str(attempt)},
+            {"task_id": "bA", "probe_task_id": "round-1"},
+        ],
+        last_specialist_task_id="",
+        kept_rounds=[{"task_id": "round-1"}],
+    )
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
+
+
+def test_no_linked_build_scans_nothing(tmp_path: Path, monkeypatch):
+    """An absent attempt root must not fall back to the working directory.
+
+    ``Path("")`` is ``Path(".")`` and its ``is_dir()`` is true, so an unguarded
+    lookup walks wherever the process happens to be and reports whatever
+    extensions it finds as missing from the framework root.
+    """
+    cwd = tmp_path / "cwd"
+    (cwd / "vllm").mkdir(parents=True)
+    (cwd / "vllm" / "_decoy_C.abi3.so").write_bytes(b"not from any build")
+    monkeypatch.chdir(cwd)
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    enablement = SimpleNamespace(build_manifest=[], last_specialist_task_id="", kept_rounds=[])
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, None) == []
+
+
+def test_a_linked_sentinel_with_no_attempt_row_scans_nothing(tmp_path: Path, monkeypatch):
+    """The same guard, reached through the sentinel-without-row path."""
+    cwd = tmp_path / "cwd"
+    (cwd / "vllm").mkdir(parents=True)
+    (cwd / "vllm" / "_decoy_C.abi3.so").write_bytes(b"not from any build")
+    monkeypatch.chdir(cwd)
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    enablement = SimpleNamespace(
+        build_manifest=[{"task_id": "bA", "probe_task_id": "round-1"}],
+        last_specialist_task_id="",
+        kept_rounds=[{"task_id": "round-1"}],
+    )
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root) == []
+
+
+def test_the_round_being_captured_links_before_it_is_kept(tmp_path: Path):
+    """Production order: records are captured, and only then is the round kept.
+
+    `_enablement_keep_records` runs inside the executor; `_push_kept_round` runs
+    afterwards in the lane. The one-shot marker that named the round was already
+    consumed when its build was enqueued. So at capture time neither linkable
+    identifier is in state, and without being told which round it is capturing
+    this helper links to no build and reports nothing -- leaving exactly the
+    recipe it exists to catch marked sufficient.
+    """
+    attempt = _built_attempt(
+        tmp_path, package="vllm", files={"_C.abi3.so": b"carried", "_moe_C.abi3.so": b"left behind"}
+    )
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"carried")
+    enablement = SimpleNamespace(
+        build_manifest=[
+            {"ok": True, "task_id": "bA", "attempt_root": str(attempt)},
+            {"task_id": "bA", "probe_task_id": PROBE_TASK},
+        ],
+        last_specialist_task_id="",
+        kept_rounds=[],  # this round is not kept yet
+    )
+
+    without = IntegratePatchExecutor._build_extensions_not_carried(enablement, root)
+    withit = IntegratePatchExecutor._build_extensions_not_carried(
+        enablement, root, specialist_task_id=PROBE_TASK
+    )
+
+    assert without == [], "the pre-fix shape: nothing links, nothing is reported"
+    assert withit == ["_moe_C.abi3.so"], "told which round it is capturing, the gap is named"
+
+
+def test_the_current_round_is_not_double_counted(tmp_path: Path):
+    """A round already in kept_rounds is not appended again."""
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_moe_C.abi3.so": b"left behind"})
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    enablement = SimpleNamespace(
+        build_manifest=[
+            {"ok": True, "task_id": "bA", "attempt_root": str(attempt)},
+            {"task_id": "bA", "probe_task_id": PROBE_TASK},
+        ],
+        last_specialist_task_id="",
+        kept_rounds=[{"task_id": PROBE_TASK}],
+    )
+
+    assert IntegratePatchExecutor._build_extensions_not_carried(
+        enablement, root, specialist_task_id=PROBE_TASK
+    ) == ["_moe_C.abi3.so"]
+
+
+def _linked(attempt: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        build_manifest=[
+            {"ok": True, "task_id": "bA", "attempt_root": str(attempt)},
+            {"task_id": "bA", "probe_task_id": PROBE_TASK},
+        ],
+        last_specialist_task_id="",
+        kept_rounds=[{"task_id": PROBE_TASK}],
+    )
+
+
+def test_an_extension_without_the_abi3_tag_is_still_judged(tmp_path: Path):
+    """A build without the stable-ABI tag names its output for one interpreter.
+
+    Scanning only ``*.abi3.so`` certified such a recipe, because an undeclared
+    output built that way was never looked at.
+    """
+    attempt = _built_attempt(
+        tmp_path,
+        package="vllm",
+        files={"_C.cpython-312-x86_64-linux-gnu.so": b"built here, never carried"},
+    )
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
+    )
+
+    assert missing == ["_C.cpython-312-x86_64-linux-gnu.so"]
+
+
+def test_a_linked_build_whose_root_is_gone_reports_unverified(tmp_path: Path):
+    """Cleaned up, unmounted, or otherwise unreadable is not "all carried"."""
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    # The row joins by attempt-root basename, so the path must still name the
+    # build; only the directory itself is gone.
+    enablement = _linked(tmp_path / "builds" / "bA")
+
+    assert (
+        IntegratePatchExecutor._build_extensions_not_carried(
+            enablement, root, specialist_task_id=PROBE_TASK
+        )
+        is None
+    )
+
+
+def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
+    """Compiled modules are not all at the package root.
+
+    Scanning only the top level skipped a subpackage's extension entirely, and
+    comparing by basename would have matched it against an unrelated file of the
+    same name at the top.
+    """
+    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
+    (root_dir / "attention").mkdir(parents=True)
+    (root_dir / "_C.abi3.so").write_bytes(b"carried")
+    (root_dir / "attention" / "_ops.cpython-312-x86_64-linux-gnu.so").write_bytes(b"nested, left behind")
+    root = tmp_path / "site-packages" / "vllm"
+    (root / "attention").mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"carried")
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(
+        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+    )
+
+    assert missing == [str(Path("attention") / "_ops.cpython-312-x86_64-linux-gnu.so")]
+
+
+def test_a_same_named_file_at_the_top_does_not_satisfy_a_nested_one(tmp_path: Path):
+    """The comparison is by relative path, not by basename."""
+    root_dir = tmp_path / "builds" / "bA" / "candidates" / "00_pr" / "worktree" / "vllm"
+    (root_dir / "attention").mkdir(parents=True)
+    (root_dir / "attention" / "_ops.abi3.so").write_bytes(b"the nested one")
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    (root / "_ops.abi3.so").write_bytes(b"the nested one")  # right bytes, wrong place
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(
+        _linked(tmp_path / "builds" / "bA"), root, specialist_task_id=PROBE_TASK
+    )
+
+    assert missing == [str(Path("attention") / "_ops.abi3.so")]
+
+
+def test_a_venv_copy_of_the_same_package_is_not_the_builds_output(tmp_path: Path):
+    """An attempt root can hold an installed copy of this very package.
+
+    Selecting every directory named after the framework compared against that
+    too, refusing recipes over files the framework root was never meant to
+    carry. The build names its own output tree; that is what is scanned.
+    """
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+    (root / "_C.abi3.so").write_bytes(b"carried")
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
+    )
+
+    assert missing == [], "only the build's own output tree is the recipe's to carry"
+
+
+def test_without_a_readable_result_the_candidate_worktrees_are_scanned(tmp_path: Path):
+    """Fallback stays narrower than the attempt root: still no venv, no deps."""
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_moe_C.abi3.so": b"left behind"})
+    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+
+    missing = IntegratePatchExecutor._build_extensions_not_carried(
+        _linked(attempt), root, specialist_task_id=PROBE_TASK
+    )
+
+    assert missing == ["_moe_C.abi3.so"]
+
+
+def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
+    """Scanning nothing is not finding nothing.
+
+    The attempt root and its result survive; the worktree they name does not.
+    An empty scan would otherwise certify the build as fully carried.
+    """
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
+    shutil.rmtree(attempt / "candidates" / "00_pr" / "worktree")
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+
+    assert (
+        IntegratePatchExecutor._build_extensions_not_carried(
+            _linked(attempt), root, specialist_task_id=PROBE_TASK
+        )
+        is None
+    )
+
+
+def test_an_empty_fallback_is_unverified(tmp_path: Path):
+    """No readable result and no candidate worktrees left to fall back to."""
+    attempt = _built_attempt(tmp_path, package="vllm", files={"_C.abi3.so": b"carried"})
+    (attempt / "result.json").write_text("not json at all", encoding="utf-8")
+    shutil.rmtree(attempt / "candidates")
+    root = tmp_path / "site-packages" / "vllm"
+    root.mkdir(parents=True)
+
+    assert (
+        IntegratePatchExecutor._build_extensions_not_carried(
+            _linked(attempt), root, specialist_task_id=PROBE_TASK
+        )
+        is None
+    )

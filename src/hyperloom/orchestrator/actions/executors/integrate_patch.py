@@ -3861,7 +3861,125 @@ class IntegratePatchExecutor:
             "enablement_launch_argv_refused": argv_refused,
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
+            "enablement_build_extensions_not_carried": self._build_extensions_not_carried(
+                getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None),
+                framework_root,
+                specialist_task_id=specialist_task_id,
+            ),
         }
+
+    @staticmethod
+    def _build_output_trees(attempt_root: Path) -> list[Path]:
+        """Return the trees a build names as its own output.
+
+        The build records them in its ``result.json`` as the prefixes a runtime
+        would import from; that is the build's own statement of where its output
+        lives, so it is read rather than guessed at. A result that cannot be
+        read falls back to the candidate worktrees the layout puts them in --
+        still narrower than the attempt root, which also holds cloned
+        dependencies and any provisioned virtual environment.
+        """
+        result = attempt_root / "result.json"
+        try:
+            payload = json.loads(result.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            payload = {}
+        runtime = payload.get("runtime") if isinstance(payload, dict) else None
+        prefixes = (runtime or {}).get("pythonpath_prefixes") if isinstance(runtime, dict) else None
+        trees = [Path(str(p)) for p in prefixes if str(p).strip()] if isinstance(prefixes, list) else []
+        if trees:
+            return trees
+        return sorted(d for d in attempt_root.glob("candidates/*/worktree") if d.is_dir())
+
+    @staticmethod
+    def _build_extensions_not_carried(
+        enablement: Any, framework_root: Path | None, *, specialist_task_id: str = ""
+    ) -> list[str] | None:
+        """Return the build's compiled extensions the framework root does not have.
+
+        A build does not install itself: its outputs reach the framework root
+        only as artifacts a specialist declared, one by one. Declare two of
+        three and the round still boots, benchmarks, and is kept -- the gap
+        surfaces hours later as an op the loaded extension does not export, on
+        whichever code path first needs it.
+
+        Only the extensions built *for this framework package* are judged, and
+        only inside the tree the build itself names as its output. An attempt
+        root also holds the other repositories a build cloned and, where one was
+        provisioned, a virtual environment with its own installed copy of this
+        same package -- comparing against those would refuse a recipe over files
+        the framework root was never meant to carry. Compared by
+        content, so an extension the base image already shipped under the same
+        name counts as not carried.
+
+        Every shared object anywhere in the package is considered, not only
+        ``.abi3.so`` directly beneath it: an extension built without the
+        stable-ABI tag carries an interpreter-specific suffix instead, and one
+        belonging to a subpackage sits below the package root. Each is compared
+        at its path relative to the package, so a nested module is matched
+        against the nested module rather than against a same-named file at the
+        top, and the name reported is that relative path.
+
+        Returns:
+            The names left behind, ``[]`` only after at least one of the linked
+            build's output trees was scanned and nothing was missing (or when no
+            build is linked, there being nothing to carry), and ``None`` when a
+            build is linked whose outputs could not be read -- an absent tree, a
+            cleaned-up worktree or an unreadable file. None of those are
+            evidence that anything was carried.
+        """
+        if framework_root is None:
+            return []
+        from ...enablement.recipe.projections import select_linked_build
+
+        rounds = list(getattr(enablement, "kept_rounds", None) or [])
+        current = str(specialist_task_id or "").strip()
+        if current and not any(str((r or {}).get("task_id") or "").strip() == current for r in rounds):
+            rounds.append({"task_id": current})
+        state = {
+            "build_manifest": list(getattr(enablement, "build_manifest", None) or []),
+            "last_specialist_task_id": str(getattr(enablement, "last_specialist_task_id", "") or ""),
+            "kept_rounds": rounds,
+        }
+        _sentinel, row = select_linked_build(state)
+        # Validated as text first: ``Path("")`` is ``Path(".")``, whose
+        # ``is_dir()`` is true, so an absent attempt root would otherwise scan
+        # the working directory and report whatever it found there.
+        attempt_root_text = str((row or {}).get("attempt_root") or "").strip()
+        if not attempt_root_text:
+            return []
+        attempt_root = Path(attempt_root_text)
+        if not attempt_root.is_dir():
+            return None
+        missing: list[str] = []
+        try:
+            package_roots = [
+                d
+                for d in (
+                    prefix / framework_root.name
+                    for prefix in IntegratePatchExecutor._build_output_trees(attempt_root)
+                )
+                if d.is_dir()
+            ]
+            if not package_roots:
+                # The build named output trees that are gone, or named none and
+                # the candidate worktrees have been cleaned up. Either way this
+                # scanned nothing, which is not the same as finding nothing.
+                return None
+            built_files = sorted(
+                (package, built) for package in package_roots for built in package.rglob("*.so")
+            )
+        except OSError:
+            return None
+        for package, built in built_files:
+            relative = built.relative_to(package)
+            installed = framework_root / relative
+            try:
+                if not installed.is_file() or installed.read_bytes() != built.read_bytes():
+                    missing.append(str(relative))
+            except OSError:
+                return None
+        return missing
 
     @staticmethod
     def _graded_framework(params: dict[str, Any], materialized_config: str) -> str:
