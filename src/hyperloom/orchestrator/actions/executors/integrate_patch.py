@@ -421,6 +421,55 @@ def _sole_patch_root(done_payload: dict[str, Any] | None) -> str | None:
     return roots.pop() if len(roots) == 1 else None
 
 
+def _declared_launch_delta(
+    done_payload: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, str]]:
+    """Read the serve flags the specialist declared its own patch needs.
+
+    A patch can be unmeasurable without launch flags rather than merely
+    cheaper with them: a model whose attention layout accepts no kv-cache
+    dtype but fp8, an indexer with no non-AITER path. The specialist states
+    those on its proposal, but this executor used to take them from the task
+    params alone -- and params are authored by orchestration, one hop later.
+    An orchestration turn that proposed ``integrate_patch`` without copying
+    them across therefore booted the gate on base args, measured the patch
+    under conditions its author never proposed, and reverted it.
+
+    That is not hypothetical. Three consecutive DeepSeek-V4-Flash enablement
+    patches were reverted on 2026-09-15 with ``launch_evidence.extra_args``
+    empty, each dying on the same boot assertion that the dropped
+    ``--kv-cache-dtype fp8`` exists to clear. The fourth specialist diagnosed
+    the harness itself rather than the model.
+
+    ``config_changes`` above already falls back to ``done_payload``; these two
+    fields are the same kind of claim by the same author and simply missed it.
+
+    The first proposal is the one read because it is the anchor the rest of
+    this executor already stamps its outcome onto.
+
+    Args:
+        done_payload: The specialist ``specialist_done`` payload, or None.
+
+    Returns:
+        ``(extra_args, extra_envs)``; both empty when nothing was declared.
+    """
+    if not isinstance(done_payload, Mapping):
+        return "", {}
+    proposals = done_payload.get("proposal_set")
+    if not isinstance(proposals, list) or not proposals:
+        return "", {}
+    first = proposals[0]
+    if not isinstance(first, Mapping):
+        return "", {}
+    raw_args = first.get("extra_args")
+    raw_envs = first.get("extra_envs")
+    args = raw_args.strip() if isinstance(raw_args, str) else ""
+    envs = (
+        {str(k): str(v) for k, v in raw_envs.items()} if isinstance(raw_envs, Mapping) else {}
+    )
+    return args, envs
+
+
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
@@ -2203,6 +2252,26 @@ class IntegratePatchExecutor:
         raw_extra_envs = params.get("extra_envs")
         if isinstance(raw_extra_envs, dict):
             proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
+        # Params win; the specialist's own declaration is the fallback, exactly
+        # as ``config_changes`` above. Only a params payload carrying nothing at
+        # all falls through, so a deliberate grid variant -- including one that
+        # means to bench the patch bare -- is never overridden. Each side falls
+        # back independently: a round may pass envs and omit flags.
+        _declared_args, _declared_envs = _declared_launch_delta(done_payload)
+        _relayed: list[str] = []
+        if not proposal_extra_args and _declared_args:
+            proposal_extra_args = _declared_args
+            _relayed.append(f"args={_declared_args}")
+        if not raw_extra_envs and _declared_envs:
+            proposal_extra_envs.update(_declared_envs)
+            _relayed.append(f"envs={','.join(sorted(_declared_envs))}")
+        if _relayed:
+            log.info(
+                "integrate_patch: relaying serve flags the specialist declared "
+                "but the proposal omitted (task=%s): %s",
+                specialist_task_id,
+                "; ".join(_relayed),
+            )
         proposal_extra_envs, _dropped = filter_untrusted_env_mapping(
             proposal_extra_envs,
             allow_predicate=is_allowed_variant_env_key,
@@ -3222,9 +3291,14 @@ class IntegratePatchExecutor:
             gate_evidence.get("accuracy"),
             acc_baseline or getattr(_ss_kb, "baseline_accuracy", None),
         )
+        # Fingerprint what was launched, not what was asked for. The two part
+        # company whenever a serve flag reaches the gate by any route other
+        # than params -- a relayed specialist declaration, an armed framework
+        # switch -- and a KB row keyed on the empty params would advertise this
+        # measurement under a recipe nobody ran.
         cfg_fingerprint = canonical_fingerprint(
-            params.get("extra_server_args"),
-            params.get("extra_envs"),
+            extra_server_args_applied,
+            extra_envs_applied,
         )
 
         switch_manifest: list[dict[str, Any]] = list(getattr(ctx, "_ip_switch_manifest", None) or [])

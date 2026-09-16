@@ -638,3 +638,60 @@ def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
     from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
 
     assert harvest_realized_diff(tmp_path, [], tmp_path / "realized.patch") == ""
+
+
+# _declared_launch_delta: the specialist states the serve flags its patch needs
+# on its own proposal, and the gate used to read params alone. Three correct
+# DeepSeek-V4-Flash patches were reverted on 2026-09-15 because of it, each on
+# the boot assertion the dropped --kv-cache-dtype fp8 exists to clear.
+
+
+def test_declared_launch_delta_reads_the_first_proposal():
+    payload = {
+        "proposal_set": [
+            {
+                "extra_args": '--kv-cache-dtype fp8 --hf-overrides {"expert_dtype":"fp8"}',
+                "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+            }
+        ]
+    }
+    args, envs = ip._declared_launch_delta(payload)
+    assert args == '--kv-cache-dtype fp8 --hf-overrides {"expert_dtype":"fp8"}'
+    assert envs == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_declared_launch_delta_takes_the_anchor_not_a_later_proposal():
+    """The first entry is what the executor stamps its outcome onto."""
+    payload = {
+        "proposal_set": [
+            {"extra_args": "--first 1"},
+            {"extra_args": "--second 2"},
+        ]
+    }
+    assert ip._declared_launch_delta(payload)[0] == "--first 1"
+
+
+def test_declared_launch_delta_coerces_env_values_to_str():
+    """A specialist writing 1 rather than "1" must not reach the launch as int."""
+    payload = {"proposal_set": [{"extra_envs": {"VLLM_ROCM_USE_AITER": 1}}]}
+    assert ip._declared_launch_delta(payload)[1] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_declared_launch_delta_is_empty_for_a_declaration_free_payload():
+    assert ip._declared_launch_delta({"proposal_set": [{}]}) == ("", {})
+    assert ip._declared_launch_delta({"proposal_set": []}) == ("", {})
+    assert ip._declared_launch_delta({}) == ("", {})
+
+
+def test_declared_launch_delta_survives_a_malformed_payload():
+    """Specialist output is model-authored, so every field can be the wrong type."""
+    assert ip._declared_launch_delta(None) == ("", {})
+    assert ip._declared_launch_delta({"proposal_set": "not-a-list"}) == ("", {})
+    assert ip._declared_launch_delta({"proposal_set": ["not-a-dict"]}) == ("", {})
+    assert ip._declared_launch_delta({"proposal_set": [{"extra_args": 5}]}) == ("", {})
+    assert ip._declared_launch_delta({"proposal_set": [{"extra_envs": ["x"]}]}) == ("", {})
+
+
+def test_declared_launch_delta_strips_but_keeps_inner_spacing():
+    payload = {"proposal_set": [{"extra_args": "  --block-size 64  "}]}
+    assert ip._declared_launch_delta(payload)[0] == "--block-size 64"

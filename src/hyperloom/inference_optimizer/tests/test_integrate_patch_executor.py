@@ -824,6 +824,90 @@ async def test_executor_accepts_explicit_server_args_and_envs(tmp_path: Path):
     assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
 
 
+async def _run_with_declaration(tmp_path: Path, task: str, proposal: dict, params: dict):
+    """Drive the executor with a specialist that declared its own serve flags."""
+    session_dir = tmp_path / "session"
+    workspace = session_dir / "runs" / "specialist" / task
+    workspace.mkdir(parents=True)
+    (workspace / "specialist_done.json").write_text(
+        json.dumps({"proposal_set": [proposal], "patches_written": []}),
+        encoding="utf-8",
+    )
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    return await executor(
+        _make_ctx(
+            f"int-{task}",
+            {"specialist_task_id": task, "apply_only": True, **params},
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_relays_serve_flags_the_proposal_omitted(tmp_path: Path):
+    """The gate must bench the patch its author proposed, not a bare launch.
+
+    Params are authored by orchestration one hop after the specialist. When a
+    turn proposes integrate_patch without copying the declared flags across,
+    the old code booted on base args and reverted the patch on the very boot
+    failure those flags prevent -- three times in a row on DeepSeek-V4-Flash
+    on 2026-09-15, with launch_evidence.extra_args empty each time.
+    """
+    result = await _run_with_declaration(
+        tmp_path,
+        "t-spec-declared",
+        {
+            "extra_args": '--kv-cache-dtype fp8 --hf-overrides {"expert_dtype":"fp8"}',
+            "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        },
+        {},
+    )
+    assert result["extra_server_args_applied"] == (
+        '--kv-cache-dtype fp8 --hf-overrides {"expert_dtype":"fp8"}'
+    )
+    assert result["extra_envs_applied"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_proposal_overrides_the_declaration(tmp_path: Path):
+    """A grid variant deliberately benching other flags must still win."""
+    result = await _run_with_declaration(
+        tmp_path,
+        "t-spec-override",
+        {"extra_args": "--kv-cache-dtype fp8", "extra_envs": {"DECLARED": "1"}},
+        {"extra_server_args": "--block-size 64", "extra_envs": {"CHOSEN": "1"}},
+    )
+    assert result["extra_server_args_applied"] == "--block-size 64"
+    assert result["extra_envs_applied"] == {"CHOSEN": "1"}
+
+
+@pytest.mark.asyncio
+async def test_args_and_envs_fall_back_independently(tmp_path: Path):
+    """A round may pass one and omit the other; the omitted side still relays."""
+    result = await _run_with_declaration(
+        tmp_path,
+        "t-spec-partial",
+        {"extra_args": "--kv-cache-dtype fp8", "extra_envs": {"VLLM_ROCM_USE_AITER": "1"}},
+        {"extra_envs": {"CHOSEN": "1"}},
+    )
+    assert result["extra_server_args_applied"] == "--kv-cache-dtype fp8"
+    assert result["extra_envs_applied"] == {"CHOSEN": "1"}
+
+
+@pytest.mark.asyncio
+async def test_config_changes_still_merge_under_a_relayed_declaration(tmp_path: Path):
+    """``config_changes`` is the other env channel; relaying must not drop it."""
+    result = await _run_with_declaration(
+        tmp_path,
+        "t-spec-cfg",
+        {"extra_envs": {"VLLM_ROCM_USE_AITER": "1"}},
+        {"config_changes": {"VLLM_USE_AITER": "1"}},
+    )
+    assert result["extra_envs_applied"] == {
+        "VLLM_USE_AITER": "1",
+        "VLLM_ROCM_USE_AITER": "1",
+    }
+
+
 # Enablement runnable gate: the bench is the launch probe; positive throughput
 # means the server booted -> KEEP; else -> REVERT. The perf/accuracy KEEP gate is
 # bypassed for enablement-tagged integrations.
