@@ -17,6 +17,7 @@ from hyperloom.orchestrator.kernel import controller_patch_integration as integr
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
 )
+from hyperloom.orchestrator.kernel.kth_qualification import KthQualificationResult
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
@@ -91,34 +92,36 @@ def _publish(
     kernel_name: str,
     kernel_path: str,
     patch: str,
+    kth_plan_id: str | None = None,
 ) -> Path:
     operator_id = f"kernel:forge-loop:{kernel_name}:standalone:unknown:triton:mi355x"
     patch_dir = patches_root / operator_directory_name(operator_id)
     patch_dir.mkdir(parents=True)
     (patch_dir / "change.patch").write_text(patch, encoding="utf-8")
     (patch_dir / "report.md").write_text("# Report\n", encoding="utf-8")
+    publication = {
+        "schema_version": 2,
+        "operator_id": operator_id,
+        "identity": {
+            "producer": "forge-loop",
+            "kernel_name": kernel_name,
+            "framework": "standalone",
+            "framework_version": "unknown",
+            "backend": "triton",
+            "gpu": "mi355x",
+        },
+        "base_commit": base_commit,
+        "best_commit": "b" * 40,
+        "repo_root": str(repo),
+        "kernel_path": kernel_path,
+        "operator_name": kernel_name,
+        "micro_validated": True,
+        "manifest": {"changed_files": [kernel_path]},
+    }
+    if kth_plan_id:
+        publication["kth_qualification"] = {"plan_id": kth_plan_id}
     (patch_dir / "publication.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "operator_id": operator_id,
-                "identity": {
-                    "producer": "forge-loop",
-                    "kernel_name": kernel_name,
-                    "framework": "standalone",
-                    "framework_version": "unknown",
-                    "backend": "triton",
-                    "gpu": "mi355x",
-                },
-                "base_commit": base_commit,
-                "best_commit": "b" * 40,
-                "repo_root": str(repo),
-                "kernel_path": kernel_path,
-                "operator_name": kernel_name,
-                "micro_validated": True,
-                "manifest": {"changed_files": [kernel_path]},
-            }
-        ),
+        json.dumps(publication),
         encoding="utf-8",
     )
     return patch_dir
@@ -187,6 +190,49 @@ async def _integrate(
     )
 
 
+class _KthProvider:
+    def __init__(self, *results: KthQualificationResult):
+        self.results = list(results)
+        self.calls = 0
+
+    def qualify(self, _publication, *, artifacts_root):
+        self.calls += 1
+        result = self.results.pop(0)
+        return result
+
+    def mark_performance_reached(self, result):
+        return KthQualificationResult(
+            **{
+                **result.__dict__,
+                "performance_reached": True,
+            }
+        )
+
+
+class _ExplodingKthProvider:
+    def qualify(self, _publication, *, artifacts_root):
+        raise OSError("artifact disk unavailable")
+
+
+def _kth_result(status: str, *, feedback: bool = False) -> KthQualificationResult:
+    verdict = {
+        "eligible": "Eligible for performance evaluation",
+        "kth_blocked": "Blocked",
+        "kth_inconclusive": "Inconclusive",
+        "needs_review": "Inconclusive",
+    }[status]
+    return KthQualificationResult(
+        status=status,
+        reason=f"{status} reason",
+        verdict=verdict,
+        request_id="req",
+        subject_digest="sha256:" + "a" * 64,
+        primary_detector="OUTPUT_WRITTEN" if status == "kth_blocked" else "",
+        artifacts_dir="/tmp/kth-test-artifacts",
+        repair_feedback={"instruction": "repair and replay"} if feedback else None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path) -> None:
     repo, base = _repo(tmp_path)
@@ -234,6 +280,186 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 3
     assert len(state.optimization_stack) == 2
     assert state.current_best["tput"] == 112.0
+
+
+@pytest.mark.asyncio
+async def test_kth_blocked_skips_validator_reverts_and_returns_feedback(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="blocked",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+        kth_plan_id="host/rmsnorm-v1",
+    )
+    validator_calls = 0
+
+    async def _must_not_validate(_publication):
+        nonlocal validator_calls
+        validator_calls += 1
+        raise AssertionError("Blocked KTH candidate reached performance")
+
+    provider = _KthProvider(_kth_result("kth_blocked", feedback=True))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+        kth_provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert validator_calls == 0
+    assert provider.calls == 1
+    assert summary.reverted_count == 1
+    assert summary.results[0].status == "kth_blocked"
+    assert summary.results[0].performance_reached is False
+    assert summary.results[0].repair_feedback["instruction"] == "repair and replay"
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    result_artifact = Path(summary.results_dir) / "0000.json"
+    assert json.loads(result_artifact.read_text())["status"] == "kth_blocked"
+
+
+@pytest.mark.asyncio
+async def test_kth_inconclusive_cannot_keep_or_reach_performance(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="inconclusive",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+        kth_plan_id="host/rmsnorm-v1",
+    )
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("Inconclusive KTH candidate reached performance")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+        kth_provider=_KthProvider(_kth_result("kth_inconclusive")),  # type: ignore[arg-type]
+    )
+
+    assert summary.kept_count == 0
+    assert summary.results[0].status == "kth_inconclusive"
+    assert summary.results[0].performance_reached is False
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+@pytest.mark.asyncio
+async def test_kth_eligible_invokes_validator_once_and_can_keep(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="eligible",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+        kth_plan_id="host/rmsnorm-v1",
+    )
+    validator_calls = 0
+
+    async def _keep(_publication):
+        nonlocal validator_calls
+        validator_calls += 1
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_keep,
+        kth_provider=_KthProvider(_kth_result("eligible")),  # type: ignore[arg-type]
+    )
+
+    assert validator_calls == 1
+    assert summary.kept_count == 1
+    assert summary.results[0].status == "kept"
+    assert summary.results[0].performance_reached is True
+    assert summary.results[0].kth_verdict == "Eligible for performance evaluation"
+
+
+@pytest.mark.asyncio
+async def test_publication_without_kth_metadata_preserves_existing_path(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="legacy",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+    provider = _KthProvider(_kth_result("kth_blocked"))
+    validator_calls = 0
+
+    async def _keep(_publication):
+        nonlocal validator_calls
+        validator_calls += 1
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_keep,
+        kth_provider=provider,  # type: ignore[arg-type]
+    )
+
+    assert provider.calls == 0
+    assert validator_calls == 1
+    assert summary.results[0].status == "kept"
+
+
+@pytest.mark.asyncio
+async def test_kth_provider_exception_fails_closed_and_reverts(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="provider-error",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+        kth_plan_id="host/rmsnorm-v1",
+    )
+
+    async def _must_not_validate(_publication):
+        raise AssertionError("Provider failure reached performance")
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await integrate_controller_patches(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_must_not_validate,
+        kth_provider=_ExplodingKthProvider(),  # type: ignore[arg-type]
+    )
+
+    assert summary.results[0].status == "needs_review"
+    assert "artifact disk unavailable" in summary.results[0].reason
+    assert summary.results[0].performance_reached is False
+    assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 @pytest.mark.asyncio

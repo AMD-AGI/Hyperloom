@@ -112,6 +112,24 @@ def test_a_publication_without_a_declared_scope_is_still_accepted(tmp_path: Path
     assert load_controller_publication(patch_dir).changed_files == ()
 
 
+def test_kth_plan_metadata_is_optional_and_strict(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    patch_dir = _publication(tmp_path / "patches", repo)
+    assert load_controller_publication(patch_dir).kth_plan_id is None
+
+    metadata_path = patch_dir / "publication.json"
+    payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    payload["kth_qualification"] = {"plan_id": "host/rmsnorm-v1"}
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert load_controller_publication(patch_dir).kth_plan_id == "host/rmsnorm-v1"
+
+    payload["kth_qualification"]["command"] = "agent-controlled"
+    metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ControllerPublicationError, match="only plan_id"):
+        load_controller_publication(patch_dir)
+
+
 def test_discovery_ignores_incomplete_and_hidden_versions(tmp_path: Path) -> None:
     root = tmp_path / "patches"
     root.mkdir()
