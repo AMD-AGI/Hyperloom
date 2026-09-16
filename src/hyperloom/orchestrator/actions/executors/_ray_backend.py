@@ -114,6 +114,7 @@ def _run_subprocess_worker(
     server_log_path: str | None,
     server_already_ready: bool,
     session_remaining_sec: float | None = None,
+    single_round_configs: tuple[str, str] | None = None,
 ) -> tuple[int, str, str]:
     """Ray worker body: run the subprocess under session-kill semantics."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -122,6 +123,11 @@ def _run_subprocess_worker(
     from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 
     worker_env = _merge_worker_env(env)
+    session_deadline_sec = session_remaining_to_deadline_sec(session_remaining_sec)
+    if single_round_configs is not None and not server_already_ready:
+        from ._server_lifecycle import prepare_single_round_port
+
+        prepare_single_round_port(single_round_configs, worker_env, session_deadline_sec=session_deadline_sec)
     proc = run_with_session_kill(
         cmd,
         env=worker_env,
@@ -130,7 +136,7 @@ def _run_subprocess_worker(
         soft_deadline_sec=soft_deadline_sec,
         server_log_path=server_log_path,
         server_already_ready=server_already_ready,
-        session_deadline_sec=session_remaining_to_deadline_sec(session_remaining_sec),
+        session_deadline_sec=session_deadline_sec,
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 

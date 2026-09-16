@@ -212,6 +212,85 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
 
+@pytest.mark.parametrize("ray_execution", [False, True])
+def test_single_profile_consumes_and_records_execution_host_port(tmp_path, monkeypatch, ray_execution):
+    """The single-round config, child environment and adopted recipe name one port."""
+    import hashlib
+    import threading
+
+    from hyperloom.orchestrator.actions.executors import _ray_backend, _ray_serving, _server_lifecycle
+
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    cfg = yaml.safe_load(base.read_text())
+    cfg["benchmark"]["profiler"]["torch_profiler"]["enabled"] = True
+    cfg["benchmark"]["envs"].update(PORT=8888, ROCR_VISIBLE_DEVICES="7")
+    base.write_text(yaml.safe_dump(cfg))
+    original = base.read_bytes()
+    monkeypatch.setenv("PORT", "8888")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2")
+    selected_on = []
+    captured = []
+
+    def pick_port():
+        selected_on.append(threading.get_ident())
+        return 41001
+
+    monkeypatch.setattr(_server_lifecycle, "_pick_free_port", pick_port)
+
+    def fake_run(cmd, **kwargs):
+        path = Path(cmd[cmd.index("--benchmark-config") + 1])
+        actual = yaml.safe_load(path.read_text())
+        captured.append((path, actual, kwargs["env"]))
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=_HOT_TPUT)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    class Lease:
+        def run_session_kill(self, cmd, **kwargs):
+            return _ray_backend._run_subprocess_worker(
+                cmd=cmd,
+                env=kwargs["env"],
+                cwd=kwargs["cwd"],
+                timeout_s=kwargs["timeout"],
+                soft_deadline_sec=None,
+                server_log_path=kwargs["server_log_path"],
+                server_already_ready=False,
+                session_remaining_sec=kwargs["session_remaining_sec"],
+                single_round_configs=kwargs["single_round_configs"],
+            )
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kwargs: Lease() if ray_execution else None)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
+    result = _run(
+        _executor(base, tmp_path)(
+            _make_ctx({"output_dir": str(tmp_path / "out"), "timeout_sec": 10, "gpu_type": "mi300x"})
+        )
+    )
+
+    assert result["status"] == "succeeded"
+    assert len(captured) == len(selected_on) == 1
+    assert (selected_on[0] != threading.get_ident()) is ray_execution
+    launch_path, actual, child_env = captured[0]
+    assert actual["benchmark"]["envs"]["PORT"] == int(child_env["PORT"]) == 41001
+    assert actual["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+    assert "server_lifecycle" not in actual["benchmark"]
+    if ray_execution:
+        assert "ROCR_VISIBLE_DEVICES" not in actual["benchmark"]["envs"]
+        assert child_env["ROCR_VISIBLE_DEVICES"] == "2"
+    evidence = result["launch_evidence"]
+    recipe_path = Path(evidence["materialized_config_path"])
+    assert evidence["requested_server_env"]["PORT"] == "41001"
+    assert evidence["recipe_digest"] == "sha256:" + hashlib.sha256(recipe_path.read_bytes()).hexdigest()
+    assert yaml.safe_load(recipe_path.read_text())["benchmark"]["envs"]["PORT"] == 41001
+    assert (launch_path != recipe_path) is ray_execution
+    assert base.read_bytes() == original
+
+
 def _run_capturing_rounds(executor, ctx, notes):
     """Run ``executor`` and record which round notes existed at each launch."""
     at_launch: list[list[str]] = []
