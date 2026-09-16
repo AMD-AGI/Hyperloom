@@ -472,3 +472,34 @@ def test_a_session_predating_the_observation_names_neither():
 
     assert "build_extensions_not_carried" not in codes
     assert "build_carry_unverified" not in codes
+
+
+def _collected_lever_codes(value, *, present=True):
+    state = {"enablement_attempts": 1, "enablement_kept_rounds": [{"patches": [], "artifacts": []}]}
+    if present:
+        state["enablement_levers_without_readers"] = value
+    out = collect_enablement(Path("/tmp/sess"), state, [])
+    return [r["code"] for r in (out.get("replay_sufficiency") or {}).get("reasons") or []]
+
+
+def test_collection_carries_a_dangling_lever_into_the_decision():
+    """The observation is useless unless it reaches the section the rules read."""
+    assert "lever_has_no_reader" in _collected_lever_codes(["VLLM_HL_MQA_LOGITS_HEAD_CHUNK"])
+
+
+def test_collection_carries_an_unscannable_lever_check():
+    assert "levers_unverified" in _collected_lever_codes(None)
+
+
+def test_collection_of_fully_read_levers_names_neither():
+    codes = _collected_lever_codes([])
+
+    assert "lever_has_no_reader" not in codes
+    assert "levers_unverified" not in codes
+
+
+def test_a_session_predating_the_lever_scan_names_neither():
+    codes = _collected_lever_codes(None, present=False)
+
+    assert "lever_has_no_reader" not in codes
+    assert "levers_unverified" not in codes

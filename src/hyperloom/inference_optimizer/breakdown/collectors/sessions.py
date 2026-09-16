@@ -386,6 +386,7 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "base_sha",
     "build_extensions_not_carried",
     "build_manifest",
+    "levers_without_readers",
     "environment_closure",
     "framework_root",
     "installed_versions_at_keep",
@@ -513,6 +514,10 @@ def _collect_recipe(
     ):
         if value:
             out[key] = value
+    for _tri in ("build_extensions_not_carried", "levers_without_readers"):
+        _val = _eg(state, _tri, _ABSENT)
+        if _val is not _ABSENT:
+            out[_tri] = _val
     _carry = _eg(state, "build_extensions_not_carried", _ABSENT)
     if _carry is not _ABSENT:
         # Assigned outside the loop above, which drops anything falsy: this

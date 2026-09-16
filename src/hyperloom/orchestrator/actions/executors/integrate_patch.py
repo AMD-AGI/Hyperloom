@@ -3866,7 +3866,87 @@ class IntegratePatchExecutor:
                 framework_root,
                 specialist_task_id=specialist_task_id,
             ),
+            "enablement_levers_without_readers": self._levers_without_readers(
+                getattr(getattr(ctx, "_ip_shared_state", None), "enablement", None),
+                framework_root,
+                framework=self._graded_framework(params, str(bench_result.get("materialized_config") or "")),
+                effective_config=bench_result.get("effective_config"),
+            ),
         }
+
+    @staticmethod
+    def _levers_without_readers(
+        enablement: Any,
+        framework_root: Path | None,
+        *,
+        framework: str,
+        effective_config: Mapping[str, Any] | None = None,
+    ) -> list[str] | None:
+        """Return accepted env levers in the framework's namespace that nothing reads.
+
+        A lever is accepted because a round that set it advanced, not because
+        anything was shown to read it. A knob a specialist introduced in a patch
+        that was later superseded leaves its name behind in ``accepted_config``,
+        and the recipe then exports an env no code consults -- a replay sets it
+        and reproduces nothing, silently.
+
+        Only the framework's own namespace is judged. ``AMD_SERIALIZE_KERNEL``
+        is read by the HIP runtime and ``NCCL_*`` by the collective library;
+        their absence from the framework tree says nothing about them.
+
+        Every regular file the framework ships is searched, matched as bytes. A
+        lever is as likely to be read by a kernel through ``getenv`` or by a
+        launch script through shell expansion as by Python, and a reader can sit
+        in a file with no extension at all -- a ``Dockerfile``, a ``Makefile``.
+        A suffix list is not evidence of absence: skipping a file is what turns
+        a working lever into a refusal. A match inside a compiled artifact
+        counts too, which can only make this miss a dangling lever, never invent
+        one.
+
+        Returns:
+            The lever names with no reader, ``[]`` when a scan found none, and
+            ``None`` when the tree could not be read -- which is not evidence
+            that every lever has one.
+        """
+        if framework_root is None or not framework.strip():
+            return []
+        # This KEEP's own effective config first. The standing ``accepted_config``
+        # is not replaced with it until the lane re-arms on the result, so a
+        # lever this round introduced -- the one the recipe will export -- is
+        # not in shared state yet, and scanning only that would check every
+        # round's levers except the decisive one.
+        accepted = getattr(enablement, "accepted_config", None) or {}
+        merged: dict[str, Any] = {}
+        for source in (accepted, effective_config):
+            if not isinstance(source, Mapping):
+                continue
+            block = source.get("extra_envs")
+            if isinstance(block, Mapping):
+                merged.update({str(k): v for k, v in block.items()})
+        envs = merged
+        prefix = f"{framework.strip().upper()}_"
+        names = sorted(
+            {str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)}
+        )
+        if not names:
+            return []
+        if not framework_root.is_dir():
+            # An empty walk over a tree that is not there would report every
+            # lever as unread, which is a refusal built out of nothing.
+            return None
+        needles = {name: name.encode("ascii", "ignore") for name in names}
+        unread = set(names)
+        try:
+            for source in framework_root.rglob("*"):
+                if not unread:
+                    break
+                if not source.is_file():
+                    continue
+                blob = source.read_bytes()
+                unread -= {name for name in unread if needles[name] in blob}
+        except OSError:
+            return None
+        return sorted(unread)
 
     @staticmethod
     def _build_output_trees(attempt_root: Path) -> list[Path]:

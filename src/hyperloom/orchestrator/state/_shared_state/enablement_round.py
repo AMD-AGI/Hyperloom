@@ -128,6 +128,10 @@ class EnablementRound:
     # that the framework root does not carry. A build installs nothing itself:
     # its outputs travel only as artifacts a specialist declares one by one.
     build_extensions_not_carried: list = field(default_factory=list)
+    # Accepted env levers in the framework's own namespace that nothing in the
+    # framework tree reads. A lever is accepted because a round advanced, not
+    # because a reader was shown to exist.
+    levers_without_readers: list = field(default_factory=list)
     # {interpreter_tag, distributions} of the accepted runtime.
     environment_closure: dict = field(default_factory=dict)
 

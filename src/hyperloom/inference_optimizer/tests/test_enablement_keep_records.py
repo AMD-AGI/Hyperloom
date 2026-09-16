@@ -2562,3 +2562,146 @@ def test_an_empty_fallback_is_unverified(tmp_path: Path):
         )
         is None
     )
+
+
+def _lever_state(**envs):
+    return SimpleNamespace(accepted_config={"extra_envs": dict(envs)})
+
+
+def test_a_lever_no_framework_file_reads_is_named(tmp_path: Path):
+    """Accepted because a round advanced, not because a reader was shown.
+
+    A knob introduced by a patch that was later superseded leaves its name in
+    accepted_config, and the recipe then exports an env nothing consults.
+    """
+    root = tmp_path / "vllm"
+    (root / "envs.py").parent.mkdir(parents=True)
+    (root / "envs.py").write_text('VLLM_ROCM_USE_AITER = os.getenv("VLLM_ROCM_USE_AITER")', encoding="utf-8")
+    state = _lever_state(VLLM_ROCM_USE_AITER="1", VLLM_HL_MQA_LOGITS_HEAD_CHUNK="1")
+
+    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == [
+        "VLLM_HL_MQA_LOGITS_HEAD_CHUNK"
+    ]
+
+
+def test_levers_outside_the_frameworks_namespace_are_not_judged(tmp_path: Path):
+    """The HIP runtime reads AMD_*, the collective library NCCL_*.
+
+    Their absence from the framework tree says nothing about whether anything
+    reads them, so naming them would refuse a replay over working configuration.
+    """
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+    (root / "envs.py").write_text("nothing here", encoding="utf-8")
+    state = _lever_state(AMD_SERIALIZE_KERNEL="3", NCCL_IB_HCA="mlx5", HIP_FORCE_DEV_KERNARG="1")
+
+    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == []
+
+
+def test_a_reader_anywhere_in_the_tree_counts(tmp_path: Path):
+    """A knob a kept patch added deep in the package is still read."""
+    deep = tmp_path / "vllm" / "attention" / "ops"
+    deep.mkdir(parents=True)
+    (deep / "sparse.py").write_text('os.environ.get("VLLM_HL_CHUNK")', encoding="utf-8")
+    state = _lever_state(VLLM_HL_CHUNK="4")
+
+    assert IntegratePatchExecutor._levers_without_readers(state, tmp_path / "vllm", framework="vllm") == []
+
+
+def test_an_extensionless_or_unanticipated_reader_counts(tmp_path: Path):
+    """A suffix list is not evidence of absence.
+
+    Readers live in files with no extension and in languages nobody listed. A
+    scan that skips them turns a working lever into a refusal, which is the one
+    outcome this check must not produce.
+    """
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+    (root / "Dockerfile").write_text("ENV VLLM_HL_DOCKER=1", encoding="utf-8")
+    (root / "Makefile").write_text("\tEXPORT=$(VLLM_HL_MAKE)", encoding="utf-8")
+    (root / "kernel.S").write_text(".ascii \"VLLM_HL_ASM\"", encoding="utf-8")
+    (root / "shim.rs").write_text('std::env::var("VLLM_HL_RUST")', encoding="utf-8")
+    (root / "prebuilt.so").write_bytes(b"\x7fELF...VLLM_HL_NATIVE\x00...")
+    state = _lever_state(
+        VLLM_HL_DOCKER="1", VLLM_HL_MAKE="1", VLLM_HL_ASM="1",
+        VLLM_HL_RUST="1", VLLM_HL_NATIVE="1", VLLM_HL_NOBODY="1",
+    )
+
+    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
+
+
+def test_a_native_or_script_reader_counts_too(tmp_path: Path):
+    """A framework lever need not be read from Python.
+
+    Compiled extensions reach it through ``getenv`` and launch scripts through
+    shell expansion; searching only ``.py`` would refuse a replay over a lever
+    that works, on the strength of where the search looked.
+    """
+    root = tmp_path / "vllm"
+    (root / "csrc").mkdir(parents=True)
+    (root / "csrc" / "attn.cu").write_text('auto v = std::getenv("VLLM_HL_KERNEL");', encoding="utf-8")
+    (root / "launch.sh").write_text('echo "${VLLM_HL_LAUNCH:-}"', encoding="utf-8")
+    (root / "envs.py").write_text("nothing", encoding="utf-8")
+    state = _lever_state(VLLM_HL_KERNEL="1", VLLM_HL_LAUNCH="2", VLLM_HL_NOBODY="3")
+
+    assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
+
+
+def test_an_unreadable_tree_is_unverified(tmp_path: Path):
+    state = _lever_state(VLLM_HL_CHUNK="4")
+
+    assert IntegratePatchExecutor._levers_without_readers(state, tmp_path / "gone", framework="vllm") is None
+
+
+def test_no_framework_named_judges_nothing(tmp_path: Path):
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), root, framework="") == []
+    assert IntegratePatchExecutor._levers_without_readers(_lever_state(VLLM_X="1"), None, framework="vllm") == []
+
+
+def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
+    """The standing accepted config does not yet hold this round's levers.
+
+    `accepted_config` is replaced with the KEEP's effective config only when the
+    lane re-arms on the executor's result, which happens after these records are
+    captured. Scanning shared state alone therefore checks every round's levers
+    except the one that decided the recipe.
+    """
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+    (root / "envs.py").write_text('os.getenv("VLLM_HL_OLD")', encoding="utf-8")
+    state = _lever_state(VLLM_HL_OLD="1")
+    effective = {"extra_envs": {"VLLM_HL_NEW": "2"}}
+
+    without = IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm")
+    withit = IntegratePatchExecutor._levers_without_readers(
+        state, root, framework="vllm", effective_config=effective
+    )
+
+    assert without == [], "the pre-fix shape: this round's lever is invisible"
+    assert withit == ["VLLM_HL_NEW"]
+
+
+def test_the_two_env_sources_are_merged_not_replaced(tmp_path: Path):
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+    (root / "envs.py").write_text("nothing reads anything", encoding="utf-8")
+    state = _lever_state(VLLM_HL_OLD="1")
+
+    assert IntegratePatchExecutor._levers_without_readers(
+        state, root, framework="vllm", effective_config={"extra_envs": {"VLLM_HL_NEW": "2"}}
+    ) == ["VLLM_HL_NEW", "VLLM_HL_OLD"]
+
+
+def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
+    root = tmp_path / "vllm"
+    root.mkdir(parents=True)
+    (root / "envs.py").write_text("nothing", encoding="utf-8")
+    state = _lever_state(VLLM_HL_OLD="1")
+
+    for junk in (None, 7, "x", {"extra_envs": 5}):
+        assert IntegratePatchExecutor._levers_without_readers(
+            state, root, framework="vllm", effective_config=junk
+        ) == ["VLLM_HL_OLD"], junk
