@@ -116,14 +116,21 @@ def _is_attempt_row(entry: Any) -> bool:
 def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Return the ``(sentinel, attempt_row)`` pair of the final round's build.
 
-    A build is linked to the final round when its routing sentinel's
-    ``probe_task_id`` equals ``last_specialist_task_id`` -- an equality between
-    two fields product code already writes, so "this build produced the
-    environment the final round validated" is decidable from data rather than
-    inferred from recency. The attempt row is then joined by
-    ``Path(attempt_root).name == task_id``; being an equality it is
-    order-independent, so concurrent completions interleaving in the manifest
+    A build is linked to a round when its routing sentinel's ``probe_task_id``
+    equals that round's task id -- an equality between two fields product code
+    already writes, so "this build produced the environment the round validated"
+    is decidable from data rather than inferred from recency. The attempt row is
+    then joined by ``Path(attempt_root).name == task_id``; being an equality it
+    is order-independent, so concurrent completions interleaving in the manifest
     cannot bind a step to another build's row.
+
+    The round is ``last_specialist_task_id`` while that marker is set, and
+    otherwise the kept rounds, latest first. The marker alone is not enough to
+    key a recipe on: it is one-shot, consumed the moment a specialist-requested
+    build is enqueued, so by the time the recipe is emitted the build it points
+    at has usually cleared it. The kept rounds live as long as the recipe does,
+    and a build requested by a round that was kept is part of the accepted stack
+    whether or not it was the last one.
 
     A sentinel is recognized by that equality alone, never by the absence of an
     outcome: routing merges its fields into the attempt row of the same build
@@ -135,20 +142,37 @@ def select_linked_build(enablement: Mapping[str, Any]) -> tuple[dict[str, Any] |
         the linked build has no matching attempt row.
     """
     manifest = enablement.get("build_manifest")
-    final_task = str(enablement.get("last_specialist_task_id") or "").strip()
-    if not isinstance(manifest, list) or not final_task:
+    if not isinstance(manifest, list):
         return None, None
-    for entry in manifest:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("probe_task_id") or "").strip() != final_task:
-            continue
-        task_id = str(entry.get("task_id") or "").strip()
-        for row in manifest:
-            if _is_attempt_row(row) and task_id and Path(str(row.get("attempt_root") or "")).name == task_id:
-                return entry, row
-        return entry, None
+    for candidate in _linkable_round_ids(enablement):
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("probe_task_id") or "").strip() != candidate:
+                continue
+            task_id = str(entry.get("task_id") or "").strip()
+            for row in manifest:
+                if _is_attempt_row(row) and task_id and Path(str(row.get("attempt_root") or "")).name == task_id:
+                    return entry, row
+            return entry, None
     return None, None
+
+
+def _linkable_round_ids(enablement: Mapping[str, Any]) -> list[str]:
+    """Return the round ids a build may be linked through, most recent first."""
+    out: list[str] = []
+    marker = str(enablement.get("last_specialist_task_id") or "").strip()
+    if marker:
+        out.append(marker)
+    rounds = enablement.get("kept_rounds")
+    if isinstance(rounds, list):
+        for row in reversed(rounds):
+            if not isinstance(row, dict):
+                continue
+            task_id = str(row.get("task_id") or "").strip()
+            if task_id and task_id not in out:
+                out.append(task_id)
+    return out
 
 
 def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] | None:

@@ -2063,3 +2063,69 @@ def test_every_executed_build_is_named_once():
     scopes = [r["scope"] for r in _decide(state)["reasons"] if r["code"] == "build_not_replayed"]
 
     assert scopes == ["bA", "bB"]
+
+
+def test_a_build_links_through_a_kept_round_when_the_marker_is_gone():
+    """The marker is one-shot; the recipe outlives it.
+
+    ``last_specialist_task_id`` is consumed the moment a specialist-requested
+    build is enqueued, so by the time a recipe is emitted the build it points at
+    has usually cleared it. Keying the build step on it alone dropped the build
+    from every such recipe, silently: the patches replayed onto whatever binary
+    the base image shipped.
+    """
+    state = {
+        "build_manifest": [_attempt("bA"), {"task_id": "bA", "probe_task_id": "round-2"}],
+        "last_specialist_task_id": "",
+        "kept_rounds": [{"task_id": "round-1"}, {"task_id": "round-2"}, {"task_id": "round-3"}],
+    }
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+
+    assert [s["kind"] for s in steps if s["kind"] == "build"] == ["build"]
+    assert "build_not_replayed" not in _codes(_decide(state))
+
+
+def test_the_marker_still_wins_while_it_is_set():
+    """Unchanged where the marker survives: it names the round to link through."""
+    state = {
+        "build_manifest": [
+            _attempt("bMarker"),
+            _attempt("bKept"),
+            {"task_id": "bMarker", "probe_task_id": "marker-round"},
+            {"task_id": "bKept", "probe_task_id": "kept-round"},
+        ],
+        "last_specialist_task_id": "marker-round",
+        "kept_rounds": [{"task_id": "kept-round"}],
+    }
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+
+    assert [s for s in steps if s["kind"] == "build"][0]["build_task_id"] == "bMarker"
+
+
+def test_the_latest_kept_round_is_tried_first():
+    state = {
+        "build_manifest": [
+            _attempt("bEarly"),
+            _attempt("bLate"),
+            {"task_id": "bEarly", "probe_task_id": "round-1"},
+            {"task_id": "bLate", "probe_task_id": "round-2"},
+        ],
+        "last_specialist_task_id": "",
+        "kept_rounds": [{"task_id": "round-1"}, {"task_id": "round-2"}],
+    }
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+
+    assert [s for s in steps if s["kind"] == "build"][0]["build_task_id"] == "bLate"
+
+
+def test_a_build_no_kept_round_asked_for_stays_unlinked():
+    """Fail closed: a build no kept round requested is still not this recipe's."""
+    state = {
+        "build_manifest": [_attempt("bA"), {"task_id": "bA", "probe_task_id": "some-other-round"}],
+        "last_specialist_task_id": "",
+        "kept_rounds": [{"task_id": "round-1"}],
+    }
+    steps = build_recipe_steps(state, attempt_summary=_build_attempt_summary)
+
+    assert not [s for s in steps if s["kind"] == "build"]
+    assert "build_not_replayed" in _codes(_decide(state))
