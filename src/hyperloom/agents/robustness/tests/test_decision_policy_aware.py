@@ -13,10 +13,8 @@ from hyperloom.agents.robustness.role.envelope import (
     IntentType,
     build_alert,
     build_delegate,
-    build_escalate,
     build_prune_branch,
     build_send_message,
-    build_update_state,
 )
 
 
@@ -42,7 +40,11 @@ def test_alert_each_severity_passes(severity, policy: PolicyAware):
 
 
 def test_escalate_passes(policy: PolicyAware):
-    policy.assert_payload_complete(build_escalate("r", "next"))
+    intent = Intent(
+        type=IntentType.ESCALATE_STRATEGY_CHANGE,
+        payload={"reason": "r", "next_action_hint": "next"},
+    )
+    policy.assert_payload_complete(intent)
 
 
 def test_prune_branch_passes(policy: PolicyAware):
@@ -73,7 +75,8 @@ def test_delegate_recover_gpu_leak_payload_passes(policy: PolicyAware):
 
 
 def test_update_state_passes(policy: PolicyAware):
-    policy.assert_payload_complete(build_update_state({"crash_count": 1}))
+    intent = Intent(type=IntentType.UPDATE_STATE, payload={"changes": {"crash_count": 1}})
+    policy.assert_payload_complete(intent)
 
 
 # Role gate
@@ -84,7 +87,6 @@ def test_update_state_passes(policy: PolicyAware):
     [
         IntentType.PROPOSE_ACTION,
         IntentType.REQUEST,
-        IntentType.RESPONSE,
         IntentType.REVIEW_VERDICT,
     ],
 )
@@ -132,6 +134,16 @@ def test_escalate_missing_hint_is_payload_error(policy: PolicyAware):
     intent = Intent(
         type=IntentType.ESCALATE_STRATEGY_CHANGE,
         payload={"reason": "r"},
+    )
+    with pytest.raises(PolicyViolation) as excinfo:
+        policy.assert_payload_complete(intent)
+    assert excinfo.value.rule == "payload"
+
+
+def test_escalate_missing_reason_is_payload_error(policy: PolicyAware):
+    intent = Intent(
+        type=IntentType.ESCALATE_STRATEGY_CHANGE,
+        payload={"next_action_hint": "h"},
     )
     with pytest.raises(PolicyViolation) as excinfo:
         policy.assert_payload_complete(intent)

@@ -1433,7 +1433,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - Repeated `trace_analyze` with unchanged trace/config: bug — reuse `last_trace_analyze`.
 - `correctness_passed=false`: do not integrate; the kernel-agent report must contain explicit correctness evidence.
 - `stop_reason=no_more_leverage`: stop and report; only resume if the user changes workload / search space / model / strategy.
-- `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied` for the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no `policy_loop` stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
+- `policy_denied` streaks (not a stop reason — nothing in the runtime stops a run over them): repeated denial of the same (action, rule) pair is advisory only — there is no auto-prune at streak ≥5 and no stop at streak ≥10. Inspect `SharedState.policy_denial_history` via the `why_denied` tool or the `=== Recent policy denials ===` block, then change something substantive (a new `params.grid` variant, a different `benchmark_script`, or a sibling action family). Do not hand-edit `state.json`.
 - `stop_reason=time_exhausted`: resume same session (`--resume-from`); do not start fresh.
 
 ## Report Back To User

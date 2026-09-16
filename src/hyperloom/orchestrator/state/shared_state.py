@@ -848,7 +848,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_ts: str = ""
     # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
+    # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Durable sum of completed optimisation-phase segments.
     explore_elapsed_accum_s: float | None = 0.0
@@ -1535,7 +1535,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         While this guard is active a ``skip_to_close`` hint is dropped; a
         not-yet-enabled run may only terminate via honest paths that do not route
-        through ``skip_to_close`` (``enablement_stalled``,
+        through ``skip_to_close`` (``enablement_attempts_exhausted``,
         ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
         aborts).
 
