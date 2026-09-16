@@ -5,6 +5,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
+  run inside FRAMEWORK_AGENT, which left it a lane with no lifecycle of its
+  own: it could not be entered, exited or reported on, and a phase that owned
+  optimisation work was also carrying the work of making the combo run at all.
+  It is now a phase of its own between PRELUDE and FRAMEWORK_AGENT, with entry
+  and exit predicates in `compute_next_phase`, its own `phase_history` rows and
+  a section in the Markdown session report. `PHASE_NAMES` is six long.
+
+  **No wall-clock budget is apportioned to it.** `DEFAULT_PHASE_BUDGET_PCT` has
+  no ENABLEMENT key, and an absent key means no cap rather than a zero one: a
+  budget apportions optimisation effort, and a combo that cannot run has
+  nothing to optimise yet. The other phases keep the percentages they had, so
+  the table now sums to 0.95 and bring-up is bounded by the run's wall clock
+  and by `ENABLEMENT_MAX_ATTEMPTS` instead. The phase's terminal exit is
+  `enablement_attempts_exhausted`, which `enablement/lane.py` sets.
+
+  **Runnability is decided from the measurement, not from a log scan.** A combo
+  counts as served once it has produced positive throughput and completed
+  requests, which is a signal the baseline already carries; the `booted`
+  property it replaces scanned the server log for bring-up milestones and could
+  not witness one past the head of a chatty log. Both enablement origins — a
+  boot failure and the accuracy gate — now open the same baseline revalidation
+  window, and the baseline is Coordinator-owned while the phase is ENABLEMENT.
+
 ### Fixed
 
 - **An accuracy eval that failed because the server was gone was read as a
@@ -60,6 +86,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   anonymous workers whose leader had already exited before recovery began;
   the generic subprocess teardown and third-party benchmark scripts are unchanged.
 
+- **A bare `--resume-from` rebuilt the budget and the stop target from the
+  flags.** `--max-hours` carried an argparse default, so a resume passing no
+  flags at all was indistinguishable from one passing the default: a 24 h
+  session was shortened to 2 h and closed as `time_exhausted` before its first
+  action, and the objective was dropped on the way. This is the path
+  `robustness_monitor.sh` takes, which auto-resumes with no flags. The flag now
+  defaults to `None` and resolves to `DEFAULT_MAX_HOURS` only after the archive
+  has had its chance at the persisted budget, so an absent flag restores 8 h
+  while an explicit `--max-hours 2` wins over it.
+
+- **Argv preflight read every dotted vLLM flag as unrecognised.** It probed
+  through `parse_known_args`, which is not what vLLM's parser uses to expand
+  `--<group>-config.<field>`, so preflight spent its one repair dropping flags
+  the server would have accepted. One of them bounded the profiler, and the
+  roofline that followed recorded 25.7 GB of trace over the whole workload
+  instead of over a steady-state window. The probe goes through the entry point
+  that performs the expansion.
+
+- **The robustness monitor called a session over while it was still running.**
+  It read the presence of `reports/final.*` as terminal, but the crash path
+  writes one as a safety net and a resume clears `stop_reason` without removing
+  it. `state.json` decides now, and the artifacts stand in only when there is
+  no state to read.
+
+- **The IR-1 stale-process scan failed on an idle machine, and could not see an
+  ATOM server.** It excluded only `os.getpid()`, so the launcher shell — whose
+  argv quotes the whole command — matched the scan's own patterns and failed the
+  gate; it now excludes its ancestry. Separately, the pattern list named only
+  vLLM and SGLang, so a leftover ATOM server still holding every rank's VRAM
+  read as a clean machine. Matched on `atom.entrypoints` alone: the per-rank
+  workers are `multiprocessing.spawn` children carrying no identifying argv, so
+  only descent from the wrapper reaches them, which teardown already covers.
+
 ### Removed
 
 - **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
@@ -105,6 +164,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   divisor, holding the other two lanes down to 0.3 and 0.2 of the phase. It
   becomes `REWRITE_RESERVE_SHARE`, taken off the top before the two real lanes
   divide the rest, and each lane's share of the phase is unchanged.
+
+- **`--max-minutes-enablement-pct` / `--phase-budget-enablement-pct`.** The
+  flag parsed and reached `DEFAULT_PHASE_BUDGET_PCT`, but no ENABLEMENT branch
+  in `compute_next_phase` ever calls `phase_cap_exceeded`, so the cap it
+  advertised was never enforced against anything. Wiring it up would have
+  contradicted the phase having no budget by design. It was new in this
+  release and nothing depended on it.
 
 ## [v1.1.1] - 2026-09-16
 Current packaged version (`pyproject.toml`). See
