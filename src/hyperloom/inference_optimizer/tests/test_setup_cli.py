@@ -2012,7 +2012,7 @@ def _drive_vllm_glibc_gate(
     tmp_path: Path,
     *,
     glibc: str,
-    vllm_version: str = "0.28.0",
+    vllm_version: str = "0.29.0",
     check_only: bool = True,
 ) -> subprocess.CompletedProcess:
     return _drive_installer(
@@ -2031,14 +2031,14 @@ def _drive_vllm_glibc_gate(
 
 
 def test_vllm_install_rejects_glibc_235_for_028(tmp_path: Path):
-    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.28.0")
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.35", vllm_version="0.29.0")
 
     assert res.returncode != 0
     assert "glibc >= 2.39" in res.stderr
 
 
 def test_vllm_install_accepts_glibc_239_for_028(tmp_path: Path):
-    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.28.0")
+    res = _drive_vllm_glibc_gate(tmp_path, glibc="2.39", vllm_version="0.29.0")
 
     assert res.returncode == 0, res.stderr
 
@@ -2210,6 +2210,9 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 '_py_has() { [ "$2" = aiter ] && return 0; return 0; }',
                 "install_sglang_from_wheel() { :; }",
                 "install_sglang_from_source() { :; }",
+                "sglang_rocm_extra_for_torch() { printf 'rocm724\\n'; }",
+                "sglang_pypi_version_for_extra() { printf '7.2.4\\n'; }",
+                "ensure_rocm_devel_headers() { :; }",
                 f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
                 install_sglang_framework,
                 "install_sglang_framework",
