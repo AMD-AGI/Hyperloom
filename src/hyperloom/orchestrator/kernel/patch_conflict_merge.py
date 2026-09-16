@@ -30,7 +30,6 @@ does not land -- and can never produce an unmeasured KEEP.
 from __future__ import annotations
 
 import ast
-import asyncio
 import re
 import subprocess
 from collections.abc import Sequence
@@ -102,7 +101,7 @@ class PatchMergeOutcome:
 
 
 class ConflictResolver(Protocol):
-    """Resolves one conflicted region. Returns its replacement, or ``None``."""
+    """Resolves one conflicted region."""
 
     async def __call__(
         self,
@@ -114,7 +113,8 @@ class ConflictResolver(Protocol):
         ours_label: str,
         theirs_label: str,
         intent: str,
-    ) -> str | None: ...
+    ) -> str | None:
+        """Return the lines that replace ``region``, or ``None`` to decline."""
 
 
 def _run_git(repo: Path, *args: str, timeout: float = 120.0) -> subprocess.CompletedProcess[str]:
@@ -137,6 +137,36 @@ def _first_line(text: str) -> str:
 def _unmerged_paths(repo: Path) -> list[str]:
     completed = _run_git(repo, "diff", "--name-only", "--diff-filter=U")
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def _staged_additions(repo: Path) -> list[str]:
+    """Paths staged by the attempt that HEAD does not carry."""
+    completed = _run_git(repo, "diff", "--cached", "--name-only", "--diff-filter=A", "HEAD")
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def _abandon_attempt(repo: Path, touched: Sequence[str]) -> None:
+    """Undo everything a refused attempt wrote, index included.
+
+    ``git apply -3`` implies ``--index``, so a refused attempt leaves its work
+    staged. The next lane's KEEP stages its own paths and then commits the
+    whole index, which would publish this lane's leftovers under that lane's
+    name. ``touched`` alone does not cover them: it is read before the patch
+    runs, and a file the patch creates does not exist yet to be named.
+    """
+    created = _staged_additions(repo)
+    for relative in created:
+        (repo / relative).unlink(missing_ok=True)
+    paths = list(dict.fromkeys([*touched, *created, *_unmerged_paths(repo)]))
+    if not paths:
+        _git_restore_to_head(repo)
+        return
+    # Unstage first: `checkout --force HEAD --` cannot clear an index entry for
+    # a path HEAD has never carried, and refuses the whole pathspec over it.
+    _run_git(repo, "reset", "-q", "--", *paths)
+    survivors = [path for path in paths if path not in created]
+    if survivors:
+        _git_restore_to_head(repo, survivors)
 
 
 def _strip_level(repo: Path, patch_path: Path) -> int:
@@ -310,6 +340,7 @@ def _anthropic_resolver() -> ConflictResolver:
             build_http_timeout,
             resolve_forge_llm_model,
         )
+        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
 
         prompt = (
             f"File: {relative_path}\n"
@@ -323,7 +354,9 @@ def _anthropic_resolver() -> ConflictResolver:
         result = await aanthropic_completion(
             component="forge",
             operation="patch_conflict_merge",
-            model=resolve_forge_llm_model("claude"),
+            # A default is mandatory: `CLAUDE_MODEL` is unset on every run that
+            # authenticates by OAuth token, and the resolver would post `""`.
+            model=resolve_forge_llm_model("claude", default=DEFAULT_CLAUDE_MODEL),
             system=_RESOLVER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_LLM_MAX_TOKENS,
@@ -407,34 +440,42 @@ async def _resolve_conflicts(
     steps: list[str],
 ) -> tuple[str, str]:
     """Write a resolution for every conflicted file. Returns (strategy, error)."""
-    import httpx
-
-    from hyperloom.common.llm_config import LLMConfigError
-
     strategy = STRATEGY_UNION
     for relative in conflicted:
-        resolved, unioned, overlapping = _union_disjoint(_rewrite_with_base_markers(repo, relative))
+        marked = _rewrite_with_base_markers(repo, relative)
+        resolved, unioned, overlapping = _union_disjoint(marked)
         if unioned:
             steps.append(f"{relative}: kept both sides of {unioned} disjoint insertion(s)")
-        if overlapping or _MARKER_RE.search(resolved):
+        unresolved = bool(overlapping) or bool(_MARKER_RE.search(resolved))
+        # A union that leaves one name defined twice -- both lanes shipped their
+        # own copy of a helper -- is not a merge either, and it is exactly what
+        # the resolver's fourth rule exists to reconcile. Hand it the marked
+        # file rather than ending the ladder on a rejection.
+        rejection = "" if unresolved else _reject_reason(repo, relative, resolved)
+        if unresolved or rejection:
             if resolver is None:
-                return strategy, f"{relative}: {overlapping} overlapping region(s), no resolver available"
+                return strategy, rejection or f"{relative}: {overlapping} overlapping region(s), no resolver available"
+            if rejection:
+                steps.append(f"{relative}: union rejected ({rejection}), asking the resolver")
             try:
                 resolved, error = await _resolve_regions(
-                    resolved,
+                    marked if rejection else resolved,
                     relative=relative,
                     resolver=resolver,
                     ours_label=ours_label,
                     theirs_label=theirs_label,
                     intent=intent,
                 )
-            except (LLMConfigError, httpx.HTTPError, asyncio.TimeoutError) as failure:
+            # The resolver is an injected callable reaching a network and an
+            # optional SDK; its failures share no base class, and an escape
+            # would abort integration with a marked-up tree still on disk.
+            except Exception as failure:  # noqa: BLE001 - a broken resolver costs the lane, nothing else
                 return strategy, f"{relative}: resolver call failed ({failure!r})"
             if error:
                 return strategy, error
             strategy = STRATEGY_LLM
+            rejection = _reject_reason(repo, relative, resolved)
 
-        rejection = _reject_reason(repo, relative, resolved)
         if rejection:
             return strategy, rejection
         (repo / relative).write_text(resolved, encoding="utf-8")
@@ -473,14 +514,14 @@ async def apply_patch_resolving_conflicts(
         applied, error = _git_apply(repo, patch_path, three_way=False, check_only=False)
         if applied:
             return PatchMergeOutcome(applied=True, strategy=STRATEGY_STRICT)
-        _git_restore_to_head(repo, touched or None)
+        _abandon_attempt(repo, touched)
         return PatchMergeOutcome(applied=False, error=error or "git apply failed")
 
     strict_error = strict_error or "git apply check failed"
     steps = [f"verbatim apply refused: {_first_line(strict_error)}"]
 
     def give_up(step: str) -> PatchMergeOutcome:
-        _git_restore_to_head(repo, touched or None)
+        _abandon_attempt(repo, touched)
         return PatchMergeOutcome(applied=False, error=strict_error, steps=(*steps, step), conflicted=True)
 
     three_way = _run_git(repo, "apply", "-3", f"-p{_strip_level(repo, patch_path)}", str(patch_path))
@@ -488,6 +529,9 @@ async def apply_patch_resolving_conflicts(
     if not conflicted:
         if three_way.returncode != 0:
             return give_up(f"three-way apply failed: {_first_line(three_way.stderr)}")
+        # Not put through the added-line check below: git merged the hunks
+        # itself, and it cannot drop a side without leaving the path unmerged.
+        # That check exists for the two rungs that reconstruct a file instead.
         steps.append("three-way merge absorbed the drift")
         return PatchMergeOutcome(applied=True, strategy=STRATEGY_THREE_WAY, steps=tuple(steps))
 

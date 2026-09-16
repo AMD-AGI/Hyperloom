@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER
 from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
@@ -64,6 +65,17 @@ def _sweep_int(name, default):
 _TILE_N = _sweep_int("TILE_N", "0")
 """
 
+#: A second lane inserting the *same* helper as lane one, plus its own constant:
+#: the union keeps both copies, which leaves ``_sweep_flag`` defined twice.
+_LANE_TWO_SHARED_HELPER = """
+
+def _sweep_flag(name, default):
+    return os.environ.get("FORGE_SWEEP_" + name, default) == "1"
+
+
+_TILE_N = _sweep_flag("TILE_N", "0")
+"""
+
 _LANE_THREE_HELPERS = """
 
 def _sweep_list(name, default):
@@ -99,8 +111,33 @@ def _capture_patch(repo: Path, patches: Path, name: str, text: str) -> Path:
     return patch
 
 
+def _capture_patch_creating(repo: Path, patches: Path, name: str, text: str, created: str) -> Path:
+    """Diff a lane that also adds a file, and put the worktree back."""
+    _write(repo, text)
+    (repo / created).write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repo, "add", "-N", created)
+    patch = patches / f"{name}.patch"
+    patch.write_text(_git(repo, "diff"), encoding="utf-8")
+    _git(repo, "checkout", "--", _MODULE)
+    _git(repo, "reset", "-q", "--", created)
+    (repo / created).unlink()
+    return patch
+
+
 def _insert_helpers(helpers: str) -> str:
     return _BASE.replace("import os\n", "import os\n" + helpers, 1)
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the default resolver unavailable, so no test can reach a gateway.
+
+    ``resolver=None`` means "use the Anthropic resolver if one can be built",
+    so a developer with a credential exported would otherwise turn the
+    no-resolver tests into live calls.
+    """
+    for name in ANTHROPIC_CREDENTIAL_ENV_ORDER:
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -226,6 +263,33 @@ async def test_overlapping_edits_are_left_to_a_resolver(repo: Path, patches: Pat
     assert "return x * 4" in (repo / _MODULE).read_text(encoding="utf-8")
 
 
+async def test_a_rejected_patch_leaves_nothing_of_the_file_it_created(repo: Path, patches: Path) -> None:
+    """``git apply -3`` implies ``--index``, and the next lane commits the index."""
+    landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
+    incoming = _capture_patch_creating(
+        repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"), "sweep.py"
+    )
+    _land(repo, landed)
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, resolver=None)
+
+    assert not outcome.applied
+    assert not _dirty(repo)
+    assert not (repo / "sweep.py").exists()
+
+
+async def test_a_union_that_duplicates_a_helper_is_rejected_without_a_resolver(repo: Path, patches: Path) -> None:
+    landed = _capture_patch(repo, patches, "stage1", _insert_helpers(_LANE_ONE_HELPERS))
+    incoming = _capture_patch(repo, patches, "stage2", _insert_helpers(_LANE_TWO_SHARED_HELPER))
+    _land(repo, landed)
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=None)
+
+    assert not outcome.applied
+    assert "redefines module-level _sweep_flag" in outcome.note()
+    assert not _dirty(repo)
+
+
 def _resolver_returning(text: str):
     """A resolver that replaces every conflicted region with *text*."""
 
@@ -299,6 +363,53 @@ async def test_a_dedented_first_line_is_put_back_where_the_markers_were(repo: Pa
     merged = (repo / _MODULE).read_text(encoding="utf-8")
     assert '    if os.environ.get("LANE_TWO"):\n' in merged
     compile(merged, _MODULE, "exec")
+
+
+async def test_a_union_that_duplicates_a_helper_escalates_to_the_resolver(repo: Path, patches: Path) -> None:
+    """Both lanes shipped the same helper, so keeping both copies is not a merge."""
+    landed = _capture_patch(repo, patches, "stage1", _insert_helpers(_LANE_ONE_HELPERS))
+    incoming = _capture_patch(repo, patches, "stage2", _insert_helpers(_LANE_TWO_SHARED_HELPER))
+    _land(repo, landed)
+    asked = 0
+
+    async def resolve(**_: object) -> str:
+        nonlocal asked
+        asked += 1
+        return (
+            "\n\ndef _sweep_flag(name, default):\n"
+            '    return os.environ.get("FORGE_SWEEP_" + name, default) == "1"\n'
+            '\n\n_PAD_ZERO = _sweep_flag("PAD_ZERO", "1")\n'
+            '_TILE_N = _sweep_flag("TILE_N", "0")\n'
+        )
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=resolve)
+
+    assert asked == 1
+    assert outcome.applied, outcome.error
+    assert outcome.strategy == STRATEGY_LLM
+    assert "redefines module-level _sweep_flag" in outcome.note()
+    merged = (repo / _MODULE).read_text(encoding="utf-8")
+    assert merged.count("def _sweep_flag") == 1
+    for symbol in ("_PAD_ZERO", "_TILE_N"):
+        assert symbol in merged, symbol
+    compile(merged, _MODULE, "exec")
+
+
+async def test_a_resolver_that_raises_costs_the_lane_and_nothing_else(repo: Path, patches: Path) -> None:
+    """An injected callable reaching a network and an SDK fails in many ways."""
+    landed = _capture_patch(repo, patches, "landed", _BASE.replace("return x * 2", "return x * 4"))
+    incoming = _capture_patch(repo, patches, "incoming", _BASE.replace("return x * 2", "return x * 8"))
+    _land(repo, landed)
+
+    async def explode(**_: object) -> str:
+        raise RuntimeError("claude-agent-sdk is not installed")
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=explode)
+
+    assert not outcome.applied
+    assert "resolver call failed" in outcome.note()
+    assert not _dirty(repo)
+    assert "<<<<<<<" not in (repo / _MODULE).read_text(encoding="utf-8")
 
 
 async def test_resolver_dropping_the_incoming_side_is_rejected(repo: Path, patches: Path) -> None:
