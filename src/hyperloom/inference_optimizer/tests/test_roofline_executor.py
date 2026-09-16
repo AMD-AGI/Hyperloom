@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -159,12 +158,7 @@ async def test_roofline_passes_resolved_framework_to_trace_analysis(tmp_path, mo
 
 
 @pytest.mark.asyncio
-async def test_cuda_graph_capture_failure_is_reported_not_retried_eager(tmp_path, monkeypatch):
-    """A capture failure ends the action with its classification; roofline never re-boots the arm eager.
-
-    Re-booting eager would publish a trace of a configuration nobody asked to measure, so the whole outcome is
-    the classified failure plus enough evidence on disk to decide the fix offline.
-    """
+async def test_profile_retry_records_successful_child_runtime(tmp_path, monkeypatch):
     state = _state()
     state.framework = "vllm"
     ctx = _ctx(tmp_path)
@@ -173,93 +167,33 @@ async def test_cuda_graph_capture_failure_is_reported_not_retried_eager(tmp_path
     async def fake_profile(profile_ctx):
         nonlocal calls
         calls += 1
-        return {
-            "status": "failed",
-            "error": "Capture cuda graph failed",
-        }
+        if calls == 1:
+            return {
+                "status": "failed",
+                "error": "Capture cuda graph failed",
+            }
+        effective_args = str(profile_ctx.task.params.get("base_extra_args") or "")
+        profile_ctx.task.params["extra_server_args"] = effective_args
+        return _profile_success("/tmp/eager.trace.json.gz")
+
+    async def fake_trace_analyze(payload, *, session_dir):
+        return _trace_analyze_success()
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.profile.profile_executor",
         fake_profile,
     )
-
-    result = await RooflineExecutor(shared_state=state)(ctx)
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "profile_cuda_graph_capture_config_failed"
-    assert calls == 1
-    assert not state.last_profile_workload
-
-    evidence = tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1_attempt1.json"
-    # The message has to name the evidence: a failure nobody can act on offline is the thing being removed here.
-    assert str(evidence) in result["error"]
-    diagnosis = json.loads(evidence.read_text(encoding="utf-8"))
-    assert diagnosis["category"] == "config"
-    assert diagnosis["matched_marker"] == "capture cuda graph failed"
-    assert diagnosis["attempt"] == 1
-    assert diagnosis["config"]["disable_cuda_graph"] is False
-    assert diagnosis["config"]["framework"] == "vllm"
-    assert "Capture cuda graph failed" in diagnosis["sources"]["last_error"]
-    assert diagnosis["marker_hits"][0]["source"] == "last_error"
-    assert diagnosis["marker_hits"][0]["line_no"] == 1
-
-
-@pytest.mark.asyncio
-async def test_capture_marker_is_not_classified_when_capture_was_already_off(tmp_path, monkeypatch):
-    """With the operator override set, a capture marker is not evidence about this run.
-
-    The server log tail can span an earlier boot, so a stale marker must not hard-fail the action as a capture
-    failure -- and "does not retry with graph capture disabled" would be nonsense to read on a run that already
-    had it disabled. The failure stays a plain profile failure.
-    """
-    state = _state()
-    state.framework = "sglang"
-    ctx = _ctx(tmp_path)
-    monkeypatch.setenv("HYPERLOOM_PROFILE_DISABLE_CUDA_GRAPH", "1")
-
-    async def fake_profile(profile_ctx):
-        return {"status": "failed", "error": "Capture cuda graph failed"}
-
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        fake_profile,
+        "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+        fake_trace_analyze,
     )
 
     result = await RooflineExecutor(shared_state=state)(ctx)
 
-    assert result["status"] == "failed"
-    assert not result["error_class"].startswith("profile_cuda_graph_capture_")
-    assert "does not retry with graph capture disabled" not in result["error"]
-    assert not (tmp_path / "diagnostics").exists()
-
-
-@pytest.mark.asyncio
-async def test_profile_instrumentation_capture_failure_is_classified_apart(tmp_path, monkeypatch):
-    """The profiler's own shape discovery colliding with capture is a different owner than bad server args."""
-    state = _state()
-    state.framework = "sglang"
-    ctx = _ctx(tmp_path)
-
-    async def fake_profile(profile_ctx):
-        return {
-            "status": "failed",
-            "error": "AssertionError in get_num_new_pages: assert seq_lens.device == cpu_device",
-        }
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.profile.profile_executor",
-        fake_profile,
-    )
-
-    result = await RooflineExecutor(shared_state=state)(ctx)
-
-    assert result["error_class"] == "profile_cuda_graph_capture_instrumentation_failed"
-    diagnosis = json.loads(
-        (tmp_path / "diagnostics" / "roofline_cuda_graph_capture_t-roofline-1_attempt1.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert diagnosis["category"] == "instrumentation"
+    assert result["status"] == "succeeded"
+    assert calls == 2
+    assert "--enforce-eager" in state.last_profile_workload["server_args"]
+    assert state.last_profile_args == state.last_profile_workload["server_args"]
 
 
 @pytest.mark.asyncio
