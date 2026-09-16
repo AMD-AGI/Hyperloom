@@ -34,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Specialist worktrees initialize the submodule commits pinned by the source
+  checkout, including nested dependencies. Fresh AITER worktrees previously
+  lacked those headers and could fail compilation before a specialist could
+  measure a change. Retries preserve existing edits and submodule commits;
+  incomplete or conflicted submodules now fail worktree setup.
+
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
   model that scored badly the same way -- a non-zero exit -- so the eval-rooted
