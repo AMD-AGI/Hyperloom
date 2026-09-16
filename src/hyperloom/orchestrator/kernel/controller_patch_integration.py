@@ -30,6 +30,9 @@ from .controller_publication import (
     load_controller_publication,
 )
 
+_CONTROLLER_SOURCE = "kernel_rewrite_controller"
+_CONTROLLER_BACKEND = "forge"
+
 
 @dataclass(frozen=True)
 class PatchIntegrationResult:
@@ -176,9 +179,9 @@ def _keep_result(
         "scope": "source_patch",
         "base_sha": publication.base_commit,
         "keep_commit": keep_commit,
-        "source": "kernel_rewrite_controller",
-        "backend": "forge",
-        "engine": "kernel_rewrite_controller",
+        "source": _CONTROLLER_SOURCE,
+        "backend": _CONTROLLER_BACKEND,
+        "engine": _CONTROLLER_SOURCE,
     }
 
 
@@ -203,7 +206,7 @@ def _record_keep(
         "keep_commit": keep_commit,
         "tput": new_tput,
         "gain_pct": float(validation.get("gain_pct") or 0.0),
-        "source": "kernel_rewrite_controller",
+        "source": _CONTROLLER_SOURCE,
     }
     shared_state.optimization_stack = [
         *[
