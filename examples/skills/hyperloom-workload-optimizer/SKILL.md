@@ -119,9 +119,10 @@ to clear.
 Optimization runs for hours in the background. Do not stream the log.
 
 Before launch the run skill shows a plan: resolved model path, run mode, framework,
-TP, concurrency, ISL/OSL, precision, budget, and `USER_DATA_PATH`. After launch it
-reports the optimizer PID, run log, launch-info JSON, session directory,
-`state.json`, and the first health check.
+TP, concurrency, ISL/OSL, precision, budget, and `USER_DATA_PATH`. Get the user's
+go-ahead on that plan before the optimizer starts — it then owns the GPU for hours.
+After launch it reports the optimizer PID, run log, launch-info JSON, session
+directory, `state.json`, and the first health check.
 
 During the run, report a short status about every 300 seconds: process alive,
 current phase, `stop_reason`, baseline and current best throughput, cumulative
