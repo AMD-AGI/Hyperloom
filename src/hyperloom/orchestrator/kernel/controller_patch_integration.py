@@ -185,61 +185,6 @@ def _keep_result(
     }
 
 
-def _record_keep(
-    shared_state: Any,
-    publication: ControllerPatchPublication,
-    validation: dict[str, Any],
-    keep_commit: str,
-    session_dir: Path,
-) -> None:
-    new_tput = float(validation.get("new_tput") or 0.0)
-    variant_name = f"kernel_rewrite_controller:{publication.operator_id}"
-    entry = {
-        "action": "integrate",
-        "scope": "source_patch",
-        "variant_name": variant_name,
-        "kernel_id": publication.operator_id,
-        "operator_id": publication.operator_id,
-        "source_file": str(publication.repo_root / publication.kernel_path),
-        "patch_path": str(publication.patch_path),
-        "base_sha": publication.base_commit,
-        "keep_commit": keep_commit,
-        "tput": new_tput,
-        "gain_pct": float(validation.get("gain_pct") or 0.0),
-        "source": _CONTROLLER_SOURCE,
-    }
-    shared_state.optimization_stack = [
-        *[
-            item
-            for item in (getattr(shared_state, "optimization_stack", None) or [])
-            if not (isinstance(item, dict) and str(item.get("operator_id") or "") == publication.operator_id)
-        ],
-        entry,
-    ]
-    current_best = (
-        dict(shared_state.current_best) if isinstance(getattr(shared_state, "current_best", None), dict) else {}
-    )
-    current_best.update(
-        {
-            "action": "integrate",
-            "variant_name": variant_name,
-            "tput": new_tput,
-            "source_file": entry["source_file"],
-            "patch_path": entry["patch_path"],
-            "keep_commit": keep_commit,
-        }
-    )
-    if validation.get("extra_server_args") is not None:
-        current_best["extra_server_args"] = validation.get("extra_server_args")
-    if isinstance(validation.get("extra_envs"), dict):
-        current_best["extra_envs"] = dict(validation["extra_envs"])
-    shared_state.current_best = current_best
-    baseline = float(getattr(shared_state, "baseline_tput", 0.0) or 0.0)
-    if baseline > 0 and new_tput > 0:
-        shared_state.cumulative_gain_validated = (new_tput / baseline - 1.0) * 100.0
-    shared_state.save(session_dir)
-
-
 async def _default_validator(
     publication: ControllerPatchPublication,
     *,
@@ -270,7 +215,7 @@ async def integrate_controller_patches(
     patches_root: str | Path,
     session_dir: Path,
     shared_state: Any,
-    record_keep: KeepRecorder | None = None,
+    record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate every complete Controller patch in filename order.
@@ -279,7 +224,8 @@ async def integrate_controller_patches(
         patches_root: The Controller's published patch directory.
         session_dir: The session whose state the KEEPs are recorded into.
         shared_state: The live session state, persisted after each recorded KEEP.
-        record_keep: Session-owned writeback for AgentX; other workloads use the local recorder.
+        record_keep: The session-owned writeback every KEEP is recorded through,
+            so a promotion also lands on the stack ledger.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
     """
@@ -492,11 +438,8 @@ async def integrate_controller_patches(
             continue
 
         try:
-            if record_keep is None:
-                _record_keep(shared_state, publication, validation, keep_commit, Path(session_dir))
-            else:
-                await record_keep(_keep_result(publication, validation, keep_commit))
-                shared_state.save(Path(session_dir))
+            await record_keep(_keep_result(publication, validation, keep_commit))
+            shared_state.save(Path(session_dir))
         except Exception as error:
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:

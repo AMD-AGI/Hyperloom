@@ -44,6 +44,17 @@ def _grading_follows_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _user_data_under_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep every session these tests build inside ``tmp_path``.
+
+    The KEEP recorder is the Coordinator's, so each test constructs one, and an
+    unset ``USER_DATA_PATH`` resolves to the shared ``/workspace/hyperloom``
+    default.
+    """
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+
+
 def _git(repo: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -223,7 +234,7 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -265,7 +276,7 @@ async def test_conflicting_patch_is_skipped_without_reverting_prior_keep(tmp_pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -308,7 +319,7 @@ async def test_e2e_failure_reverts_only_current_patch_and_continues(tmp_path: Pa
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -344,7 +355,7 @@ async def test_a_revert_leaves_the_operators_untracked_files_alone(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -395,7 +406,7 @@ async def test_a_revert_unstages_a_patch_whose_commit_never_landed(tmp_path: Pat
     original = integration._git_commit_kept
     integration._git_commit_kept = _commit_nothing  # type: ignore[assignment]
     try:
-        summary = await integrate_controller_patches(
+        summary = await _integrate(
             patches_root=patches,
             session_dir=session_dir,
             shared_state=_state(session_dir, repo),
@@ -431,7 +442,7 @@ async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -464,7 +475,7 @@ async def test_a_dirty_patch_path_is_skipped_without_cleaning_the_repository(tmp
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -505,7 +516,7 @@ async def test_a_note_alongside_a_real_commit_does_not_revert_the_keep(
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -555,7 +566,7 @@ async def test_a_commit_that_never_lands_reverts_without_poisoning_the_next_patc
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -603,7 +614,7 @@ async def test_patches_from_separate_repositories_each_keep_their_own_baseline(t
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         # The configured root is their common parent so both repositories are admissible; the point under test is the
@@ -648,7 +659,7 @@ async def test_second_base_within_one_repository_is_still_rejected(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -690,7 +701,7 @@ async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tm
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -725,7 +736,7 @@ async def test_a_patch_that_does_not_apply_is_reverted_not_left_half_staged(tmp_
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -768,7 +779,7 @@ async def test_a_validator_that_raises_reverts_its_patch_and_continues(tmp_path:
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -810,7 +821,7 @@ async def test_a_keep_carries_the_server_settings_its_validation_measured(tmp_pa
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -847,7 +858,7 @@ async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tm
         raise RuntimeError("state file is read-only")
 
     state.save = _boom  # type: ignore[method-assign]
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -897,7 +908,7 @@ async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: 
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -937,7 +948,7 @@ async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -972,7 +983,7 @@ async def test_dirt_on_a_file_the_patch_does_touch_still_blocks_it(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -1007,7 +1018,7 @@ async def test_a_run_that_admitted_nothing_does_not_report_as_completed(tmp_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -1040,7 +1051,7 @@ async def test_a_repo_root_git_cannot_read_is_skipped_not_applied(tmp_path: Path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, plain),
@@ -1085,7 +1096,7 @@ async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
