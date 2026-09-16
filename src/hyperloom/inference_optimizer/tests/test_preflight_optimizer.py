@@ -91,6 +91,15 @@ def test_stale_scan_skips_the_launcher_ancestry(preflight: ModuleType, monkeypat
     assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
 
 
+def test_stale_scan_sees_an_atom_server(preflight: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ATOM serves from its own entrypoint, which the vLLM and SGLang fragments do not match."""
+    monkeypatch.setattr(preflight.os, "getpid", lambda: 11)
+    monkeypatch.setattr(preflight, "_parent_pid", lambda pid: 1)
+    monkeypatch.setattr(preflight.os, "listdir", lambda path: ["12"])
+    monkeypatch.setattr(preflight, "_read_cmdline", lambda pid: "python3 -m atom.entrypoints.openai_server")
+    assert [pid for pid, _ in preflight._find_stale_processes()] == ["12"]
+
+
 def test_main_returns_zero_when_every_check_passes(
     preflight: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
