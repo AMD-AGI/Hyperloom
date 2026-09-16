@@ -177,6 +177,8 @@ def _keep_result(
         "base_sha": publication.base_commit,
         "keep_commit": keep_commit,
         "source": "kernel_rewrite_controller",
+        "backend": "forge",
+        "engine": "kernel_rewrite_controller",
     }
 
 

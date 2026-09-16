@@ -11,7 +11,10 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
@@ -1097,7 +1100,7 @@ async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["agentx", "synthetic"])
-async def test_controller_entry_selects_session_writeback_only_for_agentx(tmp_path, monkeypatch, mode):
+async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, monkeypatch, mode):
     from hyperloom.orchestrator.kernel import controller_submit
     from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
@@ -1121,11 +1124,95 @@ async def test_controller_entry_selects_session_writeback_only_for_agentx(tmp_pa
     await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
 
     assert len(callbacks) == 1
-    if mode == "agentx":
-        assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
-        assert callbacks[0].__self__.shared_state is coordinator.shared_state
-    else:
-        assert callbacks[0] is None
+    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__self__.shared_state is coordinator.shared_state
+
+
+@pytest.mark.asyncio
+async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="ledger",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    state = coordinator.shared_state
+    state.benchmark_mode = "synthetic"
+    state.current_best = {"action": "explore", "tput": 110.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "framework", "tput": 110.0}]
+    state.gain_per_stack_entry = [10.0]
+    state.cumulative_gain_validated = 10.0
+    state.cumulative_gain_validated_stack_len = 1
+    state.cumulative_gain_validated_ts = "2026-09-15T08:58:18+00:00"
+    state.save(session_dir)
+
+    async def _validate(_publication):
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "base_tput": 110.0,
+            "new_tput": 140.0,
+            "gain_pct": 27.272727,
+            "bench_result": {"output_throughput": 140.0},
+        }
+
+    with session_scope(session_dir):
+        stack_event.record_adoption(
+            stack_index=0,
+            entry=state.optimization_stack[0],
+            throughput_before=100.0,
+            throughput_after=110.0,
+            baseline_tput=100.0,
+            objective="output_throughput",
+        )
+        stack_event.record_validation(
+            stack_len=1,
+            baseline_tput=100.0,
+            validated_tput=110.0,
+            validated_gain_pct=10.0,
+            source="writeback",
+            measurement_basis="e2e_decision_round",
+            graded_objective="output_throughput",
+            measurement={"output_throughput": 110.0},
+            ts=state.cumulative_gain_validated_ts,
+        )
+
+        summary = await integrate_controller_patches(
+            patches_root=patches,
+            session_dir=session_dir,
+            shared_state=state,
+            record_keep=coordinator.writeback._record_integrate_keep,
+            validator=_validate,
+        )
+        ledger, _status = stack_event.assemble_stack_ext(
+            stack_event_parts(),
+            event=stack_event.stack_event_id(),
+        )
+
+    assert summary.kept_count == 1
+    assert len(state.optimization_stack) == 2
+    assert len(state.gain_per_stack_entry) == 2
+    assert state.cumulative_gain_validated == pytest.approx(40.0)
+    assert state.cumulative_gain_validated_stack_len == 2
+    assert state.cumulative_gain_validated_ts != "2026-09-15T08:58:18+00:00"
+
+    assert ledger["adoptions"]["count"] == 2
+    kernel = ledger["adoptions"]["by_source"]["kernel"]
+    assert kernel["count"] == 1
+    assert kernel["total_gain_pct"] == 30.0
+    assert kernel["by_backend"]["forge"]["count"] == 1
+    assert kernel["by_backend"]["forge"]["total_gain_pct"] == 30.0
+    assert ledger["validations"]["at_head"] is True
+    assert ledger["validations"]["settled"]["stack_len"] == 2
+    assert ledger["validated_total_gain_pct"] == pytest.approx(40.0)
 
 
 @pytest.mark.asyncio
