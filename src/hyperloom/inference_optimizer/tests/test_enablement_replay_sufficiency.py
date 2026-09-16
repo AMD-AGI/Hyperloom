@@ -1383,6 +1383,7 @@ def test_reason_code_vocabulary_matches_the_closed_contract():
         "setup_ledger_truncated",
         "build_attempt_unjoined",
         "build_inputs_incomplete",
+        "build_not_replayed",
         "environment_closure_absent",
         "closure_scope_incomplete",
         "assertions_not_at_keep",
@@ -2022,3 +2023,43 @@ def test_a_referenced_payload_larger_than_the_cap_is_undeliverable(tmp_path, mon
     decision = _bundle_decision(session)
     assert decision["status"] == "insufficient"
     assert "source_snapshot_missing" in _codes(decision)
+
+
+def test_a_build_that_ran_but_no_step_replays_is_named(tmp_path=None):
+    """The gap that reached production: patches replayed, the build silently not.
+
+    An enablement rebuilt the framework's compiled extension, kept twelve
+    patches, and emitted a recipe of twelve patch steps and no build step --
+    because the build is linked through ``last_specialist_task_id``, which the
+    final state no longer carried. An image built from that recipe put the
+    patched Python on the base image's original binary and died on the first op
+    the patches call, hours after the replay had reported success.
+    """
+    state = {"build_manifest": [_attempt("bA")], "last_specialist_task_id": ""}
+    decision = _decide(state)
+
+    assert "build_not_replayed" in _codes(decision)
+    named = [r for r in decision["reasons"] if r["code"] == "build_not_replayed"]
+    assert named[0]["scope"] == "bA", "the reason names which build went unreplayed"
+    assert decision["status"] == "insufficient"
+
+
+def test_a_replayed_build_is_not_reported_as_unreplayed():
+    """The counterpart: a linked build produces a step, so nothing is named."""
+    state = _build_state([_attempt("bA"), {"task_id": "bA", "probe_task_id": "probe"}])
+
+    assert "build_not_replayed" not in _codes(_decide(state))
+
+
+def test_a_build_that_was_asked_for_but_never_ran_is_not_named():
+    """A routing sentinel says a build was requested; only a row says one ran."""
+    state = {"build_manifest": [{"task_id": "bA", "probe_task_id": "probe"}], "last_specialist_task_id": ""}
+
+    assert "build_not_replayed" not in _codes(_decide(state))
+
+
+def test_every_executed_build_is_named_once():
+    state = {"build_manifest": [_attempt("bA"), _attempt("bB"), _attempt("bA")], "last_specialist_task_id": ""}
+    scopes = [r["scope"] for r in _decide(state)["reasons"] if r["code"] == "build_not_replayed"]
+
+    assert scopes == ["bA", "bB"]
