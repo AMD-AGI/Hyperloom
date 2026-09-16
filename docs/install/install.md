@@ -42,7 +42,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.0 --target .
+pip install hyperloom-inference-optimizer==1.1.1 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -106,7 +106,10 @@ Requirements:
 - Ubuntu 24.04 is the recommended host OS for bare-metal setup. vLLM 0.28.0+
   requires Ubuntu 24.04 or newer; on Ubuntu 22.04, downgrade vLLM (for example
   ``VLLM_VERSION=0.27.1``) or use Docker mode instead.
-- ROCm runtime and ROCm torch are already installed.
+- ROCm runtime and ROCm torch are already installed. ROCm 7.2.x is the
+  recommended and validated baseline; see
+  {doc}`Compatibility </compatibility>` for the combination the release is
+  tested against. Other ROCm versions are not validated.
 - `git` is available for dependency checkouts.
 - A serving framework is either already installed, or setup might install one.
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
@@ -134,6 +137,28 @@ The backend runs `install_baremetal.sh` in five phases:
 4. **Credentials**: Resolves LLM gateway credentials into `.env`.
 5. **Runtime env**: Persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
+
+The installer never installs ROCm itself; the host or image provides the runtime
+and a ROCm-built torch. Two framework-install details are worth knowing:
+
+- **vLLM and OpenMPI**: vLLM's ROCm torch build links `libmpi.so.40`, which most
+  container base images do not ship. Phase 2 installs an OpenMPI runtime first,
+  best-effort, trying `libopenmpi3t64` (Ubuntu 24.04's 64-bit `time_t` name) and
+  `libopenmpi3`. It skips silently when the library already resolves, when `apt`
+  is unavailable, or when not running as root.
+- **ROCm as pip wheels**: the validated baseline is ROCm 7.2.x under a single
+  `/opt/rocm` prefix, and that is the layout to prefer. ROCm can instead arrive
+  as TheRock's wheels, split across the `_rocm_sdk_core`,
+  `_rocm_sdk_libraries` and `_rocm_sdk_devel` namespace packages. The installer
+  handles that layout so it does not fail setup on it, but such a host is not a
+  tested configuration: Phase 1 probes all three packages, including their
+  `rocm_sysdeps` and `host-math` subdirectories, so the gate does not report
+  libraries as missing that the loader does resolve at runtime; and before a
+  source build, which needs hipBLAS/hipSPARSE/thrust headers, it adds
+  `rocm-sdk-devel` pinned to the installed `rocm-sdk-core` version, expands it
+  with `rocm-sdk init`, and exports the root `rocm-sdk path --root` reports so
+  the compiler and its include tree come from the same package. All of this is a
+  no-op on a standard `/opt/rocm` image.
 
 ### Scenario B: Bare metal + Docker
 
@@ -198,10 +223,16 @@ Bare-metal setup might also write runtime vars such as `FRAMEWORK`, `ROCM_PATH`,
 `VIRTUAL_ENV`, and `VLLM_VENV_ROOT`. `AITER_REF` pins ROCm/aiter to a released
 tag or commit; when unset the installer selects the newest tag compatible with
 the already-installed ROCm torch/triton stack. The ROCm wheel index for SGLang
-is controlled by `SGLANG_ROCM_EXTRA` (default `rocm724`) and
-`SGLANG_ROCM_PYPI_VERSION`. Kernel-agent paths (`MAGPIE_PATH`,
-`INFERENCEX_PATH`, `TRACELENS_ROOT`, `GEAK_ROOT`) are added later by the
-workload skill's `install.sh`.
+is controlled by `SGLANG_ROCM_EXTRA` and `SGLANG_ROCM_PYPI_VERSION`. Both are
+unset by default and derived from the ROCm build of the installed torch: only
+ROCm 7.0.x and 7.2.x have a published `amd-sglang` wheel, mapping to `rocm700`
+and `rocm724` respectively, and the recommended 7.2.x stack resolves `rocm724`.
+An exported value still wins. `rocm700` additionally requires Python 3.10 and
+setup fails outright on any other interpreter, because the source install would
+pull a mismatched ROCm 7.2 Triton. Any other ROCm stack derives nothing and takes
+the source install, which is a fallback rather than a validated path.
+Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
+`GEAK_ROOT`) are added later by the workload skill's `install.sh`.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
 credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)
@@ -396,7 +427,7 @@ It is recommended that you use a ROCm image that already ships the serving
 framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.28.0`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
 
@@ -404,7 +435,7 @@ Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:
 
 ```bash
-export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.28.0
+export HYPERLOOM_IMAGE=docker.io/vllm/vllm-openai-rocm:v0.29.0
 export REPO_ROOT="$(pwd -P)"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \

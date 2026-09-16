@@ -76,13 +76,7 @@ async def test_correctness(
     else:
         passed = False
         verdict = "NO CORRECTNESS METRIC FOUND in output"
-    outcome = (
-        "pass"
-        if passed
-        else "invalid_result"
-        if snr_db is None and allclose is None and max_diff is None
-        else "correctness_failure"
-    )
+    outcome = "pass" if passed else "invalid_result" if snr_db is None and allclose is None else "correctness_failure"
 
     result = {
         "passed": passed,
