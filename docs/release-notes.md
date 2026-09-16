@@ -18,9 +18,10 @@ summarizes the headline capabilities.
 
 The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
 is a patch release on top of 1.1.0. The session record does not move, so a
-session recorded by 1.1.0 resumes on this build. The command line does move:
-two optimizer options and one console script that 1.1.0 accepted are gone, and
-one option is added. See "Before upgrading from 1.1.0" below.
+session recorded by 1.1.0 resumes on this build. The command line and the
+environment contract do: two optimizer options, one console script and seven
+environment variables that 1.1.0 accepted are gone, and one option is added.
+See "Before upgrading from 1.1.0" below.
 
 Most of it is the Recipe knowledge base telling the truth. A warm-start hit
 could hand a session a config measured on a differently shaped card, and the
@@ -45,6 +46,16 @@ The deprecated KernelForge console-script alias is also gone, so a script
 invoking it fails with `command not found` rather than a parser error. Call
 `kernelforge`, which has been the name since v1.0.0b2; the retired spelling is
 in [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
+
+Seven environment variables 1.1.0 read are also gone, and these fail differently
+from the options above: nothing refuses them. A box that still exports them
+starts normally and behaves as though they were never set, so they have to be
+found by reading launch scripts and `.env` rather than by watching a run fail.
+
+| Removed variable | What to do |
+|---|---|
+| `FORGE_CLAUDE_MODEL`, `FORGE_CODEX_MODEL` | Set `CLAUDE_MODEL` / `CODEX_MODEL` instead. Forge now walks Hyperloom's ladder and nothing above it, so one spelling configures both. |
+| `HYPERLOOM_SKIP_COLLECTIVE`, `HYPERLOOM_COLLECTIVE_ONLY`, `HYPERLOOM_COLLECTIVE_KEEP_PCT`, `FORGE_COLLECTIVE_TIMEOUT`, `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Delete them. They steered the collective optimization lane, which is now part of the rewrite controller; communication operators are picked up as ordinary rewrite candidates and need no separate switches. |
 
 ### 1.1.1 highlights
 
