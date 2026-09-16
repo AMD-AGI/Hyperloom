@@ -11,6 +11,7 @@ produced by an older writer cannot be mistaken for one this contract judged.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 import shlex
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -41,6 +42,7 @@ REASON_BLOCKS: dict[str, str] = {
     "setup_effect_outside_verified_launch": BLOCKS_BOTH,
     "setup_ledger_truncated": BLOCKS_BOTH,
     "build_attempt_unjoined": BLOCKS_REPLAY,
+    "build_not_replayed": BLOCKS_REPLAY,
     "build_inputs_incomplete": BLOCKS_REPLAY,
     "environment_closure_absent": BLOCKS_REPLAY,
     "closure_scope_incomplete": BLOCKS_REPLAY,
@@ -530,9 +532,17 @@ def _build_reasons(
     enablement: Mapping[str, Any],
     steps: Sequence[Mapping[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Judge that an admitted build is joined to a row and reproducible."""
+    """Judge that an admitted build is joined to a row and reproducible.
+
+    A manifest that records an executed build while no step replays it is the
+    one shape this cannot stay silent about: the patches are then replayed onto
+    whatever binary the base image shipped, and a framework whose compiled
+    extension the build replaced fails at the first op the patched Python calls
+    -- long after the replay reported success.
+    """
     if not any(step.get("kind") == BUILD_KIND for step in steps):
-        return []
+        executed = _executed_build_ids(enablement)
+        return [_reason("build_not_replayed", task_id) for task_id in executed]
     sentinel, row = select_linked_build(enablement)
     task_id = str((sentinel or {}).get("task_id") or "")
     if row is None:
@@ -540,6 +550,27 @@ def _build_reasons(
     if not _build_inputs_complete(row):
         return [_reason("build_inputs_incomplete", task_id)]
     return []
+
+
+def _executed_build_ids(enablement: Mapping[str, Any]) -> list[str]:
+    """Return the ids of builds the manifest records as executed.
+
+    Read off the attempt rows, not the routing sentinels: a sentinel says a
+    build was asked for, while a row with an outcome says one ran. The id is the
+    attempt root's final segment, which is what the row is joined by elsewhere.
+    """
+    manifest = enablement.get("build_manifest")
+    if not isinstance(manifest, list):
+        return []
+    out: list[str] = []
+    for row in manifest:
+        if not isinstance(row, dict) or row.get("ok") is not True:
+            continue
+        name = PurePosixPath(str(row.get("attempt_root") or "")).name
+        candidate = name or str(row.get("task_id") or "").strip()
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
 
 
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
