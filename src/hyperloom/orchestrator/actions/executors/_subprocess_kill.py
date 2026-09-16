@@ -159,7 +159,7 @@ OVERTIME_KILL_RETURNCODE: int = -909
 # parent ``vllm serve`` / ``sglang.launch_server`` process hung instead of exiting.
 SERVER_DEAD_RETURNCODE: int = -910
 
-# Fatal server-init markers: once any appears in ``server.log`` the engine is unrecoverable within the same Magpie
+# Fatal server markers: once any appears in ``server.log`` the engine is unrecoverable within the same Magpie
 # subprocess.
 _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     # (1) runtime engine/worker bootstrap crashes
@@ -170,7 +170,10 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "AsyncEngineDeadError",
     "raise EngineDeadError",
     "Failed core proc(s)",
-    # (2) config-validation-stage terminal failures (pre-engine).
+    # (2) ROCm runtime memory faults, during startup or generation.
+    "HSA_STATUS_ERROR_MEMORY_FAULT",
+    "Memory Fault Error [host:",
+    # (3) config-validation-stage terminal failures (pre-engine).
     "does not recognize this architecture",
     "Transformers does not recognize",
     "ValidationError for ModelConfig",
