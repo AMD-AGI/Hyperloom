@@ -418,7 +418,7 @@ Optimize inference for this workload:
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
-2. Monitor the process every 300s until the optimization is complete or failed.
+2. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 ### Docker (source)

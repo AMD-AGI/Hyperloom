@@ -140,7 +140,6 @@ class SweepPhase(PhaseHandler):
             # None, not [], when the state carries no ladder: the executor reads [] as a deliberate "no concs" and
             # skips, while None lets it fall back to the ladder for this workload.
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
-            "variant_timeout_sec": int(state.conc_sweep_variant_timeout_sec or 0),
             "total_budget_sec": clamped_budget,
         }
         task, was_existing = await self.tasks.create_or_return_existing(

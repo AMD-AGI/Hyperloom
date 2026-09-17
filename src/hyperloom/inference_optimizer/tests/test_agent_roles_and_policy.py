@@ -24,16 +24,12 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
-    DELEGATE_ACTION_REQUIRED_PAYLOAD,
-    DELEGATE_ACTION_SOURCE_ALLOWLIST,
     KERNEL_AGENT_OWNED_ACTIONS,
     PolicyDenied,
     PolicyGate,
     REQUEST_ROUTING,
     REVIEW_VERDICTS,
     REVIEW_VERDICT_SOURCE_ALLOWLIST,
-    ROBUSTNESS_ONLY_INTENTS,
-    ROBUSTNESS_ONLY_SOURCE_ALLOWLIST,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
@@ -57,9 +53,9 @@ def test_default_claude_model_is_opus_5():
     )
 
 
-def test_default_role_registry_has_3_agents():
+def test_default_role_registry_has_only_orchestration_and_critic():
     reg = default_role_registry()
-    assert set(reg.keys()) == {"orchestration", "critic", "robustness"}
+    assert set(reg.keys()) == {"orchestration", "critic"}
     assert "kernel_agent" not in reg
 
 
@@ -97,16 +93,6 @@ def test_critic_review_only_codex_no_tools():
     assert IntentType.PROPOSE_ACTION not in role.allowed_intents
 
 
-def test_robustness_scheduling_police():
-    role = default_role_registry()["robustness"]
-    assert role.backend_type == BackendType.CLAUDE
-    assert IntentType.PRUNE_BRANCH in role.allowed_intents
-    assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
-    assert IntentType.PROPOSE_ACTION not in role.allowed_intents
-    assert IntentType.REQUEST not in role.allowed_intents
-    assert IntentType.REVIEW_VERDICT not in role.allowed_intents
-
-
 # PolicyGate constants
 def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_AGENT_OWNED_ACTIONS == frozenset(
@@ -129,16 +115,6 @@ def test_review_verdict_critic_only():
     assert "objection" not in REVIEW_VERDICTS
 
 
-def test_robustness_only_intents():
-    assert ROBUSTNESS_ONLY_SOURCE_ALLOWLIST == frozenset({"robustness"})
-    assert ROBUSTNESS_ONLY_INTENTS == frozenset(
-        {
-            IntentType.PRUNE_BRANCH,
-            IntentType.ESCALATE_STRATEGY_CHANGE,
-        }
-    )
-
-
 def test_kill_task_is_not_a_valid_intent_type():
     """kill_task left the vocabulary; an envelope carrying it must be rejected."""
     assert "kill_task" not in {member.value for member in IntentType}
@@ -156,6 +132,34 @@ def test_core_state_fields_includes_current_best():
 @pytest.fixture
 def gate() -> PolicyGate:
     return PolicyGate(role_registry=default_role_registry())
+
+
+def test_retired_recover_is_not_an_action():
+    from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
+
+    assert "recover" not in ACTION_CATALOGUE
+    assert all("recover" not in actions for actions in PHASE_ALLOWED_ACTIONS.values())
+
+
+def test_legacy_watchdog_options_do_not_change_resumed_measurements():
+    legacy_options = {
+        "robustness_options": {"auto_probe_inference_server": False},
+        "explore_overtime_kill_ratio": 2.0,
+        "explore_variant_timeout_sec_override": 123,
+        "explore_variant_timeout_safety_margin": 0.5,
+        "conc_sweep_variant_timeout_sec": 456,
+    }
+    persisted = {
+        "session_id": "existing",
+        "grading": {"objective": "interactivity", "noise_pct": 3.5},
+        "benchmark_mode": "agentx",
+        "operator_server_args": "--max-num-seqs 512",
+        "operator_extra_env": {"SGLANG_USE_AITER": "0"},
+    }
+    restored = SharedState.from_dict({**persisted, **legacy_options}).to_dict()
+    assert all(name not in restored for name in legacy_options)
+    assert {name: restored[name] for name in persisted} == persisted
 
 
 def test_gate_unknown_agent_rejected(gate):
@@ -223,189 +227,6 @@ def test_gate_orchestration_delegate_normal_action_ok(gate):
             payload={"action_name": "baseline"},
         ),
     )
-
-
-# Per-action delegate source allowlist: recover is robustness-only.
-def test_delegate_action_source_allowlist_constant_shape():
-    """``recover`` is the only entry today."""
-    assert DELEGATE_ACTION_SOURCE_ALLOWLIST == {
-        "recover": frozenset({"robustness"}),
-    }
-
-
-def test_delegate_action_required_payload_constant_shape():
-    assert DELEGATE_ACTION_REQUIRED_PAYLOAD == {
-        "recover": ("reason", "evidence"),
-    }
-
-
-def test_gate_robustness_delegate_recover_with_evidence_ok(gate):
-    """Robustness with full evidence at top of payload passes the gate."""
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "recover",
-                "reason": "gpu_memory_leaked",
-                "force_gpu_cleanup": True,
-                "evidence": {
-                    "consecutive_hits": 2,
-                    "per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
-                },
-            },
-        ),
-    )
-
-
-def test_gate_robustness_delegate_recover_with_nested_params_ok(gate):
-    """The gate must accept the nested ``payload["params"]`` shape from ``build_delegate``."""
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "recover",
-                "params": {
-                    "reason": "gpu_memory_leaked",
-                    "force_gpu_cleanup": True,
-                    "evidence": {
-                        "consecutive_hits": 2,
-                        "per_gpu": [{"gpu_id": 0, "free_mb": 12.0}],
-                    },
-                },
-                "idempotency_key": "recover-gpu-leak-tick-1",
-            },
-        ),
-    )
-
-
-def test_gate_orchestration_delegate_recover_rejected_by_source(gate):
-    """Orchestration must NOT initiate ``recover`` even with full payload."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "recover",
-                    "reason": "gpu_memory_leaked",
-                    "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
-                },
-            ),
-        )
-    assert exc.value.rule == "delegate_action_source"
-    assert "robustness" in str(exc.value)
-
-
-def test_gate_orchestration_propose_recover_rejected_by_source(gate):
-    """Orchestration must NOT reach ``recover`` through propose_action either; the source allowlist gates both intent kinds."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "recover"},
-            ),
-        )
-    assert exc.value.rule == "propose_action_source"
-    assert "robustness" in str(exc.value)
-
-
-def test_gate_robustness_delegate_recover_in_phase_ok():
-    """The robustness ``gpu_memory_leaked`` ladder delegates ``recover`` with a live phase set."""
-    state = SharedState(phase="FRAMEWORK_AGENT", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    gate.validate_intent(
-        "robustness",
-        Intent(
-            type=IntentType.DELEGATE,
-            payload={
-                "action_name": "recover",
-                "params": {
-                    "reason": "gpu_memory_leaked",
-                    "force_gpu_cleanup": True,
-                    "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
-                },
-            },
-        ),
-    )
-
-
-def test_gate_orchestration_propose_recover_in_phase_rejected():
-    """With a live phase set, Orchestration's propose(recover) is denied (the source gate fires first)."""
-    state = SharedState(phase="FRAMEWORK_AGENT", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.PROPOSE_ACTION,
-                payload={"action_name": "recover"},
-            ),
-        )
-    assert exc.value.rule == "propose_action_source"
-
-
-def test_gate_robustness_delegate_recover_missing_evidence_rejected(gate):
-    """Even from robustness, ``recover`` without evidence is denied."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "recover",
-                    "reason": "gpu_memory_leaked",
-                },
-            ),
-        )
-    assert exc.value.rule == "delegate_action_evidence"
-    assert "evidence" in str(exc.value)
-
-
-def test_gate_robustness_delegate_recover_missing_reason_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "recover",
-                    "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
-                },
-            ),
-        )
-    assert exc.value.rule == "delegate_action_evidence"
-    assert "reason" in str(exc.value)
-
-
-def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
-    """Empty dict / empty string count as missing (gate asserts information presence)."""
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "robustness",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={
-                    "action_name": "recover",
-                    "reason": "   ",
-                    "evidence": {},
-                },
-            ),
-        )
-    assert exc.value.rule == "delegate_action_evidence"
-
-
-def test_gate_robustness_delegate_recover_still_allowed_in_all_phases(gate):
-    """recover remains the one action robustness may delegate in any phase."""
-    payload = {
-        "action_name": "recover",
-        "reason": "gpu_memory_leaked",
-        "force_gpu_cleanup": True,
-        "evidence": {"per_gpu": [{"gpu_id": 0, "free_mb": 0.0}]},
-    }
-    gate.validate_intent("robustness", Intent(type=IntentType.DELEGATE, payload=payload))
 
 
 def test_gate_orchestration_request_to_kernel_ok(gate):
@@ -481,10 +302,10 @@ def test_gate_critic_delegate_rejected_by_role(gate):
     assert exc.value.rule == "role"
 
 
-def test_gate_robustness_prune_branch_requires_family(gate):
+def test_gate_orchestration_prune_branch_requires_family(gate):
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"reason": "3 fails"},
@@ -568,7 +389,7 @@ def test_gate_update_state_degraded_markers_rejected(gate):
 
 # allowed_tools_for_agent
 def test_allowed_tools_claude_returns_emit_intent(gate):
-    assert gate.allowed_tools_for_agent("robustness") == ["emit_intent"]
+    assert gate.allowed_tools_for_agent("robustness") == []
     from hyperloom.orchestrator.roles.mcp_context_tools import (
         CONTEXT_TOOL_NAMES,
     )
@@ -609,16 +430,9 @@ def test_kernel_agent_prompt_file_absent():
     assert not p.exists(), f"kernel_agent.md should have been deleted: {p}"
 
 
-def test_robustness_role_not_prompt_driven():
-    from hyperloom.orchestrator.roles.agent_role import default_role_registry
-
-    registry = default_role_registry()
-    assert not registry["robustness"].prompt_driven
-
-
 def test_robustness_role_no_system_prompt_file():
     p = asset_system_prompts_dir() / "robustness.md"
-    assert not p.exists(), "robustness.md should be removed; its prompt is driven by the RCA engine"
+    assert not p.exists(), "robustness.md must not be shipped"
 
 
 def test_core_state_fields_includes_closing_phase_and_baseline_config():
@@ -695,12 +509,3 @@ def test_a_forged_closing_reserve_would_have_spent_the_session_outright():
     assert applied == {}
     assert honest > 0.0
     assert state.session_budget_usable_sec() == honest
-
-
-def test_core_state_fields_synced_with_robustness_envelope():
-    # gate.CORE_STATE_FIELDS and the robustness envelope copy must stay byte-identical.
-    from hyperloom.agents.robustness.role.envelope import (
-        CORE_STATE_FIELDS as ENVELOPE_CORE_STATE_FIELDS,
-    )
-
-    assert CORE_STATE_FIELDS == ENVELOPE_CORE_STATE_FIELDS

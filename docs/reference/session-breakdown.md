@@ -98,7 +98,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
   "critic":             { /* the critic agent's own run, iteration by iteration */ },
-  "robustness":         { /* what the robustness agent raised, turn by turn */ },
+  "robustness":         { /* empty for new sessions; historical compatibility */ },
 }
 ```
 
@@ -111,9 +111,9 @@ per-topic sections (`baseline`, `final`, `phase_timeline`,
 `telemetry`, `optimizations`, `source_files` and the optional tail) are gone:
 each was a projection of the run rather than a fact of it, and they now come
 out of `timeline`, whose events carry the same facts attached to the stage
-that produced them. `critic_robustness` is gone too, split into the `critic`
-and `robustness` keys above, because the two agents run independently and a
-session can have either without the other.
+that produced them. The old combined `critic_robustness` key is absent. Critic
+activity lives under `critic`; `robustness` is retained for V6 wire compatibility
+and historical artifact readers, not as a live agent surface.
 
 How the export itself went is reported once, on `metadata.warnings`. An
 earlier shape also carried a top-level `warnings`, taken partway through the
@@ -276,7 +276,8 @@ records. This is where the facts the older flat sections projected now live,
 attached to the stage that produced them.
 
 `close` is what the session settled at close: the `steps` the close sequencer
-ran, the `artifacts` it published, and the robustness findings it collected.
+ran and the `artifacts` it published. Its `robustness` field is empty for new
+sessions and remains readable when present in historical records.
 
 `V6Outcome`, `V6TimelineEvent` and `V6Close` in
 `src/hyperloom/inference_optimizer/breakdown/schema.py` are the authority on
@@ -316,22 +317,16 @@ reporting either alone misreads the round.
 
 ## `robustness`
 
-What the robustness agent raised, turn by turn. The agent watches the session
-from outside the optimization loop, so its turns belong to no phase and no
-macro cycle and are reported here rather than on the timeline.
+New sessions emit `{}`. No Robustness agent, runtime RCA, monitor, or supervisor
+runs, and new report UI omits this section. The V6 key and historical readers
+remain so archived sessions can still be inspected without inventing activity.
+The same compatibility rule applies to `close.robustness`.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `turns` | list | One row per turn the agent took, in turn order |
-
-Each turn carries `turn_idx`, `tick_index`, `ts`, the `intents` it raised, and
-any `parse_warnings` from reading its envelope.
-
-`outcome` is the field that distinguishes a turn the agent could not complete
-(`invalid_envelope`, `no_envelope`) from one that simply had nothing to raise
-(`intents` with an empty list). A bare intent count renders those
-identically, which is what made a mute agent and a quiet session
-indistinguishable in the section this replaces.
+Historical `turns` rows may contain `turn_idx`, `tick_index`, `ts`, `intents`,
+`parse_warnings`, and `outcome`. In those records, `invalid_envelope` or
+`no_envelope` indicates an incomplete turn, whereas `intents` with an empty list
+indicates a completed turn with nothing raised. These are archived facts, not
+live recovery instructions.
 
 ---
 
@@ -528,20 +523,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     ]
   },
 
-  "robustness": {
-    "turns": [
-      {
-        "turn_idx": 12,
-        "tick_index": 61,
-        "ts": "2026-05-17T12:44:00Z",
-        "outcome": "intents",
-        "intents": [
-          { "type": "send_message", "severity": "warn", "topic": "disk", "payload": { "body_md": "workspace is 88% full" } }
-        ],
-        "parse_warnings": []
-      }
-    ]
-  }
+  "robustness": {}
 }
 ```
 

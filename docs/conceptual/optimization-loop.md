@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom's control plane delegates kernel optimization to GEAK's execution plane through handoff, result, and kernel-journey artifacts. The current phase order and write-path contracts are described below.
 :class: hl-lightbox-trigger
 ```
 
@@ -56,7 +56,7 @@ must be able to:
 - Create or resume a session directory,
 - Write `manifest.json`, `state.json`, `storage/coordinator.db`, action
   run workspaces, reports, and `session_breakdown.json`,
-- Route intents through the Orchestration, Critic, and Robustness LLM roles,
+- Route intents through the Orchestration and Critic LLM roles,
   and dispatch kernel work to programmatic Python handlers,
 - Produce a final report and a dashboard-consumable breakdown.
 
@@ -261,7 +261,6 @@ admits these actions:
 - `specialist`
 - `roofline`
 - `profile`
-- `recover`
 
 Within the kernel-agent request channel, the handler dispatches request kinds
 such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
@@ -321,13 +320,16 @@ turn never depends on what an earlier turn happened to remember.
   not by replaying a non-deterministic transcript.
 - **Write path**: All write actions flow through `emit_intent` → the
   Coordinator's intent handler, so Critic review, the accuracy gate,
-  Robustness escalation, and PolicyGate's invariants (path sandbox,
+  and PolicyGate's invariants (path sandbox,
   resource leases, phase ordering, data dependencies, single-writer
   rules) apply to every turn. Repetition is checked against state — the
   tested-variant ledger and the action-failure log — not against agent
   recall.
 
-Critic and Robustness are likewise reactive and stateless per tick.
+Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
+supervision are not roles in this loop. Stopped sessions require an explicit
+operator `--resume-from` decision; `recover-session` only reconstructs artifacts
+offline.
 
 ## Feedback loops
 
@@ -337,8 +339,6 @@ The loop adapts through facts, not through retired score tables:
   action attempts, kernel attempts, framework-agent progress, and warnings.
 - `RecipeKB` records durable lessons and pitfalls for future sessions.
 - Critic verdicts gate risky patches and framework candidates.
-- Robustness watches stalls, crashes, config-only loops, specialist
-  storms, and recovery signals.
 - PolicyGate blocks retired actions, wrong-phase actions, unsafe paths,
   and invalid envelopes before they mutate runtime state.
 

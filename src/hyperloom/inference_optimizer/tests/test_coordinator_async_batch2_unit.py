@@ -43,7 +43,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
@@ -975,10 +975,9 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    for agent in ("orchestration", "robustness"):
-        out = await coord._compose_prompt(agent)
-        assert "Specialist health" not in out
-        assert "stale" not in out.lower()
+    out = await coord._compose_prompt("orchestration")
+    assert "Specialist health" not in out
+    assert "stale" not in out.lower()
 
 
 @pytest.mark.asyncio

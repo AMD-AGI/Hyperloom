@@ -32,7 +32,6 @@ from .backends import (
     _build_proposal_scorer,
     _official_anthropic_only,
     _official_openai_only,
-    resolve_robustness_options,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -72,7 +71,6 @@ from .credentials import (
     _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
-    _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
     _resolve_agent_root as _resolve_agent_root,
     _validate_agent_runtime as _validate_agent_runtime,
 )
@@ -101,8 +99,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.orchestrator.supervisor import spawn_supervisor, stop_supervisor
-from hyperloom.orchestrator.supervisor.watch import SUPERVISOR_RESTART_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
@@ -861,26 +858,6 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-# Default robustness backend ("agent"); force observation-only mock via --robustness-mock or env.
-DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
-    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
-    "agent",
-)
-_VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
-
-
-def _resolve_robustness_choice(args: argparse.Namespace) -> str:
-    """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid."""
-    chosen, _ = _resolve_choice(
-        "robustness_backend",
-        DEFAULT_ROBUSTNESS_BACKEND,
-        _VALID_ROBUSTNESS_BACKENDS,
-        "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
-        args=args,
-    )
-    return chosen
-
-
 def _reset_state_file(session_dir: Path) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched)."""
     state_path = session_dir / "state.json"
@@ -1570,6 +1547,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # one place that covers both.
     _preflight_agentx_backend(args)
     _apply_agentx_budget_profile(args)
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+    resolve_benchmark_timeouts()
 
     if args.resume_from:
         # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
@@ -1740,7 +1720,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported HYPERLOOM_BYPASS_SCRIPTS_DIR: {state.bypass_scripts_dir}")
         if state.benchmark_backend:
             print(f"  re-exported HYPERLOOM_BENCHMARK_BACKEND: {state.benchmark_backend}")
-        # Feeds the robustness defaults and the IR-8 check only.
+        # Feeds the IR-8 check.
         if state.nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
             args.nodes = state.nodes
             os.environ["INFERENCE_OPTIMIZER_NODES"] = str(state.nodes)
@@ -2004,7 +1984,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         session_dir = make_session_dir(model_name=resolve_model_display_name(args))
         # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
-        # robustness monitor.
+        # session diagnostics.
         session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
         _persist_install_event(args, session_dir)
@@ -2167,31 +2147,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[4]))
 
-    # Resolve robustness backend choice + runtime root, mirroring critic.
-    robustness_choice = _resolve_robustness_choice(args)
-    robustness_agent_root: Path | None = None
-    # T0 anchor writes warm_start_* via its own SharedState load; reload before persisting launch-shape fields so
-    # seed/resume memory cannot clobber them.
+    # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
-    robustness_options = resolve_robustness_options(args, state)
-    state.robustness_options = robustness_options
-    # Persist before the Coordinator reads SharedState off disk, or the launch shape stays in-memory only and the next
-    # resume falls back to defaults.
-    state.save(session_dir)
-    if robustness_choice == "agent":
-        robustness_agent_root = _resolve_agent_root("robustness")
-        if robustness_agent_root is None:
-            print(
-                f"ERROR: --robustness-agent selected but robustness-agent "
-                f"runtime not found.\n"
-                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
-                f"containing src/robustness_agent/runtime/cli.py, or install "
-                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
-                f"  Bypass with --robustness-mock.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _validate_agent_runtime(robustness_agent_root, agent="robustness")
 
     backends = _build_backends(
         claude_model=args.claude_model,
@@ -2200,9 +2157,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
-        robustness_choice=robustness_choice,
-        robustness_agent_root=robustness_agent_root,
-        robustness_options=robustness_options,
         codex_follows_claude=codex_follows_claude,
         critic_protocol=args.critic_protocol,
     )
@@ -2327,20 +2281,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"critic-agent(kb={critic_kb_mode}, protocol={_review_protocol}, "
             f"model={_review_model}, root={critic_agent_root})"
         )
-    if robustness_choice == "mock":
-        robustness_str = "mock"
-    else:
-        robustness_str = f"robustness-agent(root={robustness_agent_root})"
-        if robustness_options:
-            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
-            robustness_str += f"[{kvs}]"
-    print(
-        f"Backends        : "
-        f"orchestration={orchestration_str}, "
-        f"kernel={kernel_str}, "
-        f"critic={critic_str}, "
-        f"robustness={robustness_str}"
-    )
+    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
@@ -2353,18 +2294,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "to fetch real InferenceX reference data.",
             file=sys.stderr,
         )
-
-    # The out-of-band supervisor watches for the two failures this process
-    # cannot report on itself: dying, and ceasing to tick. It is given the
-    # session's budget so its stall window fits inside the run it watches.
-    try:
-        supervisor_proc = spawn_supervisor(session_dir, session_sec=args.max_hours * 3600.0)
-    except OSError as exc:
-        # Auxiliary: a run without a watchdog still runs, and the operator is
-        # told on both channels that it is unwatched.
-        supervisor_proc = None
-        log.warning("supervisor: could not start (%s); the run proceeds unwatched", exc)
-        print(f"[supervisor] could not start ({exc}); the run proceeds unwatched", file=sys.stderr)
 
     stop_reason: str | None = None
     try:
@@ -2379,13 +2308,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
-        # Stopping the leases and the agent subprocesses is itself a step that
-        # can hang, so it happens while the supervisor is still watching; the
-        # supervisor is stood down only once it has returned.
         with timed_teardown_step(state, "coordinator_stop"):
             await coordinator.stop()
-        with timed_teardown_step(state, "supervisor_stop"):
-            stop_supervisor(supervisor_proc)
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
@@ -2396,12 +2320,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             state.save(session_dir)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist teardown timings (non-fatal)")
-
-    if stop_reason == SUPERVISOR_RESTART_REASON:
-        # The leg is over, the session is not: the monitor resumes it, and a
-        # final summary here would speak for a run that has not ended.
-        print(f"Leg stopped for a supervisor restart; session {session_dir} stays resumable.")
-        return _exit_code_for_stop_reason(stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

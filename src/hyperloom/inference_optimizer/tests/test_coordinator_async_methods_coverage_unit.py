@@ -30,7 +30,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -410,13 +410,11 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_robustness_and_kernel(coord: Coordinator) -> None:
+async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out_rob = await coord._compose_prompt("robustness")
     out_k = await coord._compose_prompt("kernel_agent")
-    assert "SESSION_DIR=" in out_rob
     assert "SESSION_DIR=" in out_k
 
 

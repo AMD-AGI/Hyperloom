@@ -104,7 +104,6 @@ def _silent_coordinator(session_dir) -> Coordinator:
         backends={
             "orchestration": MockBackend(silent, name="o"),
             "critic": MockBackend(silent, name="c"),
-            "robustness": MockBackend(silent, name="r"),
         },
     )
 
@@ -569,41 +568,6 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
             )
         )
         prompt = await c._compose_prompt("critic")
-        assert "failure:" not in prompt
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_does_not_receive_failure_rows(session_dir):
-    """Robustness inbox must not include failure: rows."""
-    c = _silent_coordinator(session_dir)
-    try:
-        pvo = {
-            "variant_name": "fp8_kv",
-            "outcome": "FAILED",
-            "stage": "warmup",
-            "failure_id": "fail.t1.abc0000",
-            "error_class": "server_init_dead",
-            "error_excerpt": "AssertionError: batch_size=1",
-            "reason": "warmup_failed",
-        }
-        await c.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "delegated_result",
-                {
-                    "task_id": "t1",
-                    "kind": "explore",
-                    "state": "succeeded",
-                    "result": {"status": "failed", "per_variant_outcomes": [pvo]},
-                    "error": None,
-                },
-            )
-        )
-        c.shared_state.max_minutes = 60
-        prompt = await c._compose_prompt("robustness")
         assert "failure:" not in prompt
     finally:
         await c.stop()

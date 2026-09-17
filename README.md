@@ -63,15 +63,14 @@ contracts, enablement ladder, and phase allowlists.
 
 ### Multi-agent harness
 
-Four roles run a session. Orchestration stays alive as one conversation so the
-plan is never rebuilt from a cold prompt. The other three are spun up when
-needed and discarded:
+The Coordinator runs Orchestration and Critic turns and dispatches specialists
+when needed. Each turn is grounded in persisted session state rather than an
+automatic supervision or recovery loop:
 
 | Role | When it runs | How it keeps the run on-goal |
 |------|----------------|------------------------------|
 | **Orchestration** | Every tick | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
 | **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
-| **Robustness** | Stall, crash, or circular search | Circuit breaker: forces recovery instead of another lap |
 | **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
 
 Risky source edits go through an isolated worktree, a unified-diff gate, a

@@ -6095,9 +6095,7 @@ class WritebackCollaborator:
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
-                    # Both halves of the catalogue contract: without lanes the row
-                    # launches a server unserialised; without a TTL it is invisible
-                    # to ``reclaim_expired_running``.
+                    # Preserve serving-lane serialization and the catalogue's admission estimate.
                     requires_lanes=lanes,
                     lease_ttl_sec=ttl,
                 )

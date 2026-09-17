@@ -35,10 +35,10 @@ from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
     _kill_stale_servers,
-    agentx_variant_timeout_sec,
     run_grid,
     variant_conc,
 )
+from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -86,19 +86,8 @@ def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
 # Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
-# Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
-DEFAULT_VARIANT_TIMEOUT_SEC = 1800
-
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
-
-# How many rungs the AgentX floor below buys when the default budget cannot fund even one.
-_AGENTX_MIN_FUNDED_RUNGS = 2
-
-
-def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: int | None = None) -> float:
-    """What a variant will actually be granted, for budget arithmetic."""
-    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state, conc=conc))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -422,8 +411,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     workspace: Path,
     model_path: str,
     gpu_type: str,
-    variant_timeout_sec: int,
-    soft_deadline_sec: float | None,
+    benchmark_timeout_sec: float,
     deadline: float | None,
     state: SharedState,
     session_dir: Path,
@@ -450,7 +438,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     so incremental flushes see the full cross-arm picture, the second so the
     caller can inspect the final budget status. ``deadline`` is an absolute
     ``time.time()`` epoch (``None`` when unbounded), distinct from
-    ``soft_deadline_sec``, which is a duration.
+    the fixed per-spawn benchmark cap.
     """
     from ..actions.executors._grid_runner import _num_gpus_for_config
     from ..actions.executors._ray_serving import maybe_serving_lease
@@ -539,8 +527,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
-                variant_timeout_sec=variant_timeout_sec,
-                soft_deadline_sec=soft_deadline_sec,
+                benchmark_timeout_sec=benchmark_timeout_sec,
                 deadline=deadline,
                 state=state,
                 session_dir=session_dir,
@@ -589,7 +576,6 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 base_extra_args="",
                 grid=[boot_variant],
                 output_root=workspace,
-                variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
@@ -597,7 +583,6 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 server_already_ready=False,
                 preclean_before_run=True,
                 warmup_before_measure=False,
-                soft_deadline_sec=soft_deadline_sec,
                 serving_lease=arm_lease,
             )
         except Exception as exc:  # noqa: BLE001
@@ -648,7 +633,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 committed=False,
                 start_time=boot_started_iso,
                 wall_duration_sec=boot_elapsed,
-                granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(boot_variant)),
+                granted_cap_sec=benchmark_timeout_sec,
             )
             boot_idx += 1
             continue
@@ -676,7 +661,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             stage=STAGE_BOOT,
             start_time=boot_started_iso,
             wall_duration_sec=boot_elapsed,
-            granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(boot_variant)),
+            granted_cap_sec=benchmark_timeout_sec,
         )
         if recorder is not None:
             recorder.record_arm_boot(
@@ -745,8 +730,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             model_path=model_path,
             gpu_type=gpu_type,
             benchmark_script=benchmark_script,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=soft_deadline_sec,
+            benchmark_timeout_sec=benchmark_timeout_sec,
             deadline=deadline,
             state=state,
             session_dir=session_dir,
@@ -789,14 +773,10 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         skip_r,
                         stage=STAGE_BUDGET_SKIP,
                         budget_remaining_sec=max(0.0, float(_reuse_remaining)),
-                        granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(v)),
+                        granted_cap_sec=benchmark_timeout_sec,
                     )
                 break
-            if (
-                has_budget
-                and _reuse_remaining is not None
-                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
-            ):
+            if has_budget and _reuse_remaining is not None and _reuse_remaining < benchmark_timeout_sec:
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
                 _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
@@ -810,7 +790,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         skip_r,
                         stage=STAGE_BUDGET_SKIP,
                         budget_remaining_sec=max(0.0, float(_reuse_remaining)),
-                        granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(v)),
+                        granted_cap_sec=benchmark_timeout_sec,
                     )
                 break
             # Check session deadline before each reuse point.
@@ -828,7 +808,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         skip_r,
                         stage=STAGE_BUDGET_SKIP,
                         budget_remaining_sec=0.0,
-                        granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(v)),
+                        granted_cap_sec=benchmark_timeout_sec,
                     )
                 break
 
@@ -846,7 +826,6 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     base_extra_args="",
                     grid=[variant],
                     output_root=workspace,
-                    variant_timeout_sec=variant_timeout_sec,
                     model_path=model_path,
                     gpu_type=gpu_type,
                     benchmark_script=benchmark_script,
@@ -854,7 +833,6 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     server_already_ready=True,
                     preclean_before_run=False,
                     warmup_before_measure=False,
-                    soft_deadline_sec=soft_deadline_sec,
                     serving_lease=arm_lease,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -885,7 +863,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     stage=STAGE_REUSE,
                     start_time=reuse_started_iso,
                     wall_duration_sec=reuse_elapsed,
-                    granted_cap_sec=_granted_cap_sec(variant_timeout_sec, state, variant_conc(variant)),
+                    granted_cap_sec=benchmark_timeout_sec,
                     budget_remaining_sec=_reuse_remaining,
                 )
             # Incremental flush after each reuse point.
@@ -931,8 +909,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     workspace: Path,
     model_path: str,
     gpu_type: str,
-    variant_timeout_sec: int,
-    soft_deadline_sec: float | None,
+    benchmark_timeout_sec: float,
     deadline: float | None,
     state: SharedState,
     session_dir: Path,
@@ -962,7 +939,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     for variant in grid:
         # Task-level budget checks.
         _ob_rem = (deadline - time.time()) if has_budget and deadline is not None else None
-        _ob_cap = _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
+        _ob_cap = benchmark_timeout_sec
         if has_budget and _ob_rem is not None and _ob_rem <= 0:
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "total_budget_exhausted"
@@ -1019,11 +996,9 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 base_extra_args="",
                 grid=[variant],
                 output_root=workspace,
-                variant_timeout_sec=variant_timeout_sec,
                 model_path=model_path,
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
-                soft_deadline_sec=soft_deadline_sec,
                 serving_lease=serving_lease,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1256,7 +1231,6 @@ async def run_conc_sweep(
     session_dir: Path,
     *,
     concs: list[int] | None = None,
-    variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
     total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
     num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     write_reports: bool = True,
@@ -1270,6 +1244,7 @@ async def run_conc_sweep(
     nothing, which is what a direct caller with no session bound wants.
     Returns a skip envelope when prerequisites are unmet.
     """
+    _, benchmark_timeout_sec = resolve_benchmark_timeouts()
     session_dir = Path(session_dir)
     # Whether the ladder was handed to the sweep or picked for the workload --
     # a distinction only this line can still see, since the two are the same
@@ -1375,36 +1350,8 @@ async def run_conc_sweep(
             report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
         )
 
-    # The module default is synthetic-sized and cannot fund a single AgentX rung.
-    # ``_granted_cap_sec`` prices a rung at what ``run_grid`` will actually grant
-    # it, which under AgentX is the raised cap (10800s at canonical settings) --
-    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own, so the whole
-    # ladder would be skipped with zero measurements. The CLI already raises
-    # this knob for AgentX; a caller reaching ``run_conc_sweep`` directly got
-    # the synthetic default. Give it the same floor here, but only when the
-    # caller left the default in place -- a number the operator chose is never
-    # overridden. Safe to raise: this is the action's own slice, and the
-    # session deadline still clamps it via ``_session_soft_dl`` below, which
-    # is why the price is computed once and reused rather than asked twice.
-    _rung_cost = _granted_cap_sec(variant_timeout_sec, state)
+    _rung_cost = benchmark_timeout_sec
     declared_total_budget_sec = total_budget_sec
-    budget_raised = False
-    if total_budget_sec is not None and int(total_budget_sec) == DEFAULT_TOTAL_BUDGET_SEC:  # noqa: SIM102
-        if _rung_cost > float(total_budget_sec):
-            _raised = int(_rung_cost * _AGENTX_MIN_FUNDED_RUNGS)
-            budget_raised = True
-            log.warning(
-                "conc_sweep: the default total budget %ds cannot fund even one rung at "
-                "the granted cap %.0fs, so every rung would be skipped as "
-                "insufficient_remaining_for_variant. Raising the budget to %ds (%d rungs) "
-                "for this AgentX sweep. Pass --conc-sweep-total-budget-sec to size it "
-                "yourself; the session deadline still clamps whatever is set here.",
-                total_budget_sec,
-                _rung_cost,
-                _raised,
-                _AGENTX_MIN_FUNDED_RUNGS,
-            )
-            total_budget_sec = _raised
 
     has_budget = total_budget_sec is not None
     started_at = time.time()
@@ -1416,26 +1363,14 @@ async def run_conc_sweep(
     json_path = rdir / "conc_sweep_summary.json"
     csv_path = rdir / "conc_sweep_raw.csv"
 
-    # Compute session soft_deadline once (used in both paths).
-    _SESSION_CLOSE_RESERVE_SEC = 120.0
-    _session_soft_dl: float | None = None
-    _session_rem_fn = getattr(state, "remaining_minutes", None)
-    if callable(_session_rem_fn):
-        _sr = _session_rem_fn()
-        if _sr is not None:
-            _sr_sec = _sr * 60.0
-            _clamped = max(0.0, _sr_sec - _SESSION_CLOSE_RESERVE_SEC)
-            _session_soft_dl = min(_rung_cost, _clamped) if _clamped > 0 else None
-
     if recorder is not None:
         recorder.record_budget(
             declared_total_sec=declared_total_budget_sec,
             granted_total_sec=total_budget_sec,
             rung_cost_sec=_rung_cost,
-            raised=budget_raised,
+            raised=False,
             gate_active=has_budget,
             deadline=deadline,
-            session_soft_deadline_sec=_session_soft_dl,
         )
 
     results: list[VariantResult] = []
@@ -1467,7 +1402,7 @@ async def run_conc_sweep(
             concs_ordered=concs_desc,
             grid_source=grid_source,
             num_prompts_factor=num_prompts_factor,
-            variant_timeout_sec=variant_timeout_sec,
+            variant_timeout_sec=benchmark_timeout_sec,
             arms_order=[name for name, _args, _envs in arms_order],
         )
     try:
@@ -1537,8 +1472,7 @@ async def run_conc_sweep(
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
                 benchmark_script=benchmark_script,
-                variant_timeout_sec=variant_timeout_sec,
-                soft_deadline_sec=_session_soft_dl,
+                benchmark_timeout_sec=benchmark_timeout_sec,
                 deadline=deadline,
                 state=state,
                 session_dir=session_dir,
@@ -1669,7 +1603,6 @@ __all__ = [
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
-    "DEFAULT_VARIANT_TIMEOUT_SEC",
     "SCHEMA_VERSION",
     "_build_arm_grid",
     "_flush_conc_sweep_report",

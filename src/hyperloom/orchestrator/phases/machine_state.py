@@ -13,7 +13,6 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
-    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
 )
 
 
@@ -51,7 +50,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "baseline",
             "roofline",
             "profile",
-            "recover",
         }
     ),
     # Three levers: configuration grids (``explore``), investigation and authoring (``specialist``), and landing a
@@ -64,7 +62,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             # roofline/profile auto-enqueued on the cumulative-gain watermark.
             "roofline",
             "profile",
-            "recover",
         }
     ),
     # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase entry, so an LLM re-issuing them per
@@ -75,7 +72,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "specialist",
             "roofline",
             "profile",
-            "recover",
         }
     ),
     # No specialist below: SWEEP is the validation window and CLOSE only reports.
@@ -83,21 +79,19 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         {
             # conc_sweep: Coordinator-internal CONC-ladder benchmark.
             "conc_sweep",
-            "recover",
         }
     ),
     PHASE_CLOSE: frozenset(
         {
             "report",
             "session_breakdown",
-            "recover",
         }
     ),
 }
 
 
-# Dispatched by the Coordinator or owned by the Robustness ladder.
-_NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+# Dispatched by the Coordinator.
+_NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS
 
 
 # Task kinds that mean the KERNEL lane is busy, which is a wider question than what a model may propose: a
@@ -411,32 +405,6 @@ def target_was_reached(state: Any) -> bool:
     return bool(str(getattr(state, "target_reached_at", "") or "").strip())
 
 
-def _one_variant_grant_sec(state: Any) -> float:
-    """Seconds a single variant round is actually granted, for budget arithmetic.
-
-    Prices the round the way the sweep's admission check does rather than at the
-    declared timeout, so both sides agree on what a cycle costs.
-
-    Args:
-        state (Any): Frozen SharedState view exposing the declared variant timeout.
-
-    Returns:
-        float: The granted per-variant cap in seconds, or ``0.0`` when unknown.
-    """
-    declared = getattr(state, "conc_sweep_variant_timeout_sec", 0) or 0
-    try:
-        declared_sec = int(declared)
-    except (TypeError, ValueError):
-        return 0.0
-    if declared_sec <= 0:
-        return 0.0
-    try:
-        from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
-    except ImportError:  # grid runner unavailable; price at the declared timeout
-        return float(declared_sec)
-    return float(agentx_variant_timeout_sec(declared_sec, shared_state=state))
-
-
 def _cycle_reloop_min_remaining_sec(
     state: Any,
     min_remaining_sec: float = DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC,
@@ -458,12 +426,14 @@ def _cycle_reloop_min_remaining_sec(
     Returns:
         float: The effective floor in seconds.
     """
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
     effective = float(min_remaining_sec)
     max_minutes = _max_minutes(state)
     if max_minutes > 0:
         budget_sec = max_minutes * 60.0
         effective = min(effective, budget_sec * _CYCLE_RELOOP_BUDGET_RATIO)
-        grant = min(_one_variant_grant_sec(state), budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
+        grant = min(resolve_benchmark_timeouts()[1], budget_sec * _CYCLE_RELOOP_MAX_BUDGET_SHARE)
         effective = max(effective, grant)
     return effective
 
@@ -1189,7 +1159,7 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
     """Return ``(stop_reason, evidence)`` for a phase-orthogonal stop.
 
     A recorded SWEEP closeout wins; otherwise skip_to_close maps to
-    time_exhausted or robustness_escalated before the coordinator stop reason.
+    time_exhausted or global_converged before the coordinator stop reason.
     """
     hint = _pending_escalate_hint(state)
     if hint == ESCALATE_HINT_SKIP_TO_CLOSE:
@@ -1197,19 +1167,14 @@ def _global_terminal(state: Any) -> tuple[str, dict[str, Any]] | None:
         if current == PHASE_SWEEP and _sweep_has_recorded_closeout(state):
             return None
         evidence: dict[str, Any] = {"evidence": "llm_escalation", "hint": hint}
-        # The robustness label is only justified by a robustness signal; record the
-        # crash count alongside the budget so the two can be told apart after the run.
-        evidence["crash_count"] = int(getattr(state, "crash_count", 0) or 0)
         floor = _cycle_reloop_min_remaining_sec(state)
         evidence["min_remaining_sec_effective"] = round(floor, 2)
         remaining = session_remaining_seconds(state)
         if remaining is not None:
             evidence["session_remaining_seconds"] = round(remaining, 2)
-            # Too little left for another cycle means the budget ran out; that is
-            # the honest terminal, not a robustness abort.
             if remaining < floor:
                 return "time_exhausted", evidence
-        return "robustness_escalated", evidence
+        return "global_converged", evidence
     sr = (getattr(state, "stop_reason", "") or "").strip()
     if sr:
         # Coordinator-set stop_reason takes precedence over phase exits.

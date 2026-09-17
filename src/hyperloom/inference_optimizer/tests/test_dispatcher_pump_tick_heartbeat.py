@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The pump must keep the supervisor's tick stamp fresh while it joins a task.
-
-``_pump_dispatcher_once`` synchronously joins every dispatched kind outside
-``_NOT_JOINED_KINDS``, so a baseline that spends an hour loading a model runs
-inside one tick body. The stamp the supervisor watches is written at the main
-loop's tick boundary, which that body has not reached yet: with no stamp from
-the join wait, a coordinator doing exactly what it was asked to do looks
-identical to a wedged one and gets killed.
-"""
+"""Long dispatcher joins do not require a supervisor progress stamp."""
 
 from __future__ import annotations
 
@@ -37,7 +29,6 @@ async def _build_coord(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     return Coordinator(
         session_dir=tmp_path,
@@ -88,74 +79,18 @@ def _pump_joins_one_task(monkeypatch, *, release: asyncio.Event) -> dict[str, in
 
 
 @pytest.mark.asyncio
-async def test_pump_stamps_tick_while_joining_a_long_task(tmp_path, monkeypatch):
-    """A stamp lands, and keeps advancing, for as long as the join wait runs."""
-    from hyperloom.orchestrator.supervisor import store as supervisor_store
-
+async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeypatch):
     release = asyncio.Event()
     counts = _pump_joins_one_task(monkeypatch, release=release)
     coord = await _build_coord(tmp_path)
     coord._dispatcher_poll_sec = 0.02
+    assert not hasattr(coord.reconciler, "stamp_progress")
 
     pump = asyncio.create_task(coord._pump_dispatcher_once())
     try:
-        await asyncio.sleep(0.2)
-        first = supervisor_store.read_tick(tmp_path)
-        await asyncio.sleep(0.2)
-        second = supervisor_store.read_tick(tmp_path)
+        await asyncio.sleep(0.1)
+        assert not pump.done()
     finally:
         release.set()
         await asyncio.wait_for(pump, timeout=5)
-
-    assert counts == {"spawned": 1, "reaped": 1}
-    assert first is not None, "pump joined a long task without ever stamping the tick"
-    assert second is not None
-    assert second.stamped_unix > first.stamped_unix, "tick stamp went stale while the pump was still polling its join"
-
-
-@pytest.mark.asyncio
-async def test_pump_stamp_carries_the_current_tick(tmp_path, monkeypatch):
-    """The stamp reports the tick in flight, not a placeholder."""
-    from hyperloom.orchestrator.supervisor import store as supervisor_store
-
-    release = asyncio.Event()
-    _pump_joins_one_task(monkeypatch, release=release)
-    coord = await _build_coord(tmp_path)
-    coord._dispatcher_poll_sec = 0.02
-    coord.shared_state.tick = 7
-
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
-    try:
-        await asyncio.sleep(0.2)
-        stamp = supervisor_store.read_tick(tmp_path)
-    finally:
-        release.set()
-        await asyncio.wait_for(pump, timeout=5)
-
-    assert stamp is not None
-    assert stamp.tick == 7
-
-
-@pytest.mark.asyncio
-async def test_pump_survives_an_unwritable_stamp(tmp_path, monkeypatch):
-    """Liveness reporting is best-effort: a failing stamp cannot break dispatch."""
-    from hyperloom.orchestrator.bringup import reconcile as reconcile_mod
-
-    release = asyncio.Event()
-    counts = _pump_joins_one_task(monkeypatch, release=release)
-    coord = await _build_coord(tmp_path)
-    coord._dispatcher_poll_sec = 0.02
-
-    def _explode(*_args, **_kwargs):
-        raise OSError("read-only session dir")
-
-    monkeypatch.setattr(reconcile_mod.supervisor_store, "stamp_tick", _explode)
-
-    pump = asyncio.create_task(coord._pump_dispatcher_once())
-    try:
-        await asyncio.sleep(0.2)
-    finally:
-        release.set()
-        await asyncio.wait_for(pump, timeout=5)
-
     assert counts == {"spawned": 1, "reaped": 1}

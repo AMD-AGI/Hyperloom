@@ -26,11 +26,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
-    DEFAULT_VARIANT_TIMEOUT_SEC,
     _build_arm_grid,
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
-    _granted_cap_sec,
     _grading_of,
     _has_optimization,
     _order_concs_desc,
@@ -877,8 +875,10 @@ def test_default_total_budget_is_two_and_half_hours():
 def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
     session_dir: Path,
     baseline_yaml: Path,
+    monkeypatch,
 ):
     """When remaining budget cannot cover another variant, the tail is skipped."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1")
     state = _make_state(baseline_config_path=str(baseline_yaml))
     calls = {"n": 0}
 
@@ -904,7 +904,6 @@ def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
                 state,
                 session_dir,
                 concs=[1, 4, 16, 64],
-                variant_timeout_sec=1,
                 total_budget_sec=2,
             )
         )
@@ -1019,7 +1018,6 @@ def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
                 state,
                 session_dir,
                 concs=[1],
-                variant_timeout_sec=3600,
                 total_budget_sec=120,
             )
         )
@@ -1050,7 +1048,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     state.conc_sweep_enabled = True
     state.conc_sweep_concs = [1, 4]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
@@ -1062,9 +1059,8 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {
             "status": "succeeded",
@@ -1079,7 +1075,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     assert result["status"] == "succeeded"
     assert captured["concs"] == [1, 4]
-    assert captured["timeout"] == 30
     assert captured["budget"] == 60
 
 
@@ -1137,13 +1132,11 @@ def test_conc_sweep_executor_task_params_override_state(
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.conc_sweep_concs = [1]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
         params = {
             "concs": ["2", "8"],
-            "variant_timeout_sec": "45",
             "total_budget_sec": "120",
         }
 
@@ -1153,9 +1146,8 @@ def test_conc_sweep_executor_task_params_override_state(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -1166,7 +1158,7 @@ def test_conc_sweep_executor_task_params_override_state(
         result = asyncio.run(ConcSweepExecutor()(_Ctx()))
 
     assert result["status"] == "succeeded"
-    assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+    assert captured == {"concs": [2, 8], "budget": 120}
 
 
 def test_conc_sweep_executor_keeps_none_budget_unbounded(
@@ -1191,7 +1183,7 @@ def test_conc_sweep_executor_keeps_none_budget_unbounded(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -2472,7 +2464,6 @@ def test_single_server_reuse_loop_budget_exhausted(
                 state,
                 session_dir,
                 concs=[4, 16, 64],
-                variant_timeout_sec=1,
                 total_budget_sec=2,
             )
         )
@@ -2545,43 +2536,6 @@ def test_single_server_pre_arm_skip_on_closing_phase(
 
 
 # --- budget arithmetic must price a variant at the cap it will be granted -------
-
-
-def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Zero regression: with AgentX off the sweep prices variants exactly as before."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    assert _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC) == float(DEFAULT_VARIANT_TIMEOUT_SEC)
-
-
-def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
-    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for."""
-    from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
-
-    for k in (
-        "AGENTX_BASELINE_TIMEOUT_SEC",
-        "AGENTX_BASELINE_OVERHEAD_SEC",
-        "AGENTX_WARMUP_GRACE_PERIOD",
-        "CONC",
-    ):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    raised = _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC)
-    assert raised == float(agentx_baseline_timeout_sec())
-    assert raised > float(DEFAULT_VARIANT_TIMEOUT_SEC)
-
-
-def test_the_admission_price_never_lowers_an_operator_raised_cap(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """An operator who asked for longer than AgentX derives keeps what they asked for."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert _granted_cap_sec(99_999) == 99_999.0
-
-
-# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
-# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_reaps_stale_servers_after_both_arms(

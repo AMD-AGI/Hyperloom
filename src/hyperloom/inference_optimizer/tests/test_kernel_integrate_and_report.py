@@ -64,7 +64,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def _write_baseline_yaml(path: Path) -> None:
@@ -2422,13 +2422,6 @@ async def test_report_executor_writes_md_and_json(session_dir):
             Intent(
                 type=IntentType.PROPOSE_ACTION,
                 payload={"action_name": "explore", "predicted_gain_pct": 5.0},
-            ),
-        )
-        await c._handle_intent(
-            "robustness",
-            Intent(
-                type=IntentType.ALERT,
-                payload={"severity": "low", "summary": "noise"},
             ),
         )
         c.shared_state.save(session_dir)

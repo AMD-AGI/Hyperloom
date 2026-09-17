@@ -382,7 +382,7 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
     assert out is not None
     target, reason, evidence = out
     assert target == PHASE_CLOSE
-    assert reason == "robustness_escalated"
+    assert reason == "global_converged"
     assert evidence.get("terminal") is True
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
 

@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
+  agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
+  supervision and resume, and task/lease age expiry. Each actual benchmark spawn
+  uses a 7800-second hard deadline (including boot and accuracy), plus a
+  600-second output-silence limit only after real server readiness; both are
+  finite positive settings. Output cannot extend the hard deadline. Session
+  cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
+  offline `recover-session`, process cleanup, and historical SBDv6 readers.
+
 ### Fixed
 
 - **A partitioned card is now a different machine in the KB key, so a warm-start

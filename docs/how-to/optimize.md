@@ -49,7 +49,7 @@ source "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
-2. Monitor the process every 300s until the optimization is complete or failed.
+2. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 | Field | Meaning | How to choose |
@@ -73,11 +73,15 @@ for the full prompt field reference (every field maps to a CLI flag defined in
 
 ## Monitor the run
 
-The agent reports a session ID, log path, and PID, then polls until the run
-completes. Under the hood it walks the phase chain
+The agent reports a session ID, log path, and PID, then reads persisted state
+on requested status checks. Recurring checks may use the hosting platform's
+scheduled invocations; no background supervisor or automatic restart is started.
+Logs are useful evidence, but activity alone does not prove useful progress.
+Under the hood the optimizer walks the phase chain
 `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
-[Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
-happens in each phase.
+[Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
+and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
+for the independent benchmark and session limits.
 
 ## Resume an interrupted session
 
@@ -94,7 +98,7 @@ Requirements:
 3. Resolve `$SESSION_DIR` from the launch-info JSON or the `HYPERLOOM_LAUNCH` line, never from the newest timestamp dir.
 4. Before launching, verify `manifest.json` and `state.json` exist.
 5. Report the log path, PID, health check, current phase, cumulative gain, and best config.
-6. Monitor the process every 300s until the optimization is complete or failed.
+6. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 ## Output and artifacts

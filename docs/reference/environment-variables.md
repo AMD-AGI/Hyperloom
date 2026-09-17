@@ -70,8 +70,7 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
-| `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
-| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (monitor / multi-node) | Unset                                                   | Explicit session directory for the Robustness Monitor (`tools/robustness_`<br>`monitor.sh.example`), which prefers it over `.session_dir` in the launch-info JSON. Multi-node crash-log collection reads it as a last-resort session root. Point it at one session dir, never at `$USER_DATA_PATH`. |
+| `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (multi-node) | Unset | Last-resort session root for multi-node crash-log collection. Point it at one session dir, never at `$USER_DATA_PATH`. |
 
 ---
 
@@ -99,8 +98,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
-  `--conc-sweep-timeout-sec`, `--conc-sweep-total-budget-sec`,
-  `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
+  `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
@@ -273,9 +271,8 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
   produced a candidate, so a winning fp8 run pays nothing for it.
 - **The gemm lane caps how many routed tuners run** (`--max-tuners`), priced on
   the router's own per-tuner estimates.
-- **The KERNEL-entry `run_optimization` call re-stamps a progress marker while
-  it waits**, so the idle guard can tell a working phase from a stuck one across
-  a subprocess that may run for an hour.
+- **Kernel subprocess output is recorded as activity** for diagnostics. Activity
+  does not prove useful progress and does not extend benchmark hard deadlines.
 - **A `status: partial` invocation spec is declined on the rewrite route**
   rather than admitted because the file exists. A partial spec leaves the
   producer on its placeholder driver, which burns the whole budget and then
@@ -674,34 +671,39 @@ otherwise `score >= floor` passes.
 
 ---
 
-## Host safety: reaping, GPU claims, and the out-of-band supervisor
+## Benchmark deadlines and lifecycle
 
-Three mechanisms protect a host from a run that ended badly. All three default
-to the weakest, most conservative setting, because the deployment is mixed and a
-guarantee that varies silently by host is not a guarantee.
+Each actual benchmark subprocess spawn uses the same finite, positive limits,
+including baseline, explore, sweep, and rebench measurements:
+
+| Variable | Default | Description |
+|---|---|---|
+| `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` | `7800` | Hard wall-clock seconds per actual spawn, including server boot and accuracy evaluation. Output cannot extend it. |
+| `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` | `600` | Output-silence seconds after real server readiness. Not armed before readiness or for server-less scriptable workloads. |
+
+Session `--max-hours` and cancellation apply independently of benchmark limits.
+Task and lease age do not expire work; admission and phase budgets, ordinary
+release, and dead-PID cleanup remain. Session exhaustion is cooperative, not a
+guarantee that a frozen Coordinator will terminate. There is no out-of-band
+supervision or automatic resume. SIGHUP uses the normal terminal drain; an
+operator may later explicitly use `--resume-from` on the same session.
+Historical stop reasons remain interpretable and are not restart requests.
+
+`PYTHONUNBUFFERED=1` affects Python output only, not shell/native buffering or
+upstream subprocess capture. Active logs do not prove useful progress. The
+Magpie streaming fix is local-only and unpublished; the installed dependency pin
+must not be assumed to include it, and this policy is not evidence of a validated
+end-to-end run.
+
+Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog budgets are separate
+from these benchmark limits and retain their existing contracts.
+
+## Host cleanup and reactor budgets
 
 | Variable | Default | Description |
 |---|---|---|
 | `HYPERLOOM_REAP_BACKEND` | `process_group` | Which unit ends a bring-up round's processes: `process_group`, `cgroup` or `container`. Only `cgroup` and `container` produce a reap that is *proof* the tree is gone — the kernel (or the container runtime) owns the membership list, so nothing can leave it by forking or re-parenting. `process_group` reaches only what it could enumerate from procfs before it signalled. A unit that cannot run on this host falls back to `process_group`, which weakens the claim rather than faking it. |
-| `HYPERLOOM_SUPERVISOR` | `0` | Set to `1` to start an out-of-band supervisor process that watches for a coordinator that died or whose tick stopped advancing. Off by default: its stall window measures the age of a timestamp refreshed at the top of every tick, so it catches a wedged coordinator but not one that ticks without making progress. |
-| `HYPERLOOM_SUPERVISOR_ENFORCE` | unset (off) | Whether the supervisor may end a process tree. A wedged coordinator receives SIGHUP for each resumable restart and SIGTERM after the restart limit. Off by default, a coordinator that does not answer that stop, and a dead one's leftovers, are left alone and the refusal is recorded in `runtime/supervisor/status.json`. Ending a tree additionally requires a reap backend whose success is proof, so enforcement with the default `process_group` unit will refuse to kill and say so. |
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. |
-| `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC` | half of `--max-hours`, capped at the larger of `3600` or the reactor timeout plus `30`, and floored at the reactor timeout plus `30` | How long coordinator progress may remain unchanged before the supervisor calls it wedged. Progress is refreshed at every reactor-stage boundary, so the derived window covers one total reactor timeout plus one supervisor poll rather than the sum of all sequential roles. Raising `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` automatically raises the derived floor and default; an explicit value overrides the derivation and is the operator's responsibility. |
-
-The supervisor never opens `coordinator.db` — it sits on a network filesystem
-where a second writer risks the message bus and the task registry — and never
-transitions round state while the coordinator is alive. Its files live under
-`<session>/runtime/supervisor/`. When it finds the coordinator's process gone it
-writes `reports/final.json` itself, marked `producer: "supervisor"`; that record
-never replaces a full report, and the coordinator's own crash-safe fallback never
-replaces it.
-
-A successful watchdog stop records a leg boundary but no session `stop_reason`
-or final artifacts, allowing the monitor to resume it. The restart count is
-persisted in `runtime/supervisor/status.json`; after three resumable restarts the
-next watchdog request uses SIGTERM and the coordinator follows its normal
-terminal path. The monitor treats `final.json`, `final.md`, a completed CLOSE
-sequence, or a vocabulary stop reason as terminal.
 
 ---
 
@@ -764,9 +766,9 @@ deployments.
 
 ---
 
-## Critic / Robustness / knowledge base (KB)
+## Critic / knowledge base (KB)
 
-The following variables configure the Critic, Robustness, and knowledge base components.
+The following variables configure the Critic and knowledge base components.
 
 | Variable                              | Default                | Description                                                                                                                          |
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
@@ -782,8 +784,6 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `CRITIC_AGENT_ROOT`                   | Derived from `REPO_ROOT` | Override location of the critic-agent runtime.                                                                                    |
 | `CRITIC_AGENT_`<br>`MAX_COMPLETION_TOKENS` | `32000`           | Output-token cap for one critic review call. A reply cut off at the cap is retried once at twice this value and then fails the turn, so the cap is a ceiling rather than a budget: unused headroom is never billed, while a truncated reply bills the whole call and yields nothing. Lower it for a model whose own output limit is smaller. A non-positive or unparseable value logs a warning and falls back to the default. |
-| `ROBUSTNESS_AGENT_ROOT`               | Derived from `REPO_ROOT` | Override location of the robustness-agent runtime.                                                                                |
-| `ROBUSTNESS_LLM_RCA_DISABLED`         | Unset                  | Set to `1` to forcibly disable the LLM root cause analysis (RCA) engine even when credentials are present.                                                 |
 
 ---
 
@@ -804,7 +804,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 Primary switch (default **off**) for live Langfuse trace push.
 
 - **SDK install**: when this flag is on, `src/hyperloom/inference_optimizer/assets/install.sh` auto-installs the optional `langfuse` SDK on demand and skips it entirely when off — no separate `pip install '...[trace]'` is required.
-- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.
+- **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
 - **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
@@ -998,7 +998,7 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 | `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P90 (slow tail) as the primary objective, with per-chip token throughput as a secondary guard. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to both axes of the 2-D domination check. A candidate whose interactivity or throughput sits within this band of the anchor is not considered strictly worse on that axis. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
-| `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
+| `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 AgentX profiling starts when AIPerf reports its measured phase. The legacy
 `AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls

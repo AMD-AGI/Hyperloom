@@ -798,6 +798,8 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BaselineExecutor):
     """Subclass that swaps the default config + extracts trace_dir."""
 
+    benchmark_watchdog = False
+
     def __init__(
         self,
         *,

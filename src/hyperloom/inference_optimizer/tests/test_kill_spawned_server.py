@@ -23,8 +23,6 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cance
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    OVERTIME_KILL_RETURNCODE,
-    SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     _scan_logs_increment,
     _scan_server_log_increment,
@@ -36,6 +34,177 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     session_deadline_to_remaining_sec,
     session_remaining_to_deadline_sec,
 )
+
+
+@pytest.mark.parametrize("text", [True, False])
+def test_capture_partial_utf8_records_bytes_before_newline(text):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os,time; os.write(1,b'\\xe2'); time.sleep(.4); os.write(1,b'\\x82\\xac'); time.sleep(.4)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    capture = sk._StreamCapture(proc, text=text)
+    capture.start()
+    try:
+        deadline = time.monotonic() + 0.35
+        while capture.last_activity_at is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert capture.last_activity_at is not None
+        assert proc.poll() is None
+        proc.wait(timeout=5)
+        stdout, stderr = capture.finish()
+        assert stdout == ("€" if text else b"\xe2\x82\xac")
+        assert stderr == ("" if text else b"")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "name", ["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC"]
+)
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "bad", ""])
+def test_benchmark_timeouts_reject_invalid_overrides(name, value):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    with pytest.raises(ValueError, match=name):
+        sk.resolve_benchmark_timeouts({name: value})
+
+
+def test_benchmark_timeouts_have_one_finite_positive_policy():
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    assert sk.resolve_benchmark_timeouts({}) == (600.0, 7800.0)
+    assert sk.resolve_benchmark_timeouts({"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "42.5"}) == (600.0, 42.5)
+
+
+@pytest.mark.parametrize("stream", [1, 2])
+def test_ready_server_quiet_log_active_partial_pipe_survives(tmp_path, stream):
+    script = f"import os,time\nfor _ in range(8):\n os.write({stream}, b'.'); time.sleep(.15)\n"
+    cp = run_with_session_kill(
+        [sys.executable, "-c", script],
+        server_log_path=str(tmp_path / "server.log"),
+        server_already_ready=True,
+        silence_timeout_sec=0.5,
+        timeout=5,
+    )
+    assert cp.returncode == 0
+
+
+def test_benchmark_launch_forces_python_unbuffered():
+    cp = run_with_session_kill(
+        [sys.executable, "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"],
+        env={**os.environ, "PYTHONUNBUFFERED": "0"},
+        silence_timeout_sec=600,
+        timeout=5,
+    )
+    assert cp.stdout.strip() == "1"
+
+
+@pytest.mark.parametrize(
+    "ready,log,noise,expected",
+    [(True, True, False, 600), (True, True, True, 7800), (False, True, False, 7800), (True, False, False, 7800)],
+)
+def test_watchdog_clock_boundaries(monkeypatch, tmp_path, ready, log, noise, expected):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    now = [0.0]
+    waited = []
+
+    class Proc:
+        args = ["clock-child"]
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            waited.append(now[0])
+            now[0] += timeout
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(False, False, False, noise, False))
+    error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
+    with pytest.raises(error):
+        sk._communicate_with_watchdog(
+            Proc(),
+            hard_timeout=7800,
+            silence_timeout_sec=600,
+            server_log_path=str(tmp_path / "server.log") if log else None,
+            server_already_ready=ready,
+        )
+    assert now[0] == expected
+    assert 599.0 in waited
+
+
+def test_exited_process_wins_over_expired_gates(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    class Proc:
+        def poll(self):
+            return 7
+
+        def communicate(self):
+            return "finished", ""
+
+    assert sk._communicate_with_watchdog(Proc(), hard_timeout=0, session_deadline_sec=-1) == ("finished", "")
+
+
+def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    path = tmp_path / "server.log"
+    path.write_text("x" * 100, encoding="utf-8")
+    offsets, residuals, identities = {}, {}, {}
+    sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    path.write_text("Application startup complete\n", encoding="utf-8")
+    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    assert not scan.grew and not scan.saw_ready
+    path.rename(tmp_path / "old.log")
+    path.write_text("Application startup complete\n" * 100, encoding="utf-8")
+    scan = sk._scan_logs_increment(str(path), offsets, residuals, identities)
+    assert not scan.grew and not scan.saw_ready
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write("new bytes\n")
+    assert sk._scan_logs_increment(str(path), offsets, residuals, identities).grew
+
+
+def test_hard_timeout_preserves_partial_captured_output():
+    with pytest.raises(subprocess.TimeoutExpired) as error:
+        run_with_session_kill(
+            [sys.executable, "-c", "import os,time; os.write(1,b'partial'); os.write(2,b'error'); time.sleep(20)"],
+            timeout=0.4,
+        )
+    assert error.value.stdout == "partial"
+    assert error.value.stderr == "error"
+
+
+def test_previous_nested_server_cannot_keep_new_round_alive(tmp_path):
+    old_dir = tmp_path / "benchmark_old"
+    old_dir.mkdir()
+    old_log = old_dir / "server.log"
+    old_log.write_text("Application startup complete\n", encoding="utf-8")
+    stop = threading.Event()
+    writer = _appends_until_stopped(old_log, "old worker output\n", stop)
+    try:
+        cp = run_with_session_kill(
+            [sys.executable, "-c", "import time; time.sleep(20)"],
+            timeout=5,
+            server_log_path=str(tmp_path / "server.log"),
+            server_already_ready=True,
+            silence_timeout_sec=0.4,
+        )
+        assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
+    finally:
+        stop.set()
+        writer.join(timeout=5)
 
 
 def test_kill_my_spawned_server_handles_none():
@@ -245,62 +414,15 @@ async def test_baseline_executor_kills_grandchild_on_timeout(tmp_path, monkeypat
                 pass
 
 
-def test_run_with_session_kill_soft_deadline_returns_sentinel():
-    """A child past ``soft_deadline_sec`` is reaped and returns ``OVERTIME_KILL_RETURNCODE`` (no ``TimeoutExpired``)."""
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
-
-
-def test_run_with_session_kill_soft_deadline_does_not_fire_for_quick_child():
-    """A child exiting before ``soft_deadline_sec`` returns normally with its own returncode."""
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "print('hi'); raise SystemExit(0)"],
-        timeout=10,
-        soft_deadline_sec=5.0,
-    )
-    assert cp.returncode == 0
-    assert "hi" in (cp.stdout or "")
-
-
-def test_run_with_session_kill_eval_start_marker_retires_soft_deadline(tmp_path):
-    """Once the accuracy eval announces itself the soft deadline stops applying:
-    the deadline bounds the throughput phase, and its anchor excludes eval."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\nHYPERLOOM_EVAL_START\n")
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(4)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-        server_log_path=str(log_path),
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == 0
-    assert elapsed >= 3.5, f"child was cut short at {elapsed:.2f}s"
-
-
-def test_run_with_session_kill_soft_deadline_still_fires_without_eval_marker(tmp_path):
-    """Without the eval marker the deadline keeps its teeth — a genuinely slow
-    throughput phase is still reaped."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("Application startup complete\n")
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=30,
-        soft_deadline_sec=1.0,
-        server_log_path=str(log_path),
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 10.0, f"soft-deadline path took {elapsed:.2f}s"
+@pytest.mark.parametrize("eval_marker", ["", "HYPERLOOM_EVAL_START"])
+def test_accuracy_never_extends_the_hard_cap(tmp_path, eval_marker):
+    script = "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text(sys.argv[2]); time.sleep(30)"
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_with_session_kill(
+            [sys.executable, "-c", script, str(tmp_path / "server.log"), eval_marker],
+            timeout=0.3,
+            server_log_path=str(tmp_path / "server.log"),
+        )
 
 
 class TestSessionDeadline:
@@ -320,9 +442,6 @@ class TestSessionDeadline:
         )
         elapsed = time.monotonic() - start
         assert cp.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
-        assert cp.returncode != OVERTIME_KILL_RETURNCODE, (
-            "a budget kill must not share the overtime code, which asserts the variant is slow"
-        )
         assert elapsed < 10.0, f"session-deadline path took {elapsed:.2f}s"
 
     def test_eval_start_does_not_retire_the_session_budget(self, tmp_path):
@@ -337,7 +456,6 @@ class TestSessionDeadline:
         cp = run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout=60,
-            soft_deadline_sec=1.0,
             server_log_path=str(log_path),
             session_deadline_sec=time.monotonic() + 1.5,
         )
@@ -556,7 +674,7 @@ def test_run_with_session_kill_reports_each_line_of_child_output():
     )
 
     assert cp.returncode == 0
-    assert len(lines) == 3
+    assert len(lines) >= 3
 
 
 def _appends_until_stopped(path: Path, line: str, stop: threading.Event) -> threading.Thread:
@@ -628,7 +746,7 @@ def test_run_with_session_kill_reports_a_silent_child_alive_only_on_real_progres
             [sys.executable, "-c", "import time; time.sleep(2)"],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=30.0,
+            silence_timeout_sec=30.0,
             on_output=lambda: reported.append(1),
         )
     finally:
@@ -665,7 +783,7 @@ def test_run_with_session_kill_reports_the_output_a_child_redirected_to_disk(tmp
         [sys.executable, "-c", script, str(bench / "benchmark_stderr.log")],
         timeout=30,
         server_log_path=str(tmp_path / "server.log"),
-        detok_stall_grace_sec=30.0,
+        silence_timeout_sec=30.0,
         on_output=lambda: reported.append(1),
     )
 
@@ -695,7 +813,6 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
         run_with_session_kill(
             [sys.executable, "-c", "import time; time.sleep(30)"],
             timeout=1,
-            soft_deadline_sec=None,
         )
 
 
@@ -813,26 +930,17 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     assert sig.offending_symbol == "deepseek_v4"
 
 
-def test_run_with_session_kill_watchdog_reaps_hung_server(tmp_path):
-    """A child that writes a fatal server marker then hangs is reaped via the
-    watchdog with ``SERVER_DEAD_RETURNCODE`` — well before the hard timeout."""
-    log_path = tmp_path / "server.log"
+def test_fatal_text_does_not_kill_a_running_child(tmp_path):
     script = (
-        "import sys, time\n"
-        "open(sys.argv[1], 'w').write("
-        "'Exception: WorkerProc initialization failed in background\\n')\n"
-        "time.sleep(60)\n"
+        "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('EngineCore failed to start'); time.sleep(.8)"
     )
-    start = time.monotonic()
     cp = run_with_session_kill(
-        [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        server_log_path=str(log_path),
-        server_dead_grace_sec=1.0,
+        [sys.executable, "-c", script, str(tmp_path / "server.log")],
+        timeout=5,
+        server_log_path=str(tmp_path / "server.log"),
+        silence_timeout_sec=0.2,
     )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == SERVER_DEAD_RETURNCODE
-    assert elapsed < 15.0, f"watchdog path took {elapsed:.2f}s (expected fast)"
+    assert cp.returncode == 0
 
 
 def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
@@ -849,7 +957,6 @@ def test_run_with_session_kill_watchdog_grace_lets_clean_exit_win(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
-        server_dead_grace_sec=10.0,
         server_log_path=str(log_path),
     )
     assert cp.returncode == 7
@@ -868,7 +975,6 @@ def test_run_with_session_kill_watchdog_ignores_healthy_server(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
-        server_dead_grace_sec=2.0,
         server_log_path=str(log_path),
     )
     assert cp.returncode == 0
@@ -980,7 +1086,7 @@ def test_run_with_session_kill_detok_stall_reaps_ready_but_silent_server(tmp_pat
         [sys.executable, "-c", script, str(log_path)],
         timeout=60,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     elapsed = time.monotonic() - start
     assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
@@ -1001,7 +1107,7 @@ def test_run_with_session_kill_detok_stall_not_armed_before_ready(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=0.5,
+        silence_timeout_sec=0.5,
     )
     assert cp.returncode == 0
 
@@ -1023,7 +1129,7 @@ def test_run_with_session_kill_detok_stall_progress_keeps_it_alive(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     assert cp.returncode == 0
 
@@ -1046,12 +1152,12 @@ def test_run_with_session_kill_detok_stall_compile_logs_keep_it_alive(tmp_path):
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=1.0,
+        silence_timeout_sec=1.0,
     )
     assert cp.returncode == 0
 
 
-def test_run_with_session_kill_detok_stall_disabled_when_grace_nonpositive(tmp_path):
+def test_shared_helper_does_not_enable_silence_without_a_policy(tmp_path):
     """``detok_stall_grace_sec <= 0`` disables the gate entirely."""
     log_path = tmp_path / "server.log"
     script = (
@@ -1064,6 +1170,6 @@ def test_run_with_session_kill_detok_stall_disabled_when_grace_nonpositive(tmp_p
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=0.0,
+        silence_timeout_sec=None,
     )
     assert cp.returncode == 0

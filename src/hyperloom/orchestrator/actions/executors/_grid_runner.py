@@ -49,15 +49,14 @@ from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
-    OVERTIME_KILL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
 )
 from .benchmark_result import (
-    estimate_killed_variant_throughput,
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
@@ -75,7 +74,6 @@ from ._server_argv import seal_server_argv
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
-    DEFAULT_VARIANT_TIMEOUT_SEC as DEFAULT_VARIANT_TIMEOUT_SEC,
     DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
@@ -723,6 +721,27 @@ def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
     return f"{magpie_dir}:{current_pythonpath}" if current_pythonpath else magpie_dir
 
 
+def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
+    """Give Magpie and bypass the same cap as the enclosing benchmark process."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    bench = cfg["benchmark"]
+    bench["timeout_seconds"] = timeout_sec
+    if bench.get("server_lifecycle"):
+        bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
+    envs = bench.setdefault("envs", {})
+    envs["PYTHONUNBUFFERED"] = "1"
+    if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(timeout_sec)
+    config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+def _benchmark_server_log(config_path: Path, output_dir: Path) -> str | None:
+    """Scriptable benchmarks have no server whose readiness can arm silence."""
+    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    framework = str(cfg["benchmark"].get("framework", "")).lower()
+    return None if framework in {"custom", "xdit"} else str(output_dir / "server.log")
+
+
 def _run_magpie(
     *,
     magpie_python: str,
@@ -731,7 +750,7 @@ def _run_magpie(
     timeout_sec: int,
     cwd: str,
     result_dir: str | None = None,
-    soft_deadline_sec: float | None = None,
+    silence_timeout_sec: float | None = None,
     preclean: bool = True,
     server_already_ready: bool = False,
     serving_lease: Any = None,
@@ -740,12 +759,15 @@ def _run_magpie(
     unset_envs: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
+    sync_benchmark_timeout(config_path, timeout_sec)
+    server_log_path = _benchmark_server_log(config_path, output_dir)
     # Pre-clean lingering servers + shared memory (skip under pytest, and for lifecycle re-attach rounds that would
     # kill the warm server).
     if preclean and not os.environ.get("PYTEST_CURRENT_TEST"):
         _kill_stale_servers()
 
     env = scrub_benchmark_process_env(os.environ.copy())
+    env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
 
     _args, _envs, reference_controls = resolve_reference_launch()
@@ -822,8 +844,8 @@ def _run_magpie(
             env=env,
             cwd=cwd,
             timeout=timeout_sec,
-            soft_deadline_sec=soft_deadline_sec,
-            server_log_path=str(output_dir / "server.log"),
+            silence_timeout_sec=silence_timeout_sec,
+            server_log_path=server_log_path,
             server_already_ready=server_already_ready,
             # Converted here, at the last moment before the process boundary: the actor cannot read this process's
             # monotonic clock.
@@ -842,8 +864,8 @@ def _run_magpie(
         env=env,
         cwd=cwd,
         timeout=timeout_sec,
-        soft_deadline_sec=soft_deadline_sec,
-        server_log_path=str(output_dir / "server.log"),
+        silence_timeout_sec=silence_timeout_sec,
+        server_log_path=server_log_path,
         server_already_ready=server_already_ready,
         on_output=on_output,
         session_deadline_sec=session_deadline_sec,
@@ -932,10 +954,6 @@ def _variant_progress_note(
     }
 
 
-# Seconds by which a round's hard cap is allowed to sit past the session deadline, so the in-process session watchdog
-# (which attributes the kill correctly) trips before the hard cap (which the ledger reads as a variant timeout).
-_SESSION_KILL_GRACE_SEC: int = 15
-
 # The returncode side of :mod:`...stop_attribution`: the same two causes, keyed by the sentinel a subprocess comes
 # back with.
 _STOPPED_BY_THE_RUN: dict[int, StoppedByTheRun] = {
@@ -961,30 +979,6 @@ def variant_conc(variant: Any) -> int | None:
     return conc if conc > 0 else None
 
 
-def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
-    """Raise a variant's hard cap to what an AgentX round actually needs."""
-    from ._workload_envs import agentx_active, agentx_env_for_conc
-
-    if not agentx_active(shared_state):
-        return cap
-    from ._agentx_timeouts import agentx_baseline_timeout_sec
-
-    return max(cap, agentx_baseline_timeout_sec(agentx_env_for_conc(conc)))
-
-
-def session_clamped_timeout_sec(
-    cap: int,
-    session_deadline_sec: float | None,
-    *,
-    reserve_sec: float = 0.0,
-) -> int:
-    """Reduce a hard timeout to what the session budget can still pay for."""
-    if session_deadline_sec is None:
-        return int(cap)
-    usable = int(session_deadline_sec - time.monotonic() - max(0.0, reserve_sec)) + _SESSION_KILL_GRACE_SEC
-    return int(cap) if usable >= int(cap) else max(1, usable)
-
-
 def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     """Resolve ``(session_deadline_sec, variant_expected_sec)`` for a :func:`run_grid` call."""
     if shared_state is None:
@@ -1004,13 +998,11 @@ async def run_grid(
     grid: list[GridVariant],
     output_root: Path,
     magpie_python: str | None = None,
-    variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
     keep_going_on_failure: bool = True,
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     result_dir: str | None = None,
-    soft_deadline_sec: float | None = None,
     server_lifecycle: dict[str, Any] | None = None,
     base_args_mode: str = "append",
     base_extra_envs: dict[str, str] | None = None,
@@ -1024,6 +1016,7 @@ async def run_grid(
     variant_expected_sec: float | None = None,
 ) -> list[VariantResult]:
     """Execute each grid variant and return all per-variant results."""
+    silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
         from .benchmark_backend import resolve_benchmark_interpreter
@@ -1097,36 +1090,6 @@ async def run_grid(
         """Report the variant that just landed."""
         await report_progress(**_variant_progress_note(grid, results, idx))
 
-    def _round_timeout_sec(idx: int, name: str, *, round_label: str, reserve_sec: float = 0.0) -> int:
-        """``variant_timeout_sec`` capped at what the session can still pay for."""
-        declared = int(variant_timeout_sec)
-        cap = agentx_variant_timeout_sec(declared, conc=variant_conc(grid[idx]))
-        if cap != declared:
-            log.info(
-                "grid_runner: variant %d/%d name=%s %s cap raised %ds -> %ds "
-                "(AgentX: AGENTX_DURATION + overhead; the synthetic default "
-                "cannot cover a canonical agentic warmup)",
-                idx + 1,
-                len(grid),
-                name,
-                round_label,
-                declared,
-                cap,
-            )
-        clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=reserve_sec)
-        if clamped == cap:
-            return cap
-        log.info(
-            "grid_runner: variant %d/%d name=%s %s cap clamped %ds -> %ds by the session budget",
-            idx + 1,
-            len(grid),
-            name,
-            round_label,
-            cap,
-            clamped,
-        )
-        return clamped
-
     def _record_round_stop(
         stopped: StoppedByTheRun,
         *,
@@ -1193,13 +1156,11 @@ async def run_grid(
         remaining_sec = session_deadline_sec - time.monotonic()
         # Falls back to a single ``variant_timeout_sec`` when no estimate was given, which is what callers that cannot
         # estimate already got.
-        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec, conc=variant_conc(grid[idx])))
-        _cap_was_raised = _raised > float(variant_timeout_sec)
         if variant_expected_sec is None:
-            required_sec = _raised
+            required_sec = benchmark_timeout_sec
         else:
             estimated_sec = float(variant_expected_sec) * rounds_left
-            required_sec = max(estimated_sec, _raised) if _cap_was_raised else estimated_sec
+            required_sec = estimated_sec
         if remaining_sec >= required_sec:
             return False
         log.warning(
@@ -1416,12 +1377,7 @@ async def run_grid(
             # Held in a local because the abort line below has to name the cap the round was actually granted: the
             # declared one is a hang backstop, and a round killed at the reserved cap logged as a two-hour timeout
             # reads as a variant that hangs rather than a budget that ran out.
-            warmup_cap_sec = _round_timeout_sec(
-                i,
-                variant.name,
-                round_label="warmup",
-                reserve_sec=float(variant_expected_sec or 0.0) * (1 + _mn_warmup_rounds),
-            )
+            warmup_cap_sec = benchmark_timeout_sec
             try:
                 warmup_rc, warmup_stdout, warmup_stderr = await _reported_magpie(
                     i,
@@ -1430,9 +1386,9 @@ async def run_grid(
                     config_path=warmup_cfg_path,
                     output_dir=warmup_slot,
                     timeout_sec=warmup_cap_sec,
+                    silence_timeout_sec=silence_timeout_sec,
                     cwd=cwd,
                     result_dir=result_dir,
-                    soft_deadline_sec=None,
                     preclean=True,
                     serving_lease=serving_lease,
                     session_deadline_sec=session_deadline_sec,
@@ -1666,15 +1622,11 @@ async def run_grid(
                     magpie_python=magpie_python,
                     config_path=cfg_path,
                     output_dir=_mn_warm_slot,
-                    timeout_sec=_round_timeout_sec(
-                        i,
-                        variant.name,
-                        round_label="mn_warmup",
-                        reserve_sec=float(variant_expected_sec or 0.0),
-                    ),
+                    timeout_sec=benchmark_timeout_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=True,
                     cwd=cwd,
                     result_dir=None,
-                    soft_deadline_sec=None,
                     preclean=False,
                     serving_lease=serving_lease,
                     session_deadline_sec=session_deadline_sec,
@@ -1712,7 +1664,7 @@ async def run_grid(
         # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
-        measure_cap_sec = _round_timeout_sec(i, variant.name, round_label="measure")
+        measure_cap_sec = benchmark_timeout_sec
         try:
             rc, stdout, stderr = await _reported_magpie(
                 i,
@@ -1723,9 +1675,9 @@ async def run_grid(
                 timeout_sec=measure_cap_sec,
                 cwd=cwd,
                 result_dir=result_dir,
-                soft_deadline_sec=soft_deadline_sec,
+                silence_timeout_sec=silence_timeout_sec,
                 preclean=(False if auto_warmup else preclean_before_run),
-                server_already_ready=(server_already_ready or auto_warmup),
+                server_already_ready=(server_already_ready or auto_warmup or _mn_imn()),
                 serving_lease=serving_lease,
                 session_deadline_sec=session_deadline_sec,
             )
@@ -1926,69 +1878,6 @@ async def run_grid(
             )
             await _report_finished_variant(i)
             if grid_is_over:
-                break
-            continue
-
-        # Soft overtime gate fired: record a ``killed_overtime=True`` result with no tput and still harvest leaks for
-        # post-mortem.
-        if rc == OVERTIME_KILL_RETURNCODE:
-            variant_runtime_sec = round(
-                max(0.0, time.time() - variant_started_unix),
-                2,
-            )
-            ok_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            ok_harvested = harvest_leaked_artifacts(
-                ok_destination,
-                subprocess_started_unix=variant_started_unix,
-            )
-            # Best-effort rough tput from server.log throughput logs; informational only — the variant stays failed
-            # and never feeds winner selection.
-            ok_warnings = [f"harvested_leaked_artifact:{src}" for src, _ in ok_harvested]
-            ok_estimate = estimate_killed_variant_throughput(slot)
-            estimated_tput = ok_estimate.get("output_throughput") if ok_estimate else None
-            if estimated_tput is not None:
-                ok_warnings.append(
-                    "estimated_output_throughput_from_server_log:"
-                    f"{estimated_tput:.1f}tok/s"
-                    f"(n={ok_estimate.get('num_samples')})"
-                )
-            overtime_error = (
-                f"killed_overtime: wall-clock {variant_runtime_sec:.1f}s "
-                f"exceeded soft_deadline_sec={float(soft_deadline_sec or 0.0):.1f}s"
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="killed_overtime",
-                error_summary=overtime_error,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    killed_overtime=True,
-                    runtime_sec=variant_runtime_sec,
-                    estimated_output_throughput=estimated_tput,
-                    error=overtime_error,
-                    error_class="killed_overtime",
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                    nonfatal_warnings=ok_warnings,
-                )
-            )
-            log.info(
-                "_grid_runner: variant %s killed_overtime (runtime=%.1fs deadline=%.1fs est_output_tput=%s tok/s)",
-                variant.name,
-                variant_runtime_sec,
-                float(soft_deadline_sec or 0.0),
-                f"{estimated_tput:.1f}" if estimated_tput is not None else "n/a",
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
                 break
             continue
 
@@ -2436,7 +2325,6 @@ __all__ = [
     "sanitize_result_dir",
     "sanitize_script_name",
     "server_args_env_name",
-    "session_clamped_timeout_sec",
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.

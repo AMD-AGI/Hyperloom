@@ -24,6 +24,11 @@ def test_now_iso():
     assert "T" in ip._now_iso()
 
 
+def test_integrate_patch_uses_shared_benchmark_deadline(tmp_path):
+    with pytest.raises(TypeError, match="variant_timeout_sec"):
+        ip.IntegratePatchExecutor(session_dir=tmp_path, variant_timeout_sec=1)
+
+
 @pytest.mark.parametrize(
     ("metadata", "selected", "expected"),
     [

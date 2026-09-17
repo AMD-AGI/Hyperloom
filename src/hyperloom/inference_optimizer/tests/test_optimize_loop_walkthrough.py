@@ -20,7 +20,6 @@ def _coordinator(session_dir: Path):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
 
@@ -37,7 +36,6 @@ def _coordinator(session_dir: Path):
         backends={
             "orchestration": MockBackend(silent, name="orch"),
             "critic": MockCriticBackend(),
-            "robustness": MockRobustnessBackend(),
         },
     )
 

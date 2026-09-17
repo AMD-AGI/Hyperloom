@@ -6,23 +6,13 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess  # nosec B404 - starts and kills a sleep, to exercise the reaper
 import sys
 import time
 
 import pytest
 
-from hyperloom.orchestrator.bringup.reap import (
-    BACKEND_PROCESS_GROUP,
-    REAP_HOLDER_REPORTED,
-    REAP_KILLED,
-    REAP_UNOBSERVABLE,
-    ProcessGroupReaper,
-    Reap,
-)
 from hyperloom.orchestrator.bringup.reconcile import Reconciler, TIMEOUT_VERDICT
-from hyperloom.orchestrator.supervisor import store as supervisor_store
 from hyperloom.orchestrator.bus.resource_lock import (
     BRINGUP_ROUND_LANE,
     ResourceLockManager,
@@ -32,8 +22,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
-    EXPIRED_REAPED,
-    EXPIRED_UNREAPED,
     OPEN,
     SETTLED,
     RoundStore,
@@ -92,26 +80,6 @@ class _Pending:
         self.verdict = None
 
 
-class _Reaper:
-    """A reap whose answer the test decides."""
-
-    name = BACKEND_PROCESS_GROUP
-    claim = "reachable"
-
-    def __init__(self, answer: Reap) -> None:
-        self.answer = answer
-        self.calls: list[str] = []
-
-    def available(self) -> str:
-        return ""
-
-    async def reap(self, target, *, now_unix: float) -> Reap:
-        self.calls.append(target.label)
-        if self.answer.confirmed_unix is None:
-            return self.answer
-        return Reap(float(now_unix), self.answer.outcome, self.name, self.claim)
-
-
 @pytest.fixture
 def db(tmp_path):
     """A real session database."""
@@ -120,7 +88,7 @@ def db(tmp_path):
     conn.close()
 
 
-def _build(db, *, reaper=None, proposals=None, state=None, **kw) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
+def _build(db, *, proposals=None, state=None, **kw) -> tuple[Reconciler, RoundStore, TaskRegistry, _State]:
     """A reconciler over ``db``, with the pieces a test needs to inspect."""
     rounds = RoundStore(db)
     tasks = TaskRegistry(db)
@@ -132,10 +100,7 @@ def _build(db, *, reaper=None, proposals=None, state=None, **kw) -> tuple[Reconc
         shared_state=shared,
         resources=ResourceFacts(),
         proposals=(lambda: proposals) if proposals is not None else None,
-        # The session dir the database lives in: the pass writes its tick stamp
-        # and its directive cursor there.
         session_dir=db.db_path.parent,
-        reaper=reaper if reaper is not None else _Reaper(Reap(None, REAP_UNOBSERVABLE)),
         **kw,
     )
     return rec, rounds, tasks, shared
@@ -164,8 +129,8 @@ async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
 
     report = await rec.run(_NOW + 10.0)
 
-    assert report.settled == [("round-spec-1", EXPIRED_UNREAPED)]
-    assert (await rounds.get("round-spec-1")).state == SETTLED
+    assert report.settled == []
+    assert (await rounds.get("round-spec-1")).state == OPEN
 
 
 @pytest.mark.asyncio
@@ -177,31 +142,31 @@ async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
     await rec.run(_NOW + 10.0)
 
     settled = await rounds.get("round-spec-1")
-    assert settled.outcome == EXPIRED_UNREAPED, "the outcome still records that nothing confirmed it"
-    assert settled.excludes_at(_NOW + 10.0) is False
+    assert settled.outcome == ""
+    assert settled.excludes_at(_NOW + 10.0) is True
     assert state.stop_reason == "", "an unobservable reap does not end the session"
 
 
 @pytest.mark.asyncio
-async def test_a_confirmed_reap_gives_the_machine_back_at_once(db):
-    """With proof the round expires reaped, and a settled round holds nothing."""
-    rec, rounds, tasks, state = _build(db, reaper=_Reaper(Reap(_NOW, REAP_KILLED)))
+async def test_age_never_requests_a_reap_of_a_running_holder(db):
+    """A configured killer must never be invoked merely because time passed."""
+    rec, rounds, tasks, state = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
     await rec.run(_NOW + 10.0)
 
     settled = await rounds.get("round-spec-1")
-    assert settled.outcome == EXPIRED_REAPED
-    assert settled.excludes_at(_NOW + 10.0) is False
+    assert settled.state == OPEN
+    assert settled.excludes_at(_NOW + 10.0) is True
     assert state.stop_reason == ""
 
 
 @pytest.mark.asyncio
-async def test_the_reaper_kills_the_holders_recorded_process_and_confirms_it(db):
-    """The default reaper is a real kill, confirmed by looking afterwards."""
+async def test_an_old_round_does_not_kill_its_live_recorded_process(db):
+    """The round budget cannot terminate a worker that is still alive."""
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(300)"])  # nosec B603
     try:
-        rec, rounds, tasks, _ = _build(db, reaper=ProcessGroupReaper())
+        rec, rounds, tasks, _ = _build(db)
         await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
         async with db.transaction() as cur:
             cur.execute(
@@ -213,7 +178,8 @@ async def test_the_reaper_kills_the_holders_recorded_process_and_confirms_it(db)
         await rec.run(_NOW + 10.0)
 
         settled = await rounds.get("round-spec-1")
-        assert settled.outcome == EXPIRED_REAPED
+        assert settled.state == OPEN
+        assert child.poll() is None
     finally:
         child.kill()
         child.wait()
@@ -233,7 +199,8 @@ async def test_a_terminal_holder_alone_never_settles_the_round(db):
 
 
 @pytest.mark.asyncio
-async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_it(db):
+@pytest.mark.parametrize("elapsed", [1.0, 100_000.0])
+async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_it(db, elapsed):
     """The successor takes the round, and the fence moves with it."""
     rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1")
@@ -246,13 +213,34 @@ async def test_a_terminal_holder_hands_the_round_to_the_integrate_that_follows_i
         lease_ttl_sec=900,
     )
 
-    report = await rec.run(_NOW + 1.0)
+    report = await rec.run(_NOW + elapsed)
 
     round_row = await rounds.get("round-spec-1")
     assert report.handed_off == ["round-spec-1"]
     assert round_row.state == OPEN
     assert round_row.holder_task_id == integrate.task_id
     assert round_row.fence == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
+    from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    await _open_round(rounds, tasks, holder="spec-1", lease=1)
+    await tasks.transition("spec-1", "running")
+    await tasks.transition("spec-1", "succeeded")
+    successor = await tasks.create(
+        kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
+    )
+    pool = SpecialistGpuPool(db, gpu_ids=[0])
+    lease = await pool.try_acquire(count=1, holder_id="spec-1", task_id="spec-1")
+    report = await rec.run(_NOW + 10_000)
+    assert report.handed_off == report.settled == []
+    assert (await rounds.get("round-spec-1")).holder_task_id == "spec-1"
+    await pool.release(lease)
+    await rec.run(_NOW + 10_001)
+    assert (await rounds.get("round-spec-1")).holder_task_id == successor.task_id
 
 
 @pytest.mark.asyncio
@@ -273,7 +261,7 @@ async def test_an_undecided_review_holds_the_round_open_until_its_ttl(db):
 @pytest.mark.asyncio
 async def test_a_terminal_holder_with_nothing_following_it_expires_on_its_cap(db):
     """Not on the tick it went terminal -- the successor is created by a later one."""
-    rec, rounds, tasks, _ = _build(db, reaper=_Reaper(Reap(_NOW, REAP_HOLDER_REPORTED)), terminal_holder_cap_sec=300.0)
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=300.0)
     await _open_round(rounds, tasks, holder="spec-1")
     await tasks.transition("spec-1", "running")
     await tasks.transition("spec-1", "succeeded")
@@ -295,11 +283,11 @@ async def test_a_holder_that_reported_its_own_end_is_proof_but_a_lease_watchdog_
 
     await rec.run(_NOW + 10.0)
 
-    assert (await rounds.get("round-spec-1")).outcome == EXPIRED_UNREAPED
+    assert (await rounds.get("round-spec-1")).state == OPEN
 
 
 @pytest.mark.asyncio
-async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservable_is_not(db):
+async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservable_is_not(db, monkeypatch):
     """Inability to observe is UNKNOWN. Nothing is manufactured from it."""
     rec, _rounds, tasks, _ = _build(db)
     dead = await tasks.create(kind="specialist", params={}, idempotency_key="dead")
@@ -308,12 +296,15 @@ async def test_a_running_task_whose_process_is_gone_is_failed_and_one_unobservab
     await tasks.transition(blind.task_id, "running")
     gone = subprocess.Popen([sys.executable, "-c", "pass"])  # nosec B603
     gone.wait()
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != gone.pid))
     async with db.transaction() as cur:
         cur.execute(
             "INSERT INTO leases (lane, holder_id, task_id, action, pid, acquired_at, expires_at, heartbeat_at)"
             " VALUES ('server_lifecycle', 'h1', ?, 'bench', ?, '', '', '')",
             (dead.task_id, gone.pid),
         )
+        cur.execute("UPDATE leases SET owner_scope='test-node'")
 
     report = await rec.run(_NOW)
 
@@ -380,9 +371,7 @@ async def test_the_resource_facts_are_reread_from_what_the_rules_left(db):
 
     await rec.run(_NOW + 10_000.0)
 
-    # The pass settled the round, so the facts now say the machine is free:
-    # the repair, not the state before it.
-    assert rec._resources.excluding_round_id == ""
+    assert rec._resources.excluding_round_id == "round-spec-1"
 
 
 @pytest.mark.asyncio
@@ -399,37 +388,30 @@ async def test_a_rule_that_raises_does_not_stop_the_rules_after_it(db):
     report = await rec.run(_NOW + 10.0)
 
     assert report.failures == ["_boom"]
-    assert report.settled == [("round-spec-1", EXPIRED_UNREAPED)]
-    # The re-read runs last, so it saw the settle the raising rule did not stop.
-    assert rec._resources.excluding_round_id == ""
+    assert report.settled == []
+    assert rec._resources.excluding_round_id == "round-spec-1"
 
 
 @pytest.mark.asyncio
-async def test_the_tick_is_stamped_before_any_rule_can_block(db):
-    """The stamp is what tells a watcher outside the process that a tick began."""
+async def test_reconcile_does_not_write_a_supervisor_tick_stamp(db):
     rec, _, _, _ = _build(db)
-
     await rec.run(_NOW)
-
-    stamp = supervisor_store.read_tick(db.db_path.parent)
-    assert stamp is not None
-    assert stamp.pid == os.getpid()
-    assert stamp.stamped_unix == _NOW
+    assert not hasattr(rec, "stamp_progress")
 
 
 @pytest.mark.asyncio
 async def test_a_round_whose_lane_another_pass_took_is_settled_here(db):
     """Whoever swept the lease, the round it belonged to still ends."""
-    rec, rounds, tasks, _ = _build(db, reaper=_Reaper(Reap(_NOW, REAP_KILLED)))
+    rec, rounds, tasks, _ = _build(db)
     await _open_round(rounds, tasks, holder="spec-1", lease=_LEASE)
     async with db.transaction() as cur:
         drop_round_lane(cur, round_id="round-spec-1")
 
     report = await rec.run(_NOW + 1.0)
 
-    assert report.settled == [("round-spec-1", EXPIRED_REAPED)]
+    assert report.settled == []
     settled = await rounds.get("round-spec-1")
-    assert settled.state == SETTLED
+    assert settled.state == OPEN
     assert settled.expires_unix > _NOW + 1.0, "the round's own column never said it had run out"
 
 
@@ -480,9 +462,12 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
 
     report = await rec.run(_NOW + 1.0)
 
-    assert (report.leases_reaped, report.settled) == (1, [])
+    assert (report.leases_reaped, report.settled) == (0, [])
     assert rec.last_report is report
     # The round is still inside its lease, so it still holds its lane and the
     # sweep left it alone.
     lanes = await db.fetchall("SELECT lane, holder_id FROM leases")
-    assert [(r["lane"], r["holder_id"]) for r in lanes] == [(BRINGUP_ROUND_LANE, "round-spec-1")]
+    assert {(r["lane"], r["holder_id"]) for r in lanes} == {
+        (BRINGUP_ROUND_LANE, "round-spec-1"),
+        ("server_lifecycle", "h1"),
+    }

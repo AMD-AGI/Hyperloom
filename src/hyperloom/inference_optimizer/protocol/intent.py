@@ -12,7 +12,7 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 
 
-# Mirrors the emit-time frozensets in agents/robustness/role/envelope.py and agents/critic/runtime/intent_envelope.py;
+# Mirrors the emit-time frozensets in agents/critic/runtime/intent_envelope.py;
 # duplicated because ``protocol`` may not import ``agents``.
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 _ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
@@ -32,7 +32,7 @@ class IntentType(str, Enum):
     RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"  # Critic-only
     EXTEND_LEASE = "extend_lease"  # refresh a live task's lease TTL
-    # Robustness-only scheduling police.
+    # Orchestration scheduling and phase control.
     PRUNE_BRANCH = "prune_branch"
     ESCALATE_STRATEGY_CHANGE = "escalate_strategy_change"
     # specialist exit: one per task.

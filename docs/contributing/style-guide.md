@@ -114,7 +114,7 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **E2E markers** (skipped in CI by default):
 
-- `critic_agent_e2e`, `robustness_agent_e2e`, `targeted_build_e2e`
+- `critic_agent_e2e`, `targeted_build_e2e`
 
 **Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Add unit tests for logic you introduce; do not chase coverage on omitted paths.
 
@@ -184,7 +184,7 @@ pip install pre-commit ruff mypy reuse
 pre-commit install
 pre-commit run --all-files   # first-time baseline
 
-pytest -m "not critic_agent_e2e and not robustness_agent_e2e and not targeted_build_e2e"
+pytest -m "not critic_agent_e2e and not targeted_build_e2e"
 ruff check . && ruff format --check .
 mypy src/hyperloom
 reuse lint

@@ -31,7 +31,6 @@ def _coordinator(session_dir: Path) -> Coordinator:
         backends={
             "orchestration": MockBackend(idle),
             "critic": MockBackend(idle),
-            "robustness": MockBackend(idle),
         },
         role_registry=default_role_registry(),
         recipe_kb=None,

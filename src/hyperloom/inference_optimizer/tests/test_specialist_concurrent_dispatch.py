@@ -52,7 +52,6 @@ async def _build_coord_with_capacity(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=tmp_path,

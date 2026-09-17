@@ -851,7 +851,6 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -907,7 +906,7 @@ class TestEveryTerminalReachesAWrittenReport:
         idle = ScriptedPlan(turns=[MockTurn(intents=[])])
         return Coordinator(
             session_dir=session_dir,
-            backends={name: MockBackend(idle) for name in ("orchestration", "critic", "robustness")},
+            backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
             role_registry=default_role_registry(),
             recipe_kb=None,
             knowledge_plane=None,
@@ -996,7 +995,6 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
         backends={
             "orchestration": MockBackend(idle_plan),
             "critic": MockBackend(idle_plan),
-            "robustness": MockBackend(idle_plan),
         },
         role_registry=default_role_registry(),
         recipe_kb=None,
@@ -1036,7 +1034,6 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1062,7 +1059,6 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1096,7 +1092,6 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb-store.example.test")
@@ -1136,7 +1131,6 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
@@ -1173,7 +1167,6 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
@@ -1214,7 +1207,6 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.LOCAL,
@@ -1246,7 +1238,6 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.LOCAL,

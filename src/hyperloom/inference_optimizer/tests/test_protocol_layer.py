@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from hyperloom.orchestrator.bus.cursor_store import CursorStore
@@ -295,7 +293,7 @@ async def test_resource_lock_heartbeat_and_stale_release(db):
 
 
 @pytest.mark.asyncio
-async def test_resource_lock_reap_expired_emits_event(db):
+async def test_resource_lock_does_not_expire_a_live_owner(db):
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     await locks.acquire_many(
         ["workspace_mutation"],
@@ -304,12 +302,10 @@ async def test_resource_lock_reap_expired_emits_event(db):
         action="patch_applier",
         ttl_sec=0,  # expires immediately
     )
-    time.sleep(0.01)
-    reaped = await locks.reap_expired()
-    assert any(r["lane"] == "workspace_mutation" for r in reaped)
+    assert await locks.reap_dead_holders() == []
+    assert (await locks.lane_holders())["workspace_mutation"] == 1
     bus = MessageBus(db)
-    expired_events = await bus.tail(topic="lease_expired")
-    assert len(expired_events) >= 1
+    assert await bus.tail(topic="lease_expired") == []
 
 
 # task_registry

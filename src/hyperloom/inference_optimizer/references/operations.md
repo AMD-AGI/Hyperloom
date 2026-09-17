@@ -116,10 +116,10 @@ echo $! > "$PID_FILE"
 ```
 
 `setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
-written above is the **setsid wrapper** PID, which exits immediately — the
-robustness monitor reads `$PID_FILE` and would misfire a spurious resume if
-it kept the dead wrapper PID. After launch, reconcile `$PID_FILE` to the **real**
-optimizer PID, which the CLI records as `.pid` in the launch-info JSON.
+written above may be a **setsid wrapper** PID rather than the optimizer PID.
+After launch, reconcile `$PID_FILE` to the **real** optimizer PID, which the
+CLI records as `.pid` in the launch-info JSON. A dead wrapper is not evidence
+that the optimizer needs restarting.
 
 Health-check after 30 seconds (the launch-info JSON carries the authoritative
 `.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
@@ -130,7 +130,7 @@ sleep 30
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
 # Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
-# and rewrite $PID_FILE so the monitor watches the right process.
+# and rewrite $PID_FILE for accurate process checks.
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
 [ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
 [ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
@@ -160,30 +160,11 @@ Reuse the launch template with these diffs: drop `--model`, add
 `RUN_TAG="resume-$(date +%Y%m%d_%H%M%S)"`. Set `$FRAMEWORK` when resuming a
 non-default session.
 
-## Robustness Monitor
-
-For runs longer than 5 minutes, start the monitor in its own `setsid nohup`
-process. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
-else `.session_dir` from `$LAUNCH_INFO_FILE`. Its only allowed relaunch is the
-same session via `optimize --resume-from "$SESSION_DIR"` after the
-optimizer process disappears without a terminal marker; it must not start a
-fresh run.
-
-```bash
-export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
-mkdir -p "$RUN_DIR"
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
-cp "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/robustness_monitor.sh.example" \
-   "$RUN_DIR/robustness_monitor.sh"
-chmod +x "$RUN_DIR/robustness_monitor.sh"
-setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
-  > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
-  2>&1 < /dev/null &
-```
-
 ## Monitoring
 
-Poll every 300s unless debugging startup failure.
+Read persisted state on each requested status check; do not start a background
+watchdog or automatic resume loop. A stopped process requires explicit diagnosis
+and an operator decision before resuming the same session.
 
 ```bash
 export SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE")"

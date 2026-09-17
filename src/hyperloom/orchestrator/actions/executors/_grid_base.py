@@ -38,8 +38,6 @@ def variant_fingerprint(
     )
 
 
-# Single home for the grid-level defaults every graded executor shares.
-DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
 DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 

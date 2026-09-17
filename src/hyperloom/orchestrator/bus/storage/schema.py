@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import sqlite3
 
-# Recorded by ensure_schema for provenance only: nothing compares it against the
-# version already in the DB, so a database written by an older version keeps its
-# own columns and is read as-is. Rows are addressed by column name, so a column
-# this version no longer writes is inert rather than a migration hazard.
-SCHEMA_VERSION = 5
+# Recorded for provenance. Additive ownership migration below preserves legacy
+# rows with unknown scope rather than inferring where their PIDs originated.
+SCHEMA_VERSION = 6
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
@@ -35,6 +33,7 @@ _DDL = [
         task_id       TEXT    NOT NULL,
         action        TEXT    NOT NULL,
         pid           INTEGER NOT NULL,
+        owner_scope   TEXT    NOT NULL DEFAULT '',
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
         heartbeat_at  TEXT    NOT NULL,
@@ -108,8 +107,7 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
-    # start. Admission reads state and expires_unix, so exclusion is bounded by
-    # the lease: a round nobody settles stops excluding on its own.
+    # start. Only explicit settlement ends exclusion; timestamps describe budgets.
     """
     CREATE TABLE IF NOT EXISTS bringup_rounds (
         round_id             TEXT    PRIMARY KEY,
@@ -219,6 +217,9 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         cur.execute("BEGIN IMMEDIATE")
         for stmt in _DDL:
             cur.execute(stmt)
+        cur.execute("PRAGMA table_info(leases)")
+        if "owner_scope" not in {row[1] for row in cur.fetchall()}:
+            cur.execute("ALTER TABLE leases ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''")
         _seed_default_lane_capacity(cur)
         cur.execute(
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",

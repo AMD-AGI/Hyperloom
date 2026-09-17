@@ -10,7 +10,6 @@ import json
 import os
 
 from hyperloom.inference_optimizer.cli import _export_operator_launch_shape
-from hyperloom.inference_optimizer.cli.backends import resolve_robustness_options
 from hyperloom.inference_optimizer.cli.bootstrap import parse_operator_extra_env
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -57,40 +56,6 @@ def test_export_operator_launch_shape_clears_stale_values(monkeypatch):
     assert "INFERENCE_OPTIMIZER_EXTRA_ENV" not in os.environ
 
 
-def test_robustness_options_fall_back_to_persisted_on_resume():
-    """A resume passing no robustness flag keeps the probe silenced by the original launch."""
-    state = SharedState(session_id="s", robustness_options={"auto_probe_inference_server": False})
-    args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None)
-
-    assert resolve_robustness_options(args, state) == {"auto_probe_inference_server": False}
-
-
-def test_robustness_options_explicit_flag_wins_over_persisted():
-    """``--no-robustness-disable-server-probe`` on the resume re-enables the probe."""
-    state = SharedState(session_id="s", robustness_options={"auto_probe_inference_server": False})
-    args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=False)
-
-    assert resolve_robustness_options(args, state) == {"auto_probe_inference_server": True}
-
-
-def test_robustness_options_unrelated_flag_leaves_the_rest_persisted():
-    """One unrelated ``--robustness-*`` flag must not reopen the probe the launch closed."""
-    state = SharedState(session_id="s", robustness_options={"auto_probe_inference_server": False})
-    args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None, robustness_llm_rca=True)
-
-    assert resolve_robustness_options(args, state) == {
-        "auto_probe_inference_server": False,
-        "llm_rca_enabled": True,
-    }
-
-
-def test_robustness_options_empty_state_is_empty():
-    """No flags and nothing persisted leaves the runtime on its own defaults."""
-    args = _ns(nodes=1, framework="vllm", robustness_disable_server_probe=None)
-
-    assert resolve_robustness_options(args, SharedState(session_id="s")) == {}
-
-
 def test_launch_shape_survives_a_state_roundtrip():
     """The fields reach disk, which is what a resume reads them back from."""
     state = SharedState(
@@ -98,7 +63,6 @@ def test_launch_shape_survives_a_state_roundtrip():
         operator_server_args="--max-num-seqs 512",
         operator_extra_env={"SGLANG_USE_AITER": "0"},
         nodes=4,
-        robustness_options={"auto_probe_inference_server": False},
         warm_replay_enabled=False,
         warm_replay_min_confidence=0.55,
         warm_replay_min_reproduce_pct=0.6,
@@ -112,7 +76,6 @@ def test_launch_shape_survives_a_state_roundtrip():
     assert restored.operator_server_args == "--max-num-seqs 512"
     assert restored.operator_extra_env == {"SGLANG_USE_AITER": "0"}
     assert restored.nodes == 4
-    assert restored.robustness_options == {"auto_probe_inference_server": False}
     assert restored.warm_replay_enabled is False
     assert restored.warm_replay_min_confidence == 0.55
     assert restored.warm_replay_min_reproduce_pct == 0.6
@@ -128,7 +91,6 @@ def test_pre_existing_state_without_the_fields_loads_defaults():
     assert restored.operator_server_args == ""
     assert restored.operator_extra_env == {}
     assert restored.nodes == 1
-    assert restored.robustness_options == {}
     assert restored.warm_replay_enabled is True
     assert restored.warm_replay_min_confidence == 0.7
     assert restored.warm_replay_min_reproduce_pct == 0.8

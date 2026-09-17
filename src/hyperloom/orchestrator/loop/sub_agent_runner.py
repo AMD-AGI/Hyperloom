@@ -12,6 +12,7 @@ transitions the row to its terminal state.
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -221,13 +222,13 @@ class SubAgentRunner:
         *,
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
+        release_resources: Callable[[], Awaitable[bool]] | None = None,
     ) -> SubAgentResult:
         """Claim the row, execute it, record the outcome.
 
-        From the claim onwards every exit writes a terminal state, so a row
-        reads ``running`` only while a live coroutine owns it -- which is what
-        the phase gates and the ``tasks.running()`` readers assume. The lease is
-        released by a single finally on every path, a rejected claim included.
+        Normal completion records a terminal state and releases resources.
+        A hard-cancelled await is not proof its worker ended, so that path keeps
+        the running row and ownership for explicit cleanup.
 
         Args:
             task: The task to execute.
@@ -235,6 +236,7 @@ class SubAgentRunner:
                 released here. ``None`` only for a task that needs no lanes.
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
+            release_resources: Confirm worker cleanup before releasing lanes.
 
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.
@@ -242,6 +244,15 @@ class SubAgentRunner:
         runner = self.executor_registry.get(task.kind)
         lease: Lease | None = prebound_lease
         try:
+            if task.kind == "recover" and runner is None and task.state == "queued":
+                await self.tasks.transition(task.task_id, "cancelled", evidence={"reason": "unsupported_action"})
+                return SubAgentResult(
+                    task_id=task.task_id,
+                    state="cancelled",
+                    result={"status": "cancelled", "error_class": "unsupported_action"},
+                    error="recover is no longer supported",
+                    error_class="unsupported_action",
+                )
             if self.policy is not None:
                 try:
                     self.policy.validate_dispatched_task(
@@ -312,19 +323,7 @@ class SubAgentRunner:
                 with progress_scope(self._progress_reporter(task.task_id)):
                     result_payload = await runner(ctx)
             except asyncio.CancelledError:
-                # Stopped from outside -- shutdown, or a wall-clock budget that
-                # ran out while this was running. ``CancelledError`` is not an
-                # ``Exception``, so it skips the handler below and nothing else
-                # would move the row off ``running``: it would hold its lanes
-                # and read as live work to every phase gate until the TTL sweep
-                # noticed. Recorded as ``cancelled`` rather than ``failed``
-                # because the action was never given the chance to fail.
-                await self._write_terminal(
-                    task.task_id,
-                    "cancelled",
-                    evidence={"reason": "cancelled_in_flight"},
-                    context="executor_cancelled",
-                )
+                log.warning("sub_agent_runner: task=%s cleanup unconfirmed; retaining ownership", task.task_id)
                 raise
             except Exception as exc:  # noqa: BLE001 — surface to task.history
                 await self._write_terminal(
@@ -352,9 +351,17 @@ class SubAgentRunner:
                 result=result_payload,
             )
         finally:
-            # The caller won the lease; releasing it is this runner's job.
-            if lease is not None:
-                await self.locks.release(lease)
+            # Cancellation of an await does not establish that its worker stopped.
+            if not isinstance(sys.exc_info()[1], asyncio.CancelledError):
+                try:
+                    released = release_resources is None or await release_resources()
+                    if released and lease is not None:
+                        await self.locks.release(lease)
+                except asyncio.CancelledError:
+                    log.warning(
+                        "sub_agent_runner: task=%s cleanup cancelled; retaining unconfirmed capacity", task.task_id
+                    )
+                    raise
 
     def _progress_reporter(self, task_id: str) -> ProgressReporter:
         """Build the ambient progress sink for one task's executor.

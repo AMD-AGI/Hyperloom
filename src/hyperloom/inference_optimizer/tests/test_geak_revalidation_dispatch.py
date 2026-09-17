@@ -28,7 +28,6 @@ def coordinator(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -38,7 +37,6 @@ def coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(sd, backends=backends)
 
@@ -975,7 +973,7 @@ async def test_prune_settles_geak_pending_when_rebench_cancelled(coordinator) ->
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
     await c._handle_prune_branch(
-        "robustness",
+        "orchestration",
         Intent(type=IntentType.PRUNE_BRANCH, payload={"family": "explore", "reason": "prune_branch"}),
     )
 

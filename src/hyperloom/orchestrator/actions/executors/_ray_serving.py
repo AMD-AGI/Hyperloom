@@ -87,6 +87,16 @@ def _pdeathsig_preexec() -> None:
         pass
 
 
+def _managed_group_running(pgid: int) -> bool:
+    """Treat zombie-only owned groups as stopped, retaining unknown observations."""
+    from hyperloom.common.proctree import group_alive, group_members
+
+    if not group_alive(pgid):
+        return False
+    members = group_members(pgid)
+    return not members or any(state != "Z" for _pid, _start, state in members)
+
+
 @dataclass
 class ManagedServerProcess:
     """Supervise a single GPU/serving subprocess tied to this object's lifetime.
@@ -169,12 +179,41 @@ class ManagedServerProcess:
             return None
         return self._proc.poll()
 
-    def stop(self, *, grace_seconds: float = 5.0) -> None:
-        """Reap the whole process tree (SIGTERM → grace → SIGKILL). Idempotent."""
+    def stop(self, *, grace_seconds: float = 5.0) -> bool:
+        """Confirm teardown of the enumerated live tree before dropping its handle."""
+        from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
         from ._subprocess_kill import kill_my_spawned_server
 
-        kill_my_spawned_server(self._proc, grace_seconds=grace_seconds)
+        proc = self._proc
+        if proc is None:
+            return True
+        if os.name != "posix":
+            kill_my_spawned_server(proc, grace_seconds=grace_seconds)
+            return False
+        if proc.poll() is not None:
+            if not _managed_group_running(proc.pid):
+                self._proc = None
+                return True
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                signal_group(proc.pid, sig, what="ManagedServerProcess.stop")
+                deadline = time.monotonic() + grace_seconds
+                while _managed_group_running(proc.pid):
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.05)
+                else:
+                    self._proc = None
+                    return True
+            return False
+        try:
+            tree = collect_tree([proc.pid])
+            if not kill_tree(tree, grace_sec=grace_seconds, confirm_sec=grace_seconds):
+                return False
+            proc.wait(timeout=1.0)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
         self._proc = None
+        return True
 
 
 def _serving_actor_body() -> Any:
@@ -233,7 +272,7 @@ def _serving_actor_body() -> Any:
             env=None,
             cwd=None,
             timeout=None,
-            soft_deadline_sec=None,
+            silence_timeout_sec=None,
             server_log_path=None,
             server_already_ready=False,
             session_remaining_sec=None,
@@ -253,7 +292,7 @@ def _serving_actor_body() -> Any:
                         env=env,
                         cwd=cwd,
                         timeout_s=timeout,
-                        soft_deadline_sec=soft_deadline_sec,
+                        silence_timeout_sec=silence_timeout_sec,
                         server_log_path=server_log_path,
                         server_already_ready=server_already_ready,
                         session_remaining_sec=session_remaining_sec,
@@ -283,9 +322,9 @@ def _serving_actor_body() -> Any:
             """Return the supervised process exit code, or ``None`` while running."""
             return self._mgr.exit_code()
 
-        def stop(self) -> None:
-            """Reap the serving process tree."""
-            self._mgr.stop()
+        def stop(self) -> bool:
+            """Return whether the managed process tree was confirmed stopped."""
+            return self._mgr.stop()
 
         def __ray_terminate__(self) -> None:  # pragma: no cover - Ray teardown hook
             """Reap the serving process when Ray tears the actor down."""
@@ -347,7 +386,7 @@ class ServingLease:
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         timeout: int | float | None = None,
-        soft_deadline_sec: float | None = None,
+        silence_timeout_sec: float | None = None,
         server_log_path: str | None = None,
         server_already_ready: bool = False,
         session_remaining_sec: float | None = None,
@@ -368,7 +407,7 @@ class ServingLease:
                 env=env,
                 cwd=cwd,
                 timeout=timeout,
-                soft_deadline_sec=soft_deadline_sec,
+                silence_timeout_sec=silence_timeout_sec,
                 server_log_path=server_log_path,
                 server_already_ready=server_already_ready,
                 session_remaining_sec=session_remaining_sec,
@@ -616,18 +655,18 @@ class GpuSpecialistLease:
         except Exception:  # noqa: BLE001
             return None
 
-    def stop(self) -> None:
-        """Reap the specialist subprocess tree (keeps the actor/lease alive). Never raises."""
+    def stop(self) -> bool:
+        """Keep the lease until the worker positively acknowledges tree teardown."""
         if self._actor is None:
-            return
+            return True
         import ray  # noqa: PLC0415
 
         try:
-            ray.get(self._actor.stop.remote(), timeout=_LEASE_PROBE_TIMEOUT_SEC)
-        except Exception:  # noqa: BLE001 — teardown must not raise
-            pass
+            return ray.get(self._actor.stop.remote(), timeout=CLOSE_STOP_TIMEOUT_SEC) is True
+        except (ray.exceptions.RayError, OSError):
+            return False
 
-    def close(self) -> None:
+    def close(self) -> bool:
         """Stop the specialist, then kill the actor to release the GPU lease.
 
         The stop comes first for the same reason it does in
@@ -636,15 +675,19 @@ class GpuSpecialistLease:
         one to reap it. Idempotent, never raises.
         """
         if self._actor is None:
-            return
-        self.stop()
-        try:
-            import ray  # noqa: PLC0415
+            return True
+        stopped = self.stop()
+        import ray  # noqa: PLC0415
 
+        try:
+            # Revoke queued starts too; a missing cleanup ack still retains capacity.
             ray.kill(self._actor)
-        except Exception:  # noqa: BLE001 — teardown must not raise
-            pass
-        self._actor = None
+        except (ray.exceptions.RayError, OSError):
+            return False
+        if stopped:
+            self._actor = None
+            self._start_ref = None
+        return stopped
 
 
 def maybe_gpu_specialist_lease(

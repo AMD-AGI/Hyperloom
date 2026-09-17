@@ -147,6 +147,26 @@ async def _all_succeed(*, grid: list[GridVariant], **_kw):
     ]
 
 
+def test_sweep_executor_uses_shared_benchmark_deadline(session_dir: Path, baseline_yaml: Path, monkeypatch):
+    from types import SimpleNamespace
+    from hyperloom.orchestrator.actions.executors import conc_sweep as executor_module
+
+    state = _state(baseline_yaml)
+    monkeypatch.setattr(executor_module.SharedState, "load_or_init", lambda _: state)
+
+    async def run_sweep(state, session_dir, *, concs, total_budget_sec, recorder):
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(executor_module, "run_conc_sweep", run_sweep)
+    executor = executor_module.ConcSweepExecutor()
+    monkeypatch.setattr(executor, "_make_recorder", lambda *args: None)
+    ctx = SimpleNamespace(
+        extra={"session_dir": str(session_dir)},
+        task=SimpleNamespace(params={"variant_timeout_sec": 1}),
+    )
+    assert asyncio.run(executor._run(ctx))["status"] == "succeeded"
+
+
 def test_a_sweep_records_both_arms_and_every_rung(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
     with session_scope(session_dir):
@@ -204,7 +224,7 @@ def test_each_rung_carries_the_load_and_the_cap_it_ran_under(session_dir: Path, 
     assert [(rung["conc"], rung["num_prompts"]) for rung in arm["grid"]] == [(16, 80), (4, 20)]
     for point in arm["points"]:
         assert point["num_prompts"] == point["conc"] * 5
-        assert point["granted_cap_sec"] == 1800.0
+        assert point["granted_cap_sec"] == 7800.0
         assert point["start_time"]
         assert point["wall_duration_sec"] is not None
 
@@ -309,7 +329,7 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
             "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._granted_cap_sec", return_value=0.9),
+        patch.dict("os.environ", {"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "0.9"}),
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_slow),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
     ):

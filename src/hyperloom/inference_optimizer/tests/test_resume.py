@@ -10,7 +10,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
@@ -29,7 +28,6 @@ def _backends_full() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -172,7 +170,6 @@ async def test_replay_rebuilds_undecided_proposals(session_dir):
             ScriptedPlan(turns=[MockTurn(intents=[propose])], default_intent=_heartbeat()), name="o"
         ),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends_no_critic)
     try:
@@ -242,7 +239,6 @@ async def test_replay_skips_rejected_proposals(session_dir):
             name="o",
         ),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -279,7 +275,6 @@ async def test_replay_mixed_pending_and_decided(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -344,12 +339,11 @@ async def test_resume_preserves_pruned_and_restores_pending(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
         await c1._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "x"},
@@ -381,7 +375,6 @@ async def test_tick_lazily_runs_replay_on_resume(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
     c1 = Coordinator(session_dir, backends=backends)
     try:
@@ -448,7 +441,7 @@ class TestN23ResumePerSession:
         "argv",
         [
             ["optimize", "--resume"],
-            # The command line already-deployed robustness monitor copies send.
+            # Historical automatic-resume invocations remain unsupported.
             ["optimize", "--resume", "--resume-from", "/tmp/sess"],
         ],
     )
