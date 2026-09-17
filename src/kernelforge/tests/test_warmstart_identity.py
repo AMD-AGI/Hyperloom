@@ -50,6 +50,46 @@ def test_fuzzy_ranking_accepts_newer_older_and_cross_isa_donors():
     ]
 
 
+def test_two_spellings_of_one_release_rank_as_that_release():
+    # Pages written before the version was canonicalized still carry the spelling
+    # their campaign used, so the ranking has to read them as the release they name
+    # rather than as a neighbouring one.
+    rows = [
+        _row("0.11.4", "mi355x"),
+        _row("v0.11.3+rocm723", "mi355x"),
+    ]
+
+    ranked = rank_fallback_identities(_target(), rows)
+
+    assert ranked[0] == rows[1]["canonical_id"]
+    assert len(ranked) == 2
+
+
+def test_runs_that_both_observed_no_version_can_reach_each_other():
+    """A target with no version has four exact dimensions left, and that is enough.
+
+    42% of the store's pages name no version, which used to end the fuzzy tier
+    before it started: the same operator, framework and backend sat one word away
+    under a different spelling of not knowing, and nothing could read it.
+    """
+    target = KernelRecipeIdentity(
+        producer="forge-loop",
+        kernel_name="softmax",
+        framework="vllm",
+        framework_version="unknown",
+        backend="triton",
+        gpu="mi355x",
+    )
+    rows = [
+        _row("unspecified", "mi355x"),
+        _row("0.11.3", "mi355x"),
+    ]
+
+    # The known release is still rejected: how far it sits from an unknown one is
+    # not a question either string can answer.
+    assert rank_fallback_identities(target, rows) == [rows[0]["canonical_id"]]
+
+
 def test_fuzzy_ranking_rejects_unknown_or_unparseable_dimensions():
     rows = [
         _row("unknown", "mi355x"),

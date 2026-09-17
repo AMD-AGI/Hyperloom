@@ -86,7 +86,7 @@ def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -
         {
             "producer": " FORGE-LOOP ",
             "framework": " SGLang ",
-            "framework_version": " 0.5.17+ROCM ",
+            "framework_version": " v0.5.17+ROCM ",
             "backend": " TRITON ",
             "gpu": " MI355X ",
         }
@@ -101,7 +101,9 @@ def test_publish_normalizes_harmless_agent_identity_variations(tmp_path: Path) -
         "producer": "forge-loop",
         "kernel_name": "kernel",
         "framework": "sglang",
-        "framework_version": "0.5.17+rocm",
+        # The build the wheel was compiled as is not part of the release a port was
+        # written against, and neither is the tag convention the campaign read it under.
+        "framework_version": "0.5.17",
         "backend": "triton",
         "gpu": "mi355x",
     }

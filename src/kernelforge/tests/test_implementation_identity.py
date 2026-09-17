@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kernelforge.knowledge.implementation_identity import (
     canonical_editable_source_paths,
+    canonical_framework_version,
     canonical_owner_framework,
     implementation_signature,
     normalize_operator_name,
@@ -79,6 +80,46 @@ def test_names_already_written_as_words_are_left_alone():
 def test_distinct_operators_sharing_a_prefix_stay_distinct():
     assert normalize_operator_name("MoeFlydslStage1") != normalize_operator_name("MoeFlydslStage2")
     assert normalize_operator_name("rmsNorm") != normalize_operator_name("addRmsNorm")
+
+
+def test_the_build_a_release_was_compiled_as_is_not_part_of_the_release():
+    # The store holds unified_attention_with_output under 0.24.0 and 0.24.0+rocm723
+    # with one implementation_signature between them: one kernel, two pages, and the
+    # faster port (11.58x) on the page the other spelling never reads.
+    assert canonical_framework_version("0.24.0+rocm723") == "0.24.0"
+    assert canonical_framework_version("0.1.dev19253+g5f76ae224.d20260727.rocm723") == "0.1"
+
+
+def test_a_release_reads_the_same_however_it_was_written_down():
+    # importlib.metadata reports the distribution version; a campaign reads the tag
+    # or the image it arrived in. Both are naming the source a port was written
+    # against, so both have to address one page.
+    assert canonical_framework_version("v0.24.0") == canonical_framework_version("0.24.0")
+    assert canonical_framework_version("v0.5.15.post1-rocm720-mi35x-20260724") == "0.5.15.post1"
+    assert canonical_framework_version("0.5.15.post1.dev20260724+g3d91a569ce") == "0.5.15.post1"
+
+
+def test_every_word_for_not_knowing_the_version_is_the_same_word():
+    # Three code paths answer "which version?" in three different words, and the
+    # store holds rmsnorm under two of them -- a 1.49x port and a 1.15x port of one
+    # kernel, neither page reachable from the other.
+    words = {"", "none", "unknown", "unspecified", "unknown_version"}
+    assert {canonical_framework_version(word) for word in words} == {"unknown"}
+
+
+def test_distinct_releases_stay_distinct():
+    assert canonical_framework_version("0.11.3") != canonical_framework_version("0.11.4")
+    assert canonical_framework_version("0.5.15") != canonical_framework_version("0.5.15.post1")
+    assert canonical_framework_version("1.0.0rc1") != canonical_framework_version("1.0.0")
+
+
+def test_a_version_naming_no_release_is_left_exactly_as_written():
+    # Read side and write side canonicalize independently, so a string this cannot
+    # read has to survive unchanged rather than become some other page's name.
+    for raw in ("not-a-version", "0.24.0+rocm723", "unspecified"):
+        once = canonical_framework_version(raw)
+        assert canonical_framework_version(once) == once
+    assert canonical_framework_version("not-a-version") == "not-a-version"
 
 
 def test_operator_name_strips_balanced_nested_template_arguments():

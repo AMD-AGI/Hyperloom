@@ -9,6 +9,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
+from kernelforge.knowledge.implementation_identity import canonical_framework_version
+
 DEFAULT_SCHEME_NAME = "kernel"
 KERNEL_CANONICAL_DIMENSIONS = (
     "producer",
@@ -45,13 +47,19 @@ class KernelRecipeIdentity:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "KernelRecipeIdentity":
-        """Build an identity from the current producer-aware record shape."""
+        """Build an identity from the current producer-aware record shape.
+
+        A declared version is whatever the campaign read -- the package, the
+        image tag, nothing at all -- while the host derives the same release
+        from installed distribution metadata. Both spellings have to reach one
+        page, so both are resolved to the release the same way.
+        """
         return cls(
             producer=str(value.get("producer") or ""),
             kernel_name=str(value.get("kernel_name") or ""),
             gpu=str(value.get("gpu") or ""),
             framework=str(value.get("framework") or ""),
-            framework_version=str(value.get("framework_version") or ""),
+            framework_version=canonical_framework_version(str(value.get("framework_version") or "")),
             backend=str(value.get("backend") or ""),
         )
 

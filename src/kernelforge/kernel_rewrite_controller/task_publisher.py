@@ -19,7 +19,10 @@ from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tre
 from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.task import parse_task_payload
-from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.implementation_identity import (
+    canonical_framework_version,
+    normalize_operator_name,
+)
 from kernelforge.knowledge.kernel_identity import KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.llm.git import GitError, git
 
@@ -68,11 +71,12 @@ def _normalize_agent_task_payload(payload: dict) -> dict:
                 continue
             identity[field] = value.strip().lower()
         # Host-owned, like base_commit and driver_path below: the parser derives
-        # it too, and writing it here is what makes the published task.json state
-        # the identity the controller went on to use rather than the draft's.
+        # these too, and writing them here is what makes the published task.json
+        # state the identity the controller went on to use rather than the draft's.
         operator_name = normalized.get("operator_name")
         if isinstance(operator_name, str) and operator_name.strip():
             identity["kernel_name"] = normalize_operator_name(operator_name)
+        identity["framework_version"] = canonical_framework_version(identity.get("framework_version", ""))
         normalized["identity"] = identity
     repo_root = normalized.get("repo_root")
     if isinstance(repo_root, str):
