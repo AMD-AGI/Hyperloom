@@ -293,11 +293,31 @@ def _reject_reason(repo: Path, relative: str, resolved: str) -> str:
     return f"{relative}: merge redefines module-level {', '.join(shadowed)}" if shadowed else ""
 
 
+def _resolver_backend() -> str:
+    """The agent backend a resolver would call, or ``""`` when none can.
+
+    Forge's rewrite lane picks its backend with
+    :func:`preferred_agent_backend`, and the last rung of this ladder is a
+    forge call like any other: an OpenAI-only box has to reach Codex here for
+    the same reason it reaches Codex there, or every overlapping-region lane on
+    that box falls back to the dropped patch this module exists to stop.
+    """
+    from hyperloom.common.llm_config import (
+        AGENT_BACKEND_CODEX,
+        anthropic_transport_ready,
+        openai_agent_credentialed,
+        preferred_agent_backend,
+    )
+
+    backend = preferred_agent_backend()
+    if backend == AGENT_BACKEND_CODEX:
+        return backend if openai_agent_credentialed() else ""
+    return backend if anthropic_transport_ready() else ""
+
+
 def llm_resolution_available() -> bool:
     """Whether a conflict resolver could actually issue a call right now."""
-    from hyperloom.common.llm_config import anthropic_transport_ready
-
-    return bool(anthropic_transport_ready())
+    return bool(_resolver_backend())
 
 
 def _blank_trimmed(lines: list[str]) -> list[str]:
@@ -324,6 +344,40 @@ def _strip_code_fence(text: str) -> str | None:
     return "\n".join(lines) + "\n" if lines else None
 
 
+def _resolver_prompt(
+    *,
+    relative_path: str,
+    region: str,
+    context_before: str,
+    context_after: str,
+    ours_label: str,
+    theirs_label: str,
+    intent: str,
+) -> str:
+    """The one region, its two labels and its surrounding source."""
+    return (
+        f"File: {relative_path}\n"
+        f"`ours` is the optimization already landed: {ours_label}\n"
+        f"`theirs` is the optimization being landed now: {theirs_label}\n"
+        f"{intent}\n\n"
+        f"Lines before the region:\n```\n{context_before}\n```\n\n"
+        f"Conflicted region:\n```\n{region}```\n\n"
+        f"Lines after the region:\n```\n{context_after}\n```"
+    )
+
+
+def _conflict_resolver() -> ConflictResolver | None:
+    """A resolver on whichever backend this deployment runs, or ``None``."""
+    from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+
+    backend = _resolver_backend()
+    if backend == AGENT_BACKEND_CODEX:
+        return _codex_resolver()
+    if backend == AGENT_BACKEND_CLAUDE:
+        return _anthropic_resolver()
+    return None
+
+
 def _anthropic_resolver() -> ConflictResolver:
     async def resolve(
         *,
@@ -342,14 +396,14 @@ def _anthropic_resolver() -> ConflictResolver:
         )
         from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
 
-        prompt = (
-            f"File: {relative_path}\n"
-            f"`ours` is the optimization already landed: {ours_label}\n"
-            f"`theirs` is the optimization being landed now: {theirs_label}\n"
-            f"{intent}\n\n"
-            f"Lines before the region:\n```\n{context_before}\n```\n\n"
-            f"Conflicted region:\n```\n{region}```\n\n"
-            f"Lines after the region:\n```\n{context_after}\n```"
+        prompt = _resolver_prompt(
+            relative_path=relative_path,
+            region=region,
+            context_before=context_before,
+            context_after=context_after,
+            ours_label=ours_label,
+            theirs_label=theirs_label,
+            intent=intent,
         )
         result = await aanthropic_completion(
             component="forge",
@@ -366,6 +420,51 @@ def _anthropic_resolver() -> ConflictResolver:
             timeout=build_http_timeout(connect=_LLM_CONNECT_TIMEOUT_S, read=_LLM_TIMEOUT_S),
             timeout_s=_LLM_TIMEOUT_S,
         )
+        return _strip_code_fence(result.text or "")
+
+    return resolve
+
+
+def _codex_resolver() -> ConflictResolver:
+    async def resolve(
+        *,
+        relative_path: str,
+        region: str,
+        context_before: str,
+        context_after: str,
+        ours_label: str,
+        theirs_label: str,
+        intent: str,
+    ) -> str | None:
+        from hyperloom.common.llm_config import (
+            achat_completion,
+            apply_reasoning_effort,
+            build_http_timeout,
+            get_async_openai_client,
+            resolve_forge_llm_model,
+        )
+        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
+        from hyperloom.orchestrator.roles.base import build_chat_messages
+
+        prompt = _resolver_prompt(
+            relative_path=relative_path,
+            region=region,
+            context_before=context_before,
+            context_after=context_after,
+            ours_label=ours_label,
+            theirs_label=theirs_label,
+            intent=intent,
+        )
+        params: dict[str, object] = {
+            "model": resolve_forge_llm_model("codex", default=DEFAULT_CODEX_MODEL),
+            "messages": build_chat_messages(_RESOLVER_SYSTEM, prompt),
+            "max_completion_tokens": _LLM_MAX_TOKENS,
+        }
+        apply_reasoning_effort(params)
+        client = get_async_openai_client(
+            timeout=build_http_timeout(connect=_LLM_CONNECT_TIMEOUT_S, read=_LLM_TIMEOUT_S),
+        )
+        result = await achat_completion(client, component="forge", operation="patch_conflict_merge", **params)
         return _strip_code_fence(result.text or "")
 
     return resolve
@@ -502,7 +601,7 @@ async def apply_patch_resolving_conflicts(
         landed_operator_ids: Operators already committed, named for the resolver.
         landed_patches: Their diffs. Every line they added must survive a merge.
         intent: What the incoming patch optimizes, for the resolver.
-        resolver: Overrides the Anthropic resolver; tests inject here.
+        resolver: Overrides this deployment's resolver; tests inject here.
 
     Returns:
         A :class:`PatchMergeOutcome`. Whenever ``applied`` is false the worktree
@@ -536,8 +635,8 @@ async def apply_patch_resolving_conflicts(
         return PatchMergeOutcome(applied=True, strategy=STRATEGY_THREE_WAY, steps=tuple(steps))
 
     steps.append(f"three-way left conflicts in {', '.join(conflicted)}")
-    if resolver is None and llm_resolution_available():
-        resolver = _anthropic_resolver()
+    if resolver is None:
+        resolver = _conflict_resolver()
     strategy, error = await _resolve_conflicts(
         repo,
         conflicted,

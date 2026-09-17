@@ -57,8 +57,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cost and can never produce an unmeasured KEEP. A lane that landed as a merge
   rather than verbatim is reported as `merge_strategy` on the integration
   result and in `summary.json`. A patch that applies cleanly takes the path it
-  always took, and the resolver is skipped entirely when no Anthropic
-  credential is configured.
+  always took, and the resolver runs on whichever backend
+  `preferred_agent_backend` picks for this deployment -- Claude through the
+  single-shot Anthropic transport, Codex through `achat_completion` -- and is
+  skipped entirely when neither side is credentialed.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a

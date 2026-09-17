@@ -6,17 +6,22 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER
+from hyperloom.common import llm_config
+from hyperloom.common.llm_config import ANTHROPIC_CREDENTIAL_ENV_ORDER, _ANTHROPIC_MANAGED_GATEWAY_ENVS
 from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_LLM,
     STRATEGY_STRICT,
     STRATEGY_THREE_WAY,
     STRATEGY_UNION,
+    _resolver_backend,
     apply_patch_resolving_conflicts,
+    llm_resolution_available,
 )
+from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",
@@ -132,11 +137,11 @@ def _insert_helpers(helpers: str) -> str:
 def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the default resolver unavailable, so no test can reach a gateway.
 
-    ``resolver=None`` means "use the Anthropic resolver if one can be built",
-    so a developer with a credential exported would otherwise turn the
-    no-resolver tests into live calls.
+    ``resolver=None`` means "build this deployment's resolver if either backend
+    can be reached", so a developer with a credential exported for Claude or
+    for Codex would otherwise turn the no-resolver tests into live calls.
     """
-    for name in ANTHROPIC_CREDENTIAL_ENV_ORDER:
+    for name in (*ANTHROPIC_CREDENTIAL_ENV_ORDER, *_ANTHROPIC_MANAGED_GATEWAY_ENVS, "OPENAI_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -261,6 +266,56 @@ async def test_overlapping_edits_are_left_to_a_resolver(repo: Path, patches: Pat
     assert "no resolver available" in outcome.note()
     assert not _dirty(repo)
     assert "return x * 4" in (repo / _MODULE).read_text(encoding="utf-8")
+
+
+async def test_an_openai_only_box_resolves_through_codex(
+    repo: Path, patches: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Forge's rewrite lane runs Codex on such a box, so this rung must too."""
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+    client = object()
+    posted: dict[str, object] = {}
+
+    async def _achat(called_on: object, **params: object) -> object:
+        posted.update(params, client=called_on)
+        return SimpleNamespace(
+            text=(
+                "\n\ndef _sweep_flag(name, default):\n"
+                '    return os.environ.get("FORGE_SWEEP_" + name, default) == "1"\n'
+                '\n\n_PAD_ZERO = _sweep_flag("PAD_ZERO", "1")\n'
+                '_TILE_N = _sweep_flag("TILE_N", "0")\n'
+            )
+        )
+
+    monkeypatch.setattr(llm_config, "get_async_openai_client", lambda **_: client)
+    monkeypatch.setattr(llm_config, "achat_completion", _achat)
+    landed = _capture_patch(repo, patches, "stage1", _insert_helpers(_LANE_ONE_HELPERS))
+    incoming = _capture_patch(repo, patches, "stage2", _insert_helpers(_LANE_TWO_SHARED_HELPER))
+    _land(repo, landed)
+
+    outcome = await apply_patch_resolving_conflicts(repo, incoming, landed_patches=[landed], resolver=None)
+
+    assert outcome.applied, outcome.error
+    assert outcome.strategy == STRATEGY_LLM
+    assert posted["client"] is client
+    assert posted["model"] == DEFAULT_CODEX_MODEL
+    assert (posted["component"], posted["operation"]) == ("forge", "patch_conflict_merge")
+    system, user = posted["messages"]  # type: ignore[misc]
+    assert "never a choice between them" in system["content"]
+    assert _MODULE in user["content"]
+    assert (repo / _MODULE).read_text(encoding="utf-8").count("def _sweep_flag") == 1
+
+
+def test_a_dual_configured_box_keeps_the_claude_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tie-break is `preferred_agent_backend`'s, not this module's."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "token")
+    monkeypatch.setenv("OPENAI_API_KEY", "token")
+
+    assert _resolver_backend() == "claude"
+
+
+def test_a_box_credentialed_for_neither_side_has_no_resolver() -> None:
+    assert not llm_resolution_available()
 
 
 async def test_a_rejected_patch_leaves_nothing_of_the_file_it_created(repo: Path, patches: Path) -> None:
