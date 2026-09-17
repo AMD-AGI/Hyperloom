@@ -34,6 +34,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A gateway deployment was told it had no OpenAI credential and handed to
+  Claude, which it could not authenticate either.** `openai_agent_credentialed`
+  recognised `OPENAI_API_KEY` alone while `codex_session` authenticates with
+  `OPENAI_API_KEY` or `LLM_GATEWAY_KEY`, so a box carrying only the gateway key
+  ranked as uncredentialed on both sides and fell through to the Claude
+  default. That is the failure #1472 set out to fix, reached through a
+  different variable name. The accepted key names are now one tuple in
+  `llm_config` that `codex_session` reads too.
+
+  **Orchestration picked its CLI from the endpoint shape rather than the shared
+  rule.** `cli/backends.py` was outside #1472's reach and still asked
+  `is_openai_only()`, so the coordinator disagreed with the five roles that had
+  been converted. Two shapes move as a result: a bare `OPENAI_BASE_URL` with no
+  key, and a Bedrock or Vertex box carrying any OpenAI variable, now run Claude
+  for orchestration instead of Codex. Neither could authenticate Codex — it
+  refuses to start without a key — so the old answer named a backend that
+  provably could not run.
+
+  **The ranking was written twice.** `preferred_agent_backend` and the Forge
+  registry's `select_default_agent_provider` each built the credential-then-SDK
+  sort key themselves and were kept in step by two docstrings pointing at each
+  other. Both now sort on `llm_config.agent_backend_rank`, the registry probes
+  the optional SDKs through `llm_config` instead of repeating `find_spec`, and
+  the CLI's pass-through wrappers around `is_anthropic_only` / `is_openai_only`
+  are gone along with the model defaults that re-derived the same shape test by
+  hand.
+
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
   model that scored badly the same way -- a non-zero exit -- so the eval-rooted
