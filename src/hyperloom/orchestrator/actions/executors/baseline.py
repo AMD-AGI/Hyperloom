@@ -2304,6 +2304,28 @@ class BaselineExecutor:
         state = self._resolve_shared_state(extra.get("shared_state"))
         return bool(getattr(state, "eval_disabled", False))
 
+    @staticmethod
+    def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
+        """The server's dying words, for a round that reached the accuracy stop without a reference.
+
+        A round whose server dies *after* the throughput benchmark still reports
+        ``succeeded`` -- the numbers were already measured. The accuracy eval then runs,
+        per the round script, against a port nobody is listening on: every request is
+        refused, no ``results*.json`` is written, and the session stops for a missing
+        accuracy reference under a message that blames the baseline setup, which is the
+        one thing that was not wrong.
+
+        The marker this returns proves only that the server died somewhere in that log,
+        never that it died before the eval or that it is why the reference is missing --
+        so callers must report it as evidence to read, not as an established cause.
+        """
+        path = str(result.get("server_log_path") or "").strip()
+        if not path:
+            return ""
+        # ``server_log_death_excerpt`` already answers ``None`` for a log it cannot read,
+        # so an unreadable path is simply "no death on record" -- no guard of our own.
+        return server_log_death_excerpt(path) or ""
+
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run."""
         from ._accuracy_gate import eval_enablement_allowed
@@ -2505,9 +2527,23 @@ class BaselineExecutor:
                 kind,
             )
             return
+        # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
+        # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
+        # state the opposite of what the artifacts show, however dead the server later became.
+        death = self._accuracy_stop_death_evidence(result) if acc is None else ""
+        if death:
+            log.error(
+                "baseline_executor: no accuracy reference, and this round's server.log "
+                "records a fatal engine death. The marker carries no ordering against "
+                "the eval, so the two are not established to be the same failure -- but "
+                "a broken setup is no longer the only suspect, and this is the excerpt "
+                "to read before looking at any config:\n%s",
+                death,
+            )
         request_baseline_accuracy_stop(
             shared_state,
-            context=f"baseline:{framework or 'unknown'}",
+            context=f"baseline:{framework or 'unknown'}{':server_died' if death else ''}",
+            cause="no accuracy result, and a fatal engine death on record for this round" if death else "",
         )
 
     def _apply_salvaged_accuracy(
