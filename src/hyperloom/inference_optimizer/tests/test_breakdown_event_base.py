@@ -86,11 +86,40 @@ def test_a_fragment_key_refuses_an_empty_natural_id():
         rec.fragment_key(_EID, "lane", "")
 
 
-def test_a_fragment_key_refuses_the_separator_inside_a_value():
-    """The segments are joined on it, so a value carrying one is ambiguous."""
+@pytest.mark.parametrize("ident", ["att-7", "a%3Ab", "a%253Ab", "a/b", "αβ"])
+def test_existing_fragment_keys_keep_their_exact_spelling(ident):
+    assert rec.fragment_key(_EID, "round", ident, "3") == f"{_EID}:round:{ident}:3"
+
+
+def test_opaque_natural_ids_cannot_change_tuple_boundaries_or_alias_existing_keys():
+    identities = [
+        ("a:b", "c"),
+        ("a", "b:c"),
+        ("a", "b", "c"),
+        ("a:b:c",),
+        ("a::b", "c"),
+        (":", "c"),
+        ("a%3Ab", "c"),
+        ("a%253Ab", "c"),
+        ("α:β", "c"),
+        ("https://example.org/kernels/7",),
+    ]
+    keys = [rec.fragment_key(_EID, "round", *ids) for ids in identities]
+    assert keys[0] == f"{_EID}:round::sha256:358764dfbc5efad2c64674a46b3583737a21e87b1dd69ec6232d898e9f81ec27"
+    digest = keys[0].rsplit(":", 1)[1]
+    keys.append(rec.fragment_key(_EID, "round", "sha256", digest))
+    assert len(set(keys)) == len(keys)
+    assert all(key.startswith(f"{_EID}:round:") for key in keys)
+    assert rec.fragment_key(_EID, "round", " a:b ", "c") == keys[0]
+
+
+@pytest.mark.parametrize(
+    "event,row_type,ids",
+    [(_EID, "round", ("a:b", " ")), (_EID, "bad:type", ("a:b",)), ("kernel:0:bad:event", "round", ("a:b",))],
+)
+def test_opaque_ids_do_not_bypass_event_row_type_or_blank_id_validation(event, row_type, ids):
     with pytest.raises(ValueError):
-        rec.fragment_key(_EID, "round", "geak:rebench", "3")
-    assert rec.fragment_key(_EID, "round", "geak", "rebench-3") == f"{_EID}:round:geak:rebench-3"
+        rec.fragment_key(event, row_type, *ids)
 
 
 # --- the sink --------------------------------------------------------------
@@ -166,6 +195,38 @@ def test_a_second_write_on_one_key_merges_instead_of_replacing(tmp_path):
     assert payload["e2e"] == {"speedup": 1.07}
     assert payload["rebench_ref"] == "idem-9"
     assert len(_fragments(tmp_path)) == 1
+
+
+def test_opaque_ids_support_existence_checks_resume_updates_and_event_filtered_reads(tmp_path):
+    identity = "aiter:paged_attention_ragged"
+    other_event = "kernel_agent:4:kernel"
+    with session_scope(tmp_path):
+        sink = rec.make_sink(_EID, producer="orchestrator")
+        assert not sink.has_row("kernel_lane_run", row_type="lane", natural_ids=identity)
+        first = sink.record("kernel_lane_run", {"attempt_id": identity}, row_type="lane", natural_ids=identity)
+        assert sink.has_row("kernel_lane_run", row_type="lane", natural_ids=identity)
+        assert not sink.has_row("kernel_lane_run", row_type="lane", natural_ids="aiter%3Apaged_attention_ragged")
+        resumed = rec.make_sink(_EID, producer="orchestrator")
+        updated = resumed.record("kernel_lane_run", {"settled": True}, row_type="lane", natural_ids=identity)
+        other = rec.make_sink(other_event, producer="orchestrator").record(
+            "kernel_lane_run", {"attempt_id": identity}, row_type="lane", natural_ids=identity
+        )
+        parts = rec.assemble_parts(tmp_path, keep_event_rows=True, only_sections=("kernel_lane_run",), only_event=_EID)
+
+    assert first == updated and first != other
+    assert len(_fragments(tmp_path)) == 2
+    assert parts["kernel_lane_run"] == [{"event_id": _EID, "attempt_id": identity, "settled": True}]
+
+
+def test_opaque_and_marker_shaped_legacy_keys_write_distinct_fragments(tmp_path):
+    digest = rec.fragment_key(_EID, "lane", "a:b").rsplit(":", 1)[1]
+    with session_scope(tmp_path):
+        sink = rec.make_sink(_EID, producer="orchestrator")
+        opaque = sink.record("kernel_lane_run", {"kind": "opaque"}, row_type="lane", natural_ids="a:b")
+        legacy = sink.record("kernel_lane_run", {"kind": "legacy"}, row_type="lane", natural_ids=("sha256", digest))
+
+    assert opaque is not None and legacy is not None and opaque != legacy
+    assert {json.loads(path.read_text())["payload"]["kind"] for path in _fragments(tmp_path)} == {"opaque", "legacy"}
 
 
 # --- assembly primitives ---------------------------------------------------
