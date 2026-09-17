@@ -28,6 +28,12 @@ from kernelforge.fusion.author import (
 from kernelforge.fusion.llm_failure import AGENT_SAFETY_REJECTION_ATTR
 
 
+@pytest.fixture(autouse=True)
+def _no_retry_backoff(monkeypatch):
+    """The author's retry backoff is real seconds; no test should spend them."""
+    monkeypatch.setattr(author.time, "sleep", lambda _seconds: None)
+
+
 def _recipe(flag: str = "FUSED"):
     return {
         "pattern": "residual_add_rmsnorm",
@@ -1259,3 +1265,106 @@ def test_declared_harness_target_survives_the_default_name_globs(tmp_path):
     # may not touch the harness.
     with pytest.raises(WorkspaceSafetyError, match="protected"):
         run([repo / "kernel.py"]).verify()
+
+
+def _counting_backend(*outcomes):
+    """A backend that plays one scripted outcome per attempt, counting the calls."""
+
+    class Backend:
+        name = "claude"
+        capabilities = AgentCapabilities()
+        runtime = AgentRuntimeConfig(provider="claude", model="claude-test")
+        calls = 0
+
+        async def run(self, spec, usage=None):
+            outcome = outcomes[min(Backend.calls, len(outcomes) - 1)]
+            Backend.calls += 1
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    return Backend
+
+
+def _author_with(tmp_path, backend_cls, **kwargs):
+    repo, target, _non_target = _author_repo(tmp_path)
+    rc = run_author(
+        "P",
+        workdir=str(repo),
+        log_path=str(tmp_path / "author.log"),
+        backend=backend_cls(),
+        target_files=[str(target)],
+        timeout_s=1,
+        **kwargs,
+    )
+    return rc, backend_cls.calls
+
+
+def test_a_stalled_transport_is_retried(tmp_path):
+    """The lane costs hours and the author costs minutes, so one more call is worth it."""
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == 0
+    assert calls == 2
+
+
+def test_a_stalled_transport_is_not_retried_forever(tmp_path):
+    """Past the attempt ceiling the upstream is down, not flaky."""
+    backend = _counting_backend(RuntimeError("API Error: Response stalled mid-stream"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 2
+
+
+def test_a_provider_safety_stop_is_never_retried(tmp_path):
+    """Retrying a safety verdict is the anti-pattern the resume allowlist already refuses."""
+
+    class ProviderSafetyError(RuntimeError):
+        def __init__(self, message):
+            super().__init__(message)
+            setattr(self, AGENT_SAFETY_REJECTION_ATTR, True)
+
+    # _with_run_error appends the transport error to a safety verdict, so this is the shape that
+    # a marker-matching classifier reads back as retryable.
+    backend = _counting_backend(ProviderSafetyError("stopped; the agent run also failed: connection error"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_SAFETY
+    assert calls == 1
+
+
+def test_a_timeout_is_never_retried(tmp_path):
+    """The attempt just spent the whole per-attempt budget; another would spend it again."""
+    backend = _counting_backend(TimeoutError("Request timed out after 7200s"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_TIMEOUT
+    assert calls == 1
+
+
+def test_a_task_level_refusal_is_not_retried(tmp_path):
+    """A model that will not write a conforming harness answers the same way every time."""
+    backend = _counting_backend(AgentRunResult(text="I cannot benchmark these in isolation", end_reason="turn_cap"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 1
+
+
+def test_a_first_attempt_that_works_is_not_retried(tmp_path):
+    backend = _counting_backend(AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"))
+
+    rc, calls = _author_with(tmp_path, backend)
+
+    assert rc == 0
+    assert calls == 1

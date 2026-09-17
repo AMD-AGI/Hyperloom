@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -25,7 +26,17 @@ from kernelforge.agent_backends.base import (
 )
 
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
-from .llm_failure import is_agent_safety_error, is_agent_timeout_error
+from .llm_failure import (
+    DEFAULT_BASE_DELAY_SEC,
+    DEFAULT_DEADLINE_SEC,
+    DEFAULT_MAX_DELAY_SEC,
+    RETRYABLE_KINDS,
+    classify_llm_error,
+    env_setting,
+    is_agent_safety_error,
+    is_agent_timeout_error,
+    retry_delay,
+)
 from .harness_contract import harness_contract
 from .validate import DEFAULT_TARGET_SPEEDUP
 from kernelforge.llm.git import git
@@ -37,6 +48,11 @@ AUTHOR_RC_OK = 0
 AUTHOR_RC_FAILED = 1
 AUTHOR_RC_SAFETY = 3
 AUTHOR_RC_TIMEOUT = 124
+
+# An author session costs minutes and gates a lane that costs hours, so a transport that
+# never delivered an answer is worth one more call. Two attempts by default: past that the
+# upstream is down rather than flaky, and the lane is better off reporting it.
+DEFAULT_AUTHOR_ATTEMPTS = 2
 
 
 def proven_fusion_fewshot() -> str:
@@ -1061,7 +1077,64 @@ def _run_registered_author(
     target_files: list[str],
     new_module_dirs: list[str],
 ) -> int:
-    """Run authoring through one already-created registered Agent backend."""
+    """Run authoring, retrying only a transport that never delivered an answer."""
+    attempts = max(1, int(env_setting("FORGE_FUSION_AUTHOR_ATTEMPTS", DEFAULT_AUTHOR_ATTEMPTS, cast=int)))
+    deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float))
+    base_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float))
+    max_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float))
+    started_at = time.monotonic()
+    for attempt in range(1, attempts + 1):
+        rc, retryable = _run_registered_author_once(
+            backend,
+            prompt,
+            workdir=workdir,
+            log_path=log_path,
+            gpu=gpu,
+            model=model,
+            max_turns=max_turns,
+            timeout_s=timeout_s,
+            target_files=target_files,
+            new_module_dirs=new_module_dirs,
+        )
+        if not retryable or attempt >= attempts:
+            return rc
+        delay = retry_delay(attempt, base_sec=base_delay, max_sec=max_delay)
+        elapsed = time.monotonic() - started_at
+        # A retry that cannot plausibly finish must not be started: each attempt spends up to the
+        # per-attempt timeout, so the clock is checked against what the next one would cost.
+        if deadline > 0 and elapsed + delay + timeout_s >= deadline:
+            log.warning(
+                "author transport failed on attempt %d/%d with %.0fs of the %.0fs retry budget spent; not retrying",
+                attempt,
+                attempts,
+                elapsed,
+                deadline,
+            )
+            return rc
+        log.warning(
+            "author attempt %d/%d failed on the transport; retrying in %.0fs",
+            attempt,
+            attempts,
+            delay,
+        )
+        time.sleep(delay)
+    return rc
+
+
+def _run_registered_author_once(
+    backend: Any,
+    prompt: str,
+    *,
+    workdir: str,
+    log_path: str,
+    gpu: str,
+    model: str,
+    max_turns: int,
+    timeout_s: int,
+    target_files: list[str],
+    new_module_dirs: list[str],
+) -> tuple[int, bool]:
+    """One authoring run, with whether its failure was the transport's rather than the task's."""
     progress: list[str] = []
     requested_targets = list(dict.fromkeys(str(path) for path in target_files if str(path)))
     requested_module_dirs = list(dict.fromkeys(str(path) for path in new_module_dirs if str(path)))
@@ -1081,7 +1154,8 @@ def _run_registered_author(
         except OSError:
             log.warning("could not write registered author log %s", log_path)
         log.error("%s: %s", heading, detail)
-        return AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY
+        # A workspace the guard could not read is the box's problem, not the transport's.
+        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
     targets = guard.target_files
     spec = AgentRunSpec(
         system_prompt=_author_system_prompt(guard.new_module_dirs),
@@ -1159,7 +1233,7 @@ def _run_registered_author(
         except OSError:
             log.warning("could not write registered author log %s", log_path)
         log.error("%s", reason)
-        return AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY
+        return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
     except Exception as exc:  # noqa: BLE001 - fail closed on guard defects
         detail = f"{type(exc).__name__}: internal workspace guard failure"
         try:
@@ -1174,7 +1248,7 @@ def _run_registered_author(
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
         # operator needs the traceback to fix it.
         log.exception("author workspace safety restoration failed: %s", _with_run_error(detail))
-        return AUTHOR_RC_SAFETY
+        return AUTHOR_RC_SAFETY, False
 
     if enforcement.violations:
         violations = enforcement.violations
@@ -1194,7 +1268,7 @@ def _run_registered_author(
         log.error("%s", reason)
         # Deterministic: the same guard, worktree and prompt reject the next attempt the same way, and the loop is
         # told so rather than spending one on it.
-        return AUTHOR_RC_SAFETY
+        return AUTHOR_RC_SAFETY, False
 
     if enforcement.created:
         log.info(
@@ -1223,7 +1297,7 @@ def _run_registered_author(
                 type(run_error).__name__,
                 run_error,
             )
-            return AUTHOR_RC_SAFETY
+            return AUTHOR_RC_SAFETY, False
         if is_agent_timeout_error(run_error):
             log.warning(
                 "%s author timed out after %ss: %s: %s",
@@ -1232,14 +1306,15 @@ def _run_registered_author(
                 type(run_error).__name__,
                 run_error,
             )
-            return AUTHOR_RC_TIMEOUT
+            # The attempt just spent the whole per-attempt budget; another would spend it again.
+            return AUTHOR_RC_TIMEOUT, False
         log.error(
             "%s author failed: %s: %s",
             backend.name,
             type(run_error).__name__,
             run_error,
         )
-        return AUTHOR_RC_FAILED
+        return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
 
     assert result is not None
     final_text = str(getattr(result, "text", "") or "")
@@ -1262,7 +1337,11 @@ def _run_registered_author(
             end_reason,
             subtype or "none",
         )
-    return AUTHOR_RC_OK if ok else AUTHOR_RC_FAILED
+    if ok:
+        return AUTHOR_RC_OK, False
+    # The backends flatten a transport failure the SDK swallowed into this end_reason rather than
+    # an exception; a turn cap or a session that simply stopped is the task's own answer.
+    return AUTHOR_RC_FAILED, end_reason == "sdk_error"
 
 
 def run_author(
