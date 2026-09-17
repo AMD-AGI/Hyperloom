@@ -124,7 +124,8 @@ def test_specialist_close_requires_positive_worker_cleanup_ack(monkeypatch, ack)
     monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
     lease = rs.GpuSpecialistLease(num_gpus=1)
     lease._actor = actor
-    assert lease.close() is (ack is True)
+    closed = lease.close()
+    assert closed is (ack is True)
     assert killed == [actor]
     assert (lease._actor is None) is (ack is True)
 
@@ -163,7 +164,8 @@ def test_pending_actor_is_cancelled_even_without_cleanup_ack(monkeypatch):
     lease = rs.GpuSpecialistLease(num_gpus=1)
     lease._actor = actor
     lease._start_ref = object()
-    assert lease.close() is False
+    closed = lease.close()
+    assert closed is False
     assert killed == [actor]
     assert lease._actor is actor
 
@@ -1313,7 +1315,8 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
     assert lease.is_alive() is False  # 598-600
     assert lease.exit_code() is None  # 613-615
     assert lease.stop() is False
-    assert lease.close() is False
+    closed = lease.close()
+    assert closed is False
     assert lease._actor is not None
 
 

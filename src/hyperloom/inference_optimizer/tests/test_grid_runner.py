@@ -2364,7 +2364,8 @@ class TestSessionBudgetWarmupRounds:
         assert warmup == measure == 7800
         deadlines = {c["session_deadline_sec"] for c in recorded}
         assert len(deadlines) == 1
-        assert 0 < deadlines.pop() - time.monotonic() <= 300.0
+        deadline = deadlines.pop()
+        assert 0 < deadline - time.monotonic() <= 300.0
         assert len(by_round) == 2, f"expected a warmup and a measured round, got {list(by_round)}"
 
     @pytest.mark.asyncio
