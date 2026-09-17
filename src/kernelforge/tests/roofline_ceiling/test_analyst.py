@@ -44,10 +44,10 @@ def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_EMPIRICAL) -> EvidenceBundl
     return EvidenceBundle(
         hardware=Hardware(
             arch="gfx950",
-            hbm_bw_bytes_per_s=8.0e12,
-            peak_flops={"bf16_mfma": 2.0e15},
+            peak_flops={"bf16_mfma": 1.686e15},
+            bandwidth={"hbm": 6.24e12, "mall": 8.49e12},
             peak_source=peak_source,
-            dispatch_floor_s=2.0e-6,
+            dispatch_floor_s=3.0e-6,
         ),
         artifacts_dir=artifacts,
         observed_ms={"c0": 40.0},
@@ -57,23 +57,9 @@ def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_EMPIRICAL) -> EvidenceBundl
 
 _GOOD = json.dumps(
     {
-        "cases": [
-            {
-                "case_id": "c0",
-                "stages": [
-                    {
-                        "name": "gemm",
-                        "flops": 2.0e12,
-                        "bytes": 8.0e10,
-                        "instruction_path": "bf16_mfma",
-                        "dispatch_count": 1,
-                        "formula_flops": "2*M*N*K",
-                        "formula_bytes": "M*K*2",
-                    }
-                ],
-            }
-        ],
+        "cases": [{"case_id": "c0", "t_ideal_ms": 12.8, "bound": "memory"}],
         "confidence": "high",
+        "analysis_md": "# Performance ceiling analysis\n\nCase `c0`: 8e10 bytes / 6.24 TB/s = 12.8 ms.",
     }
 )
 
@@ -97,10 +83,20 @@ def test_the_role_document_ships_with_the_package():
     role = load_role()
 
     assert "Performance Ceiling Analyst" in role
-    assert "You do **not** produce the latency" in role
+    assert "You do **not** own the hardware figures" in role
 
 
-def test_the_request_states_the_peaks_the_framework_will_actually_divide_by(tmp_path):
+def test_the_role_document_hands_the_composition_to_the_analyst():
+    """It offers a default rule and tells the analyst when to leave it."""
+    role = load_role()
+
+    assert "You own the whole estimate" in role
+    assert "Depart from the default" in role
+    assert "occupancy" in role.lower()
+    assert "partial overlap between stages" in role
+
+
+def test_the_request_states_the_measured_figures_rather_than_leaving_them_to_recall(tmp_path):
     request = json.loads(
         build_request(
             kernel_files=["kernel.py"],
@@ -112,10 +108,30 @@ def test_the_request_states_the_peaks_the_framework_will_actually_divide_by(tmp_
         )
     )
 
-    assert request["hardware"]["peak_flops_by_instruction_path"] == {"bf16_mfma": 2.0e15}
-    assert request["hardware"]["dispatch_floor_s"] == 2.0e-6
+    hardware = request["hardware"]
+    assert hardware["peak_flops_by_instruction_path"] == {"bf16_mfma": 1.686e15}
+    assert hardware["dispatch_floor_s"] == 3.0e-6
+    assert "units" in hardware
     assert request["scored_case_ids"] == ["c0"]
     assert "output_schema" in request
+
+
+def test_the_request_offers_every_memory_level_that_was_measured(tmp_path):
+    """Pinning the analyst to HBM mis-bounds a cache-resident working set."""
+    request = json.loads(
+        build_request(
+            kernel_files=[],
+            driver_script="",
+            performance_command=[],
+            case_ids=["c0"],
+            case_params={},
+            evidence=_bundle(tmp_path),
+        )
+    )
+
+    levels = request["hardware"]["bandwidth_bytes_per_s_by_memory_level"]
+    assert levels == {"hbm": 6.24e12, "mall": 8.49e12}
+    assert "was not measured on this box" in request["hardware"]["note"]
 
 
 def test_the_request_says_whether_the_peaks_were_measured_or_read_off_a_datasheet(tmp_path):

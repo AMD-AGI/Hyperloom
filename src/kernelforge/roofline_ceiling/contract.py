@@ -1,30 +1,33 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ceiling output contract: what the analyst declares, and what is derived.
+"""The ceiling output contract: a number per shape, and the prose that defends it.
 
-The split this module encodes is the whole design. The analyst owns every
-*judgement*: how many serial stages a case really has, the minimum legal FLOPs
-and semantic bytes of each, which instruction path it runs on, how many
-dispatches cannot be overlapped, and which assumptions all of that rests on.
-Nothing there is enumerable, which is why it is an agent's job and not a table's.
+The analyst owns the whole estimate, composition included. An earlier revision
+had it declare a stage-by-stage work model and let this module compose the
+latency from it, on one fixed rule::
 
-The analyst owns no *arithmetic* and supplies no hardware constant. Peaks come
-from the resolved :class:`Hardware` record -- measured on this box when
-``--roof-only`` ran, datasheet otherwise -- and the ideal latency is derived
-here:
+    t_stage = dispatch_count * dispatch_floor + max(flops / peak, bytes / bw)
+    t_ideal = sum over stages
 
-    t_stage  = dispatch_count * dispatch_floor + extra_latency
-               + max(flops / peak, bytes / bandwidth)
-    t_ideal  = sum over stages
+That rule does not generalize. It cannot express a stage that partially overlaps
+its predecessor, a stage whose arithmetic is split across MFMA and SFU paths, a
+shape whose real limit is that it fills eight CUs out of two hundred and
+fifty-six, or a working set that lives in Infinity Cache rather than HBM. Each
+gap wanted another schema field, and a model that needs an escape hatch per
+operator family is the wrong model. Validating a candidate against it produced
+the self-consistency of a formula that was already wrong -- confidence, not
+safety.
 
-Serial stages are summed rather than merged before one ``max`` on purpose: a
-single ``max`` over pooled FLOPs and bytes asserts that the compute of one stage
-overlaps the memory traffic of another, which is exactly what "serial" denies.
+So the composition is the analyst's judgement too, and the audit trail is prose:
+``analysis_md``, written to the structure the methodology prescribes, carrying
+the formulas, the hardware figures used and the assumptions behind them. A human
+can check it. This module cannot, and no longer pretends to.
 
-Deriving the number instead of accepting it also means a mismatch between the
-model and the answer cannot exist: there is one answer, and it is reproducible
-from the declared model by anyone who disagrees with it.
+What is still enforced here needs no view of the model at all: the case set is
+the driver's, every scored case is answered and no other, a latency is finite
+and positive, and a ceiling above the latency the box was observed reaching is
+reported rather than shipped. Those hold whatever composition the analyst chose.
 """
 
 from __future__ import annotations
@@ -34,95 +37,53 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from kernelforge.roofline_ceiling.specs import (
-    KNOWN_INSTRUCTION_PATHS,
-    PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_EMPIRICAL,
-)
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
 
-SCHEMA_VERSION = 1
+#: Bumped from 1 when the stage-level work model was dropped. A cached v1 report
+#: describes a differently-derived number and is refused rather than read.
+SCHEMA_VERSION = 2
 
 BOUND_COMPUTE = "compute"
 BOUND_MEMORY = "memory"
 BOUND_LATENCY = "latency"
 BOUND_MIXED = "mixed"
+BOUNDS = (BOUND_COMPUTE, BOUND_MEMORY, BOUND_LATENCY, BOUND_MIXED)
 
 CONFIDENCE_LEVELS = ("high", "medium", "low")
 
-#: A term is called dominant when it supplies more of a case's ideal latency
-#: than every other term combined. Below that the case is genuinely contested
-#: and "mixed" is the honest label -- guide section 8.4.
-_DOMINANCE_SHARE = 0.5
+#: Memory levels a ceiling may be taken against. Handed to the analyst with
+#: whatever figures were measured for them, because a kernel whose working set
+#: is Infinity-Cache resident rides a higher roof than HBM and one bounded by
+#: LDS bank throughput rides a lower one.
+BANDWIDTH_TIERS = ("hbm", "mall", "l2", "l1", "lds")
 
 
 class CeilingContractError(ValueError):
-    """Raised when an analyst response cannot be read as a ceiling model."""
+    """Raised when an analyst response cannot be read as a ceiling."""
 
 
 @dataclass(frozen=True)
 class Hardware:
-    """The hardware constants one ceiling run was computed against."""
+    """The measured figures one ceiling run was handed."""
 
     arch: str
-    hbm_bw_bytes_per_s: float
+    #: instruction path -> peak FLOP/s (or OP/s for the integer paths).
     peak_flops: dict[str, float]
+    #: memory level -> bytes/s.
+    bandwidth: dict[str, float]
     peak_source: str
     dispatch_floor_s: float
     provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_empirical(self) -> bool:
-        """Whether the peaks were measured on this box rather than read off a datasheet."""
+        """Whether these were measured on this box rather than read off a datasheet."""
         return self.peak_source == PEAK_SOURCE_EMPIRICAL
 
-    def peak_for(self, instruction_path: str) -> float:
-        """Peak FLOP/s for one instruction path, ``0.0`` when it has none."""
-        return float(self.peak_flops.get(str(instruction_path or "").strip().lower(), 0.0))
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for the published report."""
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class Stage:
-    """One serial stage of a case, as modelled by the analyst."""
-
-    name: str
-    flops: float
-    bytes_moved: float
-    instruction_path: str
-    dispatch_count: int
-    formula_flops: str
-    formula_bytes: str
-    extra_latency_s: float = 0.0
-    assumptions: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for the published report.
-
-        The traffic field is published as ``bytes``, the name the response schema
-        uses, so a published report reads back through the same parser that read
-        the analyst's answer. Publishing the Python attribute name instead left
-        the module unable to load its own output.
-        """
-        payload = asdict(self)
-        payload["bytes"] = payload.pop("bytes_moved")
-        payload["assumptions"] = list(self.assumptions)
-        return payload
-
-
-@dataclass(frozen=True)
-class StageTiming:
-    """The derived service times of one stage."""
-
-    name: str
-    t_compute_s: float
-    t_memory_s: float
-    t_latency_s: float
-    t_stage_s: float
-    peak_flops_used: float
-    bw_used: float
+    @property
+    def hbm_bw_bytes_per_s(self) -> float:
+        """The HBM roof, the one figure every report states."""
+        return float(self.bandwidth.get("hbm", 0.0))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for the published report."""
@@ -136,26 +97,14 @@ class CaseCeiling:
     case_id: str
     t_ideal_ms: float
     bound: str
-    stages: tuple[Stage, ...]
-    timings: tuple[StageTiming, ...]
-    bound_note: str = ""
     profiler_observed_ms: float | None = None
     issues: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize for the published report."""
-        return {
-            "case_id": self.case_id,
-            "t_ideal_ms": self.t_ideal_ms,
-            "bound": self.bound,
-            "bound_note": self.bound_note,
-            "profiler_observed_ms": self.profiler_observed_ms,
-            "issues": list(self.issues),
-            "derivation": {
-                "stages": [stage.to_dict() for stage in self.stages],
-                "timings": [timing.to_dict() for timing in self.timings],
-            },
-        }
+        payload = asdict(self)
+        payload["issues"] = list(self.issues)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -167,6 +116,11 @@ class CeilingReport:
     hardware: Hardware
     cases: tuple[CaseCeiling, ...]
     confidence: str
+    #: The analyst's own derivation, in the structure the methodology prescribes.
+    #: The only audit trail there is, which is why it is required rather than
+    #: optional: a latency with nothing behind it cannot be argued with, only
+    #: believed or discarded.
+    analysis_md: str = ""
     caveats: tuple[str, ...] = ()
 
     def case(self, case_id: str) -> CaseCeiling | None:
@@ -187,6 +141,7 @@ class CeilingReport:
             "canonical_id": self.canonical_id,
             "hardware": self.hardware.to_dict(),
             "confidence": self.confidence,
+            "analysis_md": self.analysis_md,
             "caveats": list(self.caveats),
             "cases": [entry.to_dict() for entry in self.cases],
         }
@@ -196,87 +151,43 @@ def response_schema() -> dict[str, Any]:
     """The JSON shape the analyst must return, also used to ask for a repair."""
     return {
         "type": "object",
-        "required": ["cases", "confidence"],
+        "required": ["cases", "confidence", "analysis_md"],
         "properties": {
             "cases": {
                 "type": "array",
                 "description": "One entry per scored case id, no more and no fewer.",
                 "items": {
                     "type": "object",
-                    "required": ["case_id", "stages"],
+                    "required": ["case_id", "t_ideal_ms", "bound"],
                     "properties": {
                         "case_id": {"type": "string"},
-                        "bound_note": {
-                            "type": "string",
-                            "description": "Why this case is bound the way it is, per stage.",
-                        },
-                        "stages": {
-                            "type": "array",
+                        "t_ideal_ms": {
+                            "type": "number",
                             "description": (
-                                "The serial stages a best legal implementation cannot avoid, in "
-                                "execution order. One stage when the whole case can be a single "
-                                "fused dispatch."
+                                "Theoretical achievable latency for this shape, in milliseconds. "
+                                "Your own composition of the terms you judged relevant, against "
+                                "the hardware figures supplied in this request."
                             ),
-                            "items": {
-                                "type": "object",
-                                "required": [
-                                    "name",
-                                    "flops",
-                                    "bytes",
-                                    "instruction_path",
-                                    "dispatch_count",
-                                    "formula_flops",
-                                    "formula_bytes",
-                                ],
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "flops": {
-                                        "type": "number",
-                                        "description": (
-                                            "Minimum legal FLOPs by algorithm semantics, not the padded "
-                                            "work the current implementation happens to execute."
-                                        ),
-                                    },
-                                    "bytes": {
-                                        "type": "number",
-                                        "description": (
-                                            "Minimum semantic bytes a best legal implementation must move "
-                                            "through HBM. Excludes intermediates a legal fusion keeps in "
-                                            "registers, LDS or cache."
-                                        ),
-                                    },
-                                    "instruction_path": {
-                                        "type": "string",
-                                        "description": (
-                                            "The hardware path this stage's arithmetic actually runs on. "
-                                            "Use the dtype the MFMA sees, not the storage dtype: weights "
-                                            "unpacked to bf16 before the MFMA run at the bf16 rate."
-                                        ),
-                                    },
-                                    "dispatch_count": {
-                                        "type": "integer",
-                                        "description": (
-                                            "Serial kernel dispatches this stage cannot avoid. Each is "
-                                            "charged the measured dispatch floor."
-                                        ),
-                                    },
-                                    "extra_latency_s": {
-                                        "type": "number",
-                                        "description": (
-                                            "Unavoidable non-dispatch serialization (barriers, recurrence). "
-                                            "Justify any nonzero value in assumptions."
-                                        ),
-                                    },
-                                    "formula_flops": {"type": "string"},
-                                    "formula_bytes": {"type": "string"},
-                                    "assumptions": {"type": "array", "items": {"type": "string"}},
-                                },
-                            },
+                        },
+                        "bound": {
+                            "type": "string",
+                            "enum": list(BOUNDS),
+                            "description": "What limits this shape at its ceiling.",
                         },
                     },
                 },
             },
             "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
+            "analysis_md": {
+                "type": "string",
+                "description": (
+                    "The full derivation as Markdown, in the structure the role document "
+                    "prescribes. This is the only record of how each latency was reached, so "
+                    "it must carry the formulas, the hardware figures used, the per-case "
+                    "arithmetic and the assumptions -- enough for a reader to recompute every "
+                    "number without rerunning you."
+                ),
+            },
             "caveats": {"type": "array", "items": {"type": "string"}},
         },
     }
@@ -291,120 +202,6 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _parse_stage(raw: Any, *, case_id: str, index: int) -> Stage:
-    """Read one stage out of the analyst payload."""
-    where = f"case {case_id!r} stage {index}"
-    if not isinstance(raw, Mapping):
-        raise CeilingContractError(f"{where} is not an object")
-
-    name = str(raw.get("name") or "").strip()
-    if not name:
-        raise CeilingContractError(f"{where} has no name")
-
-    flops = _finite(raw.get("flops"))
-    if flops is None or flops < 0:
-        raise CeilingContractError(f"{where} needs a finite non-negative 'flops'")
-    bytes_moved = _finite(raw.get("bytes"))
-    if bytes_moved is None or bytes_moved < 0:
-        raise CeilingContractError(f"{where} needs a finite non-negative 'bytes'")
-    if flops <= 0 and bytes_moved <= 0:
-        raise CeilingContractError(f"{where} declares neither work nor traffic")
-
-    dispatch_count = raw.get("dispatch_count")
-    try:
-        dispatches = int(dispatch_count)
-    except (TypeError, ValueError) as exc:
-        raise CeilingContractError(f"{where} needs an integer 'dispatch_count'") from exc
-    if dispatches < 1:
-        raise CeilingContractError(f"{where} needs at least one dispatch")
-
-    extra_latency = _finite(raw.get("extra_latency_s", 0.0))
-    if extra_latency is None or extra_latency < 0:
-        raise CeilingContractError(f"{where} needs a finite non-negative 'extra_latency_s'")
-
-    assumptions = raw.get("assumptions") or ()
-    if isinstance(assumptions, str) or not isinstance(assumptions, Sequence):
-        raise CeilingContractError(f"{where} 'assumptions' must be a list of strings")
-
-    return Stage(
-        name=name,
-        flops=flops,
-        bytes_moved=bytes_moved,
-        instruction_path=str(raw.get("instruction_path") or "").strip().lower(),
-        dispatch_count=dispatches,
-        formula_flops=str(raw.get("formula_flops") or "").strip(),
-        formula_bytes=str(raw.get("formula_bytes") or "").strip(),
-        extra_latency_s=extra_latency,
-        assumptions=tuple(str(entry).strip() for entry in assumptions if str(entry).strip()),
-    )
-
-
-def _time_stage(stage: Stage, hardware: Hardware) -> tuple[StageTiming, list[str]]:
-    """Derive one stage's service times, reporting what it could not be given."""
-    issues: list[str] = []
-
-    peak = hardware.peak_for(stage.instruction_path)
-    if stage.flops > 0 and peak <= 0:
-        # Silently pricing the arithmetic at zero would turn an unmodellable
-        # compute term into a free one and report a ceiling below anything the
-        # hardware can do. Charge nothing and say so instead -- and separate a
-        # path name that does not exist from a real one this box has no peak
-        # for, because the first is the analyst's mistake and the second is the
-        # measurement's gap.
-        known = stage.instruction_path in KNOWN_INSTRUCTION_PATHS
-        reason = (
-            f"{hardware.arch} has no peak for it under {hardware.peak_source}"
-            if known
-            else "it is not a canonical instruction path name"
-        )
-        issues.append(
-            f"stage {stage.name!r}: instruction path {stage.instruction_path!r} priced at nothing "
-            f"because {reason}; its compute term is missing from the ceiling"
-        )
-    t_compute = stage.flops / peak if (stage.flops > 0 and peak > 0) else 0.0
-
-    bandwidth = float(hardware.hbm_bw_bytes_per_s)
-    if stage.bytes_moved > 0 and bandwidth <= 0:
-        issues.append(f"stage {stage.name!r}: no bandwidth for {hardware.arch}; its memory term is missing")
-    t_memory = stage.bytes_moved / bandwidth if (stage.bytes_moved > 0 and bandwidth > 0) else 0.0
-
-    t_latency = stage.dispatch_count * max(float(hardware.dispatch_floor_s), 0.0) + stage.extra_latency_s
-
-    return (
-        StageTiming(
-            name=stage.name,
-            t_compute_s=t_compute,
-            t_memory_s=t_memory,
-            t_latency_s=t_latency,
-            t_stage_s=t_latency + max(t_compute, t_memory),
-            peak_flops_used=peak,
-            bw_used=bandwidth,
-        ),
-        issues,
-    )
-
-
-def classify_bound(timings: Sequence[StageTiming]) -> str:
-    """Name the term that dominates a case's ideal latency."""
-    compute = sum(timing.t_compute_s for timing in timings)
-    memory = sum(timing.t_memory_s for timing in timings)
-    latency = sum(timing.t_latency_s for timing in timings)
-    # Compute and memory do not add: within a stage only the larger one is paid.
-    served = sum(max(timing.t_compute_s, timing.t_memory_s) for timing in timings)
-    total = served + latency
-    if total <= 0:
-        return BOUND_MIXED
-    if latency / total > _DOMINANCE_SHARE:
-        return BOUND_LATENCY
-    if served <= 0:
-        return BOUND_MIXED
-    if compute > memory and compute / (compute + memory) > _DOMINANCE_SHARE:
-        return BOUND_COMPUTE
-    if memory > compute and memory / (compute + memory) > _DOMINANCE_SHARE:
-        return BOUND_MEMORY
-    return BOUND_MIXED
-
-
 def build_report(
     payload: Mapping[str, Any],
     *,
@@ -413,13 +210,13 @@ def build_report(
     expected_case_ids: Sequence[str],
     observed_ms: Mapping[str, float] | None = None,
 ) -> CeilingReport:
-    """Turn one analyst response into a validated, derived ceiling report.
+    """Validate one analyst response and publish it as a ceiling report.
 
     Raises :class:`CeilingContractError` for anything that makes the response
-    unreadable -- a missing case, a stage without a work model. Findings that
-    leave the number computable but suspect ride along on the case's ``issues``
-    and the report's ``caveats``, because a ceiling nobody can see the doubts of
-    is worse than one that names them.
+    unusable -- a missing case, a latency that is not a number, an empty
+    derivation. Findings that leave the answer usable but suspect ride along on
+    the case's ``issues``, because a ceiling whose doubts are invisible is worse
+    than one that names them.
     """
     if hardware.peak_source not in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_DATASHEET}:
         raise CeilingContractError(f"unknown peak_source {hardware.peak_source!r}")
@@ -432,9 +229,14 @@ def build_report(
     if not expected:
         raise CeilingContractError("no scored case ids to produce a ceiling for")
 
+    analysis_md = str(payload.get("analysis_md") or "").strip()
+    if not analysis_md:
+        raise CeilingContractError(
+            "response must carry 'analysis_md'; it is the only record of how the latencies were reached"
+        )
+
     observed = dict(observed_ms or {})
     by_id: dict[str, CaseCeiling] = {}
-    caveats: list[str] = [str(entry).strip() for entry in (payload.get("caveats") or ()) if str(entry).strip()]
 
     for raw_case in raw_cases:
         if not isinstance(raw_case, Mapping):
@@ -445,41 +247,35 @@ def build_report(
         if case_id in by_id:
             raise CeilingContractError(f"case {case_id!r} appears twice")
 
-        raw_stages = raw_case.get("stages")
-        if not isinstance(raw_stages, Sequence) or isinstance(raw_stages, str) or not raw_stages:
-            raise CeilingContractError(f"case {case_id!r} must declare at least one stage")
+        t_ideal_ms = _finite(raw_case.get("t_ideal_ms"))
+        if t_ideal_ms is None or t_ideal_ms <= 0:
+            raise CeilingContractError(f"case {case_id!r} needs a finite positive 't_ideal_ms'")
 
-        stages = tuple(
-            _parse_stage(raw_stage, case_id=case_id, index=index) for index, raw_stage in enumerate(raw_stages)
-        )
-        timings: list[StageTiming] = []
+        bound = str(raw_case.get("bound") or "").strip().lower()
+        if bound not in BOUNDS:
+            raise CeilingContractError(f"case {case_id!r} needs a 'bound' from: {', '.join(BOUNDS)}")
+
         issues: list[str] = []
-        for stage in stages:
-            timing, stage_issues = _time_stage(stage, hardware)
-            timings.append(timing)
-            issues.extend(stage_issues)
-
-        t_ideal_ms = sum(timing.t_stage_s for timing in timings) * 1000.0
-        if t_ideal_ms <= 0:
-            raise CeilingContractError(f"case {case_id!r} derives a non-positive ideal latency")
-
-        # Guide section 10: a ceiling above what the box was observed doing is
-        # not a ceiling. Report it rather than clamping -- the model is wrong and
-        # clamping would hide which part.
+        # The one check that survives dropping the work model, and the one the
+        # methodology leans on hardest: a ceiling above what the box was seen
+        # doing is not a ceiling. Report it rather than clamping -- the estimate
+        # is wrong somewhere, and clamping hides which part.
         seen = observed.get(case_id)
         if seen is not None and t_ideal_ms > float(seen):
             issues.append(
                 f"ideal latency {t_ideal_ms:.6g} ms exceeds the observed {float(seen):.6g} ms; "
-                "the work model overstates the minimum legal work"
+                "the estimate overstates the minimum legal work"
             )
+        # A shape the derivation never mentions has a number and nothing behind
+        # it. Not fatal -- the latency may still be right -- but it is exactly
+        # the case nobody can check.
+        if case_id not in analysis_md:
+            issues.append(f"case {case_id!r} is never mentioned in the derivation, so its latency is unaudited")
 
         by_id[case_id] = CaseCeiling(
             case_id=case_id,
             t_ideal_ms=t_ideal_ms,
-            bound=classify_bound(timings),
-            stages=stages,
-            timings=tuple(timings),
-            bound_note=str(raw_case.get("bound_note") or "").strip(),
+            bound=bound,
             profiler_observed_ms=(float(seen) if seen is not None else None),
             issues=tuple(issues),
         )
@@ -495,13 +291,17 @@ def build_report(
     if confidence not in CONFIDENCE_LEVELS:
         raise CeilingContractError(f"'confidence' must be one of {', '.join(CONFIDENCE_LEVELS)}")
 
+    caveats = [str(entry).strip() for entry in (payload.get("caveats") or ()) if str(entry).strip()]
     if not hardware.is_empirical:
         caveats.append(
             "Peaks are vendor datasheet figures, not measured on this box: these latencies are an "
             "absolute lower bound that no implementation reaches, not an achievable target."
         )
     if hardware.dispatch_floor_s <= 0:
-        caveats.append("Dispatch floor was not measured; every latency term is charged at zero.")
+        caveats.append(
+            "Dispatch floor was not measured, so any launch-latency term in these estimates is the "
+            "analyst's assumption rather than this box's."
+        )
 
     return CeilingReport(
         schema_version=SCHEMA_VERSION,
@@ -509,6 +309,7 @@ def build_report(
         hardware=hardware,
         cases=tuple(by_id[case_id] for case_id in expected),
         confidence=confidence,
+        analysis_md=analysis_md,
         caveats=tuple(dict.fromkeys(caveats)),
     )
 
@@ -524,8 +325,8 @@ def load_report(payload: Mapping[str, Any]) -> CeilingReport:
         raise CeilingContractError("published report has no 'hardware' record")
     hardware = Hardware(
         arch=str(raw_hardware.get("arch") or ""),
-        hbm_bw_bytes_per_s=float(raw_hardware.get("hbm_bw_bytes_per_s") or 0.0),
         peak_flops={str(key): float(value) for key, value in (raw_hardware.get("peak_flops") or {}).items()},
+        bandwidth={str(key): float(value) for key, value in (raw_hardware.get("bandwidth") or {}).items()},
         peak_source=str(raw_hardware.get("peak_source") or ""),
         dispatch_floor_s=float(raw_hardware.get("dispatch_floor_s") or 0.0),
         provenance=dict(raw_hardware.get("provenance") or {}),
@@ -535,32 +336,12 @@ def load_report(payload: Mapping[str, Any]) -> CeilingReport:
     for raw_case in payload.get("cases") or ():
         if not isinstance(raw_case, Mapping):
             raise CeilingContractError("published report has a malformed case entry")
-        derivation = raw_case.get("derivation") or {}
-        stages = tuple(
-            _parse_stage(raw_stage, case_id=str(raw_case.get("case_id") or "?"), index=index)
-            for index, raw_stage in enumerate(derivation.get("stages") or ())
-        )
-        timings = tuple(
-            StageTiming(
-                name=str(raw_timing.get("name") or ""),
-                t_compute_s=float(raw_timing.get("t_compute_s") or 0.0),
-                t_memory_s=float(raw_timing.get("t_memory_s") or 0.0),
-                t_latency_s=float(raw_timing.get("t_latency_s") or 0.0),
-                t_stage_s=float(raw_timing.get("t_stage_s") or 0.0),
-                peak_flops_used=float(raw_timing.get("peak_flops_used") or 0.0),
-                bw_used=float(raw_timing.get("bw_used") or 0.0),
-            )
-            for raw_timing in (derivation.get("timings") or ())
-        )
         observed = raw_case.get("profiler_observed_ms")
         cases.append(
             CaseCeiling(
                 case_id=str(raw_case.get("case_id") or ""),
                 t_ideal_ms=float(raw_case.get("t_ideal_ms") or 0.0),
                 bound=str(raw_case.get("bound") or BOUND_MIXED),
-                stages=stages,
-                timings=timings,
-                bound_note=str(raw_case.get("bound_note") or ""),
                 profiler_observed_ms=(float(observed) if observed is not None else None),
                 issues=tuple(str(entry) for entry in (raw_case.get("issues") or ())),
             )
@@ -572,11 +353,14 @@ def load_report(payload: Mapping[str, Any]) -> CeilingReport:
         hardware=hardware,
         cases=tuple(cases),
         confidence=str(payload.get("confidence") or ""),
+        analysis_md=str(payload.get("analysis_md") or ""),
         caveats=tuple(str(entry) for entry in (payload.get("caveats") or ())),
     )
 
 
 __all__ = [
+    "BANDWIDTH_TIERS",
+    "BOUNDS",
     "BOUND_COMPUTE",
     "BOUND_LATENCY",
     "BOUND_MEMORY",
@@ -587,10 +371,7 @@ __all__ = [
     "CeilingContractError",
     "CeilingReport",
     "Hardware",
-    "Stage",
-    "StageTiming",
     "build_report",
-    "classify_bound",
     "load_report",
     "response_schema",
 ]

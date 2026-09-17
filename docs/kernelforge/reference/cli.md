@@ -396,13 +396,15 @@ What it does **not** do is measure a baseline or report an attainment ratio. A
 ceiling and a baseline timed by two different methodologies produce a ratio that
 means nothing, so whoever holds a baseline divides by these numbers themselves.
 
-The work model — the serial stages, their minimum legal FLOPs and semantic
-bytes, their instruction path and their unavoidable dispatches — is derived by an
-agent, because no table covers MoE routing, paged attention and fusion legality
-for an arbitrary operator. The arithmetic and the hardware constants are not:
-peaks come from `rocprof-compute --roof-only` measured on the box, the dispatch
-floor from a probe, and the latency from the framework. Every stage's terms are
-published so the number can be checked without rerunning the agent.
+The estimate is an agent's, composition included, because no table covers MoE
+routing, paged attention, fusion legality or occupancy derating for an arbitrary
+operator, and a fixed composition rule makes the analyst distort its model to
+fit the rule. The hardware is not the agent's: every peak, bandwidth and launch
+cost comes from `rocprof-compute --roof-only` and a dispatch probe run on the
+box, and the analyst is told to use those and nothing it recalls. Each published
+report carries the analyst's own derivation — formulas, figures used and
+assumptions — because nothing recomputes the latencies and that document is the
+only record of how they were reached.
 
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.

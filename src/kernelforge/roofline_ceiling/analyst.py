@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The analyst session: an agent derives the work model, the framework derives the number.
+"""The analyst session: an agent estimates the ceiling, the framework measures the box.
 
-Deriving a minimum legal FLOP and byte count for an arbitrary operator is not
-something a table can do. MoE routing, paged attention, segmented reductions and
-fusion legality are judgements about what a best implementation would be allowed
-to skip, and enumerating them in code would cover this quarter's operators and
-silently mis-model next quarter's.
+Deriving the minimum legal work of an arbitrary operator is not something a
+table can do, and neither is composing it into a latency. MoE routing, paged
+attention, segmented reductions, fusion legality, how much of one stage overlaps
+the next, whether a shape that fills eight CUs is limited by peak throughput at
+all -- these are judgements, and a fixed composition rule imposed on them makes
+the analyst distort its model to fit the rule.
 
-So the judgement is an agent's. What is *not* an agent's is the arithmetic and
-the hardware constants: those are measured, supplied, and applied by
-:mod:`kernelforge.roofline_ceiling.contract`. The agent is asked for a model it can
-defend term by term, in a schema that makes each term visible.
+So the whole estimate is the analyst's, and the audit trail is the derivation it
+writes rather than a schema this module can parse. What is *not* the analyst's
+is the hardware: every peak, bandwidth and launch cost in the request below was
+measured on this box, so that two ceilings taken a month apart are at least
+divided by the same numbers, and so ``peak_source`` on the report is true.
 """
 
 from __future__ import annotations
@@ -78,16 +80,18 @@ def build_request(
 ) -> str:
     """Build the analyst's request payload.
 
-    Everything measured is stated here rather than left for the analyst to look
-    up, because a peak it reads off a datasheet card in the knowledge base is not
-    the peak the framework will divide by, and the resulting ceiling would be
-    internally inconsistent in a way nothing downstream could detect.
+    Every measured figure is stated here rather than left for the analyst to
+    look up. A peak it reads off a knowledge-base card is the vendor datasheet,
+    roughly twice what this box sustains, and a ceiling divided by that while
+    the report says ``roof_only_empirical`` is a report that lies about its own
+    inputs.
     """
     hardware = evidence.hardware
     payload: dict[str, Any] = {
         "task": (
-            "Derive the theoretical achievable latency work model for every scored case of this "
-            "kernel. Return one JSON object matching output_schema and nothing else."
+            "Estimate the theoretical achievable latency of every scored case of this kernel, "
+            "against the measured hardware figures below. Return one JSON object matching "
+            "output_schema and nothing else."
         ),
         "kernel_files": list(kernel_files),
         "driver_script": driver_script,
@@ -102,10 +106,16 @@ def build_request(
                 if hardware.is_empirical
                 else "vendor datasheet; an absolute lower bound, not an achievable target"
             ),
-            "hbm_bw_bytes_per_s": hardware.hbm_bw_bytes_per_s,
-            "dispatch_floor_s": hardware.dispatch_floor_s,
+            "units": "peak_flops in FLOP/s (OP/s for integer paths); bandwidth in bytes/s; times in seconds",
             "peak_flops_by_instruction_path": dict(hardware.peak_flops),
+            "bandwidth_bytes_per_s_by_memory_level": dict(hardware.bandwidth),
+            "dispatch_floor_s": hardware.dispatch_floor_s,
             "canonical_instruction_paths": list(CANONICAL_INSTRUCTION_PATHS),
+            "note": (
+                "Use these and only these. A memory level or instruction path absent from the "
+                "tables above was not measured on this box: say so rather than substituting a "
+                "datasheet figure or a neighbouring rate."
+            ),
             "provenance": hardware.provenance,
         },
         "evidence_dir": str(evidence.artifacts_dir),

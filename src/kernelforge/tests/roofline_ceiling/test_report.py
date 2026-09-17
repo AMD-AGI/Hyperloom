@@ -22,39 +22,35 @@ from kernelforge.roofline_ceiling.report import (
 )
 from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
 
+_ANALYSIS = """# Performance ceiling analysis
+
+## Conclusion
+
+- `c0`: 12.8 ms, memory-bound.
+
+## Proof approach
+
+Bytes `M*K*2 + K*N*2` = 8e10 against the measured 6.24 TB/s HBM roof gives
+12.8 ms; the same case needs only 1.19 ms at the bf16 MFMA roof. Expert weights
+are counted once, for the experts this case actually activates.
+"""
+
 
 def _hardware(peak_source: str = PEAK_SOURCE_EMPIRICAL) -> Hardware:
     return Hardware(
         arch="gfx950",
-        hbm_bw_bytes_per_s=8.0e12,
-        peak_flops={"bf16_mfma": 2.0e15},
+        peak_flops={"bf16_mfma": 1.686e15},
+        bandwidth={"hbm": 6.24e12, "mall": 8.49e12},
         peak_source=peak_source,
-        dispatch_floor_s=2.0e-6,
+        dispatch_floor_s=3.0e-6,
     )
 
 
 def _report(peak_source: str = PEAK_SOURCE_EMPIRICAL, case_ids=("c0",)):
     payload = {
-        "cases": [
-            {
-                "case_id": case_id,
-                "bound_note": "dominated by weight traffic",
-                "stages": [
-                    {
-                        "name": "gemm",
-                        "flops": 2.0e12,
-                        "bytes": 8.0e10,
-                        "instruction_path": "bf16_mfma",
-                        "dispatch_count": 1,
-                        "formula_flops": "2*M*N*K",
-                        "formula_bytes": "M*K*2 + K*N*2",
-                        "assumptions": ["weights counted once"],
-                    }
-                ],
-            }
-            for case_id in case_ids
-        ],
+        "cases": [{"case_id": case_id, "t_ideal_ms": 12.8, "bound": "memory"} for case_id in case_ids],
         "confidence": "medium",
+        "analysis_md": _ANALYSIS + "\n" + "\n".join(f"Case `{case_id}` covered." for case_id in case_ids),
         "caveats": ["trace captured on two of three shapes"],
     }
     return build_report(
@@ -77,7 +73,9 @@ def test_a_published_report_is_readable_by_a_consumer(tmp_path):
     original = _report()
     path = publish(original, tmp_path)
 
-    assert read_report(path).ideal_ms() == original.ideal_ms()
+    restored = read_report(path)
+    assert restored.ideal_ms() == original.ideal_ms()
+    assert restored.analysis_md == original.analysis_md
 
 
 def test_the_cache_key_separates_a_measured_ceiling_from_a_datasheet_one():
@@ -120,20 +118,49 @@ def test_an_absent_cache_entry_is_simply_absent(tmp_path):
     assert read_cached("never-written", tmp_path) is None
 
 
-def test_the_document_states_the_ideal_latency_and_the_formulas_behind_it():
+def test_the_document_leads_with_the_answer_and_carries_the_derivation_verbatim():
     rendered = render_document(_report())
 
-    assert "# Performance ceiling analysis" in rendered
+    assert "## Conclusion" in rendered
     assert "`c0`" in rendered
-    assert "2*M*N*K" in rendered
-    assert "weights counted once" in rendered
-    assert "dominated by weight traffic" in rendered
+    # The analyst's own document, reproduced rather than summarized.
+    assert "M*K*2 + K*N*2" in rendered
+    assert "Expert weights" in rendered
+
+
+def test_the_document_states_every_figure_the_estimate_was_taken_against():
+    """A reader recomputing the numbers needs the roofs, not just the answer."""
+    rendered = render_document(_report())
+
+    assert "Bandwidth (hbm)" in rendered
+    assert "Bandwidth (mall)" in rendered
+    assert "Peak (bf16_mfma)" in rendered
+    assert "Dispatch floor" in rendered
 
 
 def test_the_document_says_when_its_peaks_are_only_a_datasheet():
     rendered = render_document(_report(PEAK_SOURCE_DATASHEET))
 
     assert "not an achievable target" in rendered
+
+
+def test_validator_findings_reach_the_document_rather_than_only_the_json():
+    report = build_report(
+        {
+            "cases": [{"case_id": "c0", "t_ideal_ms": 99.0, "bound": "memory"}],
+            "confidence": "low",
+            "analysis_md": "case `c0` is estimated at 99 ms",
+        },
+        canonical_id="roofline-ceiling:op:gfx950",
+        hardware=_hardware(),
+        expected_case_ids=["c0"],
+        observed_ms={"c0": 10.0},
+    )
+
+    rendered = render_document(report)
+
+    assert "## Findings" in rendered
+    assert "exceeds the observed" in rendered
 
 
 def test_the_advisory_block_frames_itself_as_advisory_and_not_a_gate():

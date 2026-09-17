@@ -18,33 +18,19 @@ from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 def _report():
     payload = {
-        "cases": [
-            {
-                "case_id": "decode-t1",
-                "stages": [
-                    {
-                        "name": "gemm",
-                        "flops": 2.0e12,
-                        "bytes": 8.0e10,
-                        "instruction_path": "bf16_mfma",
-                        "dispatch_count": 1,
-                        "formula_flops": "2*M*N*K",
-                        "formula_bytes": "M*K*2",
-                    }
-                ],
-            }
-        ],
+        "cases": [{"case_id": "decode-t1", "t_ideal_ms": 12.8, "bound": "memory"}],
         "confidence": "high",
+        "analysis_md": "# Performance ceiling analysis\n\nCase `decode-t1`: 8e10 B / 6.24 TB/s = 12.8 ms.",
     }
     return build_report(
         payload,
         canonical_id="roofline-ceiling:op:gfx950",
         hardware=Hardware(
             arch="gfx950",
-            hbm_bw_bytes_per_s=8.0e12,
-            peak_flops={"bf16_mfma": 2.0e15},
+            peak_flops={"bf16_mfma": 1.686e15},
+            bandwidth={"hbm": 6.24e12},
             peak_source=PEAK_SOURCE_EMPIRICAL,
-            dispatch_floor_s=2.0e-6,
+            dispatch_floor_s=3.0e-6,
         ),
         expected_case_ids=["decode-t1"],
     )

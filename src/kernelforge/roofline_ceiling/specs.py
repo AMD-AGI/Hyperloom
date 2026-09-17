@@ -34,13 +34,23 @@ PEAK_SOURCE_EMPIRICAL = "roof_only_empirical"
 
 @dataclass(frozen=True)
 class ArchSpec:
-    """Datasheet peaks for one GPU architecture."""
+    """Datasheet peaks for one GPU architecture.
+
+    Only HBM is carried. The cache levels have no datasheet figure worth
+    quoting -- the knowledge base gives Infinity Cache a latency and no
+    bandwidth -- and inventing one would be worse than the analyst knowing it
+    has none. ``--roof-only`` measures them; the datasheet path says it cannot.
+    """
 
     arch: str
     hbm_bw_bytes_per_s: float
     #: instruction path -> peak FLOP/s (or OP/s for the integer paths).
     peak_flops: dict[str, float] = field(default_factory=dict)
     source: str = ""
+
+    def bandwidth(self) -> dict[str, float]:
+        """Memory level -> bytes/s, in the shape the hardware record carries."""
+        return {"hbm": self.hbm_bw_bytes_per_s}
 
 
 # gfx950 / MI350X / MI355X. Matrix-core rates from

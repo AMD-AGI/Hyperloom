@@ -90,10 +90,17 @@ def _format_ms(value: float) -> str:
 
 
 def render_document(report: CeilingReport) -> str:
-    """Render the operator-facing analysis document."""
+    """Render the operator-facing analysis document.
+
+    A framework-owned header -- the answer, the figures it was taken against,
+    and anything the validator objected to -- followed verbatim by the analyst's
+    own derivation. The header is what a reader checks first and the only part
+    that cannot drift from the published JSON; the derivation is the only record
+    of how the numbers were reached, so it is reproduced rather than summarized.
+    """
     hardware = report.hardware
     lines: list[str] = [
-        "# Performance ceiling analysis",
+        "# Performance ceiling",
         "",
         "## Conclusion",
         "",
@@ -112,18 +119,27 @@ def render_document(report: CeilingReport) -> str:
         "",
         f"Confidence: **{report.confidence}**.",
         "",
-        "## Hardware",
+        "## Hardware the estimate was taken against",
         "",
         f"- Architecture: `{hardware.arch}`",
         f"- Peak source: `{hardware.peak_source}`"
         + ("" if hardware.is_empirical else " — vendor datasheet, an absolute lower bound, not an achievable target"),
-        f"- HBM bandwidth: {hardware.hbm_bw_bytes_per_s / 1e12:.4g} TB/s",
     ]
+    for tier, value in sorted(hardware.bandwidth.items()):
+        lines.append(f"- Bandwidth ({tier}): {value / 1e12:.4g} TB/s")
     if hardware.dispatch_floor_s > 0:
         lines.append(f"- Dispatch floor: {hardware.dispatch_floor_s * 1e6:.4g} us")
     else:
         lines.append("- Dispatch floor: not measured")
+    for path, value in sorted(hardware.peak_flops.items()):
+        lines.append(f"- Peak ({path}): {value / 1e12:.4g} TFLOP/s")
     lines.append("")
+
+    flagged = [(case.case_id, issue) for case in report.cases for issue in case.issues]
+    if flagged:
+        lines += ["## Findings", ""]
+        lines += [f"- `{case_id}`: {issue}" for case_id, issue in flagged]
+        lines.append("")
 
     if report.caveats:
         lines += ["## Caveats", ""]
@@ -133,40 +149,11 @@ def render_document(report: CeilingReport) -> str:
     lines += [
         "## Derivation",
         "",
-        "`t_stage = dispatch_count * dispatch_floor + extra_latency + max(flops / peak, bytes / bandwidth)`,",
-        "summed over serial stages. Compute and memory overlap only within a stage.",
+        "Written by the analyst. Nothing downstream recomputes these latencies, so this is the",
+        "only record of how they were reached.",
         "",
+        report.analysis_md.strip(),
     ]
-
-    for case in report.cases:
-        lines += [f"### `{case.case_id}`", ""]
-        if case.bound_note:
-            lines += [case.bound_note, ""]
-        lines += [
-            "| Stage | FLOPs | Bytes | Path | Dispatches | t_compute (us) | t_memory (us) | t_latency (us) |",
-            "|:--|--:|--:|:--|--:|--:|--:|--:|",
-        ]
-        timings = {timing.name: timing for timing in case.timings}
-        for stage in case.stages:
-            timing = timings.get(stage.name)
-            lines.append(
-                f"| {stage.name} | {stage.flops:.4g} | {stage.bytes_moved:.4g} | "
-                f"`{stage.instruction_path}` | {stage.dispatch_count} | "
-                f"{(timing.t_compute_s * 1e6 if timing else 0.0):.4g} | "
-                f"{(timing.t_memory_s * 1e6 if timing else 0.0):.4g} | "
-                f"{(timing.t_latency_s * 1e6 if timing else 0.0):.4g} |"
-            )
-        lines.append("")
-        for stage in case.stages:
-            if stage.formula_flops or stage.formula_bytes:
-                lines.append(f"- `{stage.name}` FLOPs: `{stage.formula_flops or 'n/a'}`")
-                lines.append(f"- `{stage.name}` bytes: `{stage.formula_bytes or 'n/a'}`")
-            for assumption in stage.assumptions:
-                lines.append(f"  - {assumption}")
-        if case.issues:
-            lines += ["", "Issues:"]
-            lines += [f"- {issue}" for issue in case.issues]
-        lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
 

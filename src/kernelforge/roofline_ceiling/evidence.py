@@ -75,7 +75,18 @@ _ROOF_COLUMNS_BY_PATH: dict[str, tuple[str, ...]] = {
     "fp32_valu": ("FP32Flops",),
     "fp64_valu": ("FP64Flops",),
 }
-_ROOF_BW_COLUMN = "HBMBw"
+#: Memory level -> ``roofline.csv`` column. Every level the tool measured is
+#: handed to the analyst, not only HBM: a working set that stays resident in
+#: Infinity Cache rides a roof well above HBM, and one bounded by LDS throughput
+#: rides one below it. Pinning the ceiling to HBM alone silently mis-bounds both.
+_ROOF_BW_COLUMN_BY_TIER: dict[str, str] = {
+    "hbm": "HBMBw",
+    "mall": "MALLBw",
+    "l2": "L2Bw",
+    "l1": "L1Bw",
+    "lds": "LDSBw",
+}
+_ROOF_BW_COLUMN = _ROOF_BW_COLUMN_BY_TIER["hbm"]
 
 #: Profilers tried in order for the empirical roofs. ``omniperf`` is the former
 #: name of the same tool and still ships on older ROCm images.
@@ -286,12 +297,12 @@ def collect_empirical_peaks(
     device_id: int = 0,
     timeout_sec: float = 3600.0,
     env: dict[str, str] | None = None,
-) -> tuple[dict[str, float], float, dict[str, Any]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, Any]]:
     """Measure this box's roofs with ``rocprof-compute --roof-only``.
 
-    Returns ``(peak_flops_by_instruction_path, hbm_bytes_per_s, provenance)``.
-    Both are empty/zero when no profiler could produce a usable ``roofline.csv``;
-    the caller then falls back to the datasheet and says so.
+    Returns ``(peak_flops_by_instruction_path, bytes_per_s_by_memory_level,
+    provenance)``. Both are empty when no profiler could produce a usable
+    ``roofline.csv``; the caller then falls back to the datasheet and says so.
     """
     workload = artifacts_dir / "roofline"
     workload.mkdir(parents=True, exist_ok=True)
@@ -300,7 +311,7 @@ def collect_empirical_peaks(
     if not tool:
         return (
             {},
-            0.0,
+            {},
             {
                 "measured": False,
                 "detail": "no roofline-capable profiler on PATH; tried " + ", ".join(_ROOF_TOOLS),
@@ -334,17 +345,17 @@ def collect_empirical_peaks(
     if not found:
         detail = f"{tool} exited {code} and produced no roofline.csv"
         log.warning("ceiling empirical roofs unavailable: %s", detail)
-        return {}, 0.0, {"measured": False, "tool": tool, "exit_code": code, "detail": detail}
+        return {}, {}, {"measured": False, "tool": tool, "exit_code": code, "detail": detail}
 
     try:
         columns = _read_roofline_csv(found[0], device_id=device_id)
     except (OSError, ValueError) as exc:
-        return {}, 0.0, {"measured": False, "tool": tool, "detail": f"roofline.csv unreadable: {exc}"}
+        return {}, {}, {"measured": False, "tool": tool, "detail": f"roofline.csv unreadable: {exc}"}
 
     if not columns:
         return (
             {},
-            0.0,
+            {},
             {"measured": False, "tool": tool, "detail": f"{found[0]} carried no positive peaks"},
         )
 
@@ -355,10 +366,14 @@ def collect_empirical_peaks(
         if column:
             peaks[path] = columns[column] * _ROOF_UNIT_SCALE
             resolved_from[path] = column
-    bandwidth = columns.get(_ROOF_BW_COLUMN, 0.0) * _ROOF_UNIT_SCALE
+    bandwidth = {
+        tier: columns[column] * _ROOF_UNIT_SCALE
+        for tier, column in _ROOF_BW_COLUMN_BY_TIER.items()
+        if column in columns
+    }
 
     provenance: dict[str, Any] = {
-        "measured": bool(peaks) and bandwidth > 0,
+        "measured": bool(peaks) and bandwidth.get("hbm", 0.0) > 0,
         "tool": tool,
         "exit_code": code,
         "roofline_csv": str(found[0]),
@@ -368,7 +383,7 @@ def collect_empirical_peaks(
         "column_by_instruction_path": resolved_from,
         "paths_without_a_column": sorted(set(_ROOF_COLUMNS_BY_PATH) - set(peaks)),
     }
-    if bandwidth <= 0:
+    if bandwidth.get("hbm", 0.0) <= 0:
         provenance["detail"] = f"roofline.csv has no positive {_ROOF_BW_COLUMN}"
     return peaks, bandwidth, provenance
 
@@ -425,15 +440,16 @@ def resolve_hardware(
     *,
     arch: str = "",
     empirical_peaks: dict[str, float] | None = None,
-    empirical_bw: float = 0.0,
+    empirical_bandwidth: dict[str, float] | None = None,
     dispatch_floor_s: float = 0.0,
     provenance: dict[str, Any] | None = None,
 ) -> Hardware:
-    """Settle the hardware constants, preferring measured roofs over datasheet.
+    """Settle the hardware figures, preferring measured roofs over datasheet.
 
-    The two are never mixed. A record half measured and half datasheet would
-    make one stage's compute term comparable to another's and neither
-    comparable to the bandwidth term, and no field could say so.
+    The two are never mixed. In a record half measured and half datasheet, one
+    term would be roughly twice as generous as the next and no field could say
+    which, so a missing HBM measurement drops the whole record to datasheet
+    rather than filling one hole from the other source.
     """
     resolved_arch = canon_arch(arch) or detect_arch() or canon_arch(arch)
     spec = arch_spec(resolved_arch)
@@ -441,11 +457,12 @@ def resolve_hardware(
     notes["arch_resolved_from"] = "caller" if canon_arch(arch) else "rocminfo"
 
     peaks = dict(empirical_peaks or {})
-    if peaks and empirical_bw > 0:
+    bandwidth = dict(empirical_bandwidth or {})
+    if peaks and bandwidth.get("hbm", 0.0) > 0:
         return Hardware(
             arch=resolved_arch,
-            hbm_bw_bytes_per_s=float(empirical_bw),
             peak_flops=peaks,
+            bandwidth=bandwidth,
             peak_source=PEAK_SOURCE_EMPIRICAL,
             dispatch_floor_s=float(dispatch_floor_s),
             provenance=notes,
@@ -459,8 +476,8 @@ def resolve_hardware(
     notes.setdefault("datasheet_source", spec.source)
     return Hardware(
         arch=spec.arch,
-        hbm_bw_bytes_per_s=spec.hbm_bw_bytes_per_s,
         peak_flops=dict(spec.peak_flops),
+        bandwidth=spec.bandwidth(),
         peak_source=PEAK_SOURCE_DATASHEET,
         dispatch_floor_s=float(dispatch_floor_s),
         provenance=notes,
@@ -555,7 +572,7 @@ def collect_evidence(
         notes.append("dispatch floor unmeasured: " + str(dispatch_provenance.get("detail") or "unknown"))
 
     peaks: dict[str, float] = {}
-    bandwidth = 0.0
+    bandwidth: dict[str, float] = {}
     roof_provenance: dict[str, Any] = {"measured": False, "detail": "--roof-only was not requested"}
     if roof_only:
         peaks, bandwidth, roof_provenance = collect_empirical_peaks(
@@ -582,7 +599,7 @@ def collect_evidence(
     hardware = resolve_hardware(
         arch=arch,
         empirical_peaks=peaks,
-        empirical_bw=bandwidth,
+        empirical_bandwidth=bandwidth,
         dispatch_floor_s=dispatch_floor_s,
         provenance={
             "roofs": roof_provenance,

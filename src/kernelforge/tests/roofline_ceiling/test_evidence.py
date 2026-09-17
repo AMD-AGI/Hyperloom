@@ -67,8 +67,18 @@ def test_empirical_peaks_are_scaled_out_of_the_giga_units_the_csv_uses(tmp_path,
     peaks, bandwidth, provenance = _collect(tmp_path, monkeypatch, _ROOFLINE_CSV)
 
     assert peaks["bf16_mfma"] == pytest.approx(1.686e15)
-    assert bandwidth == pytest.approx(5.3e12)
+    assert bandwidth["hbm"] == pytest.approx(5.3e12)
     assert provenance["measured"] is True
+
+
+def test_every_memory_level_the_tool_measured_is_carried_not_only_hbm(tmp_path, monkeypatch):
+    """A cache-resident working set rides a roof well above HBM; the analyst needs it."""
+    _peaks, bandwidth, _prov = _collect(tmp_path, monkeypatch, _REAL_MI355X_CSV)
+
+    assert bandwidth["hbm"] == pytest.approx(6.2373418e12)
+    assert bandwidth["mall"] == pytest.approx(8.4968027e12)
+    assert bandwidth["l2"] == pytest.approx(34.513656e12)
+    assert bandwidth["lds"] == pytest.approx(54.161102e12)
 
 
 def test_the_scaled_mxfp_paths_share_their_unscaled_twins_pipeline(tmp_path, monkeypatch):
@@ -87,7 +97,7 @@ def test_a_real_mi355x_roofline_csv_yields_every_low_precision_roof(tmp_path, mo
     assert peaks["fp6_mfma"] == pytest.approx(8.810305e15)
     assert peaks["mxfp4_scaled_mfma"] == pytest.approx(9.769632e15)
     assert peaks["mxfp8_scaled_mfma"] == pytest.approx(2.4563362e15)
-    assert bandwidth == pytest.approx(6.2373418e12)
+    assert bandwidth["hbm"] == pytest.approx(6.2373418e12)
     assert provenance["measured"] is True
 
 
@@ -106,7 +116,7 @@ def test_measured_roofs_sit_below_the_datasheet_peaks_they_stand_in_for(tmp_path
     peaks, bandwidth, _prov = _collect(tmp_path, monkeypatch, _REAL_MI355X_CSV)
     datasheet = arch_spec("gfx950")
 
-    assert bandwidth < datasheet.hbm_bw_bytes_per_s
+    assert bandwidth["hbm"] < datasheet.hbm_bw_bytes_per_s
     for path in ("bf16_mfma", "fp8_mfma", "fp4_mfma"):
         assert peaks[path] < datasheet.peak_flops[path]
 
@@ -124,7 +134,7 @@ def test_a_missing_profiler_degrades_with_a_reason_rather_than_silently(tmp_path
 
     peaks, bandwidth, provenance = collect_empirical_peaks(command=["true"], workdir=tmp_path, artifacts_dir=tmp_path)
 
-    assert peaks == {} and bandwidth == 0.0
+    assert peaks == {} and bandwidth == {}
     assert provenance["measured"] is False
     assert "no roofline-capable profiler" in provenance["detail"]
 
@@ -144,22 +154,30 @@ def test_measured_roofs_win_and_are_labelled_as_measured():
     hardware = resolve_hardware(
         arch="gfx950",
         empirical_peaks={"bf16_mfma": 1.686e15},
-        empirical_bw=5.3e12,
+        empirical_bandwidth={"hbm": 5.3e12, "mall": 11.9e12},
         dispatch_floor_s=2.0e-6,
     )
 
     assert hardware.peak_source == PEAK_SOURCE_EMPIRICAL
     assert hardware.is_empirical
     assert hardware.peak_flops == {"bf16_mfma": 1.686e15}
+    assert hardware.bandwidth["mall"] == pytest.approx(11.9e12)
 
 
-def test_peaks_without_a_bandwidth_fall_all_the_way_back_rather_than_mixing():
+def test_peaks_without_an_hbm_measurement_fall_all_the_way_back_rather_than_mixing():
     """Half measured and half datasheet makes two terms incomparable, silently."""
-    hardware = resolve_hardware(arch="gfx950", empirical_peaks={"bf16_mfma": 1.686e15}, empirical_bw=0.0)
+    hardware = resolve_hardware(
+        arch="gfx950",
+        empirical_peaks={"bf16_mfma": 1.686e15},
+        empirical_bandwidth={"l2": 34.5e12},
+    )
 
     assert hardware.peak_source == PEAK_SOURCE_DATASHEET
     assert hardware.peak_flops["bf16_mfma"] == pytest.approx(2.5e15)
-    assert hardware.hbm_bw_bytes_per_s == pytest.approx(8.0e12)
+    assert hardware.bandwidth == {"hbm": pytest.approx(8.0e12)}
+    # The measured L2 figure is dropped with the rest: keeping it would leave one
+    # level measured and another datasheet inside a record labelled datasheet.
+    assert "l2" not in hardware.bandwidth
 
 
 def test_datasheet_fallback_records_where_its_numbers_came_from():
@@ -168,6 +186,11 @@ def test_datasheet_fallback_records_where_its_numbers_came_from():
     assert hardware.peak_source == PEAK_SOURCE_DATASHEET
     assert hardware.provenance["datasheet_source"]
     assert hardware.hbm_bw_bytes_per_s == pytest.approx(5.325e12)
+
+
+def test_the_datasheet_path_offers_no_cache_roof_rather_than_an_invented_one():
+    """The knowledge base gives Infinity Cache a latency and no bandwidth."""
+    assert set(resolve_hardware(arch="gfx950").bandwidth) == {"hbm"}
 
 
 def test_an_arch_with_neither_measurement_nor_datasheet_refuses_to_guess(monkeypatch):
