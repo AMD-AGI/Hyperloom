@@ -30,8 +30,6 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
-    _official_anthropic_only,
-    _official_openai_only,
     resolve_robustness_options,
 )
 from .model_gate import (
@@ -579,14 +577,14 @@ def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    return _official_anthropic_only()
+    return llm_config.is_anthropic_only()
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    return _official_openai_only()
+    return llm_config.is_openai_only()
 
 
 def _catalog_probe_has_no_credential() -> bool:

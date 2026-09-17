@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.inference_optimizer.cli import backends as clib
 
 
@@ -26,6 +27,14 @@ def _clear_provider_env(monkeypatch) -> None:
         "LLM_GATEWAY_KEY",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+def _set_dual_protocol_gateway(monkeypatch) -> None:
+    """One gateway (e.g. DeepSeek) serving both protocols, each side with its own URL and key."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +71,10 @@ def _build(**over):
 def _isolated_provider_env(monkeypatch):
     """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
+    # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
+    # run with is exactly the kind of machine state this fixture exists to hold still.
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
 
 def test_build_backends_mock_defaults() -> None:
@@ -221,10 +234,7 @@ def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
 def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
     """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
+    _set_dual_protocol_gateway(monkeypatch)
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -249,6 +259,7 @@ def test_backends_have_no_provider_specific_branch() -> None:
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -256,6 +267,23 @@ def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) ->
     assert b["orchestration"][0] == "codex"
     assert b["critic"][0] == "critic_agent"
     assert "kernel_agent" not in b
+
+
+def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) -> None:
+    """Both sides authenticate and both SDKs import, so the tie goes to Claude."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+
+    assert _build()["orchestration"][0] == "claude"
+
+
+def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypatch) -> None:
+    """Same credentials, so only the importable SDK separates them -- and a ClaudeBackend that cannot import is not an answer."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
+
+    assert _build()["orchestration"][0] == "codex"
 
 
 def test_build_backends_invalid_robustness_choice() -> None:

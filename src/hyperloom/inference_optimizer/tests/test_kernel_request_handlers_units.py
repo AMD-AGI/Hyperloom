@@ -912,8 +912,8 @@ class TestForgeGemmHelperCoverage:
     def test_resolve_forge_agent_defaults_an_unconfigured_provider_to_claude(self, monkeypatch):
         """A runtime logged in by other means carries no credential this can read."""
         _pin_fusion_provider_env(monkeypatch, {})
-        monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: True)
-        monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: True)
+        monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
+        monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
         assert krh._resolve_forge_agent({}) == ("claude", DEFAULT_CLAUDE_MODEL)
 
