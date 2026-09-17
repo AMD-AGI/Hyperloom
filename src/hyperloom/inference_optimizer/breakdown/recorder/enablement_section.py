@@ -352,6 +352,15 @@ def _collect_round_identity(out: dict[str, Any], state: dict[str, Any]) -> None:
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
 
 
+
+def _portable_patch_ref(raw: str, session_dir: Path) -> str:
+    """A patch reference that names no directory on the authoring host."""
+    rel = _rel(Path(raw), session_dir)
+    if not rel:
+        return Path(raw).name
+    return Path(rel).name if Path(rel).is_absolute() else rel
+
+
 def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
     """Emit what the lane landed: patches, artifacts, stack action and setup."""
     from hyperloom.orchestrator.enablement.recipe.steps import root_ids_by_path
@@ -365,7 +374,34 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     # state by the time a build lands.
     kept_rounds_raw = _eg(state, "kept_rounds")
     if isinstance(kept_rounds_raw, list) and kept_rounds_raw:
-        out["kept_rounds"] = [dict(r) for r in kept_rounds_raw if isinstance(r, dict)]
+        out["kept_rounds"] = [
+            {
+                # The linkage the fallback joins on, and nothing host-local with
+                # it. ``_push_kept_round`` stores authoring-workspace patch paths
+                # and raw artifact dicts carrying source and target; copied
+                # verbatim they would put absolute paths from this machine into
+                # a recipe meant to be replayed on another -- the same reason
+                # ``kept_patches`` is relativized and ``kept_artifacts`` reduced
+                # to its normalized fields a few lines below.
+                "task_id": str(r.get("task_id") or ""),
+                # Session-relative where it can be, the bare name otherwise --
+                # never the authoring absolute path. ``_push_kept_round`` notes
+                # that the replay sources each round's patches from the archive
+                # by name, so the name is the whole linkage and the directory it
+                # sat in on this machine is not part of it. Checked explicitly
+                # rather than through ``_rel``'s falsy branch: ``_rel`` falls
+                # back to ``str(path)``, so ``or`` never fires and the absolute
+                # path would travel exactly as if nothing had been done.
+                "patches": [_portable_patch_ref(str(p), session_dir) for p in (r.get("patches") or [])],
+                "artifacts": [
+                    str(a.get("rel_target") or a.get("target") or "")
+                    for a in (r.get("artifacts") or [])
+                    if isinstance(a, dict) and (a.get("rel_target") or a.get("target"))
+                ],
+            }
+            for r in kept_rounds_raw
+            if isinstance(r, dict)
+        ]
     kept_artifacts_raw = _eg(state, "kept_artifacts")
     framework_root = str(_eg(state, "framework_root", "") or "")
     if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:

@@ -723,6 +723,43 @@ def test_a_build_linked_only_through_a_kept_round_survives_the_projection(_bound
     assert [r.get("task_id") for r in recipe["kept_rounds"]] == ["spec-1"]
 
 
+def test_the_kept_rounds_carry_no_paths_from_the_authoring_host(_bound_session):
+    """A recipe is replayed somewhere else, so it may not name this machine.
+
+    ``_push_kept_round`` stores authoring-workspace patch paths and raw artifact
+    dicts carrying source and target. Exported verbatim, those absolute paths
+    travel into a recipe whose whole purpose is to be acted on elsewhere --
+    beside a ``kept_patches`` that is relativized and a ``kept_artifacts``
+    reduced to its normalized fields, which is what makes the inconsistency a
+    defect rather than a preference.
+    """
+    import json as _json
+
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.last_specialist_task_id = ""
+    rnd.kept_rounds = [
+        {
+            "task_id": "spec-1",
+            "patches": ["/authoring/ws/enablement/spec-1/001.patch"],
+            "artifacts": [{"source": "/authoring/ws/build/_C.so", "target": "/srv/vllm/_C.so",
+                           "rel_target": "_C.so"}],
+        }
+    ]
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    blob = _json.dumps(_ext(_bound_session)["recipe"]["kept_rounds"])
+    assert "/authoring/ws" not in blob, blob
+    assert "_C.so" in blob, "the linkage itself must survive the normalization"
+
+
 def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
     _capture_overlay(_bound_session)
     _boot_trigger()
