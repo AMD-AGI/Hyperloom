@@ -23,7 +23,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
