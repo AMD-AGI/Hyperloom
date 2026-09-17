@@ -127,16 +127,19 @@ def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
             "extra_envs": {},
         }
 
-        assert coord._lift_to_current_best(
-            "explore",
-            1100.0,
-            {
-                "name": "degraded-winner",
-                "output_throughput": 1100.0,
-                "total_throughput": 22000.0,
-                "e2e_norm_intvty_p90": 30.0,
-            },
-        ) is False
+        assert (
+            coord._lift_to_current_best(
+                "explore",
+                1100.0,
+                {
+                    "name": "degraded-winner",
+                    "output_throughput": 1100.0,
+                    "total_throughput": 22000.0,
+                    "e2e_norm_intvty_p90": 30.0,
+                },
+            )
+            is False
+        )
         assert _rows() == []
 
 
