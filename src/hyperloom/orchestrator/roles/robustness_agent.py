@@ -18,6 +18,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
     NoIntentEmitted,
     validate_envelope,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import robustness_out
 from hyperloom.inference_optimizer.session.session_paths import allocate_turn_workdir
 from ._runtime_bridge import RuntimeCall, RuntimeCaller, invoke_runtime_cli
 from .base import BackendError, BackendTurnResult
@@ -141,18 +142,42 @@ class RobustnessAgentBackend:
         except (OSError, json.JSONDecodeError) as exc:
             raise BackendError(f"RobustnessAgentBackend: failed to read emit.json from {emit_path}: {exc}") from exc
 
+        parse_warnings = list(emit.get("parse_warnings") or [])
+        runtime_tick_index = emit.get("tick_index")
+
         envelope = emit.get("intent_envelope")
         if not isinstance(envelope, dict):
-            raise BackendError(
-                f"RobustnessAgentBackend: emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})"
+            detail = f"emit.json missing intent_envelope (got keys={sorted(emit.keys())!r})"
+            self._record_turn(
+                turn_idx=turn_idx,
+                outcome=robustness_out.OUTCOME_NO_ENVELOPE,
+                tick_index=runtime_tick_index,
+                parse_warnings=parse_warnings,
+                workdir=workdir,
+                detail=detail,
             )
+            raise BackendError(f"RobustnessAgentBackend: {detail}")
         try:
             intents = validate_envelope(envelope)
         except IntentValidationError as exc:
+            self._record_turn(
+                turn_idx=turn_idx,
+                outcome=robustness_out.OUTCOME_INVALID_ENVELOPE,
+                tick_index=runtime_tick_index,
+                parse_warnings=parse_warnings,
+                workdir=workdir,
+                detail=str(exc),
+            )
             raise NoIntentEmitted(f"robustness_agent_envelope_invalid: {exc}") from exc
 
-        parse_warnings = list(emit.get("parse_warnings") or [])
-        runtime_tick_index = emit.get("tick_index")
+        self._record_turn(
+            turn_idx=turn_idx,
+            outcome=robustness_out.OUTCOME_INTENTS,
+            tick_index=runtime_tick_index,
+            intents=intents,
+            parse_warnings=parse_warnings,
+            workdir=workdir,
+        )
         intent_summary = [(i.type.value, i.payload.get("severity") or i.payload.get("topic")) for i in intents]
         log.info(
             "robustness_agent_backend turn=%d session=%s tick_index=%s intents=%s parse_warnings=%d",
@@ -172,17 +197,6 @@ class RobustnessAgentBackend:
             }
         )
 
-        # Record the robustness signal before stale workdirs are pruned.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-            instrument.record_robustness_signal(
-                self.session_dir,
-                workdir=workdir,
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never break the agent loop
-            log.debug("robustness breakdown capture failed", exc_info=True)
-
         metadata: dict[str, Any] = {
             "session_id": session_id,
             "turn_idx": turn_idx,
@@ -197,6 +211,13 @@ class RobustnessAgentBackend:
             raw_text="(robustness-agent)",
             metadata=metadata,
         )
+
+    def _record_turn(self, **fields: Any) -> None:
+        """Record one turn's robustness account. Never raises into the loop."""
+        try:
+            robustness_out.record_robustness_turn(self.session_dir, **fields)
+        except Exception:  # noqa: BLE001 — author-time capture must never break the agent loop
+            log.debug("robustness breakdown capture failed", exc_info=True)
 
     @staticmethod
     def _merge_llm_usage(metadata: dict[str, Any], usage: Any) -> None:

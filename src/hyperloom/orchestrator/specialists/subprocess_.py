@@ -10,8 +10,9 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 separately by the CLI to the matching provider's Agent SDK backend.
 
 Two agent CLIs can drive that contract, and the deployment's credential shape
-picks one (:func:`resolve_specialist_agent_backend`): ``claude --print
---output-format stream-json`` authenticates against the Anthropic side, and
+picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
+``claude --print --output-format stream-json`` authenticates against the
+Anthropic side, and
 ``codex exec --json`` against the OpenAI side. An OpenAI-only deployment has no
 Anthropic credential at all, so spawning the Claude CLI there produced a
 ``Not logged in`` exit on every specialist task and silently cost the session
@@ -46,6 +47,11 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.env import is_truthy
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
+from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CLAUDE,
+    AGENT_BACKEND_CODEX,
+    preferred_agent_backend,
+)
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     redact_file_in_place,
@@ -78,37 +84,6 @@ class SpecialistAgentUnavailableError(RuntimeError):
     run specialists at all. It surfaces as the task's failure rather than being
     absorbed into a fallback CLI that would fail to authenticate.
     """
-
-
-# The two agent CLIs that can drive the specialist contract (module docstring).
-AGENT_BACKEND_CLAUDE = "claude"
-AGENT_BACKEND_CODEX = "codex"
-
-
-def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> str:
-    """Return the agent CLI the deployment's credentials can actually drive.
-
-    An OpenAI-only deployment holds no Anthropic credential, so the Claude CLI
-    starts and immediately fails with ``Not logged in``; the Codex CLI is the
-    only runtime that can authenticate there. Every other shape — Anthropic-only,
-    both configured, or nothing configured (a CLI logged in by other means, or
-    Bedrock) — keeps the Claude CLI, so this only ever redirects the shape that
-    could not work at all.
-
-    The shape test itself belongs to :mod:`hyperloom.common.llm_config`, so this
-    cannot disagree with backend selection, the TraceLens runner or the forge
-    kernel_backend.
-
-    Args:
-        env: Environment mapping to read; defaults to ``os.environ``.
-
-    Returns:
-        :data:`AGENT_BACKEND_CODEX` for an OpenAI-only deployment, else
-        :data:`AGENT_BACKEND_CLAUDE`.
-    """
-    from hyperloom.common import llm_config  # local import: keep module import-light
-
-    return AGENT_BACKEND_CODEX if llm_config.is_openai_only(env) else AGENT_BACKEND_CLAUDE
 
 
 def resolve_codex_executable(explicit: str = "") -> str:
@@ -159,6 +134,11 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "HTTP_PROXY",
         "LANG",
         "LC_ALL",
+        # The agent CLIs are Node processes, which read neither SSL_CERT_FILE nor
+        # REQUESTS_CA_BUNDLE; behind a TLS-intercepting gateway these are the only
+        # trust knobs that reach them.
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
         "NO_PROXY",
         "OPENAI_BASE_URL",
         "PATH",
@@ -523,7 +503,7 @@ class SpecialistSubprocessConfig:
     """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
 
     Empty resolves the deployment's credential shape per dispatch via
-    :func:`resolve_specialist_agent_backend`. The CLI pins it explicitly at boot
+    :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
     so the backend cannot disagree with the executable and model chosen next to
     it; leaving it empty is for callers that construct a config directly.
     """
@@ -650,7 +630,7 @@ class SpecialistSubprocessResult:
 
 #: Directories a specialist writes for its own use inside the worktree, never
 #: part of a deliverable.
-_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", "scratch", ".hyperloom")
+_SPECIALIST_SCRATCH_DIRS: tuple[str, ...] = ("patches", "artifacts", ".hyperloom")
 
 
 def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -1192,7 +1172,7 @@ class SpecialistSubprocessDispatcher:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`resolve_specialist_agent_backend`).
+        credential shape decides (:func:`preferred_agent_backend`).
 
         Returns:
             str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
@@ -1203,7 +1183,7 @@ class SpecialistSubprocessDispatcher:
         """
         pinned = (self.config.agent_backend or "").strip().lower()
         if not pinned:
-            return resolve_specialist_agent_backend()
+            return preferred_agent_backend()
         if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
@@ -1612,12 +1592,21 @@ class SpecialistSubprocessDispatcher:
 
         With no target declared the whole worktree is in scope, minus
         :data:`_SPECIALIST_SCRATCH_DIRS`, whose whole-file copies would
-        otherwise be harvested as file creations.
+        otherwise be harvested as file creations, and minus the work artifacts
+        ``vet_patches`` refuses -- task-owned done files and bytecode caches.
+        Excluding exactly what vetting rejects keeps the harvest from authoring
+        a patch that is guaranteed to be dropped downstream.
         """
+        from .patch_safety import SPECIALIST_WORK_ARTIFACT_PATHSPECS
+
         declared = [str(t).strip().lstrip("/") for t in targets if str(t).strip()]
         if declared:
             return declared
-        return [".", *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS)]
+        return [
+            ".",
+            *(f":(exclude){name}" for name in _SPECIALIST_SCRATCH_DIRS),
+            *SPECIALIST_WORK_ARTIFACT_PATHSPECS,
+        ]
 
     @staticmethod
     def _harvest_worktree_diff(worktree: Path, *, base: str = "HEAD", targets: Sequence[str] = ()) -> str:
@@ -1625,7 +1614,10 @@ class SpecialistSubprocessDispatcher:
 
         The comparison is ``base``-against-working-tree, since a specialist is
         not required to commit. Intent-to-add stages untracked paths so they
-        render as creations, ``git diff`` being blind to them otherwise.
+        render as creations, ``git diff`` being blind to them otherwise, which
+        is what keeps "edited a file and added one" from harvesting a patch
+        that silently omits the addition. Proven Python comment-only edits
+        produce no installable patch at all.
 
         Args:
             worktree: Per-task worktree holding a ``.git`` marker.
@@ -1650,12 +1642,16 @@ class SpecialistSubprocessDispatcher:
                 log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
                 return None
 
+        from .patch_safety import patch_is_annotation_only
+
         pathspec = SpecialistSubprocessDispatcher._harvest_pathspec(targets)
         _git("add", "-A", "-N", "--", *pathspec)
         diff = _git("diff", base, "--", *pathspec)
-        if diff is None or diff.returncode != 0:
+        if diff is None or diff.returncode != 0 or not diff.stdout.strip():
             return ""
-        return diff.stdout if diff.stdout.strip() else ""
+        if patch_is_annotation_only(diff.stdout, worktree, reverse=True):
+            return ""
+        return diff.stdout
 
     @staticmethod
     def _collect_patches(
@@ -1710,7 +1706,8 @@ class SpecialistSubprocessDispatcher:
                 continue
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
-                    out.append(str(p))
+                    if p.name != "_worktree_diff.patch":
+                        out.append(str(p))
         return out, {}
 
     @staticmethod
@@ -1766,8 +1763,6 @@ class SpecialistSubprocessDispatcher:
 
 
 __all__ = [
-    "AGENT_BACKEND_CLAUDE",
-    "AGENT_BACKEND_CODEX",
     "UNBOUNDED_REAP_CAP_SEC",
     "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
@@ -1776,5 +1771,4 @@ __all__ = [
     "_pick_worktree_base",
     "_setup_worktree",
     "resolve_codex_executable",
-    "resolve_specialist_agent_backend",
 ]

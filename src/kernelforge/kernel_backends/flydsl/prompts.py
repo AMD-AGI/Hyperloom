@@ -50,6 +50,15 @@ Rules: derive tile sizes / env knobs / MFMA layout for the ACTUAL target arch an
 operator FROM these docs — never rely on memorized numbers, and never copy another
 kernel's tuning or layout without re-measuring.
 
+## Optional follow-on assembly campaign
+
+Keep this campaign's implementation in FlyDSL. If profiling identifies remaining
+instruction-level opportunities, report them for a separate follow-on campaign
+using `forge-loop --kernel-backend assembly` and the selected FlyDSL source as
+its baseline. That campaign owns compiler capture, binding, execution probes and
+the mandatory numerical contract. Do not install an assembly replacement inside
+this FlyDSL campaign. See the workflow in `languages/assembly/` for the handoff.
+
 ## When to Stop
 
 - Gate met → STOP, report GREEN.

@@ -293,6 +293,11 @@ def test_runtime_failure_is_not_mislabeled_as_handoff_validation(
 ) -> None:
     repo = _source_repo(tmp_path)
     output = tmp_path / "output"
+    # The stages before recovery have to be faked like every other test here: unfaked, the analysis reaches a real
+    # agent backend and the dispatch a real ``forge-loop`` subprocess with the full budget, which is a live campaign
+    # rather than a unit test. What this one is about happens after both.
+    _wire_fake_analysis(monkeypatch, _TaskAgentBackend(repo))
+    monkeypatch.setattr(dispatcher, "run_forge_loop", _successful_forge)
     monkeypatch.setattr(
         controller,
         "recover_all_task_results",

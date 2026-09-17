@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.inference_optimizer.breakdown import stop_reasons as sr
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import _outcome_status
-from hyperloom.inference_optimizer.breakdown.recorder.instrument import derive_outcome_status
 from hyperloom.orchestrator.bringup import ARGV_INVALID, ENV_FAULT
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -20,10 +19,9 @@ from hyperloom.orchestrator.state.shared_state import SharedState
         ("target_reached", "completed"),
         ("sweep_done", "completed"),
         ("signal", "aborted"),
-        ("user_stop_requested", "aborted"),
         ("", "aborted"),
         ("baseline_failed", "failed"),
-        ("enablement_stalled", "failed"),
+        ("enablement_attempts_exhausted", "failed"),
         # A verdict about the model reached before the loop started is still a
         # verdict, so it stays on the failure side.
         ("unsupported_model_arch", "failed"),
@@ -64,11 +62,10 @@ def test_the_new_category_is_consulted_by_the_function_that_derives_the_outcome(
     for reason in sr.INFRASTRUCTURE_STOP_REASONS:
         assert sr.outcome_status(reason) == "aborted"
         assert _outcome_status(reason) == "aborted"
-        assert derive_outcome_status(reason) == "aborted"
 
 
-def test_both_consumers_derive_the_outcome_the_same_way():
-    """One mapping, so a live snapshot and an exported outcome cannot disagree."""
+def test_the_projection_derives_the_outcome_from_the_shared_mapping():
+    """One mapping, so a section cannot answer differently by keeping its own copy."""
     reasons = (
         *sr.SUCCESS_STOP_REASONS,
         *sr.ABORTED_STOP_REASONS,
@@ -78,7 +75,7 @@ def test_both_consumers_derive_the_outcome_the_same_way():
         "server_argv_invalid",
     )
     for reason in reasons:
-        assert _outcome_status(reason) == derive_outcome_status(reason) == sr.outcome_status(reason)
+        assert _outcome_status(reason) == sr.outcome_status(reason)
 
 
 def test_every_classified_terminal_is_one_the_state_machine_can_actually_write():

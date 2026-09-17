@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -12,7 +13,6 @@ from hyperloom.common.env import env_bool, env_str
 
 INTVTY_V1 = "intvty_v1"
 
-# Read by name because ``common/`` must not import the orchestrator, where ``agentx_enabled`` lives.
 _AGENTX_ENV = "HYPERLOOM_AGENTX"
 
 # The value ``SharedState.benchmark_mode`` carries for an AgentX session, stamped at seed so it outlives the shell
@@ -41,9 +41,20 @@ VERDICT_REVERT = "REVERT"
 VERDICT_RECORDED = "RECORDED"
 
 
+def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
+    raw = (env or os.environ).get(_AGENTX_ENV, "")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def is_agentx_mode(benchmark_mode: Any) -> bool:
     """Whether a ``benchmark_mode`` names the agentic workload."""
     return str(benchmark_mode or "").strip().lower() == _AGENTX_MODE
+
+
+def agentx_active(*, benchmark_mode: Any = "") -> bool:
+    """Whether either persisted workload identity or the environment enables AgentX."""
+    return env_bool(_AGENTX_ENV) or is_agentx_mode(benchmark_mode)
 
 
 def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
@@ -219,6 +230,16 @@ class GradedComparison:
     degrade_reason: str = ""
 
     @property
+    def comparable(self) -> bool:
+        """Whether both sides supplied the axes the session asked to be graded on.
+
+        A degraded pair still carries an output-axis figure, which is a useful diagnostic but not the objective the
+        session was configured for. Lanes that must not promote on a substitute axis read this rather than the
+        verdict, so an axis-less measurement fails closed instead of scoring as an output win.
+        """
+        return not self.degrade_reason
+
+    @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
         return self.objective == GRADED_INTVTY
@@ -234,6 +255,7 @@ __all__ = [
     "VERDICT_KEEP",
     "VERDICT_RECORDED",
     "VERDICT_REVERT",
+    "agentx_active",
     "graded_axes_of",
     "graded_metric_key",
     "intvty_grading_enabled",

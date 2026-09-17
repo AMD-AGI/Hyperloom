@@ -47,14 +47,15 @@ The following table lists the minimum requirements for running Hyperloom.
 +=====================+========================================================+
 | AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
-| Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
+| Operating System    | Ubuntu 24.04 (recommended); Ubuntu 22.04 (legacy)      |
 +---------------------+--------------------------------------------------------+
 | ROCm Version        | 7.2.x                                                  |
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
-| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), plus             |
-|                     | ``custom`` for your own benchmark script               |
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0),                  |
+|                     | Atom (>= 0.1.7-rc0), plus ``custom`` for your own      |
+|                     | benchmark script                                       |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
 +---------------------+--------------------------------------------------------+
@@ -74,7 +75,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.1.1             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -124,6 +125,9 @@ The following inference frameworks are supported:
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
+   * - Atom
+     - 7.2.4
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset). On a quantized non-vLLM backend GEAK must resolve a live rewrite seam rather than guess one, which forge does not require.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -133,8 +137,9 @@ Container images
 
 Pick the image that matches your environment. Public Docker Hub refs are used
 on your own GPU machine: the official upstream ``lmsysorg/sglang-rocm:<tag>``
-for SGLang and ``vllm/vllm-openai-rocm:<tag>`` for vLLM. If your deployment
-uses a private registry mirror, set the registry prefix accordingly.
+for SGLang, ``vllm/vllm-openai-rocm:<tag>`` for vLLM and
+``rocm/atom-dev:<tag>`` for Atom. If your deployment uses a private registry
+mirror, set the registry prefix accordingly.
 
 .. list-table::
    :header-rows: 1
@@ -146,16 +151,22 @@ uses a private registry mirror, set the registry prefix accordingly.
      - MI300X / MI325X
    * - ``lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825``
      - MI355X
-   * - ``vllm/vllm-openai-rocm:v0.27.1``
+   * - ``vllm/vllm-openai-rocm:v0.29.0``
      - MI300X / MI325X / MI355X
+   * - ``rocm/atom-dev:v0.1.7-rc0``
+     - MI355X (verified); MI300X / MI325X untested
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.
 
+``rocm/atom-dev`` also publishes a ``latest`` tag, which tracks the newest
+nightly build and moves. Pin the versioned tag so a session stays reproducible.
+
 Browse all available tags at
-`hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_
+`hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_,
+`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_
 and
-`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_.
+`hub.docker.com/r/rocm/atom-dev/tags <https://hub.docker.com/r/rocm/atom-dev/tags>`_.
 
 Bare-metal recommended environment
 -----------------------------------
@@ -170,6 +181,9 @@ Hyperloom does not install ROCm or torch itself.
    * - Item
      - Recommended
      - Notes
+   * - Operating System
+     - Ubuntu 24.04
+     - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
    * - ROCm
      - 7.2.x
      - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
@@ -181,14 +195,14 @@ Hyperloom does not install ROCm or torch itself.
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
      - 0.5.18 (rocm724), pinned to commit ``0c7ff19e3b73``
-     - Installed in ``shared`` mode (reuses the host torch). Uses the ROCm 7.2.4 AMD wheel index (``SGLANG_ROCM_EXTRA=rocm724``), so the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch (non-3.10 Python); on Python 3.10 the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
+     - Installed in ``shared`` mode (reuses the host torch). The wheel target is derived from the ROCm build of the installed torch rather than defaulted, so a ROCm 7.2.x stack resolves ``SGLANG_ROCM_EXTRA=rocm724`` and the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch, which is taken for any Python other than 3.10 and for a ROCm stack no published wheel targets; on Python 3.10 with a derived target the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
    * - vLLM
-     - v0.27.1 (rocm723), isolated venv
-     - Installs ``vllm==0.27.1+rocm723`` from the wheels.vllm.ai pip index. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
+     - v0.29.0 (rocm723), isolated venv
+     - Installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
 Bare-metal ROCm patch levels differ per framework, and each one matches its
 container image. The vLLM stack installs the ``rocm723`` variant (ROCm
-7.2.3), matching ``vllm/vllm-openai-rocm:v0.27.1``; the SGLang stack
+7.2.3), matching ``vllm/vllm-openai-rocm:v0.29.0``; the SGLang stack
 installs from the ROCm 7.2.4 AMD wheel index, matching the two
 ``lmsysorg/sglang-rocm:v0.5.18-rocm724-*`` images. ``docker`` mode is still
 the preferred route for a pre-validated stack, since the images also pin the
@@ -197,3 +211,12 @@ surrounding torch, Triton, and AITER builds.
 These are recommended defaults, not hard pins. Framework and ROCm versions are
 overridable via env (``SGLANG_REF``, ``SGLANG_ROCM_EXTRA``, ``VLLM_VERSION``,
 ``VLLM_ROCM_VARIANT``) for hosts that need a different pinned stack.
+
+The table above is the validated combination, and ROCm 7.2.x under a single
+``/opt/rocm`` prefix is the layout to prefer. A host where ROCm arrives as
+TheRock's pip wheels instead, split across the ``_rocm_sdk_*`` namespace
+packages, is handled rather than validated: the bare-metal installer probes
+those packages for library resolution and, before a framework source build,
+supplies the devel headers and toolchain root from them, so setup does not fail
+on that layout. Only ROCm 7.0.x and 7.2.x have a published ``amd-sglang`` wheel;
+any other stack falls back to a source install. See :doc:`/install/install`.

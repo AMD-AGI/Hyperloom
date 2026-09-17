@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.0"
+version = "1.1.1"
 description = "Inference Optimizer — three-role (Orchestration/Critic/Robustness) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -89,6 +89,7 @@ forge-profiling = [
 ]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[ci]",
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
     # Property-based tests over the bring-up ladder.
@@ -216,6 +217,9 @@ exclude = [
 ".agents/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
 ".cursor/skills/hyperloom-qwen3-14b-fp8-12h-forge" = ["examples/hyperloom-qwen3-14b-fp8-12h-forge/SKILL.md"]
+".agents/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
+".claude/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
+".cursor/skills/hyperloom-qwen3-14b-fp8-12h-atom" = ["examples/hyperloom-qwen3-14b-fp8-12h-atom/SKILL.md"]
 ".agents/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".claude/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
 ".cursor/skills/hyperloom-custom-advanced" = ["examples/hyperloom-custom-advanced/SKILL.md"]
@@ -450,13 +454,13 @@ fail_under = 90
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
     "-m", "not critic_agent_e2e and not robustness_agent_e2e and not targeted_build_e2e",
-    "--cov=.", "--cov-report=term",
+    "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
 # 2-vCPU GitHub runner, so pin it).
 xdist_workers = 2
 # GitHub matrix shards the suite is split across (pytest-split).
-total_shards = 4
+total_shards = 6
 # Repository variable name: when truthy, CI skips fail_under enforcement.
 relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 

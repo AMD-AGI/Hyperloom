@@ -107,32 +107,28 @@ def _rich_inputs(**overrides):
         warm_start_lessons=[
             {
                 "confidence": 0.9,
-                "attrs": {
-                    "statement": "enable cudagraph",
-                    "measured_impact": {
-                        "gain_pct": 5.0,
-                        "throughput_after": 100.0,
-                        "stack_depth_at_apply": 2,
-                        "measured_at": "2026-01-02T00:00:00",
-                    },
-                    "validated_count": 3,
-                    "source_session_ids": ["s1", "s2"],
-                    "framework_version": "0.6.1",
+                "statement": "enable cudagraph",
+                "measured_impact": {
+                    "gain_pct": 5.0,
+                    "throughput_after": 100.0,
+                    "stack_depth_at_apply": 2,
+                    "measured_at": "2026-01-02T00:00:00",
                 },
+                "validated_count": 3,
+                "source_session_ids": ["s1", "s2"],
+                "framework_version": "0.6.1",
             },
-            {"attrs": {}},  # filtered
+            {},  # filtered
         ],
         warm_start_pitfalls=[
             {
                 "confidence": 0.8,
-                "attrs": {
-                    "description": "do not enforce eager",
-                    "severity": "high",
-                    "validated_count": 2,
-                    "source_session_id": "s9",
-                },
+                "description": "do not enforce eager",
+                "severity": "high",
+                "validated_count": 2,
+                "source_session_id": "s9",
             },
-            {"attrs": {}},  # filtered
+            {},  # filtered
         ],
         framework_source_roots=("/src/vllm",),
         source_hint_directories=("/src/vllm/v1",),

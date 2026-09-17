@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shlex
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_allowed_external_env_key, is_secret_shaped_env_name
+from hyperloom.common.overlay import validate_overlay_pythonpath
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +40,34 @@ class ReferenceRecipe:
     server_args: str = ""
     envs: dict[str, str] = field(default_factory=dict)
     model: str | None = None
+    launch_controls: dict[str, Any] = field(default_factory=dict)
+
+
+_CONTROLS_PREFIX = "# hyperloom-launch-controls: "
+
+
+def _validate_launch_controls(controls: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(controls, dict) or set(controls) - {
+        "overlay_pythonpath",
+        "unset_envs",
+        "remove_args",
+        "args_mode",
+    }:
+        raise ValueError("invalid reference launch controls")
+    for key in ("unset_envs", "remove_args"):
+        values = controls.get(key, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"reference {key} must be a list of strings")
+    if any(not is_allowed_external_env_key(name) for name in controls.get("unset_envs", [])):
+        raise ValueError("reference unset_envs contains a forbidden environment name")
+    mode = controls.get("args_mode", "append")
+    if not isinstance(mode, str) or mode not in {"append", "replace"}:
+        raise ValueError("invalid reference args_mode")
+    overlay = controls.get("overlay_pythonpath", "")
+    if not isinstance(overlay, str):
+        raise ValueError("reference overlay_pythonpath must be a string")
+    validate_overlay_pythonpath(overlay)
+    return controls
 
 
 def _read_source(source: str) -> str:
@@ -123,27 +153,42 @@ def _should_drop_flag(name: str) -> bool:
 
 
 def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
-    """Lift ``(server_args, envs, model)`` from a reference recipe; raises on a source that cannot be read or shell-parsed."""
-    text = _read_source(source)
+    """Lift static launch settings from an untrusted local or remote recipe.
 
+    Executable overlay imports require resuming the owning session or explicitly
+    running its exported launcher; a recipe comment cannot authorize Python code.
+    """
+    text = _read_source(source)
+    controls: dict[str, Any] = {}
+    for raw in text.splitlines():
+        if raw.startswith(_CONTROLS_PREFIX):
+            if controls:
+                raise ValueError("duplicate reference launch controls")
+            controls = _validate_launch_controls(json.loads(raw[len(_CONTROLS_PREFIX) :]))
+            if controls.get("overlay_pythonpath"):
+                raise ValueError(
+                    "reference overlay_pythonpath imports executable code; resume the owning session "
+                    "or review and run the exported launcher directly"
+                )
     envs = _extract_envs(text)
     line = _find_entrypoint_line(text, framework)
     if not line:
         log.warning(
             "reference-script: no %s entrypoint in %r; carrying exports only", _entrypoint_markers(framework), source
         )
-        return ReferenceRecipe(server_args="", envs=envs, model=None)
+        return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
 
     server_args, model = _extract_server_args(shlex.split(line), framework)
-    return ReferenceRecipe(server_args=server_args, envs=envs, model=model)
+    return ReferenceRecipe(server_args=server_args, envs=envs, model=model, launch_controls=controls)
 
 
 def _extract_envs(text: str) -> dict[str, str]:
     """Pull literal exports the denylist allows, resolving self-referential defaults."""
     envs: dict[str, str] = {}
     dropped: list[str] = []
-    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(\S+)\s*$")
-    for line in text.splitlines():
+    pat = re.compile(r"^\s*export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.DOTALL)
+    lines = iter(text.splitlines(keepends=True))
+    for line in lines:
         m = pat.match(line)
         if not m:
             continue
@@ -151,19 +196,51 @@ def _extract_envs(text: str) -> dict[str, str]:
         if not is_allowed_external_env_key(key):
             dropped.append(key)
             continue
-        # strip surrounding quotes if present
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
-            val = val[1:-1]
-        if _has_var(val):
-            resolved = _resolve_self_default(key, val)
+        while True:
+            try:
+                tokens = shlex.split(val)
+                break
+            except ValueError:
+                continuation = next(lines, None)
+                if continuation is None:
+                    tokens = []
+                    break
+                val += continuation
+        if len(tokens) != 1 and val.strip():
+            dropped.append(key)
+            continue
+        literal = tokens[0] if tokens else ""
+        if _has_shell_expansion(val):
+            resolved = _resolve_self_default(key, literal)
             if resolved is None:
                 dropped.append(key)
                 continue
-            val = resolved
-        envs[key] = val
+            literal = resolved
+        envs[key] = literal
     if dropped:
         log.info("reference recipe: dropped %d export(s): %s", len(dropped), ", ".join(sorted(set(dropped))))
     return envs
+
+
+def _has_shell_expansion(value: str) -> bool:
+    """Recognize dynamic shell syntax while preserving quoted literal values."""
+    quote = ""
+    escaped = False
+    for char in value.strip():
+        if escaped:
+            escaped = False
+        elif quote == "'":
+            if char == "'":
+                quote = ""
+        elif char == "\\":
+            escaped = True
+        elif char == quote:
+            quote = ""
+        elif not quote and char in ("'", '"'):
+            quote = char
+        elif char in ("$", "`") or (not quote and char in ";&|<>()"):
+            return True
+    return False
 
 
 # ``${FOO:-1}`` / ``${FOO-1}``, capturing the name and the default.
@@ -176,7 +253,7 @@ def _resolve_self_default(key: str, val: str) -> str | None:
     if not m or m.group(1) != key:
         return None
     default = m.group(2)
-    return None if _has_var(default) else default
+    return None if _has_shell_expansion(default) else default
 
 
 def _extract_server_args(
@@ -308,6 +385,10 @@ def render_reference_script(
     framework: str,
     server_args: str,
     envs: dict[str, str] | None = None,
+    overlay_pythonpath: str | None = None,
+    unset_envs: list[str] | None = None,
+    remove_args: list[str] | None = None,
+    args_mode: str = "append",
     model: str | None = None,
     tp: int | None = None,
     max_model_len: int | None = None,
@@ -323,6 +404,18 @@ def render_reference_script(
     has_enablement = bool(setup_commands or framework_root or rounds)
 
     lines: list[str] = ["#!/usr/bin/env bash"]
+    controls = _validate_launch_controls(
+        {
+            **({"overlay_pythonpath": overlay_pythonpath} if overlay_pythonpath else {}),
+            **({"unset_envs": unset_envs} if unset_envs else {}),
+            **({"remove_args": remove_args} if remove_args else {}),
+            **({"args_mode": args_mode} if args_mode == "replace" else {}),
+        }
+    )
+    if controls:
+        lines.append(_CONTROLS_PREFIX + json.dumps(controls, sort_keys=True))
+    for name in unset_envs or []:
+        lines.append(f"unset {shlex.quote(name)}")
     if has_enablement:
         lines.append("# Auto-generated by hyperloom — enablement fix replay script.")
         lines.append("set -euo pipefail")
@@ -350,13 +443,16 @@ def render_reference_script(
     if framework_root:
         lines.append(f"export FRAMEWORK_ROOT={shlex.quote(str(framework_root))}")
     for k, v in (envs or {}).items():
-        if not str(k).strip() or _has_var(str(v)):
+        if not str(k).strip():
             continue
         # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
         if is_secret_shaped_env_name(k):
             lines.append(f"# export {k}=<redacted; supply manually>")
         else:
             lines.append(f"export {k}={shlex.quote(str(v))}")
+    if overlay_pythonpath:
+        prefix = shlex.quote(str(overlay_pythonpath))
+        lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
 
     if runtime:
         lines.append("")

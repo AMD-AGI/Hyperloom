@@ -47,12 +47,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "can warn the operator that it is ignored; renaming it silences the warning.",
     ),
     (
-        "*",
-        r"KERNEL_AGENTS_MODEL",
-        "Legacy alias for FORGE_AGENT_MODEL, kept working on purpose. A "
-        "back-compat alias that gets renamed is not a back-compat alias.",
-    ),
-    (
         "src/kernelforge/agent_backends/registry.py",
         r"kernel_agents\.agent_providers",
         "Pre-rename entry-point group, still read so third-party provider plugins "
@@ -69,8 +63,13 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
     ),
     (
+        "src/kernelforge/tests/test_agent_env_contract.py",
+        r"KERNEL_AGENTS_MODEL",
+        "The test that asserts the alias is no longer read has to name it.",
+    ),
+    (
         "CHANGELOG.md",
-        r"kernel_agents|kernel-agents",
+        r"kernel_agents|kernel-agents|KERNEL_AGENTS_MODEL",
         "Historical release notes.",
     ),
 )

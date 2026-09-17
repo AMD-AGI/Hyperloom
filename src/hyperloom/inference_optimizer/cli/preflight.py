@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from hyperloom.common.llm_config import (
     has_anthropic_credential,
     provider_model_defaults,
 )
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -246,6 +248,41 @@ def _prepend_path(var: str, entry: str) -> None:
     os.environ[var] = os.pathsep.join(parts)
 
 
+_ROCM_SDK_WHEEL_PACKAGES: tuple[str, ...] = (
+    "_rocm_sdk_core",
+    "_rocm_sdk_libraries",
+    "_rocm_sdk_devel",
+)
+_ROCM_SDK_WHEEL_LIB_SUBDIRS: tuple[str, ...] = (
+    "lib",
+    "lib/host-math/lib",
+    "lib/rocm_sysdeps/lib",
+)
+
+
+def _rocm_sdk_wheel_lib_dirs() -> list[str]:
+    """Lib dirs for TheRock's pip-packaged ROCm (``_rocm_sdk_*`` wheels).
+
+    TheRock splits libraries across up to three namespace packages
+    (``_rocm_sdk_core``, ``_rocm_sdk_libraries``, ``_rocm_sdk_devel``); which
+    ones are installed depends on the wheel's build profile. Each package can
+    also nest libraries under subdirs (host-math, rocm_sysdeps) the dynamic
+    loader does not search by default. Returns [] on a standard ``/opt/rocm``
+    image, where none of these packages are importable.
+    """
+    dirs: list[str] = []
+    for pkg in _ROCM_SDK_WHEEL_PACKAGES:
+        spec = importlib.util.find_spec(pkg)
+        if not spec or not spec.origin:
+            continue
+        root = Path(spec.origin).resolve().parent
+        for subdir in _ROCM_SDK_WHEEL_LIB_SUBDIRS:
+            candidate = root / subdir
+            if candidate.is_dir():
+                dirs.append(str(candidate))
+    return dirs
+
+
 def _derive_runtime_paths() -> None:
     """Rebuild PATH / LD_LIBRARY_PATH from .env-loaded roots (replaces hyperloom.env.sh)."""
     venv = os.environ.get("VIRTUAL_ENV", "")
@@ -255,6 +292,8 @@ def _derive_runtime_paths() -> None:
     if rocm:
         _prepend_path("PATH", str(Path(rocm) / "bin"))
         _prepend_path("LD_LIBRARY_PATH", str(Path(rocm) / "lib"))
+    for lib_dir in reversed(_rocm_sdk_wheel_lib_dirs()):
+        _prepend_path("LD_LIBRARY_PATH", lib_dir)
     vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
     if vllm_root:
         _prepend_path("PATH", str(Path(vllm_root) / "bin"))
@@ -474,10 +513,16 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
     }
 
 
-_RAY_VERSION = "2.44.1"
-# Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
+# A floor rather than an exact requirement: interpreters with no 2.44.1 wheel
+# (cp314 postdates it) must be allowed to keep the newer release the
+# kernel-agent installer resolved for them.
+_RAY_MIN_VERSION = "2.44.1"
+# Only 2.44.1's CLI fails to import with click >= 8.3.0, so the ceiling applies
+# to that release alone; forcing it onto newer Ray downgrades a working click.
+_RAY_CLICK_PINNED_VERSION = "2.44.1"
 _RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
-_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_VERSION}"
+_RAY_INSTALL_SPEC = f"ray[default]=={_RAY_MIN_VERSION}"
+_RAY_FALLBACK_INSTALL_SPEC = f"ray[default]>={_RAY_MIN_VERSION}"
 _CLICK_INSTALL_SPEC = f"click<{_RAY_CLI_CLICK_MAX_VERSION}"
 _RAY_INSTALL_SPECS = (_RAY_INSTALL_SPEC, _CLICK_INSTALL_SPEC)
 
@@ -487,7 +532,8 @@ import importlib.metadata as md
 import re
 import sys
 
-RAY_VERSION = "__RAY_VERSION__"
+RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
+RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
 RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
 RAY_CLI_CLICK_MAX_VERSION_TUPLE = __RAY_CLI_CLICK_MAX_VERSION_TUPLE__
 
@@ -502,28 +548,31 @@ except Exception as exc:
     print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
 
-if ray.__version__ != RAY_VERSION:
-    print(f"ray version mismatch: {ray.__version__} != {RAY_VERSION}", file=sys.stderr)
+if _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
+    print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
     raise SystemExit(1)
 
-try:
-    click_version = md.version("click")
-except md.PackageNotFoundError:
-    print("click is not installed", file=sys.stderr)
-    raise SystemExit(1)
+if ray.__version__ == RAY_CLICK_PINNED_VERSION:
+    try:
+        click_version = md.version("click")
+    except md.PackageNotFoundError:
+        print("click is not installed", file=sys.stderr)
+        raise SystemExit(1)
 
-if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
-    print(
-        f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
+    if _version_tuple(click_version) >= RAY_CLI_CLICK_MAX_VERSION_TUPLE:
+        print(
+            f"click version incompatible with Ray CLI: {click_version} >= {RAY_CLI_CLICK_MAX_VERSION}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 try:
     from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
 except Exception as exc:
     print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     raise SystemExit(1)
+
+print(ray.__version__)
 """
 
 
@@ -534,10 +583,24 @@ def _version_tuple(version: str) -> tuple[int, int, int]:
 
 
 _RAY_SMOKE = (
-    _RAY_SMOKE_TEMPLATE.replace("__RAY_VERSION__", _RAY_VERSION)
+    _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
+    .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
     .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
     .replace("__RAY_CLI_CLICK_MAX_VERSION_TUPLE__", repr(_version_tuple(_RAY_CLI_CLICK_MAX_VERSION)))
 )
+
+
+def _ray_probe_env() -> dict[str, str]:
+    """Ray refuses to import on ROCm when only ROCR_VISIBLE_DEVICES is set, and
+    preflight clears HIP_VISIBLE_DEVICES for the benchmark path; restore a
+    re-indexed value for Ray's own probes so they are not false negatives."""
+    env = dict(os.environ)
+    if env.get("HIP_VISIBLE_DEVICES"):
+        return env
+    visible = [part for part in env.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
+    if visible:
+        env["HIP_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(len(visible)))
+    return env
 
 
 def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
@@ -545,6 +608,7 @@ def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
         [python_exe, "-c", _RAY_SMOKE],
         capture_output=True,
         text=True,
+        env=_ray_probe_env(),
     )
 
 
@@ -559,27 +623,46 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
             "target": "ray",
             "interpreter": python_exe,
             "spec": _RAY_INSTALL_SPEC,
-            "version_after": _RAY_VERSION,
+            "version_after": (check.stdout or "").strip() or _RAY_MIN_VERSION,
             "message": None,
         }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
     print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
-    subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *_RAY_INSTALL_SPECS],
-        check=True,
+    specs: tuple[str, ...] = _RAY_INSTALL_SPECS
+    install = subprocess.run(
+        [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
+        capture_output=True,
+        text=True,
     )
+    if install.returncode != 0:
+        # The pinned release has no distribution for this interpreter; take one
+        # that resolves and drop the click ceiling, which only guards 2.44.1.
+        specs = (_RAY_FALLBACK_INSTALL_SPEC,)
+        print(
+            f"Preflight: {_RAY_INSTALL_SPEC} does not resolve for {python_exe}; "
+            f"retrying with {_RAY_FALLBACK_INSTALL_SPEC}"
+        )
+        install = subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
+            capture_output=True,
+            text=True,
+        )
+    if install.returncode != 0:
+        detail = (install.stderr or install.stdout or "no pip output").strip()
+        raise RuntimeError(f"Ray install failed for {' '.join(specs)}: {detail}")
     check = _ray_smoke(python_exe)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
-    print("Preflight: ray installed OK")
+    version_after = (check.stdout or "").strip() or _RAY_MIN_VERSION
+    print(f"Preflight: ray installed OK ({version_after})")
     return {
         "status": "applied",
         "skip_reason": None,
         "target": "ray",
         "interpreter": python_exe,
-        "spec": _RAY_INSTALL_SPEC,
-        "version_after": _RAY_VERSION,
+        "spec": " ".join(specs),
+        "version_after": version_after,
         "message": reason,
     }
 
@@ -2300,6 +2383,18 @@ def _preflight(
         raise exc
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
+    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
+    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
+    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    inferencex_network_fs = is_network_fs(inferencex_path)
+    if inferencex_network_fs:
+        print(
+            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
+            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
+            f"HYPERLOOM_CACHE_DIR on local disk.",
+            file=sys.stderr,
+        )
     _record_install_step(
         install_event,
         step_id="clone_inferencex",
@@ -2312,6 +2407,7 @@ def _preflight(
             "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
             "dest": inferencex_path,
             "writable": os.access(inferencex_path, os.W_OK),
+            "network_fs": inferencex_network_fs,
             "exit_code": 0,
         },
     )

@@ -15,11 +15,15 @@ from pathlib import Path
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.proctree import running
 from hyperloom.inference_optimizer.session.session_paths import supervisor_log_path
-from hyperloom.orchestrator.supervisor.watch import DEFAULT_TICK_STALL_SEC
+from hyperloom.orchestrator.loop.coordinator_helpers import (
+    DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
+    resolve_reactor_turn_timeout_sec,
+)
+from hyperloom.orchestrator.supervisor.watch import DEFAULT_POLL_SEC, DEFAULT_TICK_STALL_SEC
 
 log = logging.getLogger(__name__)
 
-#: Set to ``0``/``false`` to run without a supervisor at all.
+#: Set to ``1``/``true`` to run a supervisor at all; off by default.
 SUPERVISOR_ENABLE_ENV = "HYPERLOOM_SUPERVISOR"
 
 #: Overrides the stall window, in seconds.
@@ -28,9 +32,8 @@ SUPERVISOR_STALL_ENV = "HYPERLOOM_SUPERVISOR_TICK_STALL_SEC"
 #: How long the supervisor is given to exit after being asked to.
 _STOP_GRACE_SEC: float = 5.0
 
-#: The shortest stall window worth arming. One tick can legitimately spend two
-#: role turns at their five-minute cap, plus a retry each.
-_TICK_STALL_FLOOR_SEC: float = 1800.0
+#: The shortest default stall window covers one reactor turn and one poll.
+_TICK_STALL_FLOOR_SEC: float = DEFAULT_REACTOR_TURN_TIMEOUT_SEC + DEFAULT_POLL_SEC
 
 __all__ = [
     "SUPERVISOR_ENABLE_ENV",
@@ -46,7 +49,7 @@ def _truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def tick_stall_sec(session_sec: float) -> float:
+def tick_stall_sec(session_sec: float, *, env: dict[str, str] | None = None) -> float:
     """Return the stall window a session of ``session_sec`` should be watched with.
 
     Args:
@@ -55,9 +58,11 @@ def tick_stall_sec(session_sec: float) -> float:
     Returns:
         float: Seconds a tick may go without advancing.
     """
+    floor = resolve_reactor_turn_timeout_sec(env) + DEFAULT_POLL_SEC
+    default = max(DEFAULT_TICK_STALL_SEC, floor)
     if session_sec <= 0.0:
-        return DEFAULT_TICK_STALL_SEC
-    return max(_TICK_STALL_FLOOR_SEC, min(DEFAULT_TICK_STALL_SEC, session_sec / 2.0))
+        return default
+    return max(floor, min(default, session_sec / 2.0))
 
 
 def spawn_supervisor(
@@ -75,8 +80,8 @@ def spawn_supervisor(
         env: Environment to read the switches from; defaults to ``os.environ``.
 
     Returns:
-        subprocess.Popen | None: The supervisor process, or ``None`` when
-        :data:`SUPERVISOR_ENABLE_ENV` switched it off.
+        subprocess.Popen | None: The supervisor process, or ``None`` unless
+        :data:`SUPERVISOR_ENABLE_ENV` opts into it.
 
     Raises:
         OSError: If the supervisor could not be started.
@@ -85,8 +90,11 @@ def spawn_supervisor(
     # Its environment is scrubbed of control-plane credentials and start-up
     # hooks, which would otherwise be readable from ``/proc/<pid>/environ``.
     environ = scrub_benchmark_process_env(dict(os.environ if env is None else env))
-    if not _truthy(environ.get(SUPERVISOR_ENABLE_ENV, "1")):
-        log.info("supervisor: disabled by %s", SUPERVISOR_ENABLE_ENV)
+    # Off by default: the stall window only measures the age of a timestamp the
+    # reconciler refreshes at the top of every tick, so it detects a wedged
+    # coordinator but not one that ticks without making progress.
+    if not _truthy(environ.get(SUPERVISOR_ENABLE_ENV, "0")):
+        log.info("supervisor: not enabled (%s)", SUPERVISOR_ENABLE_ENV)
         return None
     argv = [
         sys.executable,
@@ -96,7 +104,7 @@ def spawn_supervisor(
         str(session_dir),
     ]
     override = environ.get(SUPERVISOR_STALL_ENV, "").strip()
-    argv += ["--tick-stall-sec", override or f"{tick_stall_sec(session_sec):.0f}"]
+    argv += ["--tick-stall-sec", override or f"{tick_stall_sec(session_sec, env=environ):.0f}"]
     log_path = supervisor_log_path(Path(session_dir))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     # The child dups this descriptor at spawn, so the parent's copy is done the

@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
     MockBackend,
@@ -332,6 +333,253 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
     assert result["gain_pct"] == pytest.approx(12.0)
     assert result["stack_incremental_gain_pct"] == pytest.approx(1.8181818, rel=1e-3)
     assert result["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    (
+        "grading_mode",
+        "output",
+        "total",
+        "intvty",
+        "missing",
+        "submission_valid",
+        "decision",
+        "objective",
+        "increment",
+        "verdict",
+    ),
+    [
+        pytest.param(
+            "agentx", 130.0, 18000.0, 410.0, None, True, "REVERT", GRADED_INTVTY, 2.5, "RECORDED", id="total-regresses"
+        ),
+        pytest.param(
+            "agentx",
+            105.0,
+            22000.0,
+            410.0,
+            None,
+            True,
+            "KEEP",
+            GRADED_INTVTY,
+            2.5,
+            "KEEP",
+            id="intvty-wins-output-dips",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            22000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "RECORDED",
+            id="interactivity-regresses",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            18000.0,
+            300.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            -25.0,
+            "REVERT",
+            id="both-axes-regress",
+        ),
+        pytest.param(
+            "agentx",
+            130.0,
+            22000.0,
+            404.0,
+            None,
+            True,
+            "REVERT",
+            GRADED_INTVTY,
+            1.0,
+            "RECORDED",
+            id="intvty-below-keep-floor",
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, False, "REVERT", None, -100.0, "REVERT", id="invalid-submission"
+        ),
+        pytest.param(
+            "agentx", 130.0, 22000.0, 410.0, None, None, "REVERT", None, -100.0, "REVERT", id="unverified-submission"
+        ),
+        pytest.param(
+            "synthetic",
+            130.0,
+            18000.0,
+            300.0,
+            None,
+            True,
+            "KEEP",
+            "output_throughput",
+            200.0 / 11.0,
+            "KEEP",
+            id="synthetic-output",
+        ),
+        *[
+            pytest.param(
+                "agentx",
+                output,
+                22000.0,
+                410.0,
+                (side, axis),
+                True,
+                "NEEDS_REVIEW",
+                "output_throughput",
+                (output - 110.0) / 110.0 * 100.0,
+                "KEEP" if direction == "up" else "REVERT",
+                id=f"missing-{side}-{axis}-output-{direction}",
+            )
+            for side in ("candidate", "reference")
+            for axis in ("total", "intvty")
+            for direction, output in (("up", 130.0), ("down", 90.0))
+        ],
+        *[
+            pytest.param(
+                mode,
+                130.0,
+                None,
+                None,
+                ("reference", "total"),
+                True,
+                "KEEP",
+                "output_throughput",
+                200.0 / 11.0,
+                "KEEP",
+                id=f"{mode}-missing-axes",
+            )
+            for mode in ("synthetic", "explicit-output")
+        ],
+    ],
+)
+async def test_stack_validation_preserves_actual_measurement(
+    tmp_path: Path,
+    monkeypatch,
+    grading_mode,
+    output,
+    total,
+    intvty,
+    missing,
+    submission_valid,
+    decision,
+    objective,
+    increment,
+    verdict,
+):
+    """The real stack verdict and its writeback envelope share one E2E measurement."""
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
+    import hyperloom.orchestrator.kernel.request_handlers as krh
+
+    agentx = grading_mode != "synthetic"
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1" if agentx else "0")
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    if grading_mode == "explicit-output":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
+    monkeypatch.setattr(krh._load_apply_tool(), "_clear_python_kernel_caches", lambda target: {"status": "skipped"})
+    c = _stack_validation_coordinator(tmp_path)
+    c.shared_state.framework = "vllm"
+    c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
+    c.shared_state.baseline_accuracy = 0.9
+    c.shared_state.current_best.update(
+        total_throughput=20000.0,
+        e2e_norm_intvty_p90=400.0,
+        extra_server_args="--max-model-len 8192",
+    )
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    original_source = "def kernel():\n    return 1\n"
+    optimized_source = "def kernel():\n    return 2\n"
+    for entry in stack:
+        target = tmp_path / f"{entry['kernel_id']}.py"
+        patch = tmp_path / f"{entry['kernel_id']}_opt.py"
+        target.write_text(original_source, encoding="utf-8")
+        patch.write_text(optimized_source, encoding="utf-8")
+        entry.update(target_file=str(target), patch_path=str(patch))
+
+    bench_result = {
+        "status": "succeeded",
+        "output_throughput": output,
+        "input_throughput": total - output if total is not None else None,
+        "total_token_throughput": total,
+        GRADED_INTVTY: intvty,
+        "completed_requests": 64,
+        "submission_valid": submission_valid,
+        "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
+        "accuracy": 0.9,
+        "ttft_mean_ms": 20.0,
+        "e2el_mean_ms": 1000.0,
+        "tpot_mean_ms": 2.0,
+        "launch_evidence": {
+            "observed_server_launch_flags": "--max-model-len 8192",
+            "observed_server_identity": {"model_path": "/models/test-model", "tp_size": 1},
+        },
+        "launch_evidence_path": str(tmp_path / "measured" / "launch_evidence.json"),
+        "server_log_path": str(tmp_path / "measured" / "server.log"),
+        "report_path": str(tmp_path / "measured" / "benchmark_report.json"),
+        "workspace": str(tmp_path / "measured"),
+    }
+    if missing:
+        side, axis = missing
+        incomplete = bench_result if side == "candidate" else c.shared_state.current_best
+        missing_keys = (
+            ("total_token_throughput", "total_throughput", "input_throughput") if axis == "total" else (GRADED_INTVTY,)
+        )
+        for key in missing_keys:
+            incomplete.pop(key, None)
+    original_measurement = dict(bench_result)
+    original_best = dict(c.shared_state.current_best)
+    calls = []
+
+    async def _benchmark(self, ctx):
+        calls.append(ctx)
+        assert ctx.extra["shared_state"] is c.shared_state
+        assert ctx.task.params["extra_server_args"] == "--max-model-len 8192"
+        assert ctx.task.params["quality_ref_exempt"] is True
+        assert ctx.task.params[baseline_mod.SBD_INNER_STEP_PARAM] is True
+        assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == optimized_source for entry in stack)
+        return bench_result
+
+    monkeypatch.setattr(baseline_mod.BaselineExecutor, "__call__", _benchmark)
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert len(calls) == 1
+    assert result["status"] == "ok", result
+    assert result["decision"] == decision
+    assert result["graded_verdict"] == verdict
+    assert result["stack_incremental_gain_pct"] == pytest.approx(increment)
+    assert result["base_tput"] == 100.0
+    valid = not agentx or submission_valid is True
+    assert result["new_tput"] == (output if valid else 0.0)
+    assert result["gain_pct"] == pytest.approx(output - 100.0 if valid else -100.0)
+    assert result["stack_kernel_ids"] == ["k001", "k004"]
+    assert result["patch_cleanup_status"] == "complete"
+    expected_source = optimized_source if decision == "KEEP" else original_source
+    assert all(Path(entry["target_file"]).read_text(encoding="utf-8") == expected_source for entry in stack)
+    assert result["bench_result"] == original_measurement
+    assert bench_result == original_measurement
+    assert c.shared_state.current_best == original_best
+    assert result.get("graded_objective") == objective
+    if missing and grading_mode == "agentx":
+        reason = "candidate_axes_missing" if missing[0] == "candidate" else "current_best_axes_missing"
+        assert reason in result["reason"]
+        assert result["revert_result"]["status"] == "ok"
+        assert result["finalize_results"] == []
+    assert result["workspace"] == bench_result["workspace"]
+    assert result["report_path"] == bench_result["report_path"]
+    assert result["ttft_mean_ms"] == bench_result["ttft_mean_ms"]
+    assert result["e2el_mean_ms"] == bench_result["e2el_mean_ms"]
+    assert result["tpot_mean_ms"] == bench_result["tpot_mean_ms"]
 
 
 @pytest.mark.asyncio
@@ -1233,8 +1481,9 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     class _FakeBaseline:
         default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
 
-        def __init__(self, *, session_dir):
+        def __init__(self, *, session_dir, shared_state=None):
             self.session_dir = session_dir
+            self.shared_state = shared_state
 
         async def __call__(self, ctx):
             return {"output_throughput": 98.0}  # below base_tput -> REVERT

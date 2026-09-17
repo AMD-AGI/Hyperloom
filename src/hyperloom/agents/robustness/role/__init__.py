@@ -8,9 +8,7 @@ from .envelope import (
     IntentType,
     build_alert,
     build_envelope_dict,
-    build_escalate,
     build_send_message,
-    build_update_state,
 )
 from .prompt_inputs import (
     InboxItem,
@@ -29,8 +27,6 @@ __all__ = [
     "SharedStateSnapshot",
     "build_alert",
     "build_envelope_dict",
-    "build_escalate",
     "build_send_message",
-    "build_update_state",
     "from_coordinator_prompt",
 ]

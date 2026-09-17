@@ -9,6 +9,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+
+def test_shared_helpers_are_exported():
+    from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
+
+    assert {"persist_summary", "clear_competitor_target", "to_inferencex_name"} <= set(target_analyzer.__all__)
+    assert "normalize_benchmark_id" in inferencex_client.__all__
+    assert target_analyzer.normalize_benchmark_id is inferencex_client.normalize_benchmark_id
+
 
 # name_mapping
 def test_name_mapping_known_display_name_passthrough():
@@ -345,6 +355,9 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
     assert summary.status == "no_match"
     assert summary.reason == "fetch_error"
     assert summary.best is None
+    report = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
+    assert "only feeds the final report" not in report
+    assert "prompt advisory or final-report comparison" in report
 
 
 def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
@@ -435,6 +448,226 @@ def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
     assert summary.status == "no_match"
     assert summary.reason == "no_inferencex_data"
     assert summary.best is None
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("GLM-5.2", "GLM-5.2"),
+        ("zai-org/GLM-5.2-FP8", "GLM-5.2"),
+        ("/models/GLM-5.2-MXFP4", "GLM-5.2"),
+        ("MiniMaxAI/MiniMax-M3", "MiniMax-M3"),
+        ("/models/MiniMaxAI-MiniMax-M3-NVFP4", "MiniMax-M3"),
+        ("GLM-5.3-Quark-MXFP4-AttnFP8", None),
+        ("GLM-5.2-custom-finetune", None),
+    ],
+)
+def test_agentic_model_names_use_verified_aliases_only(name, expected):
+    from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import to_inferencex_name
+
+    assert to_inferencex_name(name) == expected
+
+
+def _agentic_row(benchmark_id, *, tput=2643.69293, conc=1, **overrides):
+    row = {
+        **_SAMPLE_ROW,
+        "id": benchmark_id,
+        "model": "glm5.2",
+        "framework": "sglang",
+        "precision": "fp4",
+        "benchmark_type": "agentic_traces",
+        "isl": None,
+        "osl": None,
+        "conc": conc,
+        "decode_tp": 8,
+        "metrics": {**_SAMPLE_ROW["metrics"], "tput_per_gpu": tput, "output_tput_per_gpu": 18.7487},
+    }
+    row.update(overrides)
+    return row
+
+
+def _analyze_agentx(tmp_path, **kwargs):
+    from hyperloom.inference_optimizer.baseline_comparison import analyze
+
+    return analyze(
+        **{
+            "session_dir": tmp_path,
+            "model_path": "GLM-5.2",
+            "compare_against_gpu": "b300",
+            "precision": "fp4",
+            "benchmark_mode": "agentx",
+            **kwargs,
+        }
+    )
+
+
+def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+    from hyperloom.inference_optimizer.session import session_paths
+
+    rows = [
+        _agentic_row("10", tput=1000.0),
+        _agentic_row("20", tput=2000.0),
+        _agentic_row("20", tput=2000.0),
+        _agentic_row("30", tput=1500.0, conc=2),
+        _agentic_row("90", hardware="h100"),
+        _agentic_row("91", precision="fp8"),
+        _agentic_row("92", is_multinode=True),
+        _agentic_row("93", disagg=True),
+        _agentic_row("94", benchmark_type="single_turn", isl=1024, osl=1024),
+    ]
+    before = json.dumps(rows, sort_keys=True)
+    _patch_fetch_rows(monkeypatch, rows)
+    calls = []
+
+    def derived(ids):
+        calls.append(ids)
+        return {"30": 25.0, "20": 40.0, "10": 20.0}
+
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", derived, raising=False)
+    stale = session_paths.competitor_target_json(tmp_path)
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text('{"per_conc":[{"conc":1,"source":"old synthetic"}]}', encoding="utf-8")
+
+    summary = _analyze_agentx(tmp_path, isl=999, osl=888)
+
+    assert calls == [["10", "20", "30"]]
+    assert json.dumps(rows, sort_keys=True) == before
+    assert summary.status == "ok"
+    assert summary.row_count == 3
+    assert summary.query.isl is None and summary.query.osl is None
+    assert summary.best.benchmark_id == "20"
+    assert summary.best.e2e_norm_intvty_p90 == 40.0
+    assert summary.best.tput_per_gpu == 2000.0
+    assert [(p.conc, p.benchmark_id) for p in summary.all_concurrencies] == [(1, "20"), (2, "30")]
+    saved = json.loads((tmp_path / "target_analysis/target_baseline.json").read_text(encoding="utf-8"))
+    assert saved["query"]["benchmark_mode"] == "agentx"
+    assert saved["best"]["benchmark_id"] == "20"
+    assert saved["best"]["e2e_norm_intvty_p90"] == 40.0
+    md = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
+    assert "agentic_traces" in md
+    assert "cross-system" in md
+    from hyperloom.orchestrator.knowledge import research_hints
+
+    target = research_hints.load_competitor_target(tmp_path)
+    assert target["benchmark_mode"] == "agentx"
+    assert target["throughput_basis"] == "total_token_throughput_per_gpu"
+    assert target["per_conc"][0]["benchmark_id"] == "20"
+    assert target["per_conc"][0]["e2e_norm_intvty_p90"] == 40.0
+    assert "interactivity" not in target["per_conc"][0]
+    gap = research_hints.gap_analysis(
+        target,
+        benchmark_mode="agentx",
+        our_tput_per_gpu=1000.0,
+        our_tpot_ms=None,
+        our_e2e_norm_intvty_p90=20.0,
+        conc=1,
+    )
+    assert gap["throughput_gap_pct"] == 50.0
+    assert gap["interactivity_gap_pct"] == 50.0
+
+
+@pytest.mark.parametrize("derived", [{"1": None}, {}, None])
+def test_agentx_analysis_preserves_total_when_p90_is_unavailable(tmp_path, monkeypatch, derived):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    _patch_fetch_rows(monkeypatch, [_agentic_row("1")])
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", lambda ids: derived, raising=False)
+    summary = _analyze_agentx(tmp_path)
+
+    assert summary.status == "ok"
+    assert summary.best.tput_per_gpu == 2643.69293
+    assert summary.best.e2e_norm_intvty_p90 is None
+    assert "P90 unavailable" in summary.warning
+    assert ("fetch failed" in summary.warning) is (derived is None)
+    md = (tmp_path / "target_analysis/target_analysis_report.md").read_text(encoding="utf-8")
+    assert "P90 unavailable" in md
+
+
+def test_agentx_highest_throughput_selection_keeps_p90_from_the_same_row(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    rows = [_agentic_row("1", tput=999999.0), _agentic_row("2", tput=100.0), _agentic_row("3", tput=100.0)]
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", lambda ids: {"1": None, "2": 40.0, "3": 40.0}, raising=False)
+    winners = []
+    for order in (rows, list(reversed(rows))):
+        _patch_fetch_rows(monkeypatch, order)
+        summary = _analyze_agentx(tmp_path)
+        winners.append(summary.best.benchmark_id)
+        assert summary.best.tput_per_gpu == 999999.0
+        assert summary.best.e2e_norm_intvty_p90 is None
+        assert summary.all_concurrencies[0].benchmark_id == "1"
+    assert winners == ["1", "1"]
+
+
+@pytest.mark.parametrize("benchmark_id", [None, "invalid", 0, True])
+def test_agentx_rows_without_joinable_id_keep_only_throughput(tmp_path, monkeypatch, benchmark_id):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    _patch_fetch_rows(monkeypatch, [_agentic_row(benchmark_id)])
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", lambda ids: pytest.fail("no usable IDs"), raising=False)
+    summary = _analyze_agentx(tmp_path)
+    assert summary.best.benchmark_id is None
+    assert summary.best.e2e_norm_intvty_p90 is None
+    assert summary.best.tput_per_gpu == 2643.69293
+    assert "P90 unavailable" in summary.warning
+
+
+@pytest.mark.parametrize("precision", ["mxfp4", "nvfp4"])
+def test_agentx_precision_alias_is_explicitly_an_upstream_bucket(tmp_path, monkeypatch, precision):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    _patch_fetch_rows(monkeypatch, [_agentic_row("1")])
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", lambda ids: {"1": 10.0}, raising=False)
+    summary = _analyze_agentx(tmp_path, precision=precision)
+    assert summary.status == "ok"
+    assert summary.query.precision == "fp4"
+    assert "precision bucket" in summary.warning
+
+
+@pytest.mark.parametrize(
+    "rows,reason",
+    [
+        ([_agentic_row("1", precision="fp8")], "precision_mismatch"),
+        ([_agentic_row("1", benchmark_type="single_turn", isl=1024, osl=1024)], "dimension_mismatch"),
+        ([_agentic_row("1", hardware="h100")], "unsupported_target_gpu"),
+        ([], "no_inferencex_data"),
+        (None, "fetch_error"),
+        ([_agentic_row("1", tput=0)], "no_valid_rows"),
+    ],
+)
+def test_agentx_no_match_diagnostics_do_not_request_derived_metrics(tmp_path, monkeypatch, rows, reason):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    _patch_fetch_rows(monkeypatch, rows)
+    monkeypatch.setattr(ta, "fetch_agentic_interactivity", lambda ids: pytest.fail("nothing matched"), raising=False)
+    summary = _analyze_agentx(tmp_path)
+    assert summary.reason == reason
+    assert summary.best is None
+    assert summary.query.benchmark_mode == "agentx"
+
+
+def test_agentx_no_target_persists_marker_without_network(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    monkeypatch.setattr(ta, "fetch_rows", lambda name: pytest.fail("no target requested"))
+    summary = _analyze_agentx(tmp_path, compare_against_gpu="")
+    assert summary.reason == "no_target_gpu_configured"
+    assert summary.query.benchmark_mode == "agentx"
+
+
+def test_synthetic_analysis_never_fetches_agentic_p90(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.baseline_comparison.target_analyzer as ta
+
+    _patch_fetch_rows(monkeypatch, _make_rows())
+    monkeypatch.setattr(
+        ta, "fetch_agentic_interactivity", lambda ids: pytest.fail("synthetic must not fetch P90"), raising=False
+    )
+    summary = ta.analyze(
+        session_dir=tmp_path, model_path="MiniMax-M2.5", compare_against_gpu="b300", isl=1024, osl=1024
+    )
+    assert summary.best.tput_per_gpu == 6624.1
+    assert summary.best.e2e_norm_intvty_p90 is None
 
 
 # report.py renderer — _format_external_baseline_section branches on reason

@@ -7,3 +7,7 @@ self-hosted-runner:
   labels:
     - Hyperloom-e2e-ci
     - hyperloom-pre-e2e-baremetal
+    # ci-e2e.yml's `runs-on` is an expression now, so actionlint cannot see the label
+    # it resolves to. Declared anyway: this is the only place in the repo that records
+    # which self-hosted labels are expected to exist.
+    - Hyperloom-e2e-ci-dispatron

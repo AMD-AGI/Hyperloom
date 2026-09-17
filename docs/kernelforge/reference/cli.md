@@ -92,6 +92,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--commit-new-path <glob>` | none | Workspace-relative path or glob naming a file the agent may CREATE and still have committed with a KEEP. Repeatable. Untracked files are otherwise never staged and never removed by a REVERT. `*` does not cross a directory separator and `**` is rejected; name each level. Protected measurement paths are never admitted. Immutable per campaign. |
 | `--snr-threshold <dB>` | `30.0` | SNR pre-filter threshold, stored immutably. A KEEP is decided by the task's own `correctness_command`, not by this value. |
 | `--prepare-task` / `--no-prepare-task` | on | Pre-loop preflight of the driver against the loop's stdout contract; on failure one agent authors or repairs the measurement driver (never the kernel), then it is re-checked. Skipped on `--resume`. |
+| `--baseline-json <file>` | none | JSON file holding a scoring anchor measured outside this loop: `{"wall_ms": <float>, "case_times": {"<case id>": <ms>}}`. Every speedup the run reports then divides by those per-case times, and they are the wall time published beside it. The loop still benches the kernel it starts from, but as the search start and first incumbent rather than as the anchor — so the KEEP bar begins at that kernel's own score, not at 1.0x. Use it when the starting kernel already replaced something else and the run should be graded against the original: `forge-rewrite` passes its source kernel's timings this way. Omitted, the loop anchors on its own first bench. |
 
 ### Budget and deadlines
 
@@ -118,7 +119,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `stop_hooks` and `session_env`; refused on one that does not. |
+| `--lanes <n>` | `3` | Implementer lanes per round (1–8). Above 1 the round's analysis is partitioned into that many non-overlapping plans, each run concurrently in its own workspace copy and measured on its own. Lanes run concurrently, so a lane costs a session rather than a share of the round's wall clock, and three is what the three specialist analyses divide into. The partition returns fewer when the evidence supports fewer. Needs a provider declaring `session_env`; refused on one that does not, because lanes sharing a build cache measure each other's binaries. A provider without `stop_hooks` runs and is warned: it loses in-session denial, so a lane can waste its session or void the round, but it cannot misreport one. |
 | `--merge-stacking` / `--no-merge-stacking` | on | Once consecutive iterations stop producing a new best, spend one iteration measuring two archived rejected gains applied together, chosen for winning on different cases. Costs a measurement but no Implementer session. Applies at every `--lanes` setting; turn it off to compare against a run that predates it. |
 | `--specialist-probe` / `--no-specialist-probe` | on | Let the read-only planning specialists measure one variant per probe in a scratch tree instead of only arguing about a dispatch constant. Each probe re-runs the workspace driver for one case with declared constants overridden, queues on the same device lock the fan-out lanes take, and never touches the canonical tree. Falls back to `FORGE_SPECIALIST_PROBE`. |
 | `--specialist-probe-max <n>` | `6` | Probes ONE analysis round may make in total, shared across every specialist it dispatches. Every call counts, including a refused one. Falls back to `FORGE_SPECIALIST_PROBE_MAX`. |
@@ -212,7 +213,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950`. Also exported to the environment. |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU for rewrite KB identities. |
-| `--model <name>` | provider default | LLM model; overrides `KERNEL_AGENTS_MODEL`. |
+| `--model <name>` | provider default | LLM model; overrides `CLAUDE_MODEL`/`CODEX_MODEL`. |
 | `--permission-mode <v>` | `acceptEdits` | Claude permission mode. |
 | `--supervisor-backend <name>` | `codex` | OPTIMIZE supervisor backend on stall: `codex` or `claude`. |
 | `--rewrite-kb` / `--no-rewrite-kb` | on | Read and publish rewrite recipes. |

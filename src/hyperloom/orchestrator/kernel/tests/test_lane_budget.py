@@ -44,13 +44,13 @@ def test_the_split_never_exceeds_the_whole() -> None:
 
 
 def test_the_split_follows_the_weights() -> None:
-    shares = lb.split_lanes(1000, weights={lb.LANE_REWRITE: 3.0, lb.LANE_GEMM: 1.0})
-    assert shares == {lb.LANE_REWRITE: 750, lb.LANE_GEMM: 250}
+    shares = lb.split_lanes(1000, weights={lb.LANE_FUSION: 3.0, lb.LANE_GEMM: 1.0})
+    assert shares == {lb.LANE_FUSION: 750, lb.LANE_GEMM: 250}
 
 
 def test_weights_need_not_sum_to_one() -> None:
-    shares = lb.split_lanes(100, weights={lb.LANE_REWRITE: 30.0, lb.LANE_GEMM: 10.0})
-    assert shares == {lb.LANE_REWRITE: 75, lb.LANE_GEMM: 25}
+    shares = lb.split_lanes(100, weights={lb.LANE_FUSION: 30.0, lb.LANE_GEMM: 10.0})
+    assert shares == {lb.LANE_FUSION: 75, lb.LANE_GEMM: 25}
 
 
 def test_a_zero_phase_budget_splits_into_zeros() -> None:
@@ -65,22 +65,12 @@ def test_an_unknown_lane_is_refused() -> None:
 @pytest.mark.parametrize("weight", [0.0, -1.0, float("inf"), True, "1"])
 def test_an_unusable_weight_is_refused(weight: Any) -> None:
     with pytest.raises(lb.LaneBudgetError):
-        lb.split_lanes(100, weights={lb.LANE_REWRITE: weight})
+        lb.split_lanes(100, weights={lb.LANE_GEMM: weight})
 
 
 def test_no_weights_at_all_is_refused() -> None:
     with pytest.raises(lb.LaneBudgetError, match="at least one lane weight"):
         lb.split_lanes(100, weights={})
-
-
-def test_rewrite_divides_by_its_admission_floor() -> None:
-    """Overshooting here costs the whole share, not a slice of it."""
-    assert lb.max_targets(lb.LANE_REWRITE, lb.REWRITE_MIN_TARGET_SEC * 2) == 2
-    assert lb.max_targets(lb.LANE_REWRITE, lb.REWRITE_MIN_TARGET_SEC * 2 - 1) == 1
-
-
-def test_rewrite_below_one_floor_funds_nothing() -> None:
-    assert lb.max_targets(lb.LANE_REWRITE, lb.REWRITE_MIN_TARGET_SEC - 1) == 0
 
 
 def test_gemm_consumes_router_estimates_in_order() -> None:
@@ -119,7 +109,7 @@ def test_fusion_with_no_budget_funds_nothing() -> None:
 @pytest.mark.parametrize("budget", [-1, True, 1.5, "100"])
 def test_an_unusable_lane_budget_is_refused(budget: Any) -> None:
     with pytest.raises(lb.LaneBudgetError, match="non-negative int"):
-        lb.max_targets(lb.LANE_REWRITE, budget)
+        lb.max_targets(lb.LANE_GEMM, budget)
 
 
 def test_max_targets_refuses_an_unknown_lane() -> None:
@@ -135,12 +125,13 @@ def test_allocate_covers_every_lane_in_one_pass() -> None:
         assert allocation.budget_sec > 0
 
 
-def test_allocate_on_a_three_hour_phase_funds_rewrite_but_not_generously() -> None:
-    """The documented shape: a 3h session leaves rewrite one or two kernels."""
-    allocations = lb.allocate(158.0)
-    rewrite = allocations[lb.LANE_REWRITE]
-    assert rewrite.max_targets in {0, 1}
-    assert rewrite.is_fundable == (rewrite.max_targets > 0)
+def test_rewrite_takes_its_share_off_the_top() -> None:
+    """Rewrite is reserved rather than allocated, at the same fractions of the
+    phase the lanes saw when it still competed as one."""
+    phase_sec = lb.phase_budget_sec(180.0)
+    allocations = lb.allocate(180.0)
+    assert allocations[lb.LANE_FUSION].budget_sec == int(phase_sec * 0.3)
+    assert allocations[lb.LANE_GEMM].budget_sec == int(phase_sec * 0.2)
 
 
 def test_allocate_on_an_unbounded_session_funds_nothing() -> None:

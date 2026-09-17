@@ -303,7 +303,7 @@ TOOL_WHITELIST_BY_ROLE: dict[str, frozenset[str]] = {
 ALL_KNOWN_EXTERNAL_TOOL_NAMES: frozenset[str] = PR_MONITOR_TOOL_NAMES | WEB_TOOL_NAMES
 
 
-# REQUEST/RESPONSE routing matrix: source role → allowed target_agents (only orchestration→kernel).
+# REQUEST routing matrix: source role → allowed target_agents (only orchestration→kernel).
 REQUEST_ROUTING: dict[str, frozenset[str]] = {
     "orchestration": frozenset({"kernel_agent"}),
 }
@@ -429,6 +429,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         # without the other lets an update_state move the session's end time
         # away from the reason it was stamped for.
         "stop_ts",
+        # Where the stopped leg's phase segment ends; the next leg banks time up
+        # to it, so a forged value bills a phase for time it never ran.
+        "leg_ended_ts",
         "last_tick_exception",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
@@ -639,8 +642,6 @@ class PolicyGate:
             self._validate_send_message_topic(payload)
         elif intent.type == IntentType.REQUEST:
             self._validate_request(role, payload)
-        elif intent.type == IntentType.RESPONSE:
-            self._validate_response(payload)
         elif intent.type == IntentType.REVIEW_VERDICT:
             self._validate_review_verdict(role, payload)
         elif intent.type == IntentType.EXTEND_LEASE:
@@ -1040,28 +1041,6 @@ class PolicyGate:
             kind,
             intent_kind="request",
         )
-
-    def _validate_response(self, payload: dict[str, Any]) -> None:
-        """Require ``in_reply_to`` and ``kind`` on a ``RESPONSE`` intent.
-
-        Args:
-            payload (dict[str, Any]): the response payload, expected to
-                carry ``in_reply_to`` (the message id being answered) and
-                ``kind``.
-
-        Returns:
-            None: returns silently when both fields are present.
-
-        Raises:
-            PolicyDenied: with ``rule='payload'`` when ``in_reply_to`` or
-                ``kind`` is missing or blank.
-        """
-        in_reply_to = str(payload.get("in_reply_to", "")).strip()
-        if not in_reply_to:
-            raise PolicyDenied("response missing in_reply_to", rule="payload")
-        kind = str(payload.get("kind", "")).strip()
-        if not kind:
-            raise PolicyDenied("response missing kind", rule="payload")
 
     def _validate_review_verdict(self, role: "AgentRole", payload: dict[str, Any]) -> None:
         """Validate a ``REVIEW_VERDICT`` intent (Critic-only).

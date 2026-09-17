@@ -20,7 +20,7 @@ from kernelforge.agent_backends import (
     StdioMcpServer,
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
@@ -29,7 +29,6 @@ from kernelforge.loop.scoring import (
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
-from kernelforge import rtk
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -109,13 +108,17 @@ def make_agent_fn(
     extra_protected_globs: list[str] | None = None,
     extra_protected_paths: list[str] | None = None,
     correctness_only: bool = False,
+    commit_new_paths: list[str] | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Create an agent_fn callback for the autonomous iteration loop."""
     runtime = config.agent_runtime()
     if agent_backend and agent_backend.strip().lower() != runtime.provider:
         runtime = resolve_agent_runtime(
             agent_backend,
-            model=config.agent_model,
+            # ``config.agent_model`` belongs to the provider that was resolved,
+            # not to the one being switched to; carrying it across the switch
+            # is how a Claude model id reaches the OpenAI-protocol gateway.
+            model=resolve_agent_model(agent_backend),
             executable=config.agent_cli,
             timeout_sec=config.agent_timeout_sec,
             reasoning_effort=config.agent_reasoning_effort,
@@ -149,6 +152,18 @@ def make_agent_fn(
     source_files = [f for f in (source_files or []) if f]
     target_functions = [f for f in (target_functions or []) if f]
     is_repo_task = (task_type or "").strip().lower() in _REPO_TASK_TYPES
+    if kernel_backend_name == "assembly" and not correctness_only:
+        from kernelforge.assembly.prepare import frozen_paths
+
+        assembly_files = [path for path in source_files if Path(path).suffix.lower() in {".s", ".asm"}]
+        if not assembly_files:
+            raise ValueError("assembly optimization requires a verified .s target from preparation")
+        extra_protected_paths = list(extra_protected_paths or []) + frozen_paths(config.workspace, assembly_files)
+        preparation_dir = Path(config.workspace) / "forge_experiments" / "assembly_preparation"
+        extra_protected_paths.extend(str(path) for path in preparation_dir.glob("*") if path.is_file())
+        commit_new_paths = []
+        source_files = assembly_files
+        is_repo_task = False
 
     def _bullets(items: list[str]) -> str:
         return "\n".join(f"  - {i}" for i in items)
@@ -168,54 +183,33 @@ def make_agent_fn(
             file=sys.stderr,
         )
 
-    # Kernel-backend prompts name build/test/bench/pmc/registers as if they were tools.
+    # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
+    # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. They used
+    # to name those four as tools and this framing spent a sentence translating them back into shell -- prompt tokens
+    # paid, every session, to correct the prompt sitting directly beneath them. The backend prompts name the mechanism
+    # now, so only the framing that is actually about this loop is left.
     kernel_backend_section = ""
     if kernel_backend_context:
-        # Drop the profile/pmc mentions from this framing when profiling is disabled, so the implementer prompt
-        # carries no profiling guidance. (The loaded kernel_backend_context is backend domain knowledge and is left
-        # as-is.)
+        # Profiling off means the loop hands the session no profiler, so this framing must not promise one. (The loaded
+        # kernel_backend_context is backend domain knowledge and is left as-is.)
         _self_verbs = (
-            "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
+            "build, run, and profile the kernel YOURSELF via Bash"
             if profiling_enabled
-            else "build and run the kernel YOURSELF via the Bash tool (compile, run the driver)"
-        )
-        _self_tools = (
-            "`build`/`test`/`bench`/`pmc`/`registers`" if profiling_enabled else "`build`/`test`/`bench`/`registers`"
+            else "build and run the kernel YOURSELF via Bash"
         )
         kernel_backend_section = (
             f"{chr(10)}## Backend Expertise ({kernel_backend_name}){chr(10)}"
             "Backend guidance for choosing and implementing your edit. In this "
             f"loop you {_self_verbs} to verify every change before finishing. "
-            f"Where the guidance below names {_self_tools} tools, run those steps "
-            "as shell commands via Bash. After you finish, the loop also runs an "
-            "SNR pre-filter + benchmark pass on your final kernel, and accepts it "
-            "only if the task's own correctness suite passes too."
+            "After you finish, the loop also runs an SNR pre-filter + benchmark "
+            "pass on your final kernel, and accepts it only if the task's own "
+            "correctness suite passes too."
             f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
-    # `rtk` (token filter) is advertised to the agent ONLY when it's actually on PATH; otherwise the agent would
-    # prefix every shell command with a missing binary (command not found).
-    if rtk.is_available():
-        _rtk_guidance = (
-            "Always prefix shell commands with `rtk` — it filters verbose output (ninja,\n"
-            "cmake, git, grep, find, ls, rocprofv3, etc.) for 60-90% fewer tokens, and\n"
-            "passes through unchanged for unknown commands. Examples:\n"
-            "  - `rtk git diff` instead of `git diff`\n"
-            "  - `rtk grep -r foo .` instead of `grep -r foo .`\n"
-            "  - `rtk ninja -j4` instead of `ninja -j4`\n"
-            "  - `rtk ls path/` instead of `ls path/`\n"
-        )
-        _rtk_guidance_terse = (
-            "Prefix noisy shell commands with `rtk` to filter verbose output (ninja, cmake,\n"
-            "git, grep, find, ls, rocprofv3, …) for 60-90% fewer tokens; it passes unknown\n"
-            "commands through unchanged. "
-        )
-    else:
-        _rtk_guidance = ""
-        _rtk_guidance_terse = ""
-
     workspace_hygiene_rule = (
-        "Do NOT create or leave new non-ignored files in the workspace. Run "
+        "Do NOT create or leave new non-ignored files outside the campaign's "
+        "explicit --commit-new-path allowlist. Run "
         "one-off checks inline; if a temporary file is unavoidable, place it "
         "under forge_experiments/ and remove it before ending the turn."
     )
@@ -323,7 +317,7 @@ keep exploring until you are done rather than reserving effort for a summary.
 {self_profiling_section}
 ## Tool usage — token discipline
 Every Bash invocation's stdout/stderr is billed back to you on the next turn.
-{_rtk_guidance}Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
+Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
 """
 
     # In-session self-correction mode: the agent may build/test/fix itself inside ONE session.
@@ -405,7 +399,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   The loop stages and keeps/reverts ALL your tracked source edits together, so a
   cross-file change is validated and benchmarked as one unit.
 - Do NOT change the kernel's public function signature or delete needed imports.
-- Keep the kernel in its original backend/DSL (do not rewrite in another language).
+- {"Optimize only the selected assembly; keep the frontend, launcher and ABI frozen." if kernel_backend_name == "assembly" else "Keep the kernel in its original backend/DSL (do not rewrite in another language)."}
 - Do NOT edit the test harness / driver (the files that measure your kernel);
   such edits are blocked. Optimize the kernel, not the measurement. That is the
   whole boundary: gaming means changing what measures you. Caching, memoization
@@ -431,7 +425,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
 
 {self_profiling_section}
 ## Tool usage — token discipline
-{_rtk_guidance_terse}Never `cat` a whole file — use the Read tool.
+Never `cat` a whole file — use the Read tool.
 """
 
     async def agent_fn(
@@ -475,6 +469,12 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
                 )
         else:
             target_section = f"## Target kernel\n{kernel_path}\n"
+        if kernel_backend_name == "assembly" and not correctness_only:
+            target_section = (
+                "## Editable assembly source\n"
+                + _bullets(source_files)
+                + "\nAll other tracked files are frozen, including the Python launcher and reference.\n"
+            )
 
         # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut
         # and the stated cut can never disagree.
@@ -574,10 +574,10 @@ Make your change(s) now.
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=prompt,
+            role="implementer",
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
-            reasoning_effort="max",
             tool_policy=AgentToolPolicy(
                 read=True,
                 search=True,
@@ -589,6 +589,7 @@ Make your change(s) now.
                 thinking_budget_tokens=3000,
             ),
             target_files=(source_files or [kernel_path]),
+            commit_new_paths=list(commit_new_paths or []),
             driver_script=driver_script or "",
             protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
             # The loop writes its own ledger into the workspace it hands the implementer, and the kernel's runtime
@@ -596,7 +597,18 @@ Make your change(s) now.
             allow_dirty_baseline=True,
             ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths or []),
-            hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
+            # Built only for a provider that runs them. A backend which ignores
+            # ``AgentRunSpec.hooks`` drops the whole group without a word, so
+            # attaching one anyway makes this call site read as protection the
+            # session does not have -- the confusion the outer gate below
+            # exists to answer. Keyed on the backend that was resolved rather
+            # than the one that was asked for, so a provider fallback carries
+            # the decision with it.
+            hooks=(
+                gate.make_agent_hooks(stop_check=gate_stop_check)
+                if gate is not None and backend.capabilities.stop_hooks
+                else None
+            ),
             mcp_servers=pr_mcp_servers,
             progress_log=progress_log,
         )
@@ -841,7 +853,6 @@ def _make_session_summarizer(
         allow_untracked=True,
         read_only_resume=True,
         protected_globs=["*"],
-        reasoning_effort="high",
         # Preserve the implementer's progress log as a stable fallback record.
         progress_log=None,
         tool_policy=AgentToolPolicy(

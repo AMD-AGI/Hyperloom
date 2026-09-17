@@ -9,9 +9,11 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ...framework.build_actions import BuildResult, TargetedBuildAction
-from ...framework.stack_actions import FrameworkRuntime
-from ...framework.targeted_build import (
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+
+from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
+from ...enablement.runtime.stack_actions import FrameworkRuntime
+from ...enablement.runtime.targeted_build import (
     _resolve_budget_sec,
     classify_build_exit,
     ensure_build_dead,
@@ -26,16 +28,12 @@ if TYPE_CHECKING:
 class TargetedBuildExecutor:
     """Executor for ``targeted_build`` task rows."""
 
-    @staticmethod
-    def _attempt_root(session_dir: Path, task_id: str) -> str:
-        return str(session_dir / "enablement" / "builds" / task_id)
-
     async def __call__(self, ctx: "RunnerContext") -> dict[str, Any]:
         """Spawn and await a targeted build."""
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
-        attempt_root = self._attempt_root(session_dir, task.task_id)
+        attempt_root = str(action.attempt_root)
         budget_sec = float(_resolve_budget_sec(action))
         shared_state = ctx.extra.get("shared_state")
 
@@ -72,7 +70,7 @@ class TargetedBuildExecutor:
                 shared_state.pending_targeted_build = {}
                 shared_state.save(session_dir)
 
-        self._record_result(result, shared_state)
+        self._record_result(result, shared_state, task_id=str(task.task_id or ""))
         if not result.ok:
             raise RuntimeError(
                 f"targeted_build failed: failure_class={result.failure_class!r}"
@@ -81,12 +79,17 @@ class TargetedBuildExecutor:
         return result.to_state()
 
     @staticmethod
-    def _record_result(result: Any, shared_state: Any) -> None:
+    def _record_result(result: Any, shared_state: Any, *, task_id: str = "") -> None:
         """Append the build result to the manifest; record failure carrier."""
+        entry = result.to_state()
+        # Recorded on the timeline whether or not there is a SharedState to
+        # append to: a build dispatched without one still ran, and the manifest
+        # is only where the *lane* reads its own history from.
+        enablement_event.record_build(task_id=task_id, entry=entry)
         if shared_state is None:
             return
         manifest = list(getattr(shared_state.enablement, "build_manifest", []) or [])
-        manifest.append(result.to_state())
+        manifest.append(entry)
         shared_state.enablement.build_manifest = manifest
         if not result.ok:
             shared_state.enablement.last_build_failure = {

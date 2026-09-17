@@ -361,12 +361,12 @@ async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
 
     result = await backend.run(
         AgentRunSpec(
+            role="experience summary",
             system_prompt=_SUMMARY_SYSTEM,
             user_prompt=prompt,
             cwd=workspace,
             writable=False,
             timeout_sec=_LLM_TIMEOUT_SEC,
-            reasoning_effort="high",
             tool_policy=AgentToolPolicy(
                 read=False,
                 search=False,

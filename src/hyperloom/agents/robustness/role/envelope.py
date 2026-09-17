@@ -19,7 +19,6 @@ class IntentType(str, Enum):
     UPDATE_STATE = "update_state"
     ALERT = "alert"
     REQUEST = "request"
-    RESPONSE = "response"
     REVIEW_VERDICT = "review_verdict"
     # Robustness never emits this; kept in the mirror for the contract test.
     EXTEND_LEASE = "extend_lease"
@@ -52,7 +51,7 @@ ROBUSTNESS_ALLOWED_INTENTS: frozenset[IntentType] = frozenset(
 )
 
 
-# Severities accepted by ``alert`` and ``escalate_strategy_change``; ``high`` raises priority 0 broadcasts.
+# Severities accepted by ``alert`` and ``escalate_strategy_change``.
 ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 
 
@@ -68,6 +67,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "current_best",
         "stop_reason",
         "stop_ts",
+        "leg_ended_ts",
         "last_tick_exception",
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
@@ -258,29 +258,6 @@ def build_alert(
     return Intent(type=IntentType.ALERT, payload=payload)
 
 
-def build_escalate(
-    reason: str,
-    next_action_hint: str,
-    *,
-    severity: str = "medium",
-) -> Intent:
-    """Construct an ``escalate_strategy_change`` intent."""
-    if not reason:
-        raise ValueError("escalate reason must be non-empty")
-    if not next_action_hint:
-        raise ValueError("escalate next_action_hint must be non-empty")
-    if severity not in ALERT_SEVERITIES:
-        raise ValueError(f"escalate severity {severity!r} not in {sorted(ALERT_SEVERITIES)!r}")
-    return Intent(
-        type=IntentType.ESCALATE_STRATEGY_CHANGE,
-        payload={
-            "reason": reason,
-            "next_action_hint": next_action_hint,
-            "severity": severity,
-        },
-    )
-
-
 def build_prune_branch(family: str, reason: str) -> Intent:
     """Construct a ``prune_branch`` intent. Robustness-only."""
     if not family:
@@ -311,19 +288,6 @@ def build_delegate(
     if idempotency_key:
         payload["idempotency_key"] = idempotency_key
     return Intent(type=IntentType.DELEGATE, payload=payload)
-
-
-def build_update_state(changes: Mapping[str, Any]) -> Intent:
-    """Construct an ``update_state`` intent."""
-    if not changes:
-        raise ValueError("update_state changes must be a non-empty mapping")
-    illegal = sorted(set(changes.keys()) - ROBUSTNESS_STATE_FIELDS)
-    if illegal:
-        raise ValueError(
-            "update_state contains fields outside robustness allowlist: "
-            f"{illegal!r}; allowed: {sorted(ROBUSTNESS_STATE_FIELDS)!r}"
-        )
-    return Intent(type=IntentType.UPDATE_STATE, payload={"changes": dict(changes)})
 
 
 # Per-intent payload validators (mirror upstream ``PolicyGate.validate_intent``)
@@ -423,7 +387,7 @@ def _validate_send_message_payload(payload: dict[str, Any]) -> None:
     # Unknown topics are not rejected (upstream soft-degrades to observation).
 
 
-# Intent spec table — single source for required fields + builder + validator
+# Intent spec table — single source for required fields + validator
 
 
 @dataclass(frozen=True)
@@ -431,41 +395,34 @@ class IntentSpec:
     """Contract for one robustness-emittable intent type."""
 
     required: tuple[str, ...]
-    builder: Callable[..., Intent]
     validator: Callable[[dict[str, Any]], None]
 
 
-# The 6 intents the robustness role may actually emit; each carries its builder + validator so the required-field map
-# and the validator dispatch stay in lock-step.
+# The 6 intents the robustness role may actually emit; each carries its validator so the required-field map and the
+# validator dispatch stay in lock-step.
 INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
     IntentType.SEND_MESSAGE: IntentSpec(
         required=("topic",),
-        builder=build_send_message,
         validator=_validate_send_message_payload,
     ),
     IntentType.DELEGATE: IntentSpec(
         required=("action_name",),
-        builder=build_delegate,
         validator=_validate_delegate_payload,
     ),
     IntentType.UPDATE_STATE: IntentSpec(
         required=("changes",),
-        builder=build_update_state,
         validator=_validate_update_state_payload,
     ),
     IntentType.ALERT: IntentSpec(
         required=("severity", "summary"),
-        builder=build_alert,
         validator=_validate_alert_payload,
     ),
     IntentType.PRUNE_BRANCH: IntentSpec(
         required=("family", "reason"),
-        builder=build_prune_branch,
         validator=_validate_prune_branch_payload,
     ),
     IntentType.ESCALATE_STRATEGY_CHANGE: IntentSpec(
         required=("reason", "next_action_hint"),
-        builder=build_escalate,
         validator=_validate_escalate_payload,
     ),
 }
@@ -475,7 +432,6 @@ INTENT_SPEC: Mapping[IntentType, IntentSpec] = {
 _REQUIRED_ONLY: Mapping[IntentType, tuple[str, ...]] = {
     IntentType.PROPOSE_ACTION: ("action_name", "predicted_gain_pct"),
     IntentType.REQUEST: ("target_agent", "kind"),
-    IntentType.RESPONSE: ("in_reply_to", "kind"),
     IntentType.REVIEW_VERDICT: ("target_proposal_msg_id",),
     IntentType.EXTEND_LEASE: ("task_id", "extra_sec"),
     IntentType.SPECIALIST_DONE: (

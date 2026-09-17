@@ -38,7 +38,7 @@ class MagpieBackend:
 
     def resolve_interpreter(self) -> str:
         """Return the Magpie-importable interpreter for the Magpie backend."""
-        from ._grid_runner import _resolve_magpie_python
+        from ._benchmark_interpreter import _resolve_magpie_python
 
         return _resolve_magpie_python()
 

@@ -1532,8 +1532,9 @@ async def test_the_partition_divides_what_it_was_given_without_reading_more() ->
     assert partition.tool_policy.search is False
     assert partition.tool_policy.max_turns == orchestration_module.ROUND_PARTITION_MAX_TURNS
     assert partition.timeout_sec == orchestration_module.ROUND_PARTITION_TIMEOUT_SEC
-    assert partition.reasoning_effort == orchestration_module.ROUND_PARTITION_EFFORT
-    assert lane.reasoning_effort == "max"
+    # The partition no longer names an effort of its own; the runtime settles it.
+    assert partition.reasoning_effort == ""
+    assert lane.reasoning_effort == ""
     # A lane plan does need the source; only the division does not.
     assert lane.tool_policy.read is True
     assert lane.timeout_sec == 1800

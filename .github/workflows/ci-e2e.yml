@@ -5,6 +5,11 @@ name: CI E2E (single-GPU smoke run)
 # (Failed or timeout). Opt OUT by adding the `skip-e2e-test` label. Runs on a
 # self-hosted runner that can reach the run API.
 #
+# Run ONE PR on a different runner (for proving a replacement without moving everyone
+# onto it): set `vars.CI_E2E_CANARY_RUNNER_LABEL` to that runner's label and add the
+# `e2e-canary` label to the PR. The label alone does not start a run -- add `retest`
+# or comment `/retest` after it. Remove the label to go back.
+#
 # Re-run WITHOUT a new commit (e.g. after a transient cluster fault):
 #   * add the `retest` label to the PR (auto-removed so it can be re-applied), or
 #   * comment `/retest` (or `/retest-failed`) on the PR.
@@ -80,6 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
+      runner_label: ${{ steps.decide.outputs.runner_label }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
       head_ref: ${{ steps.decide.outputs.head_ref }}
       head_sha: ${{ steps.decide.outputs.head_sha }}
@@ -98,6 +104,11 @@ jobs:
           ACTION: ${{ github.event.action }}
           LABEL: ${{ github.event.label.name }}
           PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          # The pool, and the runner a PR opts into with the `e2e-canary` label.
+          # CANARY is empty unless somebody sets the variable, and an empty CANARY
+          # makes the label inert -- so merging this changes nothing on its own.
+          DEFAULT_RUNNER_LABEL: ${{ vars.CI_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
+          CANARY_RUNNER_LABEL: ${{ vars.CI_E2E_CANARY_RUNNER_LABEL }}
           PR_NUMBER_EVT: ${{ github.event.pull_request.number }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -111,9 +122,14 @@ jobs:
         run: |
           set -euo pipefail
           run=false; pr_number=""; head_ref=""; head_sha=""; head_repo=""
+          # Never empty: a `runs-on` that evaluates to "" is not a job that fails, it
+          # is a job that never schedules.
+          runner_label="$DEFAULT_RUNNER_LABEL"
+          labels_json='[]'
           emit() {
             {
               echo "run=$run"
+              echo "runner_label=$runner_label"
               echo "pr_number=$pr_number"
               echo "head_ref=$head_ref"
               echo "head_sha=$head_sha"
@@ -134,6 +150,7 @@ jobs:
               fi
               ;;
             pull_request)
+              labels_json="$PR_LABELS_JSON"
               if echo "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
                 echo "skip-e2e-test present; skipping"; emit; exit 0
               fi
@@ -162,25 +179,52 @@ jobs:
               head_ref="$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')"
               head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')"
               head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
+              # `github.event.pull_request` does not exist on an issue_comment, so the
+              # labels have to come from the PR fetched above or `/retest` would always
+              # land on the pool. `[]?` for the same reason the three lines above use
+              # `// ""`: on an error body this must degrade to "no labels" and let the
+              # head_sha check below report it, not abort the step with a jq trace.
+              labels_json="$(printf '%s' "$pr_json" | jq -c '[.labels[]?.name]')"
               run=true
               ;;
           esac
+          # One decision for every trigger, rather than an expression on the job that
+          # can only see the pull_request event's shape.
+          #
+          # Deliberately not `jq -e`: with no output values -- which is what jq does on
+          # empty or unparseable input -- `jq -e` exits 0, and the guard would fail OPEN
+          # onto the single canary runner. Comparing a printed boolean fails closed,
+          # because anything other than the literal `true` is the pool.
+          has_canary="$(printf '%s' "$labels_json" \
+            | jq -r '[.[]? | select(. == "e2e-canary")] | length > 0' 2>/dev/null || true)"
+          if [ -n "$CANARY_RUNNER_LABEL" ] && [ "$has_canary" = true ]; then
+            runner_label="$CANARY_RUNNER_LABEL"
+            echo "e2e-canary label present; running on $runner_label"
+          fi
+
           if [ "$run" = true ] && [ -z "$head_sha" ]; then
             echo "failed to resolve head_sha for ref=$head_ref" >&2
             exit 1
           fi
-          echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo"
+          echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo runner=$runner_label"
           emit
 
   e2e:
     needs: resolve
     if: needs.resolve.outputs.run == 'true'
-    # Self-hosted runner registered with the label `Hyperloom-e2e-ci`
-    # (config.sh --labels Hyperloom-e2e-ci). Must reach github.com + the run API.
+    # A self-hosted runner that can reach github.com + the run API. Which one is
+    # decided in `resolve`, not in an expression here: the answer depends on the PR's
+    # labels, and `github.event.pull_request` is null on an issue_comment, so an
+    # expression on this line would silently send every `/retest` to the pool.
     #
-    # Overridable so that a replacement runner can be proven on a real run before the
-    # pool moves to it. Unset, this is the pool it has always been.
-    runs-on: ${{ vars.CI_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
+    # Defaults to the `Hyperloom-e2e-ci` pool. Two things move it, most specific first:
+    #
+    #   * `vars.CI_E2E_CANARY_RUNNER_LABEL` + the `e2e-canary` label on a PR moves
+    #     THAT PR only. For proving a new runner: every other PR keeps the pool's
+    #     eight runners and its concurrency. Unset variable => the label does nothing.
+    #   * `vars.CI_E2E_RUNNER_LABEL` moves every PR that is not opted in above. For
+    #     once a replacement is trusted and the whole pool should follow.
+    runs-on: ${{ needs.resolve.outputs.runner_label }}
     # Covers a full MAX_HOURS run + setup/baseline overhead.
     timeout-minutes: 240
     steps:
@@ -258,3 +302,6 @@ jobs:
 # --- docs: quick reference -------------------------------------------------
 # Triggers:  PR (base main/v1.0-dev) · `retest` label · `/retest` comment · manual dispatch
 # Opt out:   add the `skip-e2e-test` label (PRs that don't touch runtime code).
+# Runner:    `Hyperloom-e2e-ci` pool, unless `vars.CI_E2E_CANARY_RUNNER_LABEL` is set
+#            and the PR carries `e2e-canary` (that PR only), or
+#            `vars.CI_E2E_RUNNER_LABEL` is set (all PRs).

@@ -62,7 +62,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.0 --target .
+pip install hyperloom-inference-optimizer==1.1.1 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -170,6 +170,12 @@ value.
    - Do not mark any option as recommended. Present the three options in the exact
      order above without a default selection.
 
+8. Only when the user chose `baremetal` **and** `vllm (isolated)` in Step 7,
+   briefly note that the installer enforces the vLLM 0.28.0+ glibc floor
+   (glibc >= 2.39). If setup later fails with that error, explain it in plain
+   language and point the user to Docker mode or a pre-0.28 override — do not
+   implement a second version gate here.
+
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
@@ -265,6 +271,15 @@ export REPO_ROOT="$(pwd -P)"
 PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
 ```
 
+Downgrade path only when the user explicitly chooses a pre-0.28 vLLM on a host
+that failed the glibc check:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+export VLLM_VERSION=0.27.1
+PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework vllm --framework-env isolated --yes
+```
+
 For `sglang`:
 
 ```bash
@@ -342,6 +357,13 @@ structured UI: which kernel optimization backend the KERNEL_AGENT phase should
 use. Do not ask this for `3h` (it runs `--no-kernel`, so there is no kernel
 phase to route) or for `custom advanced` (that skill collects its own flags).
 
+Do not ask it when `FRAMEWORK` is `atom` either. GEAK does not drive kernel
+rewrites on ATOM, so only one of the two answers is usable and offering both
+just invites the wrong one. In that case skip straight to
+`hyperloom-qwen3-14b-fp8-12h-atom`. The CLI defaults the backend to `forge` on
+atom by itself, so write nothing to `.env`; tell the user which backend was
+selected and why, rather than asking.
+
 Present exactly these two option labels in this order:
 
 1. `geak` — the default backend, which owns the whole kernel phase.
@@ -361,11 +383,17 @@ The choice selects which demo skill to load and sets
   the same backend.
 
 `KERNEL_OPT_BACKEND_ORDER` is the only switch, and the opt-in is an **exact**
-match on `forge`. There is no CLI flag for it; do not invent one. Nothing else
-needs installing for `forge` — KernelForge is vendored into Hyperloom, the
-runtime installer already installs the `claude` CLI it drives, and it reuses the
-LLM credentials written above. Do not ask the user for any other `FORGE_*`
-value.
+match on `forge`. There is no CLI flag for it; do not invent one. KernelForge is
+vendored into Hyperloom and reuses the LLM credentials written above, so do not
+ask the user for any other `FORGE_*` value. One thing does have to be present
+though: the runtime installer ensures the `claude_agent_sdk` Python package, but
+not the `claude` CLI binary that the SDK drives. A missing binary makes the SDK
+hang until the caller's timeout instead of failing loudly, so check it before
+launching and install it when absent:
+
+```bash
+command -v claude || npm install -g @anthropic-ai/claude-code
+```
 
 If `.env` was already written before this question, update it with the selected
 value rather than re-running the whole setup backend.
@@ -392,6 +420,8 @@ The demo skills are installed under each agent's discovery dir (`.agents/skills/
 - `3h` → `hyperloom-qwen3-8b-3h`
 - `12h` + `geak` → `hyperloom-qwen3-14b-fp8-12h`
 - `12h` + `forge` → `hyperloom-qwen3-14b-fp8-12h-forge`
+- `12h` + `FRAMEWORK=atom` → `hyperloom-qwen3-14b-fp8-12h-atom` (no backend
+  question; the CLI defaults atom to `forge`)
 - `custom advanced` → `hyperloom-custom-advanced`
 
 The demo skill reads the values already in `.env` (LLM keys/base URLs,

@@ -17,11 +17,14 @@ from hyperloom.inference_optimizer.cli.bootstrap import (
     AGENTX_MEASUREMENT_EPOCH,
     agentx_state_is_stale,
 )
+from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
 
 
 def _budget_args(**over) -> argparse.Namespace:
     base = dict(
-        max_hours=2.0,
+        # What the parser produces when ``--max-hours`` is absent: the flag
+        # carries no argparse default, so the profile sees ``None``, not 2.0.
+        max_hours=None,
         explore_overtime_kill_ratio=2.0,
         conc_sweep_timeout_sec=1800,
         conc_sweep_total_budget_sec=9000,
@@ -84,9 +87,22 @@ def test_hard_cap_stays_above_the_soft_kill_at_agentx_baselines(monkeypatch):
 def test_budget_profile_never_touches_max_hours(monkeypatch):
     """``--max-hours`` is the operator's contract with the scheduler."""
     _on(monkeypatch)
-    args = _budget_args()
+    args = _budget_args(max_hours=2.0)
     _apply_agentx_budget_profile(args)
     assert args.max_hours == 2.0
+
+
+def test_the_note_fires_when_the_operator_passed_no_budget(monkeypatch, capsys):
+    _on(monkeypatch)
+    _apply_agentx_budget_profile(_budget_args())
+    assert "--max-hours" in capsys.readouterr().err
+
+
+def test_the_note_stays_quiet_for_a_budget_the_operator_typed(monkeypatch, capsys):
+    """An explicit value is a deliberate choice, even at the default's number."""
+    _on(monkeypatch)
+    _apply_agentx_budget_profile(_budget_args(max_hours=DEFAULT_MAX_HOURS))
+    assert capsys.readouterr().err == ""
 
 
 def test_budget_profile_preserves_operator_values(monkeypatch):
@@ -458,7 +474,7 @@ def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
 
 def test_the_derivation_does_not_narrate_once_per_call_site(monkeypatch, caplog):
     """A ladder resolves this for every rung at several sites; one line each."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.actions.executors import _agentx_timeouts as bl
 
     _on(monkeypatch)
     monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
