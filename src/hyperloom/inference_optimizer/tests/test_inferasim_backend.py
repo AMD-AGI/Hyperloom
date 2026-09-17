@@ -466,6 +466,30 @@ def test_argv_omits_the_engine_when_unknown():
     assert "--serving-engine" not in argv
 
 
+def test_engine_build_keeps_its_name_and_still_reads_server_args(monkeypatch):
+    """An engine build is its own regime, but shares its base engine's args env.
+
+    Infera takes the engine as a free string, so ``mori-sglang`` must reach it
+    verbatim rather than being folded into ``sglang``. Its server args still
+    arrive in ``EXTRA_SGLANG_ARGS``, and dropping them would lose the very
+    flags that decide the regime.
+    """
+    monkeypatch.delenv("MODEL", raising=False)
+    bench = {
+        "framework": "mori-sglang",
+        "model": "/models/x",
+        "envs": {"EXTRA_SGLANG_ARGS": "--attention-backend aiter", "TP": 4},
+    }
+    spec = ib.spec_from_benchmark(bench)
+    assert spec.framework == "mori-sglang"
+    assert spec.extra_server_args == "--attention-backend aiter"
+    assert ib.recipe_from_spec(spec)["attention_backend"] == "aiter"
+    # Distinct from its base engine, matching Infera's regime axis.
+    assert ib.recipe_from_spec(spec)["engine"] != "sglang"
+    argv = ib._build_argv(spec, "w.yaml")
+    assert argv[argv.index("--serving-engine") + 1] == "mori-sglang"
+
+
 def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
     """A corrupt curve is worse than no anchor: fall back to pure analysis.
 
