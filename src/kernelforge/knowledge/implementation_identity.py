@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Iterable
 
+from packaging.version import InvalidVersion, Version
+
 
 _UNKNOWN = "unknown"
 _NO_FRAMEWORK_SENTINELS = {"", "standalone", "none", "unknown"}
@@ -42,6 +44,16 @@ _LOWER_UPPER_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 #: the store and in this tree.
 _ACRONYM_FRAGMENT_MAX = 2
 
+#: Every spelling of "no version was observed". The three code paths that answer
+#: that question answer it in three different words -- the framework's
+#: distribution is not installed, no framework owns the source, or the campaign
+#: declared nothing -- and the store holds pages under all of them. They name one
+#: absence, so they are one value of the dimension.
+_UNKNOWN_VERSIONS = frozenset({"", "unknown", "unspecified", "none", "unknown_version"})
+
+#: ``v0.24.0`` is the tag spelling of release ``0.24.0``.
+_TAG_V_PREFIX = re.compile(r"^v(?=\d)")
+
 
 def canonical_owner_framework(value: str) -> str:
     """Canonicalize source-owner names shared by page and path identity."""
@@ -49,6 +61,39 @@ def canonical_owner_framework(value: str) -> str:
     if owner in _NO_FRAMEWORK_SENTINELS:
         return _UNKNOWN
     return _OWNER_ALIASES.get(owner, owner)
+
+
+def canonical_framework_version(value: str) -> str:
+    """Return the release a framework version string names.
+
+    One installed framework is named several ways at once. ``importlib.metadata``
+    reports whatever the wheel was built as -- ``0.24.0+rocm723``,
+    ``0.5.15.post1.dev20260724+g3d91a569ce`` -- while a campaign reading the
+    package or the image it arrived in writes ``v0.24.0`` or
+    ``v0.5.15.post1-rocm720-mi35x-20260724``. Every one of those names the source
+    a port was written against; what follows the release names the machine that
+    compiled it, which a port does not depend on. Keeping the difference gives
+    one release a page per spelling, and a campaign reads only the page its own
+    spelling addresses.
+    """
+    raw = str(value or "").strip().lower()
+    if raw in _UNKNOWN_VERSIONS:
+        return _UNKNOWN
+    candidate = _TAG_V_PREFIX.sub("", raw)
+    # An image tag joins the build to the release with the same character a
+    # pre-release uses, so it is only distinguishable by failing to parse whole.
+    for text in (candidate, candidate.split("-", 1)[0]):
+        try:
+            parsed = Version(text)
+        except InvalidVersion:
+            continue
+        release = parsed.base_version
+        if parsed.pre is not None:
+            release += "".join(str(part) for part in parsed.pre)
+        if parsed.post is not None:
+            release += f".post{parsed.post}"
+        return release
+    return raw
 
 
 def _strip_balanced_template_arguments(value: str) -> str:
@@ -276,6 +321,7 @@ def hash_implementation_identity(payload: dict) -> str:
 __all__ = [
     "canonical_editable_source_map",
     "canonical_editable_source_paths",
+    "canonical_framework_version",
     "canonical_owner_framework",
     "derive_implementation_symbols",
     "hash_implementation_identity",

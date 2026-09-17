@@ -36,7 +36,7 @@ SUMMARY = {
 }
 #: ``my_kernel`` loses its ``_kernel`` suffix, and a file owned by no framework
 #: package reports ``unknown`` with no installed version.
-IDENTITY = "kernel:forge-loop:my:unknown:none:triton:mi300x"
+IDENTITY = "kernel:forge-loop:my:unknown:unknown:triton:mi300x"
 
 
 @pytest.fixture()
