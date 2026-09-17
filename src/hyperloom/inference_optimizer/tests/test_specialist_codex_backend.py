@@ -776,8 +776,8 @@ class _NeverStartedGpuLease:
         raise RuntimeError("setup failure must precede Ray submission")
 
 
-def test_specialist_env_keeps_llm_gateway_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Gateway-only credentials must survive the specialist secret allowlist."""
+def test_specialist_env_drops_the_retired_gateway_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A name the child can no longer authenticate with is not worth forwarding."""
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key-value")
@@ -785,7 +785,7 @@ def test_specialist_env_keeps_llm_gateway_key(monkeypatch: pytest.MonkeyPatch) -
 
     child_env = _build_specialist_env()
 
-    assert child_env["LLM_GATEWAY_KEY"] == "gateway-key-value"
+    assert "LLM_GATEWAY_KEY" not in child_env
 
 
 @pytest.mark.asyncio
@@ -795,13 +795,13 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
 ) -> None:
     """Resolver fallback cannot reintroduce parent secrets after explicit opt-out."""
 
-    gateway_secret = "parent-gateway-secret"
+    openai_secret = "parent-openai-secret"
     header_secret = "parent-literal-header-secret"
     _pin_provider_env(
         monkeypatch,
         {
             "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
-            "LLM_GATEWAY_KEY": gateway_secret,
+            "OPENAI_API_KEY": openai_secret,
             "OPENAI_CUSTOM_HEADERS": f"user: {header_secret}",
         },
     )
@@ -847,17 +847,16 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
     )
 
     assert resolver_overlays
-    assert resolver_overlays[0].get("LLM_GATEWAY_KEY") == ""
     assert resolver_overlays[0].get("OPENAI_CUSTOM_HEADERS") == ""
     assert resolver_overlays[0].get("OPENAI_API_KEY") == ""
     assert resolved_configs == []
     assert "not configured" in result.error
-    assert gateway_secret not in result.error
+    assert openai_secret not in result.error
     assert header_secret not in result.error
     assert not (workspace / ".codex" / "config.toml").exists()
     assert popen_calls == 0
     assert lease.start_calls == 0
-    assert gateway_secret not in repr(lease.kwargs)
+    assert openai_secret not in repr(lease.kwargs)
     assert header_secret not in repr(lease.kwargs)
 
 
@@ -874,7 +873,7 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
         monkeypatch,
         {
             "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
-            "LLM_GATEWAY_KEY": secret,
+            "OPENAI_API_KEY": secret,
             "OPENAI_CUSTOM_HEADERS": f"user: {header_value}",
         },
     )
@@ -910,7 +909,7 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
     )
 
     assert result.exit_code == 0
-    assert captured["env"]["LLM_GATEWAY_KEY"] == secret
+    assert captured["env"]["OPENAI_API_KEY"] == secret
     assert any(
         name.startswith("HYPERLOOM_CODEX_HTTP_HEADER_") and value == header_value
         for name, value in captured["env"].items()
@@ -1124,7 +1123,6 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
         "PATH",
         "CODEX_HOME",
         "OPENAI_API_KEY",
-        "LLM_GATEWAY_KEY",
         "HYPERLOOM_CODEX_HTTP_HEADER_0",
         # Every mask spelling, not just the canonical three: an MCP server env
         # that re-pins the specialist's cards does so just as well through the
@@ -1147,7 +1145,6 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
         {
             "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
             "OPENAI_API_KEY": "provider-openai-key",
-            "LLM_GATEWAY_KEY": "provider-gateway-key",
             "OPENAI_CUSTOM_HEADERS": "user: provider-header-value",
         },
     )

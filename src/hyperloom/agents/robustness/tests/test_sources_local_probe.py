@@ -351,7 +351,7 @@ async def test_probe_gateway_health_uses_custom_subscription_header(monkeypatch)
 
     monkeypatch.setattr(lp.httpx, "AsyncClient", _PatchedClient)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
-    monkeypatch.setenv("LLM_GATEWAY_KEY", "gateway-key")
+    monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "gateway-key")
     # OpenAI-side gateway probe reads OPENAI_CUSTOM_HEADERS (strict separation).
     monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub-key")
     monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
