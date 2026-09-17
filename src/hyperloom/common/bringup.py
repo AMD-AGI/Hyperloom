@@ -269,7 +269,11 @@ class BootObservation:
 
     @property
     def booted(self) -> bool:
-        """True when nothing failed and the server answered requests."""
+        """True when no stage failed and the log witnessed the HTTP-ready rung.
+
+        A marker the log carries, not a request the server answered: whether it
+        served is the measurement's to report.
+        """
         return self.stage_failed is None and self.stage_reached >= LadderStage.HTTP_READY
 
     def to_dict(self) -> dict[str, Any]:

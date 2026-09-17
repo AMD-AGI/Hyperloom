@@ -89,31 +89,6 @@ def resolve_grading_anchor_tput(state: Any) -> float:
 ANCHOR_DEGRADED: Any = object()
 
 
-def resolved_grading(state: Any) -> tuple[bool, float | None]:
-    """Whether the interactivity objective applies to *state*, and the noise band it grades under.
-
-    Prefers what the session recorded at seed over re-deriving it. The derivation reads the environment, and every
-    later reader of it is somewhere the environment is not evidence: a resumed process, a re-baseline subprocess, an
-    export driven from CLOSE. Sessions seeded before ``SharedState.grading`` existed carry nothing and only those
-    derive, reporting a null band because the band they actually applied was never recorded.
-    """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, intvty_serving_grading_enabled
-
-    recorded = getattr(state, "grading", None)
-    recorded = recorded if isinstance(recorded, dict) else {}
-    objective = str(recorded.get("objective") or "").strip()
-    if objective:
-        noise_pct = recorded.get("noise_pct")
-        return objective == GRADED_INTVTY, (float(noise_pct) if isinstance(noise_pct, (int, float)) else None)
-    return (
-        intvty_serving_grading_enabled(
-            scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-        ),
-        None,
-    )
-
-
 def resolve_graded_comparison(
     state: Any,
     measurement: Any,
@@ -132,8 +107,7 @@ def resolve_graded_comparison(
     # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
     # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
     # its own because variants stack within a round, and ANCHOR_DEGRADED holds a round on the output axis rather than
-    # re-resolving the session anchor the way None does. The objective and the band come from ``resolved_grading``,
-    # so both are the ones the session was seeded with rather than whatever the calling process's environment holds.
+    # re-resolving the session anchor the way None does.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
@@ -144,6 +118,7 @@ def resolve_graded_comparison(
         VERDICT_RECORDED,
         VERDICT_REVERT,
         intvty_of,
+        intvty_serving_grading_enabled,
         output_tput_of,
         passes_intvty_gate,
         passes_tput_guard,
@@ -152,9 +127,11 @@ def resolve_graded_comparison(
         total_tput_of,
     )
 
-    on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
-    if on_intvty:
+    if intvty_serving_grading_enabled(
+        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+    ):
         if anchor_perf is ANCHOR_DEGRADED:
             # Already on the output axis for this round. Re-resolving the
             # session anchor here would grade later variants on interactivity
@@ -179,10 +156,10 @@ def resolve_graded_comparison(
                     keep_threshold_pct,
                     threshold,
                 )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
+            tput_holds = passes_tput_guard(cand_perf, ref_perf)
             if gain is not None and gain >= threshold and tput_holds:
                 verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
+            elif not passes_intvty_gate(cand_perf, ref_perf) and not tput_holds:
                 verdict = VERDICT_REVERT
             else:
                 verdict = VERDICT_RECORDED
@@ -323,11 +300,6 @@ _DEFAULT_LAST_FAILURES = 30
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
-
-# How many ``skip_to_close`` hints the pre-enablement guard may drop before it
-# stops dropping them. Matches the stall-streak terminal, so a run that keeps
-# asking to close reaches an exit on the same order as one that stalls out.
-MAX_SKIP_TO_CLOSE_SUPPRESSIONS: int = 5
 
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
@@ -495,12 +467,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
-    # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
-    # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
-    # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
-    # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
-    # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
-    grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by ``_parse_conc_sweep_concs``.
@@ -866,7 +832,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_ts: str = ""
     # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
+    # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Durable sum of completed optimisation-phase segments.
     explore_elapsed_accum_s: float | None = 0.0
@@ -1547,33 +1513,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.last_discarded_escalate_hint = hint
         self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
-
-    def enablement_close_guard_active(self) -> bool:
-        """True while a not-yet-enabled run must be protected from premature close.
-
-        While this guard is active a ``skip_to_close`` hint is dropped; a
-        not-yet-enabled run may only terminate via honest paths that do not route
-        through ``skip_to_close`` (``enablement_stalled``,
-        ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
-        aborts).
-
-        The suppression count bounds the guard. Every input it reads is set by
-        one path and cleared by several, so any missed clear would otherwise make
-        this the sole authority denying a session its last exit.
-
-        Returns:
-            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
-            has never gone positive and enablement has not yet succeeded, or
-            while a revalidation window is open, until the bound is spent.
-        """
-        if self.enablement.skip_to_close_suppressions >= MAX_SKIP_TO_CLOSE_SUPPRESSIONS:
-            return False
-        phase = (self.phase or "").strip().upper()
-        return (
-            phase in ("PRELUDE", "FRAMEWORK_AGENT")
-            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and not self.enablement.succeeded
-        ) or self.enablement.validation_pending
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(

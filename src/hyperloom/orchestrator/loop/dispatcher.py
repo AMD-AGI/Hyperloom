@@ -1480,6 +1480,29 @@ class DispatcherCollaborator:
                 return False
         return True
 
+    def _phase_denial_for_action(
+        self,
+        action_name: str,
+    ) -> PolicyDenied | None:
+        """Refuse an action the current phase reserves for the Coordinator.
+
+        Args:
+            action_name: The proposed/delegated action name.
+
+        Returns:
+            A :class:`PolicyDenied` when the phase reserves the action, else
+            ``None``.
+        """
+        action = str(action_name or "").strip()
+        phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+        if not _phase_state.coordinator_reserved_in_phase(action, phase):
+            return None
+        return PolicyDenied(
+            f"action={action!r} is Coordinator-dispatched while the phase is {phase!r}",
+            rule="phase_incompatible",
+            hint=f"{phase} proposes: {', '.join(_phase_state.allowed_actions_for(phase)) or '(none)'}",
+        )
+
     def _sequence_denial_for_action(
         self,
         action_name: str,
@@ -1593,6 +1616,9 @@ class DispatcherCollaborator:
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
+        denied = self._phase_denial_for_action(action_name)
+        if denied is not None:
+            return denied
         denied = self._sequence_denial_for_action(action_name)
         if denied is not None:
             return denied

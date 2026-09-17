@@ -139,48 +139,6 @@ class V6MetadataLangfuse(TypedDict, total=False):
     counts: dict[str, int]
 
 
-class V6GradedAxes(TypedDict, total=False):
-    """The four axes an AgentX measurement is ranked on.
-
-    Every axis is present on every measurement, ``None`` where nothing measured
-    it: absent would be indistinguishable from an axis the framework failed to
-    report, and zero reads as "measured, and it was zero". A synthetic run
-    carries four nulls.
-    """
-
-    e2e_norm_intvty_p90: float | None
-    total_throughput: float | None
-    input_throughput: float | None
-    tpot_p90_ms: float | None
-
-
-class V6GradingTputGuard(TypedDict, total=False):
-    """The throughput constraint riding along with the interactivity objective.
-
-    ``noise_pct`` is ``None`` on a session seeded before the band was recorded:
-    the band that session applied is unknown, and today's environment is not
-    evidence of it.
-    """
-
-    enabled: bool
-    noise_pct: float | None
-
-
-class V6Grading(TypedDict, total=False):
-    """The axis this session was configured to grade on.
-
-    The session-level setting and only that. What the run actually decided a
-    given promotion on is ``outcome.validation.graded_on``, read off the
-    promotion itself: a session configured for interactivity still grades an
-    individual comparison on output whenever either side of it cannot supply
-    the axis pair. Neither field resolves the other.
-    """
-
-    benchmark_mode: str
-    objective: str
-    tput_guard: V6GradingTputGuard
-
-
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint."""
 
@@ -188,7 +146,6 @@ class V6Metadata(TypedDict, total=False):
     versions: V6MetadataVersions
     session: V6MetadataSession
     task_config: V6TaskConfig
-    grading: V6Grading
     langfuse: V6MetadataLangfuse
     warnings: list[str]
 
@@ -239,15 +196,6 @@ class V6OutcomeValidation(TypedDict, total=False):
     disagreeing means one of them is wrong.
     """
 
-    #: The axis every percentage here shares, read off the row that produced
-    #: the settled figure. The reconciliation has to be single-axis: an
-    #: attributed figure on one axis against an unattributed figure on another
-    #: makes the gap meaningless.
-    graded_on: str | None
-    #: The settled measurement's own axes, on the same row as the gain they
-    #: produced -- a revalidation moves the cumulative figure without
-    #: re-promoting the recipe, so ``current_best`` can be a later measurement.
-    perf: V6GradedAxes
     attributed_gain_pct: float
     unattributed_gain_pct: float
     chain_total_gain_pct: float | None
@@ -586,7 +534,7 @@ class V6ConcSweepPoint(TypedDict, total=False):
     request_throughput: float | None
     total_token_throughput: float | None
     input_throughput: float | None
-    e2e_norm_intvty_p90: float | None
+    intvty_p90: float | None
     tpot_p90_ms: float | None
     ttft_mean_ms: float | None
     e2el_mean_ms: float | None
@@ -633,25 +581,13 @@ class V6ConcSweepArm(TypedDict, total=False):
 
 
 class V6ConcSweepPair(TypedDict, total=False):
-    """The two arms joined at one concurrency.
-
-    The pair is ranked on one axis and reports a second. ``*_value`` is on the
-    axis ``result.metric`` names -- a slow-tail interactivity percentile
-    whenever the session grades on one, which is why these are not named for
-    throughput. ``*_guard`` and ``guard_holds`` carry the throughput the
-    session would have held a promotion to, reported rather than enforced: a
-    sweep exists to draw the interactivity/throughput frontier, so a rung that
-    moved along it is a result and not a failure. They are null off the
-    interactivity objective, where there is no second axis to hold."""
+    """The two arms joined at one concurrency."""
 
     conc: int
-    baseline_value: float | None
-    optimized_value: float | None
+    baseline_throughput: float | None
+    optimized_throughput: float | None
     speedup: float | None
     delta_pct: float | None
-    baseline_guard: float | None
-    optimized_guard: float | None
-    guard_holds: bool | None
     baseline_status: str
     optimized_status: str
     error: str | None
@@ -1026,14 +962,9 @@ class V6StackValidation(TypedDict, total=False):
     validated_gain_pct: float | None
     source: str
     measurement_basis: str
-    #: The axis the figure was graded on, so an intvty-graded gain is not later
-    #: read as an output gain. Always the axis the session was configured for:
-    #: only a comparison the orchestrator found comparable is recorded here.
+    #: The axis the figure was graded on, so a total- or intvty-graded gain is
+    #: not later read as an output gain.
     graded_objective: str
-    #: The graded axes of the measurement that produced the figure, recorded
-    #: beside it because a later revalidation moves the cumulative gain without
-    #: re-promoting the recipe.
-    perf: V6GradedAxes
 
 
 class V6StackExt(TypedDict, total=False):
@@ -1862,9 +1793,6 @@ __all__ = [
     "V6EnablementExt",
     "V6EnablementRevalidation",
     "V6GeakCandidate",
-    "V6GradedAxes",
-    "V6Grading",
-    "V6GradingTputGuard",
     "V6KBWriteBackExt",
     "V6KernelAdoptedRow",
     "V6KernelAnalysisArtifacts",

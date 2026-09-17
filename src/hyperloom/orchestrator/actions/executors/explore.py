@@ -62,9 +62,9 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    SessionDirField,
     _kill_stale_servers,
     _num_gpus_for_config,
-    _resolve_session_dir,
     apply_aiter_moe_pin_filter,
     apply_compatibility_filter,
     apply_multi_node_invalid_variants,
@@ -444,6 +444,8 @@ def _default_grid_for_framework(
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -453,7 +455,7 @@ class ExploreExecutor:
     ):
         """Initialize the explore executor and its gating thresholds."""
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:

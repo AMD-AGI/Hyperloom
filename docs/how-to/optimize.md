@@ -78,7 +78,7 @@ on requested status checks. Recurring checks may use the hosting platform's
 scheduled invocations; no background supervisor or automatic restart is started.
 Logs are useful evidence, but activity alone does not prove useful progress.
 Under the hood the optimizer walks the phase chain
-`PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
+`PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for each phase
 and [benchmark deadlines](../reference/environment-variables.md#benchmark-deadlines-and-lifecycle)
 for the independent benchmark and session limits.

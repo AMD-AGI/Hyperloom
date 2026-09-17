@@ -51,8 +51,8 @@ def _write_minimal_config(path: Path) -> None:
 def _booted_observation(session: Path) -> str:
     """Record the observation a bench that came up and served would leave.
 
-    The gate reads the boot verdict off this artifact rather than off a
-    throughput, so a bench stub that records none has not booted anything.
+    The gate decides runnability from the measurement; this artifact is what
+    the ladder arithmetic and the failure explanation read.
     """
     slot = session / "round"
     slot.mkdir(parents=True, exist_ok=True)
@@ -75,6 +75,7 @@ async def test_launch_only_skips_missing_specialist_task_id(tmp_path):
 
     bench_result = {
         "output_throughput": 100.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -102,6 +103,7 @@ async def test_launch_only_skips_critic_gate(tmp_path):
 
     bench_result = {
         "output_throughput": 50.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -174,6 +176,7 @@ async def test_launch_only_boot_success_returns_kept(tmp_path):
 
     bench_result = {
         "output_throughput": 200.0,
+        "completed_requests": 12,
         "status": "succeeded",
         "boot_observation_path": _booted_observation(session),
     }
@@ -339,7 +342,10 @@ async def test_launch_only_runtime_override_passed_to_bench(tmp_path):
 
     async def _capture_bench(self_inner=None, **kwargs):
         captured.append(dict(kwargs.get("params", {})))
-        return {"output_throughput": 50.0, "status": "succeeded"}, {"enablement_accuracy": None, "timed_out": False}
+        return {"output_throughput": 50.0, "completed_requests": 12, "status": "succeeded"}, {
+            "enablement_accuracy": None,
+            "timed_out": False,
+        }
 
     with patch.object(IntegratePatchExecutor, "_bench_patch", new=_capture_bench):
         await ex(_make_ctx("probe-7", params))

@@ -123,7 +123,7 @@ async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, l
 async def test_an_expired_round_is_settled_though_every_other_path_is_shut(db):
     """The pass is the one thing that runs when the session is already stopping."""
     state = _State()
-    state.stop_reason = "enablement_stalled"
+    state.stop_reason = "enablement_attempts_exhausted"
     rec, rounds, tasks, _ = _build(db, state=state)
     await _open_round(rounds, tasks, holder="spec-1", lease=1.0)
 
@@ -321,13 +321,13 @@ async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_
     async with db.transaction() as cur:
         for msg_id in ("m-late", "m-answered"):
             cur.execute(
-                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, priority, ts)"
-                " VALUES (?, 'orchestration', '*', 'proposal', NULL, '{}', 1, '2020-01-01T00:00:00+00:00')",
+                "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
+                " VALUES (?, 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')",
                 (msg_id,),
             )
         cur.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, priority, ts)"
-            " VALUES ('v1', 'critic', '*', 'review_verdict', NULL, ?, 1, '2020-01-01T00:01:00+00:00')",
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
+            " VALUES ('v1', 'critic', '*', 'review_verdict', NULL, ?, '2020-01-01T00:01:00+00:00')",
             (json.dumps({"target_proposal_msg_id": "m-answered", "verdict": "approve"}),),
         )
 
@@ -350,8 +350,8 @@ async def test_a_second_pass_does_not_deny_a_proposal_twice(db):
     rec, _rounds, _tasks, _ = _build(db, review_ttl_sec=1.0)
     async with db.transaction() as cur:
         cur.execute(
-            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, priority, ts)"
-            " VALUES ('m1', 'orchestration', '*', 'proposal', NULL, '{}', 1, '2020-01-01T00:00:00+00:00')"
+            "INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)"
+            " VALUES ('m1', 'orchestration', '*', 'proposal', NULL, '{}', '2020-01-01T00:00:00+00:00')"
         )
 
     await rec.run(_NOW)

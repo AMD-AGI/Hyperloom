@@ -637,19 +637,11 @@ def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
 
 def test_stop_reason_vocab_has_v08_additions():
     for new in (
-        "plateau_explore",
-        "plateau_kernel",
         "no_kernel_skipped",
         "sweep_done",
         "robustness_escalated",
-        "user_stop_requested",
-        "recipe_kb_drain_failed",
-        "recipe_kb_t0_failed",
-        "recipe_kb_commit_failed",
         "prelude_baseline_failed",
-        "prelude_policy_loop",
         "time_exhausted_during_prelude",
-        "crash_threshold_exceeded",
     ):
         assert new in STOP_REASON_VOCAB
         assert is_valid_stop_reason(new)

@@ -658,7 +658,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
         self._record_phase_entry_evidence(
@@ -1751,7 +1750,6 @@ class KernelPhase(PhaseHandler):
                     "speedup": result.get("throughput_speedup"),
                     "result_path": str(result_path),
                 },
-                priority=1,
             )
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
@@ -3896,7 +3894,6 @@ class KernelPhase(PhaseHandler):
                 log.exception("KERNEL entry: reclaiming the campaign repositories failed")
             if int(result.get("patch_count") or 0) > 0:
                 try:
-                    from ..actions.executors._workload_envs import agentx_active
                     from ..kernel.controller_patch_integration import (
                         integrate_controller_patches,
                     )
@@ -3905,7 +3902,7 @@ class KernelPhase(PhaseHandler):
                         patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                         session_dir=self.session_dir,
                         shared_state=self.shared_state,
-                        record_keep=(self._record_integrate_keep if agentx_active(self.shared_state) else None),
+                        record_keep=self._record_integrate_keep,
                     )
                     result["integration"] = integration.to_dict()
                 except Exception as error:  # noqa: BLE001
@@ -3960,7 +3957,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
 
@@ -4078,7 +4074,6 @@ class KernelPhase(PhaseHandler):
                         "result": result,
                         "source": "kernel_entry_auto",
                     },
-                    priority=1,
                 )
             )
         except Exception:  # noqa: BLE001

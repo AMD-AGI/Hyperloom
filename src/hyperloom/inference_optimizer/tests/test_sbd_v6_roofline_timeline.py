@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -129,48 +128,6 @@ def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
     assert action["profile"]["max_attempts"] == 3
 
 
-def test_preflight_conditions_survive_onto_the_action(tmp_path: Path) -> None:
-    """What the action found before profiling is carried whether or not the run went on to succeed."""
-    recorder = _recorder(reason="prelude_initial")
-    recorder.begin(max_profile_attempts=3)
-    recorder.record_preflight(
-        {
-            "orphans_reaped": [1234],
-            "orphans_reaped_count": 1,
-            "disk": {"free_bytes": 1024, "free_pct": 3.5},
-            "stale_traces": [{"path": "runs/roofline/t-1/old.pt.trace.json.gz"}],
-            "stale_trace_count": 1,
-        }
-    )
-    recorder.finish_failed(phase="profile", message="never booted")
-
-    preflight = _actions(tmp_path)[0]["preflight"]
-    assert preflight["orphans_reaped_count"] == 1
-    assert preflight["disk"]["free_pct"] == 3.5
-    assert preflight["stale_trace_count"] == 1
-
-
-def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> None:
-    """The process outcome rides on the attempt row, because the result dict cannot show it."""
-    recorder = _recorder(reason="kernel_followup")
-    recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
-        status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
-        disable_cuda_graph=False,
-        profile_result=_profile_result(),
-        server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
-    )
-    recorder.finish_failed(phase="trace_analyze", message="stopped")
-
-    run = _actions(tmp_path)[0]["profile"]["runs"][0]
-    assert run["status"] == "succeeded"
-    assert run["server_liveness"]["dead_with_pidfile"] == 1
-
-
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
     recorder = _recorder(task_id="t-capture-1", task_kind="gemm_shape_capture", framework="vllm")
     recorder.begin(max_profile_attempts=1)
@@ -189,195 +146,6 @@ def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) 
     request = _actions(tmp_path)[0]["request"]
     assert request["task_kind"] == "roofline"
     assert request["arm"] == "current_best"
-
-
-def _validate(**overrides: Any) -> dict[str, Any]:
-    """A certificate shaped like the one selfcert produces, with the tables populated."""
-    validate: dict[str, Any] = {
-        "schema_version": 1,
-        "probe_version": "selfcert-1.0.0",
-        "probe_status": "ok",
-        "verdict": {
-            "usable_by": ["bypass", "tracelens"],
-            "decode_conclusions_valid": True,
-            "silently_wrong": False,
-            "severity": "ok",
-            "blocking_reasons": [],
-            "warnings": [],
-            "recommended_splitter_mode": "decode_only",
-            "measures": {"attributed_pct": 91.0, "graph_launch_coverage": 0.9},
-            "thresholds_effective": {"graph_launch_coverage_max": 0.2},
-        },
-        "trace_dir_level": {
-            "selected_role": "source",
-            "production_selected_role": "source",
-            "production_would_analyze_split_chunk": False,
-            "file_count_by_role": {"source": 1, "capture_sidecar": 3, "split_chunk": 0},
-            "candidates": [{"path": f"/w/t/{i}.json", "bytes": 10, "role": "source"} for i in range(40)],
-            "capture_sidecar_probe": {
-                "files_present": 3,
-                "files_scanned": 3,
-                "truncated_scan": False,
-                "op_meta_coverage": 0.75,
-                "cpu_op_total": 40,
-                "kernel_count": 9,
-                "files": [{"path": f"/w/t/capture_traces/bs_{i}.json"} for i in range(3)],
-            },
-        },
-        "rank_level": [
-            {
-                "rank": 0,
-                "parse": {
-                    "event_total": 5000,
-                    "aggregation_scope": "full_trace",
-                    "truncated": False,
-                    "truncation_reason": "",
-                },
-                "attribution": {
-                    "attributed_pct": 91.0,
-                    "attributed_gpu_ms": 45.5,
-                    "gpu_kernel_sum_ms": 50.0,
-                    "attributed_kernels": 91,
-                    "unlinked_kernels": 9,
-                    "graph_attributed_kernels": 80,
-                    "cuda_runtime_links": 100,
-                    "op_meta_coverage": 0.8,
-                    "op_meta_basis": {"cpu_op_total": 100, "cpu_op_with_meta": 80},
-                },
-                "density": {
-                    "kernel_count": 100,
-                    "graph_mode": True,
-                    "graph_launch_count": 20,
-                    "graph_launch_coverage": 0.9,
-                    "graph_under_recorded": False,
-                    "graph_under_recorded_threshold": 0.2,
-                    "busy_fraction": 0.7,
-                    "kernel_per_launch": 5.0,
-                },
-                "time_structure": {"idle_pct_full_trace": 30.0},
-                "annotations": {"step_root_count": 12},
-            }
-        ],
-        "chunk_level": [{"path": "/w/t/chunk0.json"}, {"path": "/w/t/chunk1.json"}],
-        "checks": [],
-    }
-    validate.update(overrides)
-    return validate
-
-
-def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) -> None:
-    """The numbers a reader needs come inline; the per-rank and per-file tables stay behind a path."""
-    recorder = _recorder()
-    recorder.begin(max_profile_attempts=1)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
-        status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
-        disable_cuda_graph=False,
-        profile_result=_profile_result(
-            trace_validate=_validate(),
-            trace_validate_path="/w/traces/selfcert.json",
-        ),
-    )
-    recorder.finish_failed(phase="analysis", message="stop")
-
-    validate = _actions(tmp_path)[0]["profile"]["runs"][0]["validate"]
-    quality = validate["trace_quality"]
-
-    assert validate["certificate_path"] == "/w/traces/selfcert.json"
-    assert validate["severity"] == "ok"
-    assert validate["schema_version"] == 1
-    # Attribution with the terms of its ratio, so 91% of 50ms cannot be mistaken for 91% of an hour.
-    assert quality["attributed_pct"] == 91.0
-    assert quality["attributed_gpu_ms"] == 45.5
-    assert quality["gpu_kernel_sum_ms"] == 50.0
-    assert quality["op_meta_basis"] == {"cpu_op_total": 100, "cpu_op_with_meta": 80}
-    # The scope the ratios were computed over.
-    assert quality["aggregation_scope"] == "full_trace"
-    assert quality["truncated"] is False
-    # The boolean and the threshold it was compared against.
-    assert quality["graph_under_recorded"] is False
-    assert quality["graph_under_recorded_threshold"] == 0.2
-    # Capture sidecars, previously never measured anywhere.
-    assert quality["capture_op_meta_coverage"] == 0.75
-    assert quality["capture_sidecar_files_present"] == 3
-    assert quality["analyzed_rank"] == 0
-    assert quality["rank_count_certified"] == 1
-    assert quality["chunk_count_certified"] == 2
-    assert quality["file_count_by_role"]["capture_sidecar"] == 3
-
-    # The unbounded tables must not have been copied in.
-    flat = json.dumps(validate)
-    assert "candidates" not in flat
-    assert "rank_level" not in flat
-    assert "chunk_level" not in flat
-    assert "capture_traces/bs_" not in flat
-
-
-def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_path: Path) -> None:
-    """Patch facts cannot live in the certificate: the attempts whose patching is in question produce none."""
-    recorder = _recorder()
-    recorder.begin(max_profile_attempts=3)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
-        status="failed",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=1.0,
-        disable_cuda_graph=False,
-        profile_result=None,
-        failure={"phase": "profile", "error_class": "RuntimeError", "message": "boom"},
-        instrumentation={
-            "check_id": "instrumentation_preflight",
-            "status": "failed",
-            "detail": {
-                "tracelens_patch_status": "unavailable",
-                "degraded_reason": "tracelens_runtime_patch_unavailable",
-                "patchers": {"benchmark_lib": True, "benchmark_serving": False},
-                "failed_patchers": ["benchmark_serving"],
-            },
-        },
-    )
-    recorder.finish_failed(phase="profile", message="boom")
-
-    run = _actions(tmp_path)[0]["profile"]["runs"][0]
-    assert run["validate"] == {}, "no trace was produced, so there is no certificate"
-    assert run["instrumentation"]["status"] == "failed"
-    assert run["instrumentation"]["detail"]["failed_patchers"] == ["benchmark_serving"]
-    assert run["instrumentation"]["detail"]["tracelens_patch_status"] == "unavailable"
-
-
-def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -> None:
-    """A patch that succeeded used to write nothing, making "fine" and "nobody looked" the same record."""
-    recorder = _recorder()
-    recorder.begin(max_profile_attempts=1)
-    recorder.record_profile_run(
-        run_index=1,
-        attempt_reason=PROFILE_ATTEMPT_INITIAL,
-        status="succeeded",
-        started_at="2026-01-01T00:00:00+00:00",
-        duration_sec=30.0,
-        disable_cuda_graph=False,
-        profile_result=_profile_result(trace_validate=_validate()),
-        instrumentation={
-            "check_id": "instrumentation_preflight",
-            "status": "passed",
-            "detail": {
-                "tracelens_patch_status": "ok",
-                "degraded_reason": "",
-                "patchers": {"benchmark_lib": True, "benchmark_serving": True},
-                "failed_patchers": [],
-            },
-        },
-    )
-    recorder.finish_failed(phase="analysis", message="stop")
-
-    detail = _actions(tmp_path)[0]["profile"]["runs"][0]["instrumentation"]["detail"]
-    assert detail["tracelens_patch_status"] == "ok"
-    assert detail["patchers"] == {"benchmark_lib": True, "benchmark_serving": True}
-    assert detail["failed_patchers"] == []
 
 
 def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
@@ -421,7 +189,7 @@ def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
     ]
     assert [row["effective"] for row in profile["runs"]] == [False, True]
     assert profile["effective_run_index"] == 2
-    assert profile["graph_capture_disabled"] is True
+    assert profile["eager_fallback_applied"] is True
     assert profile["effective_run"]["trace"]["main_path"].endswith("merged-a.pt.trace.json.gz")
 
 

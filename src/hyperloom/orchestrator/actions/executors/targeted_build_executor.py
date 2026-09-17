@@ -11,9 +11,9 @@ from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
-from ...framework.build_actions import BuildResult, TargetedBuildAction
-from ...framework.stack_actions import FrameworkRuntime
-from ...framework.targeted_build import (
+from ...enablement.runtime.build_actions import BuildResult, TargetedBuildAction
+from ...enablement.runtime.stack_actions import FrameworkRuntime
+from ...enablement.runtime.targeted_build import (
     _resolve_budget_sec,
     classify_build_exit,
     ensure_build_dead,
@@ -28,16 +28,12 @@ if TYPE_CHECKING:
 class TargetedBuildExecutor:
     """Executor for ``targeted_build`` task rows."""
 
-    @staticmethod
-    def _attempt_root(session_dir: Path, task_id: str) -> str:
-        return str(session_dir / "enablement" / "builds" / task_id)
-
     async def __call__(self, ctx: "RunnerContext") -> dict[str, Any]:
         """Spawn and await a targeted build."""
         task = ctx.task
         action = TargetedBuildAction.from_state(task.params)
         session_dir = Path(ctx.extra["session_dir"])
-        attempt_root = self._attempt_root(session_dir, task.task_id)
+        attempt_root = str(action.attempt_root)
         budget_sec = float(_resolve_budget_sec(action))
         shared_state = ctx.extra.get("shared_state")
 

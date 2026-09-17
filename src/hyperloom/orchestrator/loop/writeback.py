@@ -48,7 +48,7 @@ from ..state.optimization_journal import (
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_FRAMEWORK_AGENT
+from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
@@ -533,7 +533,6 @@ class WritebackCollaborator:
                     "hint": denied.hint,
                     "reason": str(denied),
                 },
-                priority=0,
             )
         )
         resolved_action = action_name or str((intent.payload or {}).get("action_name") or "")
@@ -853,8 +852,9 @@ class WritebackCollaborator:
         Returns:
             Whether a comparable measurement updated the validation watermark.
         """
-        graded_source = _graded_source(measurement, new_tput)
-        graded = resolve_graded_comparison(self.shared_state, graded_source, against_baseline=True)
+        graded = resolve_graded_comparison(
+            self.shared_state, _graded_source(measurement, new_tput), against_baseline=True
+        )
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
             return False
@@ -878,9 +878,6 @@ class WritebackCollaborator:
                 source=source,
                 measurement_basis=measurement_basis,
                 graded_objective=graded.objective,
-                # The figures grading actually read, not the raw measurement: the caller's resolved output
-                # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
-                measurement=graded_source,
                 ts=ts,
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
@@ -953,6 +950,8 @@ class WritebackCollaborator:
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
                 "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                "backend": result.get("backend"),
+                "engine": result.get("engine"),
                 # Provenance for a fusion sibling; readers key the stack row on
                 # ``action == "fusion"`` above, this just records the producer.
                 **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
@@ -1383,6 +1382,9 @@ class WritebackCollaborator:
             # and so does a session that never admitted the eval lane — nothing
             # would re-run the eval, so holding the budget just stalls the run.
             eval_pending_suppress = eval_failed and not is_multi_node() and eval_enablement_allowed(self.shared_state)
+            # Baseline failures are the ENABLEMENT phase's input, not a reason to stop
+            # the run; its own attempt cap bounds it.
+            in_enablement = str(self.shared_state.phase or "").strip().upper() == PHASE_ENABLEMENT
             if eval_failed:
                 self._persist_eval_failure(result_payload)
             if stopped_by_the_run:
@@ -1428,7 +1430,7 @@ class WritebackCollaborator:
                 # that failed some other way is no evidence the arguments were
                 # fixed.
                 self.shared_state.baseline_failure_streak += 1
-                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress:
+                if self.shared_state.baseline_failure_streak >= 3 and not eval_pending_suppress and not in_enablement:
                     self.shared_state.set_stop_reason("baseline_failed")
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
@@ -1438,6 +1440,7 @@ class WritebackCollaborator:
                 self.shared_state.baseline_total_failures >= _BASELINE_MAX_TOTAL_FAILURES
                 and not self.shared_state.stop_reason
                 and not eval_pending_suppress
+                and not in_enablement
             ):
                 self.shared_state.set_stop_reason("baseline_failed")
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
@@ -3550,22 +3553,23 @@ class WritebackCollaborator:
                     promoting_tid,
                 )
             self.shared_state.baseline_failure_streak = 0
-            # A genuine baseline may revalidate an eval-origin enablement.
+            # A genuine baseline is what revalidates an enablement KEEP.
             if bool(getattr(self.shared_state.enablement, "validation_pending", False)):
                 if is_revalidation:
                     acc = result.get("accuracy")
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
-                    if accuracy_meets_floor(acc, floor):
+                    eval_off = bool(getattr(self.shared_state, "eval_disabled", False))
+                    if accuracy_meets_floor(acc, floor) or eval_off:
                         self.shared_state.enablement.succeeded = True
                         self.shared_state.enablement.validation_pending = False
                         self.shared_state.enablement.revalidation_task_id = ""
                         self.shared_state.enablement.origin = ""
                         self.shared_state.enablement.pending = False
                         await self._settle_enablement_round(BOOTED, reason="revalidation_promoted")
-                        # This promote is the eval-origin lane's terminal: the
-                        # KEEP that preceded it was provisional, so the round
-                        # that landed it did not close the lane.
+                        # This promote is the lane's terminal: the KEEP that
+                        # preceded it was provisional, so the round that landed
+                        # it did not close the lane.
                         enablement_event.record_revalidation_outcome(
                             generation=generation,
                             promoted=True,
@@ -5748,7 +5752,7 @@ class WritebackCollaborator:
         import shutil
         import signal
 
-        from ..framework.targeted_build import kill_build_pgroup
+        from ..enablement.runtime.targeted_build import kill_build_pgroup
 
         state = self.shared_state
         pending = getattr(state, "pending_targeted_build", {}) or {}

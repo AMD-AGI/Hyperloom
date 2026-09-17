@@ -17,11 +17,14 @@ from hyperloom.inference_optimizer.cli.bootstrap import (
     AGENTX_MEASUREMENT_EPOCH,
     agentx_state_is_stale,
 )
+from hyperloom.inference_optimizer.cli.parser import DEFAULT_MAX_HOURS
 
 
 def _budget_args(**over) -> argparse.Namespace:
     base = dict(
-        max_hours=2.0,
+        # What the parser produces when ``--max-hours`` is absent: the flag
+        # carries no argparse default, so the profile sees ``None``, not 2.0.
+        max_hours=None,
         conc_sweep_total_budget_sec=9000,
     )
     base.update(over)
@@ -60,9 +63,22 @@ def test_budget_profile_does_not_expand_benchmark_caps(monkeypatch):
 def test_budget_profile_never_touches_max_hours(monkeypatch):
     """``--max-hours`` is the operator's contract with the scheduler."""
     _on(monkeypatch)
-    args = _budget_args()
+    args = _budget_args(max_hours=2.0)
     _apply_agentx_budget_profile(args)
     assert args.max_hours == 2.0
+
+
+def test_the_note_fires_when_the_operator_passed_no_budget(monkeypatch, capsys):
+    _on(monkeypatch)
+    _apply_agentx_budget_profile(_budget_args())
+    assert "--max-hours" in capsys.readouterr().err
+
+
+def test_the_note_stays_quiet_for_a_budget_the_operator_typed(monkeypatch, capsys):
+    """An explicit value is a deliberate choice, even at the default's number."""
+    _on(monkeypatch)
+    _apply_agentx_budget_profile(_budget_args(max_hours=DEFAULT_MAX_HOURS))
+    assert capsys.readouterr().err == ""
 
 
 def test_budget_profile_preserves_operator_values(monkeypatch):

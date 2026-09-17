@@ -120,6 +120,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from .parser import (
+    DEFAULT_MAX_HOURS,
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
     _redact_unknown_args as _redact_unknown_args,
@@ -364,7 +365,9 @@ def _should_remote_probe_gpu(args: argparse.Namespace) -> bool:
 
 
 def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
-    """Validate atom-specific CLI knobs: sole job is the ``--nodes>=2`` fail-fast guard (IR-8)."""
+    """Validate atom-specific CLI knobs: the ``--nodes>=2`` fail-fast guard (IR-8) and a kernel-backend warning."""
+    from hyperloom.common.env import forge_explicitly_enabled
+
     auto_disabled: list[str] = []
     if int(getattr(args, "nodes", 1) or 1) >= 2:
         print(
@@ -375,10 +378,37 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         )
         sys.exit(2)
     print(
-        "  framework=atom: no auto-disable applied (kernel-agent + "
-        "framework-agent + profile / roofline / TraceLens all wired "
-        "for atom); --nodes>=2 guard active — see SKILL.md IR-8"
+        "  framework=atom: no auto-disable applied (framework-agent + "
+        "profile / roofline / TraceLens all wired for atom); "
+        "--nodes>=2 guard active — see SKILL.md IR-8"
     )
+    # The kernel phase runs on atom, but GEAK -- the backend everything else
+    # defaults to -- does not produce kernel candidates there: its extraction step
+    # declines to guess a rewrite seam for a quantized, non-vLLM backend. Since the
+    # default phase split gives the kernel phase half the session, defaulting to
+    # GEAK on atom means defaulting to half a session of nothing. forge is the
+    # backend that works here, so on atom it is the default rather than an opt-in
+    # the operator has to know about.
+    #
+    # Only an unset value is filled in. An operator who named a backend keeps it:
+    # running GEAK on atom on purpose, to measure exactly this, stays possible.
+    if not getattr(args, "no_kernel", False):
+        if not os.environ.get("KERNEL_OPT_BACKEND_ORDER", "").strip():
+            os.environ["KERNEL_OPT_BACKEND_ORDER"] = "forge"
+            print(
+                "  framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge' "
+                "(on atom GEAK must resolve a live rewrite seam; forge needs none)"
+            )
+        elif not forge_explicitly_enabled():
+            print(
+                "  WARNING: framework=atom with KERNEL_OPT_BACKEND_ORDER="
+                f"{os.environ.get('KERNEL_OPT_BACKEND_ORDER', '')!r}, so the kernel "
+                "phase runs GEAK. On a quantized non-vLLM backend GEAK may not guess "
+                "a rewrite seam -- it has to resolve one from the live server, which "
+                "is unproven on atom. Unset it to get 'forge', or pass --no-kernel "
+                "to skip the phase.",
+                file=sys.stderr,
+            )
     return auto_disabled
 
 
@@ -887,12 +917,6 @@ def _reset_state_file(session_dir: Path) -> None:
     )
 
 
-# AgentX conc-sweep budgets, sized from a measured round: 35B / conc 64 / 3600s window = ~111 min end to end (46 min
-# per-lane warmup + 60 min measurement + ~5 min boot, corpus load and mapping).
-_AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
-_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 runs
-
-
 def _preflight_agentx_backend(args: argparse.Namespace) -> None:
     """Reject the combinations where AgentX labels work it did not do."""
     if not _agentx_enabled():
@@ -926,21 +950,20 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
 
 
 def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
-    """Widen the per-variant time budgets for AgentX's much longer runs."""
+    """Warn when AgentX is enabled without an explicit session budget."""
     if not _agentx_enabled():
         return
-    if float(getattr(args, "max_hours", 0) or 0) == 2.0:
+    # ``--max-hours`` carries no argparse default, so absence reads as ``None``
+    # here: this runs before either path settles the budget. An explicit value
+    # is a deliberate choice even when it equals the default, and gets no note.
+    if getattr(args, "max_hours", None) is None:
         print(
-            "NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of 2.0. "
+            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
             file=sys.stderr,
         )
-    if int(getattr(args, "conc_sweep_timeout_sec", 0) or 0) == 1800:
-        args.conc_sweep_timeout_sec = _AGENTX_CONC_SWEEP_TIMEOUT_SEC
-    if int(getattr(args, "conc_sweep_total_budget_sec", 0) or 0) == 9000:
-        args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
 
 
 # Largest input+output a single request reaches in the 256k-capped weka corpus, measured over all 30,141 requests of
@@ -1015,7 +1038,11 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
-    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict."""
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    ENABLEMENT has no flag: nothing enforces a cap for it, since
+    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
         PHASE_FRAMEWORK_AGENT,
@@ -1268,6 +1295,56 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     if getattr(args, "streams_per_partition", None) is None:
         streams = archived.get("streams_per_partition")
         args.streams_per_partition = int(streams) if streams else None
+
+
+#: Manifest objective kinds and the flag each one was parsed from.
+_OBJECTIVE_KIND_TO_FLAG: Mapping[str, str] = {
+    "gain_pct": "target_gain",
+    "tput": "target_tput",
+    "baseline": "target_baseline_dir",
+    "roofline_pct": "target_roofline",
+}
+
+
+def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mapping[str, Any]) -> list[str]:
+    """Fill the budget and the stop target from the archive when this resume omitted them.
+
+    A bare resume would otherwise rebuild both from the flags: the budget would
+    shorten a longer session and close the leg as ``time_exhausted``, and the
+    objective would be dropped. An operator may pass only ``--resume-from``.
+    An omitted ``--max-hours`` arrives as ``None``, so a smaller
+    explicit budget still tightens the leg, which is what ``_start_run`` reads.
+
+    Args:
+        args: Parsed arguments for this resume; an explicit flag always wins.
+        state: Loaded session state, whose ``max_minutes`` already carries every
+            ``--extend-hours`` grant from earlier legs.
+        manifest: The session manifest, which is where the objective is recorded.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    lines: list[str] = []
+    persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
+    if getattr(args, "max_hours", None) is None and persisted_minutes > 0:
+        args.max_hours = persisted_minutes / 60.0
+        lines.append(f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted)")
+
+    # Restored as a set: a target named on this resume replaces the persisted
+    # objective outright rather than joining it, which build_objective refuses.
+    if any(getattr(args, flag, None) is not None for flag in _OBJECTIVE_KIND_TO_FLAG.values()):
+        return lines
+    recorded = manifest.get("objective") or {}
+    # ``_objective_summary`` writes one entry, and ``objectives`` too when a
+    # roofline target joins a throughput one.
+    for entry in recorded.get("objectives") or [recorded]:
+        flag = _OBJECTIVE_KIND_TO_FLAG.get(str(entry.get("kind") or ""))
+        value = entry.get("value")
+        if flag is None or value is None:
+            continue
+        setattr(args, flag, str(value) if flag == "target_baseline_dir" else float(value))
+        lines.append(f"  → restored objective: --{flag.replace('_', '-')} {value}")
+    return lines
 
 
 def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
@@ -1550,6 +1627,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     resolve_benchmark_timeouts()
+    # A fresh launch has nothing to restore, so settle the budget before the
+    # manifest and the workload env read it. A resume keeps ``None`` until
+    # ``_restore_budget_and_objective`` has had its chance at the session's own.
+    if not args.resume_from and args.max_hours is None:
+        args.max_hours = DEFAULT_MAX_HOURS
 
     if args.resume_from:
         # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
@@ -1638,6 +1720,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             _enforce_expected_framework(state.framework)
             os.environ["FRAMEWORK"] = state.framework
             print(f"  re-exported FRAMEWORK : {state.framework}")
+            # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
+            # it is gone in this new process. Without re-applying the default, a resumed atom
+            # session runs GEAK while the persisted state still reads 'forge' -- and silently,
+            # because the warning for an operator-named backend lives in the same function.
+            if state.framework == "atom":
+                _apply_atom_auto_tighten(args)
         if state.gpu_type:
             runner_gpu_type = _gpu_runner_type(state.gpu_type)
             os.environ["TARGET_GPU_TYPE"] = state.gpu_type
@@ -1824,6 +1912,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
         print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
+        for line in _restore_budget_and_objective(args, state, manifest):
+            print(line)
+        if args.max_hours is None:
+            args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.

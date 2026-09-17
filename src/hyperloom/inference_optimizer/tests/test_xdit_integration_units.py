@@ -532,7 +532,7 @@ class TestValidateTraceStructureScriptable:
 
         if with_kernels:
             # Healthy diffusion trace: cpu_op + kernel, no execute_*/user_annotation.
-            events = [{"cat": "cpu_op", "name": "aten::mm"}, {"name": "some_gemm", "cat": "kernel"}]
+            events = [{"name": "cpu_op", "cat": "cpu_op"}, {"name": "some_gemm", "cat": "kernel"}]
         else:
             # Metadata-only (repeat=0 empty window) trace: no cpu_op / kernel.
             events = [{"name": "process_labels", "cat": "process_labels"}]

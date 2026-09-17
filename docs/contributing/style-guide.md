@@ -173,7 +173,7 @@ CI enforces this through the **REUSE Compliance** workflow.
 - Branch from `main`; keep commits logically grouped.
 - PR description: problem, approach, test evidence.
 - **Do not commit:** virtualenvs, `.coverage`, build artifacts, large logs, credentials, local `.env`.
-- **Changelog:** user-visible changes should note `CHANGELOG.md` when maintainers expect a release note.
+- **Changelog:** required. Anything an operator can observe carries a `CHANGELOG.md` entry under `[Unreleased]` in the same PR — see [`AGENTS.md`](../../AGENTS.md) § *Authoring rules of engagement* for what counts and what is exempt.
 
 ## Local development checklist
 

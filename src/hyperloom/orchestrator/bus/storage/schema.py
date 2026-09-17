@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import sqlite3
 
-# Recorded for provenance. Additive ownership migration below preserves legacy
-# rows with unknown scope rather than inferring where their PIDs originated.
+# Recorded for provenance, not migration gating: ensure_schema inspects columns
+# so databases sharing a version but differing in layout migrate correctly.
+# Legacy ownership stays unknown; retired NOT NULL columns without defaults
+# must be dropped before new writers can insert rows.
 SCHEMA_VERSION = 6
 
 
@@ -59,7 +61,6 @@ _DDL = [
         topic         TEXT    NOT NULL,
         in_reply_to   TEXT,
         payload       TEXT    NOT NULL,
-        priority      INTEGER NOT NULL,
         ts            TEXT    NOT NULL
     )
     """,
@@ -163,6 +164,25 @@ _MANAGED_TABLES = (
 )
 
 
+#: SQLite gained ``ALTER TABLE ... DROP COLUMN`` here.
+_DROP_COLUMN_MIN_SQLITE = (3, 35, 0)
+
+
+def _drop_legacy_priority_column(cur: sqlite3.Cursor) -> None:
+    """Take ``events.priority`` off a database written before the column was retired."""
+    cur.execute("PRAGMA table_info(events)")
+    if "priority" not in {row[1] for row in cur.fetchall()}:
+        return
+    if sqlite3.sqlite_version_info < _DROP_COLUMN_MIN_SQLITE:
+        floor = ".".join(str(part) for part in _DROP_COLUMN_MIN_SQLITE)
+        raise RuntimeError(
+            "this coordinator.db still carries the retired events.priority column, and SQLite "
+            f"{sqlite3.sqlite_version} cannot drop it ({floor} is the floor). Finish or discard "
+            "the session under the build that started it."
+        )
+    cur.execute("ALTER TABLE events DROP COLUMN priority")
+
+
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
     """Idempotently insert default capacity rows; existing rows are left alone so a resume preserves the operator's choice."""
     for lane, capacity in DEFAULT_LANE_CAPACITIES.items():
@@ -220,6 +240,7 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         cur.execute("PRAGMA table_info(leases)")
         if "owner_scope" not in {row[1] for row in cur.fetchall()}:
             cur.execute("ALTER TABLE leases ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''")
+        _drop_legacy_priority_column(cur)
         _seed_default_lane_capacity(cur)
         cur.execute(
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",

@@ -595,7 +595,6 @@ class KernelStackPhase(PhaseHandler):
                         "source": "auto_integrate_after_kernel_opt",
                         "mode": "patch",
                     },
-                    priority=2,
                 )
             )
             self._auto_integrate_attempt_marks[dispatch_key] = recorded

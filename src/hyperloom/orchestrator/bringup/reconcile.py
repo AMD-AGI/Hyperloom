@@ -61,8 +61,8 @@ _UNDECIDED_PROPOSALS_SQL = """
 #: instant of the write. The guard is in the statement rather than in a read
 #: before it, so a verdict arriving in between wins.
 _TIMEOUT_DENY_SQL = """
-    INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, priority, ts)
-    SELECT ?, ?, ?, 'review_verdict', NULL, ?, 0, ?
+    INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)
+    SELECT ?, ?, ?, 'review_verdict', NULL, ?, ?
     WHERE NOT EXISTS (
         SELECT 1 FROM events
         WHERE topic = 'review_verdict'

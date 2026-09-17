@@ -38,11 +38,6 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement attempt cap: consecutive settled rounds that made no progress
-# before the lane stops dispatching. Advancing rounds (outcome ADVANCED or
-# BOOTED) reset the streak; abandoned and expired rounds are skipped.
-# The wall clock is the outer bound for a bring-up still making progress.
-_ENABLEMENT_MAX_ATTEMPTS: int = 8
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
@@ -722,7 +717,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_single_verdict": "router",
         "_handle_delegate": "router",
         "_handle_request": "router",
-        "_handle_response": "router",
         "_handle_extend_lease": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
@@ -863,6 +857,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_read_enablement_source_context": "enablement_params",
         "_derive_checkpoint_weight_facts": "enablement_params",
         "_discover_enablement_candidate_refs": "enablement_params",
+        "_enablement_admitted": "enablement_lane",
         "_maybe_enqueue_enablement_specialist": "enablement_lane",
         "_maybe_record_enablement_human_review": "enablement_lane",
         "_enablement_in_flight": "enablement_lane",
@@ -958,6 +953,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_reap_dispatched_task": "dispatcher",
         "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
+        "_phase_denial_for_action": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_time_budget_denial_for_action": "dispatcher",
         "_admission_denial_for_action": "dispatcher",

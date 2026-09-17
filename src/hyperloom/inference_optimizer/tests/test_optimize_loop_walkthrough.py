@@ -101,7 +101,5 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
         assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]
         reasons = {reason for _, _, reason in _chain(state)}
         assert "optimize_no_more_leverage" in reasons
-        for reason in reasons:
-            assert ps.is_valid_phase_exit_reason(reason), reason
     finally:
         await coord.stop()
