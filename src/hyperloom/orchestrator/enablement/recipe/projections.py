@@ -184,7 +184,7 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
     resolvable. What travels is which slots the launch bound, the inputs that
     re-create the venv, and the build that produced it.
     """
-    from ...framework.stack_actions import FrameworkRuntime
+    from ..runtime.stack_actions import FrameworkRuntime
 
     runtime = enablement.get("active_runtime")
     if not isinstance(runtime, dict) or not runtime:

@@ -26,6 +26,63 @@ from ..session_package import deliverable
 
 log = logging.getLogger(__name__)
 
+# --------------------------------------------------------------------------
+
+_ENABLEMENT_LOG_EXCERPT_CHARS = 2000
+
+
+#: Distinguishes "this state never recorded the field" from a recorded ``None``.
+_ABSENT = object()
+
+
+
+_RECIPE_STATE_FIELDS: tuple[str, ...] = (
+    "active_runtime",
+    "accepted_config",
+    "accepted_config_source",
+    "accepted_stack_targets",
+    "base_sha",
+    "build_extensions_not_carried",
+    "build_manifest",
+    "levers_without_readers",
+    "environment_closure",
+    "framework_root",
+    "installed_versions_at_keep",
+    "kept_artifacts",
+    "kept_patches",
+    "kept_stack_action",
+    "last_specialist_task_id",
+    "launch_argv_refused",
+    "launch_evidence",
+    "patch_roots",
+    "patch_targets",
+    "roots",
+    "setup_commands",
+    "setup_executions",
+    "source_snapshots",
+)
+
+
+#: Round-lifecycle counters the durable round ledger owns since the bring-up
+#: round rework. Read for a pre-rework state document, never synthesised.
+_LEGACY_ROUND_COUNTERS: tuple[str, ...] = ("attempts", "stall_streak")
+
+
+#: Reasons that specifically deny a closed dependency set. The status cannot read
+#: "verified" while one stands: pinned components are not a pinned environment,
+#: and a closure captured over the Python layer alone does not cover a build or
+#: an installer outside it.
+_CLOSURE_DENYING_CODES: frozenset[str] = frozenset(
+    {
+        "build_inputs_incomplete",
+        "build_attempt_unjoined",
+        "environment_closure_absent",
+        "closure_scope_incomplete",
+        "setup_occurrences_unknown",
+        "setup_ledger_truncated",
+    }
+)
+
 
 def _eg(state: dict, name: str, default: Any = None) -> Any:
     """Read an enablement round field from a v4 nested or v3 flat state dict."""
