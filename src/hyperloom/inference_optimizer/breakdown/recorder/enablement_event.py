@@ -136,6 +136,9 @@ _RECIPE_KEYS: tuple[str, ...] = (
     # the one thing this block exists to keep beside the verdict.
     "build_extensions_not_carried",
     "levers_without_readers",
+    # ``select_linked_build`` falls back to these when the one-shot specialist
+    # marker has been consumed, which it normally has by the time a build lands.
+    "kept_rounds",
 )
 
 #: Ceiling on the serialized recipe. A real host's environment closure runs to
