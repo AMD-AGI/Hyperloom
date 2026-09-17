@@ -30,9 +30,17 @@ RAY_SERVING_SLOT = "serving_slot"
 _HEAD_CUSTOM_RESOURCES = {RAY_SERVING_SLOT: 1}
 
 
-#: Set when a ``ray.init`` attempt timed out and its runner was abandoned mid-connect.
-#: The next attempt clears the session that runner may have left, because it is the
-#: one that owns the process from then on.
+#: Held for the whole life of a ``ray.init`` attempt and released by the thread that
+#: made it -- including an abandoned one, on whatever schedule it finishes. Only one
+#: connect may be outstanding in this process at a time, because ``ray.init`` is
+#: process-global and uncancellable: a second attempt overlapping an abandoned first
+#: is how a late connect lands between the new attempt's shutdown and its own init
+#: and hands it the OLD cluster, silently, through ``ignore_reinit_error=True`` --
+#: which is precisely what the version-mismatch retry exists to escape.
+_INIT_GATE = threading.Semaphore(1)
+
+#: Set when an attempt timed out, so the next one clears a session its runner may
+#: have created. Read only after the gate is held, i.e. after that runner is done.
 _STALE_CONNECT_POSSIBLE = threading.Event()
 
 
@@ -351,10 +359,21 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         abandoned runner shuts the session back down on its way out.
         """
         timeout = _ray_init_timeout_sec()
+        # Wait out any abandoned runner rather than racing it. It releases the
+        # gate when it finishes, so by the time this attempt holds it, every
+        # connect that could still land has landed and the cleanup below is
+        # deterministic. A runner that never returns leaves this reporting an
+        # unusable cluster, which is what it is, instead of a second connect
+        # interleaved with the first.
+        if not _INIT_GATE.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"a previous ray.init(address={address!r}) is still outstanding after "
+                f"{timeout:g}s; the raylet never answered it and this process cannot "
+                "safely start a second connect while it is unresolved."
+            )
         if _STALE_CONNECT_POSSIBLE.is_set():
-            # A previous attempt timed out and its runner may have connected
-            # since. Clear whatever it left before taking the process for this
-            # one; done here, on the thread that is about to own the session.
+            # A previous attempt timed out and its runner has since finished; it
+            # may have connected. Clear what it left before taking the process.
             _STALE_CONNECT_POSSIBLE.clear()
             with contextlib.suppress(Exception):
                 ray.shutdown()
@@ -365,16 +384,28 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         # runner reads "not abandoned", returns, and the caller then declares
         # abandonment -- the process connected and nobody responsible for it.
         verdict_lock = threading.Lock()
-        verdict: dict[str, bool] = {"landed": False, "abandoned": False}
+        verdict: dict[str, bool] = {"done": False, "landed": False, "abandoned": False}
 
         def _runner() -> None:
             try:
                 _connect(address)
+                landed = True
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
                 outcome["error"] = exc
-                return
+                landed = False
             with verdict_lock:
-                verdict["landed"] = True
+                verdict["done"] = True
+                verdict["landed"] = landed
+                if landed and verdict["abandoned"]:
+                    # The caller gave up before this returned, so a session may
+                    # exist that nobody asked for. Recorded under the lock and
+                    # therefore BEFORE the gate is released: the next attempt
+                    # cannot start and find the marker missing.
+                    _STALE_CONNECT_POSSIBLE.set()
+            # Released last, and by this thread rather than the caller: the
+            # caller may already have given up, and no second connect may start
+            # while this one is unresolved.
+            _INIT_GATE.release()
 
         thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
         # The banner suppression is held here, across a join that always returns, so
@@ -384,19 +415,15 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             thread.start()
             thread.join(timeout)
         with verdict_lock:
-            # Decided here rather than from ``thread.is_alive()``: a runner that
-            # returned a microsecond ago is alive to that check and has already
-            # connected.
-            timed_out = not verdict["landed"] and "error" not in outcome
+            # ``done`` rather than ``thread.is_alive()``: a runner that returned
+            # a microsecond ago is still alive to that check and has already
+            # connected. Claimed under the same lock the runner reports through,
+            # so exactly one of the two sides owns the outcome.
+            timed_out = not verdict["done"]
+            if timed_out:
+                verdict["abandoned"] = True
+                _STALE_CONNECT_POSSIBLE.set()
         if timed_out:
-            # The abandoned runner may still connect. It must not clean up after
-            # itself: ``ignore_reinit_error=True`` means a late ``ray.init`` on
-            # an already-connected process is a no-op that attaches to whatever
-            # session is current, so a shutdown from that thread would tear down
-            # a LATER leg's working connection, not its own. The next attempt
-            # clears it instead -- that one is the current owner, and legs in
-            # this process are sequential.
-            _STALE_CONNECT_POSSIBLE.set()
             raise TimeoutError(
                 f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
                 "the raylet accepted the connection but never finished registration. "

@@ -275,34 +275,64 @@ def test_an_abandoned_runner_never_tears_down_a_session(monkeypatch):
     assert shutdowns == [], "the abandoned runner must not shut anything down"
 
 
-def test_the_next_attempt_clears_what_an_abandoned_runner_may_have_left(monkeypatch):
-    """Responsibility sits with the thread that owns the process from then on."""
+def test_a_second_attempt_waits_out_an_unresolved_first(monkeypatch):
+    """Two connects may not overlap, because ``ray.init`` is process-global.
+
+    The interleaving that matters: the second attempt starts while the first
+    runner is still inside ``ray.init``. If it were allowed to run, its shutdown
+    would happen before that runner connects, the connect would land in the gap,
+    and its own ``ray.init`` -- ``ignore_reinit_error=True`` -- would silently
+    attach to the OLD cluster. Which is exactly what the version-mismatch retry
+    exists to escape.
+    """
     import threading
     import types
 
     release = threading.Event()
-    shutdowns = []
-    inits = []
+    order = []
 
     def _init(**_kw):
-        inits.append(1)
-        if len(inits) == 1:
+        order.append("init")
+        if len(order) == 1:
             release.wait(5)
 
     fake_ray = types.SimpleNamespace(
-        init=_init, shutdown=lambda: shutdowns.append(1), is_initialized=lambda: False
+        init=_init, shutdown=lambda: order.append("shutdown"), is_initialized=lambda: False
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
 
     with pytest.raises(TimeoutError):
         ray_runtime.quiet_ray_init(num_gpus=1)
-    assert shutdowns == []
 
+    # The first runner is still blocked, so the gate is still held and the second
+    # attempt cannot even begin its connect.
+    second: dict = {}
+
+    def _second():
+        try:
+            ray_runtime.quiet_ray_init(num_gpus=1)
+            second["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            second["error"] = exc
+
+    t = threading.Thread(target=_second, daemon=True)
+    t.start()
+    t.join(5)
+    assert order == ["init"], f"the second attempt started while the first was unresolved: {order}"
+    assert isinstance(second.get("error"), TimeoutError), second
+    assert "still outstanding" in str(second["error"])
+
+    # Once the first resolves, the gate frees and a later attempt proceeds --
+    # and its cleanup now runs AFTER that late connect rather than before it.
     release.set()
+    for _ in range(100):
+        if ray_runtime._INIT_GATE.acquire(blocking=False):
+            ray_runtime._INIT_GATE.release()
+            break
+        threading.Event().wait(0.05)
     ray_runtime.quiet_ray_init(num_gpus=1)
-
-    assert shutdowns == [1], "the next attempt must clear the stale session first"
+    assert order[1:] == ["shutdown", "init"], order
 
 
 def test_a_connect_landing_on_the_deadline_is_claimed_by_exactly_one_side(monkeypatch):
