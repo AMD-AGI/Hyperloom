@@ -124,10 +124,10 @@ python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-**Detach it the way the harness understands.** Under Claw (`$CLAW_SESSION_ID`
-set), hand that block to the bash tool with `run_in_background=true` — no
-`setsid nohup`, no trailing `&`. Everywhere else, prefix `setsid nohup`, append
-` &`, and `echo $! > "$PID_FILE"`; that form is required for runs longer than 5
+**Detach it the way the harness understands.** When `$CLAW_SESSION_ID` is set
+*and* your bash tool takes a `run_in_background` parameter, hand that block to it
+with `run_in_background=true` — no `setsid nohup`, no trailing `&`. Otherwise
+prefix `setsid nohup`, append ` &`, and `echo $! > "$PID_FILE"`; that form is required for runs longer than 5
 minutes under Cursor. See the **Launch** section of `SKILL.md` for why the
 distinction matters: a hand-detached run is invisible to Claw, and the sandbox
 is reclaimed about fifteen minutes after the agent turn ends, with the run still
@@ -135,8 +135,8 @@ going.
 
 Either way, reconcile `$PID_FILE` to the **real** optimizer PID, which the CLI
 records as `.pid` in the launch-info JSON. Under `setsid` the `$!` written above
-is the wrapper, which exits immediately; under Claw the tool returns a
-`shell_id` and never a pid. The robustness monitor reads `$PID_FILE` and would
+is the wrapper, which exits immediately; on the background-tool path the tool
+returns a `shell_id` and never a pid (see the two conditions above). The robustness monitor reads `$PID_FILE` and would
 misfire a spurious resume on a dead wrapper pid.
 
 When no authoritative pid can be had — no `.pid` in the launch-info JSON and a
@@ -222,8 +222,8 @@ non-default session.
 ## Robustness Monitor
 
 For runs longer than 5 minutes, start the monitor in its own detached process,
-by the same rule as the optimizer above: `run_in_background=true` under Claw,
-`setsid nohup ... &` elsewhere. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
+by the same rule as the optimizer above: `run_in_background=true` where both of
+its conditions hold, `setsid nohup ... &` elsewhere. It polls every 300s. It reads `$INFERENCE_OPTIMIZER_SESSION_DIR` first,
 else `.session_dir` from `$LAUNCH_INFO_FILE`. Its only allowed relaunch is the
 same session via `optimize --resume-from "$SESSION_DIR"` after the
 optimizer process disappears without a terminal marker; it must not start a

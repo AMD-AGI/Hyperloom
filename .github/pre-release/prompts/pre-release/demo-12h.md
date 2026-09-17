@@ -53,7 +53,7 @@ killed the moment the turn ends. So:
    progress note such as "install started", "waiting on the pull", or "waiting on the
    monitor" — that kills the work you just started and the leg ends up with nothing
    running at all.
-2. Start `optimize` **detached** the way the demo skill does — `run_in_background=true` under Claw, `setsid nohup` elsewhere — so it
+2. Start `optimize` **detached** the way the demo skill does — `run_in_background=true` when `$CLAW_SESSION_ID` is set and the bash tool offers it, `setsid nohup` otherwise — so it
    survives the end of this turn.
 3. Before you finish, confirm the run is really live and report the paths: the nested
    session run dir exists, `state.json` is present in it, and the optimizer PID is alive.

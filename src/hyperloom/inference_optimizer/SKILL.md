@@ -1115,11 +1115,19 @@ causes MODEL_PATH race conditions where sessions launch the wrong model.
 After launching, locate the optimizer via
 `pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
 
-**How you launch depends on the harness.** Under Claw (`$CLAW_SESSION_ID` is
-set) the run must be started with the bash tool's `run_in_background=true`, not
-with `setsid nohup ... &`. Everywhere else, `setsid nohup` stays correct. Both
-are detached — the difference is whether anything outside the process knows it
-exists.
+**How you launch depends on the harness.** Two things have to hold before the
+bash tool's `run_in_background=true` is the right form: `$CLAW_SESSION_ID` must
+be set, and your bash tool must take a `run_in_background` parameter. Both, or
+`setsid nohup ... &` stays correct.
+
+Each answers half the question. The session id says a platform is reclaiming
+this sandbox on what it can see, so a run detached by hand is one it cannot see.
+The parameter says this deployment serves background shells at all — switched
+off, the tool does not offer one, and there is nothing to hand the block to.
+Off-platform neither holds, and `setsid` is what you want there anyway: nothing
+is reclaiming anything, and a harness's own background shell may not outlive the
+connection that started it. Both forms are detached — the difference is whether
+anything outside the process knows it exists.
 
 ```bash
 cd "$REPO_ROOT"
@@ -1162,8 +1170,9 @@ python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-**Under Claw**, pass that block to the bash tool with `run_in_background=true`
-and no `setsid nohup` and no trailing `&` — the tool is what detaches it. The
+**When both conditions hold**, pass that block to the bash tool with
+`run_in_background=true` and no `setsid nohup` and no trailing `&` — the tool is
+what detaches it. The
 tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
 check below from the launch-info JSON, which carries the real one. The monitor
 requires that file, so do not skip it.
@@ -1351,9 +1360,9 @@ bash "$RUN_DIR/robustness_monitor.sh" \
   2>&1 < /dev/null
 ```
 
-Launch it the same way you launched the optimizer: under Claw with the bash
-tool's `run_in_background=true`, everywhere else prefixed with `setsid nohup`
-and suffixed with ` &`. The monitor outlives the turn by design, so under Claw
+Launch it the same way you launched the optimizer: with the bash tool's
+`run_in_background=true` where both conditions above hold, otherwise prefixed
+with `setsid nohup` and suffixed with ` &`. The monitor outlives the turn by design, so under Claw
 it has the same problem the optimizer had — detached by hand, it is invisible,
 and it holds nothing open.
 

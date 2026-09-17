@@ -346,7 +346,7 @@ OPT_FLAGS=(
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)
 
-# Detach per the rule above: run_in_background=true under Claw, or prefix
+# Detach per the rule above: run_in_background=true when both conditions hold, or prefix
 # `setsid nohup` and append ` &` elsewhere. Either way $PID_FILE is reconciled
 # from the launch-info JSON in the health-check block below -- the tool returns
 # a shell_id, and $! is the setsid wrapper.
@@ -460,7 +460,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    robustness and critic subprocesses can import `hyperloom.agents` after
    changing cwd.
-3. Run it detached the way the harness understands: under Claw (`$CLAW_SESSION_ID` set) hand the command to the bash tool with `run_in_background=true`; everywhere else use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
+3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the
    `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely
    on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`.
