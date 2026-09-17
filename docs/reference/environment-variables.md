@@ -310,6 +310,22 @@ It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
 
+## Independent KTH qualification
+
+Optional. When a host map is configured, covered Controller patches are
+qualified by Kernel Trust Harness after apply and before performance
+evaluation. See [KTH qualification](kth-qualification.md).
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `HYPERLOOM_KTH_QUALIFY_EXECUTABLE` | No | `kth-qualify` | Host-owned KTH CLI. |
+| `HYPERLOOM_KTH_ROOT` | No | — | KTH checkout used to pin the harness revision. |
+| `HYPERLOOM_KTH_EXPECTED_SHA` | No | SHA from `HYPERLOOM_KTH_ROOT` | Host-pinned KTH revision. A child-reported hash is not trusted alone. |
+| `HYPERLOOM_KTH_OPERATION_PLANS` | No | empty | JSON or `operator=plan` map. Covered operations always qualify. |
+| `HYPERLOOM_KTH_KERNEL_PATH_PLANS` | No | empty | JSON or `path=plan` map. |
+| `HYPERLOOM_KTH_ALLOWED_PATHS` | No | the publication kernel path | Comma-separated path prefixes the patch may touch. |
+| `HYPERLOOM_KTH_TIMEOUT_S` | No | `300` | Qualification timeout. Timeout fails closed. |
+
 ### Candidate review
 
 One agent session may audit the finished candidate table on the `agent`
