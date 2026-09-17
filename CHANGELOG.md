@@ -5,6 +5,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **A partitioned card is now a different machine in the KB key, so a warm-start
+  hit can no longer replay a config tuned on a differently shaped one.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. The compute-partition mode was
+  not among those dimensions, and neither was expert parallelism on a single
+  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
+  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
+  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
+  not just on a cluster: both are fixed at launch rather than explored, which is
+  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
+  read an SPX row because it is asking a different `canonical_id` — no flag, no
+  demotion, and no second comparison that could be applied to a different row
+  than the one that gets replayed, since `resolve_kb_topology` is the single call
+  both the reader and the writer build the key from. Every suffix is omitted at
+  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
+  this build does not recognise), so existing keys stay byte-identical and
+  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
+  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
+  exactly the rows these suffixes were added for.
+
+  `workload_shape` still publishes `ep` and `partitions` as a description of the
+  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
+  to 1, so publishing it would have every dense run claim a formation it never
+  chose, and one partition is the whole card. The count a launch published wins
+  over one re-derived from the mode name, so there is only ever one derivation to
+  keep in agreement.
+
+### Removed
+
+- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
+  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
+  with the pod — which was never the exposure, since framework version and
+  precision are already identity dimensions. Encoding the partition mode in the
+  key makes the mismatch it would have caught unrepresentable, so a read-side
+  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
+  written into every row's `stack_fingerprint` and compared nowhere at read time;
+  that is a real gap and is tracked in #1507 rather than under a flag whose name
+  says fingerprint and whose behaviour would have been workload shape.
+
 ### Changed
 
 - **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
@@ -34,6 +83,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A measured Controller patch was dropped because the patch kept before it
+  had moved its context.** Lanes run in parallel from one pinned base commit,
+  so two lanes touching the same file each ship a diff written against that
+  same base; integration applies them one at a time and commits every KEEP,
+  which leaves the later diff stale by the time its turn comes. Measured in the
+  Kimi-K3 session of 2026-09-13: `flydsl_moe_stage2` (1.1727x micro) was lost
+  to `error: patch failed: aiter/ops/flydsl/moe_kernels.py:14` once
+  `flydsl_moe_stage1` had landed, although the two touched disjoint functions
+  and defined disjoint module-level symbols -- they collided only because each
+  inserted its own sweep helpers at the same anchor. A refused diff is now
+  rebuilt in escalating steps: `git apply -3` for pure line drift, then keeping
+  both sides of every conflict region whose merge base is empty, then an LLM
+  for the regions where the lanes genuinely edited the same lines -- one region
+  at a time, carrying the surrounding source as context rather than the file to
+  rewrite. Whatever the last two steps reconstruct is discarded unless it still
+  contains every line the incoming patch and every landed KEEP added, parses,
+  carries no conflict marker and redefines no module-level name; a lane that
+  fails any of those is dropped exactly as it was before, with the worktree put
+  back to HEAD. Nothing here decides a KEEP: the E2E gate downstream still
+  measures and still reverts, so a bad merge costs what a dropped patch already
+  cost and can never produce an unmeasured KEEP. A lane that landed as a merge
+  rather than verbatim is reported as `merge_strategy` on the integration
+  result and in `summary.json`. A patch that applies cleanly takes the path it
+  always took, and the resolver runs on whichever backend
+  `preferred_agent_backend` picks for this deployment -- Claude through the
+  single-shot Anthropic transport, Codex through `achat_completion` -- and is
+  skipped entirely when neither side is credentialed.
+
 - **A gateway deployment was told it had no OpenAI credential and handed to
   Claude, which it could not authenticate either.** `openai_agent_credentialed`
   recognised `OPENAI_API_KEY` alone while `codex_session` authenticates with
@@ -41,16 +118,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   ranked as uncredentialed on both sides and fell through to the Claude
   default. That is the failure #1472 set out to fix, reached through a
   different variable name. The accepted key names are now one tuple in
-  `llm_config` that `codex_session` reads too.
+  `llm_config` that `codex_session` reads too. It moves the roles that resolve a
+  backend on their own -- the Forge registry, the kernel request handlers, the
+  specialist runner; the optimizer CLI refuses a gateway-key-only box in
+  preflight long before it builds a backend.
 
   **Orchestration picked its CLI from the endpoint shape rather than the shared
   rule.** `cli/backends.py` was outside #1472's reach and still asked
-  `is_openai_only()`, so the coordinator disagreed with the five roles that had
-  been converted. Two shapes move as a result: a bare `OPENAI_BASE_URL` with no
-  key, and a Bedrock or Vertex box carrying any OpenAI variable, now run Claude
-  for orchestration instead of Codex. Neither could authenticate Codex — it
-  refuses to start without a key — so the old answer named a backend that
-  provably could not run.
+  `is_openai_only()` for the coordinator, so a deployment that configured both
+  sides got Claude whether or not the Claude SDK was importable. It now falls
+  through to `preferred_agent_backend()`, which moves one shape: both sides
+  configured with only the Codex extra installed runs orchestration on Codex
+  instead of on a `ClaudeBackend` that cannot import its SDK. A single-provider
+  launch still pins its own CLI ahead of the shared rule, because by that point
+  the CLI has already rewritten the model ids to match it.
 
   **The ranking was written twice.** `preferred_agent_backend` and the Forge
   registry's `select_default_agent_provider` each built the credential-then-SDK

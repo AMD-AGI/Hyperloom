@@ -850,16 +850,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "Manifest records the reason as ``explicit_flag`` when set "
         "explicitly.",
     )
-    opt.add_argument(
-        "--recipe-kb-strict-fingerprint",
-        dest="recipe_kb_strict_fingerprint",
-        action="store_true",
-        default=False,
-        help="When set, T0 refuses warm_start_recipe rows whose "
-        "stack_fingerprint does not match the current pod (recorded "
-        "in manifest.json). Default: lenient (M1 records the flag "
-        "in manifest only; consumed by M5 specialist assembly).",
-    )
     # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
         "--no-warm-replay",

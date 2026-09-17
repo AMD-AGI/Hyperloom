@@ -102,10 +102,51 @@ def _kb_env(monkeypatch, tmp_path, **env):
     """Isolate resolve_kb_topology from the ambient env and any real state file."""
     monkeypatch.delenv("HYPERLOOM_MN_EXT_SERVICE_URL", raising=False)
     monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "state.json"))
-    for key in ("INFERENCE_OPTIMIZER_NODES", "INFERENCE_OPTIMIZER_GPUS_PER_NODE", "TP", "EP", "PD_MODE"):
+    for key in (
+        "INFERENCE_OPTIMIZER_NODES",
+        "INFERENCE_OPTIMIZER_GPUS_PER_NODE",
+        "TP",
+        "EP",
+        "PD_MODE",
+        "HYPERLOOM_PARTITION_MODE",
+    ):
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+
+
+def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch, tmp_path):
+    """Reader and writer both key off this one call, so the mode has to arrive through it."""
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="CPX")
+    monkeypatch.setattr(mne, "_read_state", lambda: {})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["partition_mode"] == "CPX"
+    assert kb_hardware_slug("MI300X", **topo) == "MI300X_cpx"
+
+
+def test_resolve_kb_topology_prefers_persisted_partition_mode_on_resume(monkeypatch, tmp_path):
+    """A resume reads the mode it recorded rather than whatever the new shell exports."""
+    _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="SPX")
+    monkeypatch.setattr(mne, "_read_state", lambda: {"compute_partition": {"mode": "cpx"}})
+
+    assert mne.resolve_kb_topology()["partition_mode"] == "CPX"
+
+
+def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_published_one(monkeypatch, tmp_path):
+    """No mode means the whole card, which is the key every historical row already has."""
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
+
+    _kb_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(mne, "_read_state", lambda: {})
+
+    topo = mne.resolve_kb_topology()
+
+    assert topo["partition_mode"] == ""
+    assert kb_hardware_slug("MI300X", **topo) == "MI300X"
 
 
 def test_resolve_kb_topology_prefers_env_over_state(monkeypatch, tmp_path):
