@@ -214,7 +214,17 @@ def _collect_recipe(
     enablement = _recipe_state(state)
     steps = build_recipe_steps(enablement, attempt_summary=build_attempt_summary)
     if steps:
-        out["recipe_steps"] = steps
+        # Normalized on the way out, never on the way in: ``patch_targets`` and
+        # ``patch_roots`` are keyed by the raw path, so rewriting the input makes
+        # every lookup miss and the whole recipe reports ``patch_targets_unknown``
+        # -- a portability fix that silently costs the steps their targets. The
+        # published value is the only part a consumer reads.
+        out["recipe_steps"] = [
+            {**st, "path": _portable_patch_ref(str(st.get("path") or ""), session_dir)}
+            if st.get("kind") == "patch" and st.get("path")
+            else st
+            for st in steps
+        ]
     accepted_config = project_accepted_config(enablement.get("accepted_config"))
     if accepted_config:
         archived = str(_eg(state, "accepted_config_path", "") or "")
@@ -399,8 +409,12 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
                 # back to ``str(path)``, so ``or`` never fires and the absolute
                 # path would travel exactly as if nothing had been done.
                 "patches": [_portable_patch_ref(str(p), session_dir) for p in (r.get("patches") or [])],
+                # ``rel_target`` when the producer recorded one; otherwise the
+                # target's own name. Falling back to ``target`` verbatim put an
+                # install path from this machine into the recipe, which is the
+                # same leak this projection exists to close.
                 "artifacts": [
-                    str(a.get("rel_target") or a.get("target") or "")
+                    str(a.get("rel_target") or "") or Path(str(a.get("target") or "")).name
                     for a in (r.get("artifacts") or [])
                     if isinstance(a, dict) and (a.get("rel_target") or a.get("target"))
                 ],

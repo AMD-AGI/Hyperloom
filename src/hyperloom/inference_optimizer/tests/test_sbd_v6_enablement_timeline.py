@@ -881,3 +881,38 @@ def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_se
     assert collected["kept_patches"] == ["a.patch"]
     assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
 
+def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
+    """One assertion over the whole recorded recipe, not one per field.
+
+    This leak was closed four times in a row and kept reappearing somewhere
+    else: kept_rounds, then kept_patches, then the artifact fallback, then
+    recipe_steps -- which is the recipe's own product, the array a consumer
+    replays in order. Each fix normalized the surface in front of it. Asserting
+    over the serialized whole is the only form that does not have to be
+    remembered next time a field is added.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+
+    state = {
+        "enablement": {
+            "kept_patches": ["/authoring/ws/a.patch"],
+            "kept_rounds": [
+                {
+                    "task_id": "s1",
+                    "patches": ["/authoring/ws/a.patch"],
+                    "artifacts": [{"source": "/authoring/ws/_C.so", "target": "/srv/vllm/_C.so"}],
+                }
+            ],
+        },
+        "enablement_mode": "all",
+    }
+    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+
+    blob = _json.dumps(collected)
+    assert "/authoring/ws" not in blob, blob
+    # The linkage itself must survive: normalizing must not mean discarding.
+    assert "a.patch" in blob and "_C.so" in blob
+
