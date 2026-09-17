@@ -183,7 +183,15 @@ _RULES: tuple[_Rule, ...] = (
         bridge_layer="rocm_hip",
         patterns=(
             re.compile(r"out of resource:\s*(shared memory|registers)"),
-            re.compile(r"Required:\s*(\d+),\s*Hardware limit:\s*(\d+)"),
+            # Anchored to the launch that reported it. ``Required: n, Hardware
+            # limit: n`` on its own is how any capacity diagnostic words itself
+            # -- "insufficient GPUs for tensor parallel", a KV cache larger than
+            # the device -- and this rule precedes the resource-constraint one
+            # and asks for code acquisition, so the bare pair sent a host that is
+            # simply too small off to rebuild source that was never wrong. That
+            # distinction is the whole reason this rule exists.
+            re.compile(r"(?:out of resource|OutOfResources)[^\n]*?Hardware limit:\s*(\d+)"),
+            re.compile(r"hipErrorLaunchOutOfResources"),
             re.compile(r"[Rr]educing block sizes or `?num_stages`?"),
             re.compile(r"uses too much shared data"),
         ),

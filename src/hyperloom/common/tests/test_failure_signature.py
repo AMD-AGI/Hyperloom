@@ -557,3 +557,40 @@ def test_failure_signature_to_dict_round_trips_fields() -> None:
     assert d["kind"] == MISSING_MODEL_ARCH
     assert d["offending_file"] == "m.py"
     assert d["confidence"] == 0.9
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ERROR: insufficient GPUs for tensor parallel. Required: 8, Hardware limit: 4",
+        "KV cache blocks exceed device capacity. Required: 4096, Hardware limit: 2048",
+    ],
+)
+def test_a_capacity_diagnostic_is_not_a_kernel_over_its_budget(text):
+    """``Required: n, Hardware limit: n`` is how any capacity report words itself.
+
+    Accepting the pair on its own made this rule -- which precedes the
+    resource-constraint one and asks for code acquisition -- claim a host that
+    is simply too small, and send the enablement off to rebuild source that was
+    never wrong. Telling those two apart is the only reason this rule exists.
+    """
+    from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
+
+    assert classify_failure(text).kind != KERNEL_RESOURCE_LIMIT
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "triton.runtime.errors.OutOfResources: out of resource: shared memory, "
+        "Required: 98304, Hardware limit: 65536. Reducing block sizes may help.",
+        "out of resource: registers, Required: 512, Hardware limit: 256",
+        "hipErrorLaunchOutOfResources",
+    ],
+)
+def test_a_launch_that_names_its_own_resource_still_classifies(text):
+    """Narrowing the pattern must not cost the cases it was written for."""
+    from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
+
+    assert classify_failure(text).kind == KERNEL_RESOURCE_LIMIT
+
