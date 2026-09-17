@@ -338,6 +338,61 @@ def test_ensure_ray_cluster_declares_serving_slot(monkeypatch):
     assert "--num-gpus=4" in starts[0]
 
 
+def _capture_ray_env(monkeypatch) -> list:
+    """Record the env every ``ray`` CLI call is handed."""
+    seen: list = []
+    started = False
+
+    monkeypatch.setattr(ray_runtime, "ray_status_ok", lambda: started)
+
+    def _fake_run(cmd, **kwargs):
+        nonlocal started
+        if cmd[:1] == ["ray"]:
+            seen.append((tuple(cmd), kwargs.get("env")))
+        if cmd[:2] == ["ray", "start"]:
+            started = True
+        return _Proc()
+
+    monkeypatch.setattr(ray_runtime.subprocess, "run", _fake_run)
+    return seen
+
+
+def test_ray_cli_gets_hip_visible_devices_when_only_rocr_is_set(monkeypatch):
+    """Ray's AMD probe raises at import when ROCR is set without HIP.
+
+    Preflight drops HIP for the benchmark path, so every ray CLI call has to
+    re-supply it or the cluster can never start on ROCm.
+    """
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    seen = _capture_ray_env(monkeypatch)
+
+    ray_runtime.ensure_ray_cluster(num_gpus=1)
+
+    assert seen, "no ray CLI call was made"
+    for cmd, env in seen:
+        assert env is not None, f"{cmd} inherited the caller's environment"
+        # One visible device via ROCR, so Ray's own view indexes it as 0.
+        assert env.get("HIP_VISIBLE_DEVICES") == "0", (cmd, env.get("HIP_VISIBLE_DEVICES"))
+
+
+def test_ray_cli_keeps_an_operator_supplied_hip_visible_devices(monkeypatch):
+    """An explicit HIP value is the operator's, not ours to re-index."""
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "2,3")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "1")
+    fake = _FakeResource(soft=1048576, hard=1048576, events=[])
+    monkeypatch.setattr(ray_runtime, "resource", fake, raising=False)
+    seen = _capture_ray_env(monkeypatch)
+
+    ray_runtime.ensure_ray_cluster(num_gpus=1)
+
+    assert seen
+    for cmd, env in seen:
+        assert env.get("HIP_VISIBLE_DEVICES") == "1", (cmd, env.get("HIP_VISIBLE_DEVICES"))
+
+
 def _install_failing_ray_start(monkeypatch, stdout: str, stderr: str):
     """Make ``ray start`` exit non-zero with output, leaving the cluster down."""
 
