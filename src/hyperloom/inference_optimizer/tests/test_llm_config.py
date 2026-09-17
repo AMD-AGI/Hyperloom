@@ -200,9 +200,10 @@ def test_explicit_openai_side_wins_key_and_url_independently():
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
 
-def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+def test_retired_gateway_key_loses_to_the_anthropic_fallback():
+    """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -324,7 +325,7 @@ def test_openai_kwargs_error_names_every_searched_key():
     with pytest.raises(LLMConfigError) as excinfo:
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
     message = str(excinfo.value)
-    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 

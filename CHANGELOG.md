@@ -44,6 +44,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Removed
 
+- **Every non-official LLM key name as a Hyperloom credential.** `OPENAI_API_KEY`
+  and the three Anthropic-side names are the only credentials the optimizer
+  authenticates with. A survey of the eight vendor and gateway aliases found
+  read paths behind exactly two of them: `LLM_GATEWAY_KEY`, which
+  `resolve_openai_client_config` accepted one rung above the Anthropic fallback
+  and which `codex_session` would name as the Codex key variable, and
+  `LLM_API_KEY`, which the robustness RCA resolver read when the OpenAI side
+  carried no key. The other six — `AMD_API_KEY`, `AMD_LLM_API_KEY`,
+  `GEAK_API_KEY`, `LLM_PROXY_API_KEY`, `CLAW_API_KEY` and the LLM-side
+  `SAFE_API_KEY` — never authenticated anything here at all.
+
+  Two of those read sites were a credential name doing a second job it had no
+  business doing. `_provider_only_mode` treated a bare `LLM_GATEWAY_KEY` as
+  proof that the host fronted both protocols, which suppressed single-provider
+  detection; single-provider intent is now read off the two sides' own URL and
+  key. TraceLens took the same variable as an on-its-own gateway marker, which
+  `HYPERLOOM_STRICT_GATEWAY_MARKERS` exists to express three lines below the
+  check that was removed. The specialist secret allowlist also stops forwarding
+  `LLM_GATEWAY_KEY` to the child, which could not have authenticated with it
+  once `codex_session` no longer resolves it.
+
+  A deployment whose `.env` carries `LLM_GATEWAY_KEY` as its only OpenAI-side
+  credential has to rename it to `OPENAI_API_KEY`; the value and the endpoint
+  are unchanged. An Anthropic-only host that also carried the gateway key now
+  resolves its Anthropic bearer for OpenAI-protocol calls instead, which is the
+  credential it was already using for everything else.
+
+  What this does not touch: `LLM_API_KEY`, `AMD_LLM_API_KEY` and `LLM_API_BASE`
+  are still filled from the OpenAI side by CLI preflight and mirrored into the
+  Ray runtime env, because they are how GEAK and the kernel tools receive that
+  credential rather than anything Hyperloom reads — retiring them is a change to
+  make in those components. All eight names also stay in the benchmark secret,
+  variant, external and specialist-redaction lists: membership there asserts
+  that a name holds a secret worth scrubbing, not that anything consumes it, and
+  an operator's stale export still needs stripping from child processes.
+
 - **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
   nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
   with the pod — which was never the exposure, since framework version and

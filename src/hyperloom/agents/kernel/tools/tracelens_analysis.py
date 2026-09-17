@@ -331,13 +331,11 @@ ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 def _is_safe_litellm_gateway() -> bool:
     """True when the Claude SDK targets a strict LiteLLM-style gateway (#574).
 
-    ``LLM_GATEWAY_KEY`` is an explicit gateway signal and wins on its own; a
-    deployment may front the gateway on a hostname with no protocol marker.
-    Otherwise detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL``
-    host; other backends are left alone.
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host;
+    other backends are left alone. A deployment fronting the gateway on a
+    hostname with no protocol marker names it in
+    ``HYPERLOOM_STRICT_GATEWAY_MARKERS``.
     """
-    if os.environ.get("LLM_GATEWAY_KEY", "").strip():
-        return True
     base_url = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).lower()
     # Generic protocol markers by default (no operator/brand strings shipped);
     # a specific deployment can add its own gateway host substrings via

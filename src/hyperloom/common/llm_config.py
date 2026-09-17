@@ -65,6 +65,14 @@ ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
+# What may authenticate an OpenAI-protocol client, highest precedence first. The Anthropic-side keys come last
+# because an Anthropic-only deployment fronts both protocols behind one gateway token.
+_OPENAI_CLIENT_KEY_ENV_ORDER: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+
 
 def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
     """First non-blank value among ``names``, in the order given."""
@@ -102,7 +110,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
 )
 
 # Retired provider-specific variables.
@@ -395,27 +402,10 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("OPENAI_API_KEY") or "").strip()
-        or (source.get("LLM_GATEWAY_KEY") or "").strip()
-        # Anthropic-only deployments: one gateway token authenticates both protocols.
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-    )
+    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
+    api_key = _first_set_value(candidates, source)
     if not api_key:
-        key_names = " / ".join(
-            dict.fromkeys(
-                [
-                    api_key_env,
-                    "OPENAI_API_KEY",
-                    "LLM_GATEWAY_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                ]
-            )
-        )
-        raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
 
     explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()

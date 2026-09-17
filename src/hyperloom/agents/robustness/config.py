@@ -275,9 +275,6 @@ def _openai_rca_credentials(env: Mapping[str, str]) -> tuple[str, str, str] | No
     openai_key = env.get("OPENAI_API_KEY", "").strip()
     if openai_key:
         return openai_base or "https://api.openai.com/v1", openai_key, "openai"
-    gateway_key = env.get("LLM_API_KEY", "").strip() or env.get("LLM_GATEWAY_KEY", "").strip()
-    if gateway_key and openai_base:
-        return openai_base, gateway_key, "openai"
     return None
 
 
