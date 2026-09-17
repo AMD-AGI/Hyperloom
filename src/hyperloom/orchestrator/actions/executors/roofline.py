@@ -671,9 +671,7 @@ class RooflineExecutor:
                     failure=failure,
                     # Probed here rather than only on the failure paths: the run this is meant to catch is the
                     # one that reports success.
-                    server_liveness=await asyncio.to_thread(
-                        _server_liveness_probe, session_dir, _self_task_id
-                    ),
+                    server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, _self_task_id),
                     # Drained per attempt, so every attempt carries which patchers ran and what they returned --
                     # including the attempts that raised, where no result dict exists to carry it. Resolved by
                     # attribute because ``profile_executor`` is a module-level name that alternate wirings and
