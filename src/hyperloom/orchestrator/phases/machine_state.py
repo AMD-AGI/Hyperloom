@@ -66,7 +66,6 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "baseline",
             "roofline",
             "profile",
-            "recover",
             "specialist",
             "integrate_patch",
             "targeted_build",

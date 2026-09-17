@@ -257,7 +257,6 @@ def test_phase_explore_allowlist_drops_legacy_actions():
             "integrate_patch",
             "roofline",
             "profile",
-            "recover",
         }
     )
 
