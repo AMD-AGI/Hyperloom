@@ -2724,3 +2724,24 @@ def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):
     assert _names_a_live_channel("GIT_TERMINAL_PROMPT", "1") is True
     assert _names_a_live_channel("PIP_KEYRING_PROVIDER", "subprocess") is True
     assert _names_a_live_channel("GIT_ASKPASS", "/usr/bin/askpass") is True
+
+
+def test_an_empty_drop_in_directory_is_not_a_credential_store(tmp_path):
+    """``etc/apt/auth.conf.d`` ships empty on a stock image, which is most of them.
+
+    Detected by existence alone, that one directory marked ``apt_auth`` live on
+    every Debian and Ubuntu host -- including the machine this branch was
+    developed on -- so every recipe produced there carried
+    ``credential_required`` and could never be replayed. A drop-in directory is
+    evidence only when something has been dropped in.
+    """
+    from hyperloom.orchestrator.enablement.recipe.credentials import detect_credential_channels
+
+    drop_in = tmp_path / "etc" / "apt" / "auth.conf.d"
+    drop_in.mkdir(parents=True)
+
+    assert detect_credential_channels({}, fs_root=str(tmp_path)) == []
+
+    (drop_in / "private.conf").write_text("machine repo login u password p\n", encoding="utf-8")
+
+    assert detect_credential_channels({}, fs_root=str(tmp_path)) == ["apt_auth"]
