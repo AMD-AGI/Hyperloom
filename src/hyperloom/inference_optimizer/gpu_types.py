@@ -65,6 +65,9 @@ def _autodetect_gpu_type() -> str | None:
             text=True,
             timeout=5,
         ).stdout.upper()
+        # Spaces dropped so a derived tag matches the spelling rocm-smi prints:
+        # radeon8060s appears as "Radeon 8060S Graphics".
+        out = out.replace(" ", "")
         for tag in _PRODUCT_TAGS:
             if tag in out:
                 return tag.lower()
