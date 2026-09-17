@@ -73,6 +73,8 @@
 #   cp "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/robustness_monitor.sh.example" \
 #      "$RUN_DIR/robustness_monitor.sh"
 #   chmod +x "$RUN_DIR/robustness_monitor.sh"
+#   # when CLAW_SESSION_ID is set and the bash tool offers run_in_background,
+#   # launch with it instead of setsid nohup
 #   setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
 #     > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
 #     2>&1 < /dev/null &
@@ -148,14 +150,28 @@ state_path = sd / "state.json"
 final_report = sd / "reports" / "final.md"
 final_summary = sd / "reports" / "final.json"
 
-if final_report.is_file() or final_summary.is_file():
-    print("final_artifact", file=sys.stderr)
-    raise SystemExit(0)
+def _final_artifact_present():
+    return final_report.is_file() or final_summary.is_file()
 
+
+# ``state.json`` decides, not the report artifacts: the crash path's safety-net
+# writes a final report too, so a resume that clears ``stop_reason`` leaves a
+# stale ``final.json`` behind that would otherwise read as terminal forever and
+# strand the very run this monitor exists to guard. The artifacts only stand in
+# when there is no state to read.
 if not state_path.is_file():
+    if _final_artifact_present():
+        print("final_artifact", file=sys.stderr)
+        raise SystemExit(0)
     raise SystemExit(1)
 
-state = json.loads(state_path.read_text())
+try:
+    state = json.loads(state_path.read_text())
+except (OSError, ValueError):
+    if _final_artifact_present():
+        print("final_artifact", file=sys.stderr)
+        raise SystemExit(0)
+    raise SystemExit(1)
 stop = (state.get("stop_reason") or "").strip()
 close_done = state.get("close_sequence_done") is True
 
@@ -171,11 +187,8 @@ except ImportError:
     print("warn: STOP_REASON_VOCAB unavailable; using the offline subset", file=sys.stderr)
     STOP_REASON_VOCAB = frozenset({
         "target_reached", "global_converged", "time_exhausted", "max_ticks",
-        "baseline_failed", "prelude_baseline_failed", "policy_loop",
-        "prelude_policy_loop", "emergency", "signal", "unknown", "custom",
-        "crash_threshold_exceeded", "user_stop_requested",
-        "time_exhausted_during_prelude", "recipe_kb_t0_failed",
-        "recipe_kb_drain_failed", "recipe_kb_commit_failed",
+        "baseline_failed", "prelude_baseline_failed", "emergency", "signal",
+        "unknown", "custom", "time_exhausted_during_prelude",
         "model_context_window_too_small", "unsupported_model_arch",
         "model_config_incompatible", "baseline_accuracy_failed",
     })

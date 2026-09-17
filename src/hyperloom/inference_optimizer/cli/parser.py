@@ -31,6 +31,11 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
+#: Fallback wall-clock budget. Named because ``--resume-from`` reads it back as
+#: the "operator did not set this" signal: unlike the target flags, this one has
+#: a real default, so the value alone cannot say whether it was asked for.
+DEFAULT_MAX_HOURS = 2.0
+
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
 _SECRET_NAME_HINTS = (
     "token",
@@ -451,7 +456,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "state.json under `explore_search.last_round.skipped_dup`, and in the "
         "action's per-variant outcomes, tagged `user_skip`.",
     )
-    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--max-hours",
+        type=float,
+        # No argparse default: ``--resume-from`` must tell "the operator asked
+        # for this many hours" from "the operator said nothing", and a default
+        # would make an explicit value indistinguishable from absence.
+        default=None,
+        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
+    )
     opt.add_argument(
         "--extend-hours",
         dest="extend_hours",
@@ -840,16 +853,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "no-ops). Also short-circuits any legacy IR-3 KB probe marker. "
         "Manifest records the reason as ``explicit_flag`` when set "
         "explicitly.",
-    )
-    opt.add_argument(
-        "--recipe-kb-strict-fingerprint",
-        dest="recipe_kb_strict_fingerprint",
-        action="store_true",
-        default=False,
-        help="When set, T0 refuses warm_start_recipe rows whose "
-        "stack_fingerprint does not match the current pod (recorded "
-        "in manifest.json). Default: lenient (M1 records the flag "
-        "in manifest only; consumed by M5 specialist assembly).",
     )
     # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
@@ -1256,7 +1259,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1264,7 +1267,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

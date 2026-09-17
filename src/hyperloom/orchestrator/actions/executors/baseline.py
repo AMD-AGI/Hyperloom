@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import hashlib
 import json
 import logging
 import os
@@ -20,12 +19,11 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -51,7 +49,6 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     BASELINE_COLD_START_TIMEOUT_SEC,
@@ -66,6 +63,7 @@ from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 # back, how a round's cap is clamped to the budget, how the two session bounds are resolved, and the hygiene every
 # launch needs.
 from ._grid_runner import (
+    SessionDirField,
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
@@ -153,6 +151,15 @@ _EVAL_FAILURE_MARKERS = (
     "run_eval failed with exit code",
     "ERROR: run_eval failed",
     "Unknown parameter: --concurrent-requests",
+)
+# Markers showing the eval failed because the server was not reachable, rather than because the model scored badly or
+# the framework lacks a capability. The eval harness reports both the same way -- a non-zero ``run_eval`` -- so without
+# this distinction a torn-down server is indistinguishable from an accuracy gap, and gets routed to the enablement lane
+# to hunt for a capability that was never missing.
+_EVAL_SERVER_UNREACHABLE_MARKERS = (
+    "ClientConnectorError",
+    "Cannot connect to host",
+    "Connect call failed",
 )
 # Bounded per-file read so log scanning never slurps a multi-GB server.log.
 _LOG_SCAN_MAX_BYTES = 262_144
@@ -242,9 +249,12 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up. Both
-#: ends are needed: the boot milestones are at the head, the wall at the tail.
+#: Bytes read from each end of a ``server.log`` when observing a bring-up.
 _BRINGUP_LOG_EDGE_BYTES = 65_536
+
+#: Cap on milestone lines carried out of the unread middle; the ladder needs
+#: one witness per milestone.
+_BRINGUP_MIDDLE_MARKER_LINES = 200
 
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
@@ -279,8 +289,39 @@ class BringupLog:
     degraded: str = ""
 
 
+def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
+    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
+    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+
+    handle.seek(start)
+    remaining = max(0, stop - start)
+    kept: list[str] = []
+    carry = b""
+    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
+        chunk = handle.read(min(1 << 20, remaining))
+        if not chunk:
+            break
+        remaining -= len(chunk)
+        lines = (carry + chunk).split(b"\n")
+        carry = lines.pop()
+        for raw in lines:
+            text = raw.decode("utf-8", "replace")
+            lowered = text.lower()
+            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
+                kept.append(text)
+                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
+                    break
+    return kept
+
+
 def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log's head and tail for bring-up classification.
+    """Read a server log for bring-up classification: both edges, plus milestones.
+
+    The edges carry the failure excerpt. The ladder needs a witness for every
+    milestone the boot passed, and those are not all near one: a build that logs
+    per kernel shape pushes the later rungs megabytes in, which would understate
+    ``stage_reached`` and make two unequal boots compare as equal. So the middle
+    is streamed for milestone lines and they are carried between the edges.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -306,6 +347,7 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
                 return BringupLog(handle.read().decode("utf-8", "replace"))
             handle.seek(0)
             head = handle.read(edge_bytes)
+            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
             handle.seek(size - edge_bytes)
             tail = handle.read(edge_bytes)
     except FileNotFoundError:
@@ -313,7 +355,8 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    return BringupLog(head.decode("utf-8", "replace") + "\n" + tail.decode("utf-8", "replace"))
+    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
+    return BringupLog("\n".join(segments))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:
@@ -708,91 +751,6 @@ def _is_double_run_accuracy_handoff(
         return False
     source = str((salvaged or {}).get("source_file") or "")
     return _WARMUP_ROUND_DIR in Path(source).parts
-
-
-def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
-    """Mirror an InferenceX checkout onto stable local disk."""
-    src = str(src)
-    if (
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX",
-            "",
-        ).strip()
-        == "1"
-    ):
-        return src
-    try:
-        if not is_network_fs(src):
-            return src
-    except Exception:  # noqa: BLE001 — detection is best-effort
-        return src
-
-    real_src = os.path.realpath(src)
-    local_root = Path(
-        os.environ.get("INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", "")
-        or os.path.join(
-            os.path.expanduser("~"),
-            ".cache",
-            "hyperloom",
-            "inferencex_local",
-        )
-    )
-    src_hash = hashlib.sha1(real_src.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
-    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
-    dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
-    dest = local_root / dest_name
-    try:
-        local_root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: could not create local InferenceX root %s (%s); using the network-mount checkout.",
-            local_root,
-            exc,
-        )
-        return src
-    # Lock keyed on dest so concurrent tasks mirroring the same source serialize their rmtree/replace instead of
-    # racing.
-    lock_path = str(local_root / f".{dest.name}.lock")
-    staging: Path | None = None
-    try:
-        with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
-            staging = Path(tempfile.mkdtemp(dir=str(local_root)))
-            staged_ix = staging / "InferenceX"
-            # Copy the tree fresh every run because the per-task patch step rewrites the mirror in place.
-            shutil.copytree(real_src, staged_ix, symlinks=True)
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
-            os.replace(staged_ix, dest)
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: could not mirror InferenceX %s to local disk "
-            "(%s); using the network-mount checkout. The #523 cuda-graph "
-            "pickle dump may ENOENT if the mount flaps mid-run.",
-            real_src,
-            exc,
-        )
-        return src
-    finally:
-        # Always clear the staging dir so it doesn't accumulate across runs.
-        if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
-
-    if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
-        log.warning(
-            "baseline_executor: local InferenceX mirror at %s is incomplete; using original %s",
-            dest,
-            real_src,
-        )
-        shutil.rmtree(dest, ignore_errors=True)
-        return src
-    log.info(
-        "baseline_executor: #523 — mirrored InferenceX from network mount %s "
-        "to local disk %s so the server cwd (cuda-graph pickle dump target) "
-        "survives a wekafs/NFS flap.",
-        real_src,
-        dest,
-    )
-    return str(dest)
 
 
 def _git_head_sha(repo_path: str) -> str:
@@ -1588,6 +1546,8 @@ def _rollback_warm_kernel_apply_results(
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -1599,15 +1559,13 @@ class BaselineExecutor:
         cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults."""
-        from ._grid_runner import _resolve_session_dir
-
         # Backend-aware interpreter: bypass uses a plain python3, magpie uses the Magpie-importable venv.
         from .benchmark_backend import resolve_benchmark_interpreter
 
         self.magpie_python = magpie_python or resolve_benchmark_interpreter()
         # None = resolve from $FRAMEWORK at call time; explicit fixture path wins.
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.shared_state = shared_state
         self.default_timeout_sec = default_timeout_sec
         self.cwd = Path(cwd if cwd is not None else tempfile.gettempdir())
@@ -2036,6 +1994,53 @@ class BaselineExecutor:
         return BaselineExecutor._failure_carries_markers(result, _EVAL_FAILURE_MARKERS)
 
     @staticmethod
+    def _is_server_unreachable_eval_failure(result: dict[str, Any]) -> bool:
+        """Whether an eval-rooted failure happened because the server had gone away.
+
+        Evidence of a refused connection says the eval never reached a verdict, so the run carries no information
+        about accuracy or about a missing framework capability -- the two things the enablement lane exists to chase.
+
+        Deliberately not routed through ``_failure_carries_markers``: that climbs out of a round directory to the
+        shared task root, so a warmup round whose server crashed would decide the classification of a measure round
+        that did reach a verdict -- demoting a real accuracy failure out of the enablement lane, the inverse of what
+        this check is for. Scan this round's own directory instead. The markers are frequently absent from
+        ``result['error']`` -- that is why the eval-rooted check reads logs at all -- and when the eval-rooted verdict
+        came from a log, the refusal that caused it is in the same log.
+        """
+        texts = [str(result.get("error") or "")]
+        texts.extend(str(warning) for warning in result.get("nonfatal_warnings") or [])
+        if any(marker in text for text in texts for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+            return True
+        out_dir = result.get("output_dir")
+        if not out_dir:
+            return False
+        root = Path(out_dir)
+        if not root.is_dir():
+            return False
+        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+        seen = 0
+        try:
+            for path in root.rglob("*.log"):
+                if path.name not in log_names:
+                    continue
+                seen += 1
+                if seen > 64:  # bound the scan on pathological trees
+                    break
+                try:
+                    with path.open("rb") as f:
+                        f.seek(0, 2)
+                        size = f.tell()
+                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
+                        chunk = f.read().decode("utf-8", "replace")
+                except OSError:
+                    continue
+                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
+                    return True
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
         """Whether a failed baseline died on the MoE runner backend in use."""
         return BaselineExecutor._failure_carries_markers(
@@ -2180,54 +2185,69 @@ class BaselineExecutor:
         )
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
+        # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
+        # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
+        # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
+        # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
+        # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
+        # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
         if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
-            _, evidence = self._eval_failure_evidence(result)
-            if self._eval_enablement_active(ctx):
-                from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
-
+            if self._is_server_unreachable_eval_failure(result):
                 log.warning(
-                    "baseline_executor: eval-rooted failure; routing to "
-                    "enablement instead of salvaging (RUN_EVAL stays on)."
-                )
-                self._stamp_eval_failure_contract(
-                    ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
-                )
-                return result
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-                log.error(
-                    "baseline_executor: failure is eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark) on a genuine baseline, "
-                    "whose whole purpose is to establish the accuracy "
-                    "reference. NOT retrying with RUN_EVAL=false: a "
-                    "throughput-only baseline cannot satisfy the accuracy gate, "
-                    "so the retry would burn a second full benchmark and the "
-                    "run would stop anyway. Stopping now — fix the accuracy "
-                    "eval (see the benchmark stdout/stderr for the run_eval "
-                    "error) rather than disabling RUN_EVAL."
+                    "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
+                    "the eval reached a verdict; recording an ordinary baseline failure rather than an enablement "
+                    "gap."
                 )
                 result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                result["accuracy_source"] = "eval_unavailable"
-                self._request_eval_rooted_baseline_stop(ctx, result)
-                return result
-            log.warning(
-                "baseline_executor: failure looks eval-rooted (InferenceX "
-                "run_eval aborted the benchmark); retrying once with "
-                "RUN_EVAL=false to salvage the throughput baseline without "
-                "the accuracy gate."
-            )
-            retry = await self._run_pass(
-                ctx,
-                recorder=recorder,
-                attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                force_disable_eval=True,
-            )
-            retry.setdefault("nonfatal_warnings", [])
-            retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-            if retry.get("status") == "succeeded":
-                retry["accuracy_source"] = "eval_unavailable"
-            eval_disabled_by_fallback = True
-            result = retry
+                result["nonfatal_warnings"].append("eval_failed_server_unreachable")
+            else:
+                _, evidence = self._eval_failure_evidence(result)
+                if self._eval_enablement_active(ctx):
+                    from ._accuracy_gate import EVAL_KIND_RUNTIME_FAILURE
+
+                    log.warning(
+                        "baseline_executor: eval-rooted failure; routing to "
+                        "enablement instead of salvaging (RUN_EVAL stays on)."
+                    )
+                    self._stamp_eval_failure_contract(
+                        ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
+                    )
+                    return result
+                if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX "
+                        "run_eval aborted the benchmark) on a genuine baseline, "
+                        "whose whole purpose is to establish the accuracy "
+                        "reference. NOT retrying with RUN_EVAL=false: a "
+                        "throughput-only baseline cannot satisfy the accuracy gate, "
+                        "so the retry would burn a second full benchmark and the "
+                        "run would stop anyway. Stopping now — fix the accuracy "
+                        "eval (see the benchmark stdout/stderr for the run_eval "
+                        "error) rather than disabling RUN_EVAL."
+                    )
+                    result.setdefault("nonfatal_warnings", [])
+                    result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
+                    result["accuracy_source"] = "eval_unavailable"
+                    self._request_eval_rooted_baseline_stop(ctx, result)
+                    return result
+                log.warning(
+                    "baseline_executor: failure looks eval-rooted (InferenceX "
+                    "run_eval aborted the benchmark); retrying once with "
+                    "RUN_EVAL=false to salvage the throughput baseline without "
+                    "the accuracy gate."
+                )
+                retry = await self._run_pass(
+                    ctx,
+                    recorder=recorder,
+                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
+                    force_disable_eval=True,
+                )
+                retry.setdefault("nonfatal_warnings", [])
+                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
+                if retry.get("status") == "succeeded":
+                    retry["accuracy_source"] = "eval_unavailable"
+                eval_disabled_by_fallback = True
+                result = retry
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
@@ -2422,6 +2442,18 @@ class BaselineExecutor:
             # with the observed value rather than reporting it as a missing measurement.
             acc = acc_val
 
+        # An eval that never reached a verdict because the server was unreachable produced no accuracy signal, so
+        # neither the stop below nor the enablement routing has anything to act on; stamping either would put an
+        # accuracy-flavoured verdict on evidence that says only that the measurement broke. But when the salvage
+        # above did find a measured accuracy, there IS a signal -- a real one, from a round that reached a verdict --
+        # and returning here would throw it away, leaving a genuinely under-floor model anchoring nothing.
+        if (
+            salvaged is None
+            and result.get("status") != "succeeded"
+            and self._is_server_unreachable_eval_failure(result)
+        ):
+            return
+
         # Route into enablement instead of stopping: the throughput baseline stays for diagnostics but is blocked from
         # anchoring.
         if eval_enablement:
@@ -2553,11 +2585,6 @@ class BaselineExecutor:
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Keep the InferenceX checkout Magpie ``cd``s into on stable local disk so SGLang's relative-path cuda-graph
-        # dump survives a wekafs/NFS flap.
-        ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
-        effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
-
         # Warm patches are prepared after config/runtime preflight, immediately before the single final benchmark.
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
@@ -2607,7 +2634,6 @@ class BaselineExecutor:
                 args_mode=str(params.get("args_mode") or "append"),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
-                inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
@@ -2624,6 +2650,7 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
         # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
         # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
         _rt_from_params = params.get("runtime_override")

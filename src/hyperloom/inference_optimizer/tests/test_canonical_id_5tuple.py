@@ -322,7 +322,7 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
     """Single-node KB keys must stay byte-for-byte identical to pre-infera runs."""
     gpu = "MI300X"
     assert kb_hardware_slug(gpu, nodes=1) == gpu
-    # PD / world-size / formation kwargs are all ignored when nodes < 2.
+    # Cluster kwargs are all ignored when nodes < 2, and the default shape (dense, whole card) adds nothing.
     assert (
         kb_hardware_slug(
             gpu,
@@ -332,11 +332,44 @@ def test_kb_hardware_slug_single_node_unchanged() -> None:
             pd_prefill_nodes=2,
             pd_decode_nodes=1,
             tp=8,
-            ep=8,
+            ep=1,
+            partition_mode="SPX",
             backend="rayjob",
         )
         == gpu
     )
+
+
+def test_kb_hardware_slug_separates_a_divided_card_from_a_whole_one() -> None:
+    """SPX and CPX share a GPU type but are different machines; the key has to say so."""
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="CPX") == "MI300X_cpx"
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="DPX") == "MI300X_dpx"
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, partition_mode="QPX") == "MI300X_qpx"
+    # The mode also suffixes inside a cluster key, after the formation and before the backend.
+    assert (
+        kb_hardware_slug("MI300X", nodes=2, gpus_per_node=8, tp=8, ep=8, partition_mode="CPX", backend="rayjob")
+        == "MI300X_ws16_tp8_ep8_cpx_rayjob"
+    )
+
+
+def test_kb_hardware_slug_treats_the_default_shape_as_no_shape() -> None:
+    """Anything that would re-key a historical row has to be omitted, not encoded."""
+    # One partition IS the whole card, so SPX must be indistinguishable from a mode nobody published.
+    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="SPX") == "MI300X"
+    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="") == "MI300X"
+    # A mode this build does not know is not a licence to invent a key for it.
+    assert kb_hardware_slug("MI300X", nodes=1, partition_mode="TPX") == "MI300X"
+    # tp is deliberately NOT encoded single-node: almost every run sets it, so it would move the whole corpus.
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8) == "MI300X"
+
+
+def test_kb_hardware_slug_encodes_single_node_expert_parallelism() -> None:
+    """``ep`` is fixed at launch and invalidates a config across splits, whatever the node count."""
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8) == "MI300X_ep8"
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=8, partition_mode="CPX") == "MI300X_ep8_cpx"
+    # Dense is the default, so ep<=1 stays silent and keeps the historical key.
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=1) == "MI300X"
+    assert kb_hardware_slug("MI300X", nodes=1, tp=8, ep=0) == "MI300X"
 
 
 def test_kb_hardware_slug_multi_node_adds_topology_suffix() -> None:

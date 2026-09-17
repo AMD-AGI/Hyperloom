@@ -11,6 +11,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.actions.executors._server_lifecycle import (
     reap_orphaned_servers,
 )
@@ -97,10 +99,15 @@ def _spawn_dead_leader_with_live_child(tmp_path: Path, marker: str) -> tuple[int
     raise AssertionError("leader did not write child pid")
 
 
-def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
+@pytest.mark.parametrize(
+    ("marker", "tag"),
+    [("sglang.launch_server", "sglang_8888"), ("atom.entrypoints.openai_server", "atom_8888")],
+    ids=["sglang", "atom"],
+)
+def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path, marker, tag):
     """A live server whose cmdline matches is reaped and its pidfile removed."""
-    proc = _spawn_marker_process("sglang.launch_server")
-    pidfile = _write_pidfile(tmp_path, "sglang_8888", proc.pid)
+    proc = _spawn_marker_process(marker)
+    pidfile = _write_pidfile(tmp_path, tag, proc.pid)
     try:
         reaped = reap_orphaned_servers(tmp_path)
 
@@ -109,6 +116,7 @@ def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            # The assertions below report a survivor; finally still cleans it up.
             pass
 
         assert proc.pid in reaped
@@ -118,6 +126,7 @@ def test_reap_kills_matching_orphan_and_clears_pidfile(tmp_path):
         try:
             proc.kill()
         except OSError:
+            # The reaper may already have terminated and collected the child.
             pass
         proc.wait(timeout=5)
 

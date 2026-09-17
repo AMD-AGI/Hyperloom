@@ -201,6 +201,7 @@ def test_all_renderers_register_in_stable_order() -> None:
         "workload",
         "baseline",
         "final",
+        "enablement",
         "capability_summary",
         "phase_timeline",
         "kernel_lifecycle",

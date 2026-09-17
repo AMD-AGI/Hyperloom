@@ -169,11 +169,15 @@ class MachinePhase(PhaseHandler):
         state = self.shared_state
         await self._track_kernel_idle_streak()
         optimize_enabled = self._optimize_enabled()
+        # Only asked inside the phase: the query renews the open round's lease.
+        in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
             optimize_enabled=optimize_enabled,
+            enablement_enabled=self._enablement_admitted(),
+            enablement_in_flight=in_enablement and await self._enablement_in_flight(),
         )
         if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._maybe_enqueue_explore_research_scout()

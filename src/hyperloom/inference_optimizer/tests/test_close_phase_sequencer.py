@@ -754,19 +754,6 @@ async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
 
 
 @pytest.mark.asyncio
-async def test_close_sequencer_does_not_overwrite_existing_stop_reason(
-    coord,
-):
-    """An operator-set ``stop_reason`` must survive the final step's setter."""
-    coord.shared_state.phase_history = [_close_phase_history_row()]
-    coord.shared_state.set_stop_reason("recipe_kb_drain_failed")
-
-    await coord._on_enter_close(from_phase="SWEEP")
-
-    assert coord.shared_state.stop_reason == "recipe_kb_drain_failed"
-
-
-@pytest.mark.asyncio
 async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord,
 ):
