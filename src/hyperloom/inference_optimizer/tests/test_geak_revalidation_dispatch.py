@@ -2073,20 +2073,22 @@ async def test_prune_drain_leaves_running_rebench_alone(coordinator) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["geak", "resume"])
 @pytest.mark.parametrize(
-    ("baseline_runtime", "timeout_override", "expected_timeout", "expected_soft_deadline"),
-    [(4140.0, 9000, 9000, 6210.0), (4140.0, 0, 8280, 6210.0), (0.0, 0, 2400, None)],
-    ids=["explicit_override", "measured_baseline", "default"],
+    ("baseline_runtime", "legacy_timeout_override"),
+    [(4140.0, 9000), (4140.0, 0), (0.0, 0)],
+    ids=["retired_override", "measured_baseline", "default"],
 )
+@pytest.mark.parametrize("session_remaining_sec", [None, 20000.0], ids=["unbounded", "bounded"])
 async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     coordinator,
     tmp_path,
     monkeypatch,
     source,
     baseline_runtime,
-    timeout_override,
-    expected_timeout,
-    expected_soft_deadline,
+    legacy_timeout_override,
+    session_remaining_sec,
 ) -> None:
+    import time
+
     from hyperloom.orchestrator.actions.executors import ExploreExecutor
 
     baseline = tmp_path / "baseline.yaml"
@@ -2103,10 +2105,11 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     state.baseline_config_path = str(baseline)
     state.baseline_tput = 100.0
     state.baseline_runtime_sec = baseline_runtime
-    state.explore_variant_timeout_sec_override = timeout_override
+    state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.explore_variant_timeout_safety_margin = 0.5
     state.explore_overtime_kill_ratio = 1.5
     state.baseline_double_run = False
+    monkeypatch.setattr(state, "session_budget_usable_sec", lambda **_kwargs: session_remaining_sec)
     if source == "geak":
         state.geak_result = {"status": "ok", "accepted_config": {"flags": "--mem-fraction-static 0.9"}}
     else:
@@ -2123,17 +2126,20 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.run_grid", capture_grid)
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors.explore.maybe_serving_lease", lambda **_kwargs: None)
     executor = ExploreExecutor(session_dir=coordinator.session_dir)
+    started = time.monotonic()
     await executor._run_explore(SimpleNamespace(task=task, extra={"shared_state": state}))
+    finished = time.monotonic()
 
     assert len(calls) == 1
-    assert calls[0]["variant_timeout_sec"] == expected_timeout
-    assert calls[0]["soft_deadline_sec"] == expected_soft_deadline
     assert calls[0]["variant_expected_sec"] == (baseline_runtime or None)
-    assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
-    if timeout_override:
-        assert task.params["variant_timeout_sec"] == timeout_override
+    if session_remaining_sec is None:
+        assert calls[0]["session_deadline_sec"] is None
     else:
-        assert "variant_timeout_sec" not in task.params
+        assert started + session_remaining_sec <= calls[0]["session_deadline_sec"] <= finished + session_remaining_sec
+    assert task.params.get("baseline_runtime_sec", 0.0) == baseline_runtime
+    for retired_param in ("variant_timeout_sec", "soft_deadline_sec", "overtime_kill_ratio"):
+        assert retired_param not in calls[0]
+        assert retired_param not in task.params
 
 
 @pytest.mark.asyncio

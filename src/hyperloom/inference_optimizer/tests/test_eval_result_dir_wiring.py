@@ -63,10 +63,15 @@ def test_parse_eval_results_misses_when_root_is_benchmark_subdir(tmp_path):
 
 def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    config_path = tmp_path / "config.yaml"
+    _write_yaml(config_path)
     captured: dict = {}
 
     def fake_run(cmd, *args, **kwargs):
         captured["env"] = dict(kwargs.get("env") or {})
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert config["benchmark"]["timeout_seconds"] == kwargs["timeout"] == 5
+        assert config["benchmark"]["envs"]["PYTHONUNBUFFERED"] == "1"
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
     with patch(
@@ -75,7 +80,7 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
     ):
         _run_magpie(
             magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
+            config_path=config_path,
             output_dir=tmp_path / "slot",
             timeout_sec=5,
             cwd=str(tmp_path),
@@ -86,6 +91,9 @@ def test_run_magpie_exports_eval_result_dir_under_result_dir(tmp_path, monkeypat
 
 def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    config_path = tmp_path / "config.yaml"
+    _write_yaml(config_path)
+    result_dir = tmp_path / "redirect_leak"
     captured: dict = {}
 
     def fake_run(cmd, *args, **kwargs):
@@ -98,18 +106,20 @@ def test_run_magpie_eval_result_dir_follows_result_dir_override(tmp_path, monkey
     ):
         _run_magpie(
             magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
+            config_path=config_path,
             output_dir=tmp_path / "slot",
             timeout_sec=5,
             cwd=str(tmp_path),
-            result_dir="/tmp/redirect_leak",
+            result_dir=str(result_dir),
         )
-    assert captured["env"]["RESULT_DIR"] == "/tmp/redirect_leak"
-    assert captured["env"]["EVAL_RESULT_DIR"] == "/tmp/redirect_leak/eval_output"
+    assert captured["env"]["RESULT_DIR"] == str(result_dir)
+    assert captured["env"]["EVAL_RESULT_DIR"] == str(result_dir / "eval_output")
 
 
 def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
+    config_path = tmp_path / "config.yaml"
+    _write_yaml(config_path)
     output_dir = tmp_path / "slot"
     trace_file = output_dir / "benchmark_sglang_20260716_010101" / "magpie_trace.json"
 
@@ -130,7 +140,7 @@ def test_run_magpie_keeps_magpie_traces_when_eval_output_is_cleaned(tmp_path, mo
     ):
         _run_magpie(
             magpie_python="/opt/venv/bin/python",
-            config_path=tmp_path / "config.yaml",
+            config_path=config_path,
             output_dir=output_dir,
             timeout_sec=5,
             cwd=str(tmp_path),

@@ -664,8 +664,14 @@ def test_killed_overtime_enters_failures_and_mints_gap():
 # --- short-session reloop boundary ---
 
 
-def test_short_session_reloop_boundary():
-    """A 2h session uses an 1800s floor; just above → True, just below → False."""
+@pytest.mark.parametrize(
+    ("benchmark_timeout", "expected_floor"),
+    [(None, 3600.0), ("1800", 1800.0), ("900", 1080.0), ("9000", 3600.0)],
+    ids=["default_cap", "benchmark_cap", "session_share", "half_session_cap"],
+)
+@pytest.mark.parametrize("remaining_offset", [-1.0, 0.0, 1.0], ids=["below", "at", "above"])
+def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_floor, remaining_offset):
+    """The reloop floor combines the shared benchmark cap and session shares."""
     from datetime import datetime, timedelta, timezone
     from hyperloom.orchestrator.phases import machine_state as ps
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -683,12 +689,23 @@ def test_short_session_reloop_boundary():
     st.last_conc_sweep = {"status": "succeeded"}
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
-    # The 2h floor is max(1080s session share, one 1800s variant grant).
-    reloop, ev = ps.should_reloop_to_explore(st, now_unix=start_unix + 3600)
-    assert reloop is True, f"expected reloop True, got evidence: {ev}"
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
+    if benchmark_timeout is None:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
+    remaining_sec = expected_floor + remaining_offset
+    reloop, ev = ps.should_reloop_to_explore(
+        st,
+        now_unix=start_unix + 7200 - remaining_sec,
+        min_remaining_sec=7200,
+    )
 
-    # Remaining = 7200 - 5401 = 1799s (just below floor) → should not reloop.
-    reloop2, ev2 = ps.should_reloop_to_explore(st, now_unix=start_unix + 5401)
-    assert reloop2 is False
-    assert ev2["reloop_blocked"] == "insufficient_remaining"
+    assert ev["min_remaining_sec_effective"] == expected_floor
+    assert reloop is (remaining_offset >= 0), ev
+    if remaining_offset < 0:
+        assert ev["reloop_blocked"] == "insufficient_remaining"
+        assert ev["session_remaining_seconds"] == remaining_sec
+    else:
+        assert ev["next_cycle"] == 1
+        assert "reloop_blocked" not in ev
