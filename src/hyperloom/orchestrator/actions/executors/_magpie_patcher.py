@@ -451,12 +451,12 @@ def _apply_client_tokenizer_patch_dir(scripts_dir: Path) -> bool:
     return ok
 
 
-def _apply_eval_concurrency_fixes(
-    magpie_dir: Path | str | None,
-    inferencex_dir: Path | str | None,
-) -> bool:
-    """Apply every eval-concurrency compatibility fix, independent of the ``benchmarker.py`` atomic-copy patch."""
-    ok = True
+def _script_dirs(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
+    """The benchmark script directories to patch, each yielded once.
+
+    Magpie's own and InferenceX's copy can resolve to the same path, and a patch
+    applied twice to one directory is at best wasted and at worst counted twice.
+    """
     scanned: set[Path] = set()
     for scripts_dir in (
         _resolve_benchmark_scripts_dir(magpie_dir),
@@ -465,6 +465,28 @@ def _apply_eval_concurrency_fixes(
         if scripts_dir is None or scripts_dir in scanned:
             continue
         scanned.add(scripts_dir)
+        yield scripts_dir
+
+
+def _client_scripts(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
+    """Every caller script under those directories.
+
+    ``benchmark_lib.sh`` is the shared library rather than a caller, so it is
+    skipped here once instead of at each of the four sites that walk these
+    directories -- a skip that has to hold at every one of them.
+    """
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
+        for script in sorted(scripts_dir.glob("*.sh")):
+            if script.name != "benchmark_lib.sh":
+                yield script
+
+def _apply_eval_concurrency_fixes(
+    magpie_dir: Path | str | None,
+    inferencex_dir: Path | str | None,
+) -> bool:
+    """Apply every eval-concurrency compatibility fix, independent of the ``benchmarker.py`` atomic-copy patch."""
+    ok = True
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
         if not _apply_eval_flag_patch_atomic(scripts_dir):
             ok = False
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
@@ -491,26 +513,13 @@ def _client_tokenizer_hook_installed(
     client call, and judging them would refuse a workload whose own script is
     patched and correct.
     """
-    scanned: set[Path] = set()
-    seen_target = False
-    for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
-    ):
-        if scripts_dir is None or scripts_dir in scanned:
+    for script in _client_scripts(magpie_dir, inferencex_dir):
+        if script_name is not None and script.name != script_name:
             continue
-        scanned.add(scripts_dir)
-        for script in sorted(scripts_dir.glob("*.sh")):
-            if script.name == "benchmark_lib.sh":
-                continue
-            if script_name is not None and script.name != script_name:
-                continue
-            seen_target = True
-            if not _is_client_tokenizer_mode_patched(script):
-                return False
+        if not _is_client_tokenizer_mode_patched(script):
+            return False
     # A named script that exists nowhere is not this patcher's to judge -- the
     # launcher fails on the missing script with a clearer message than this one.
-    del seen_target
     return True
 
 
@@ -520,14 +529,7 @@ def _install_client_tokenizer_hook(
     script_name: str | None = None,
 ) -> bool:
     """Apply the hook, then report the post-condition. Caller must hold the lock."""
-    scanned: set[Path] = set()
-    for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
-    ):
-        if scripts_dir is None or scripts_dir in scanned:
-            continue
-        scanned.add(scripts_dir)
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
         _apply_client_tokenizer_patch_dir(scripts_dir)
     return _client_tokenizer_hook_installed(magpie_dir, inferencex_dir, script_name)
 
@@ -566,23 +568,13 @@ def live_eval_concurrency_flag_scripts(
 ) -> list[Path]:
     """Benchmark scripts that still invoke ``run_eval`` with the rejected flag."""
     hits: list[Path] = []
-    scanned: set[Path] = set()
-    for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
-    ):
-        if scripts_dir is None or scripts_dir in scanned:
+    for script in _client_scripts(magpie_dir, inferencex_dir):
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError:
             continue
-        scanned.add(scripts_dir)
-        for script in sorted(scripts_dir.glob("*.sh")):
-            if script.name == "benchmark_lib.sh":
-                continue
-            try:
-                text = script.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if _LIVE_RUN_EVAL_FLAG_RE.search(text):
-                hits.append(script)
+        if _LIVE_RUN_EVAL_FLAG_RE.search(text):
+            hits.append(script)
     return hits
 
 
