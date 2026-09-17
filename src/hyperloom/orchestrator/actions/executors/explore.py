@@ -37,7 +37,6 @@ from ...state.failure_evidence import (
 )
 from ...state.shared_state import (
     first_positive_tput,
-    framework_is_scriptable,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
     resolved_grading,
@@ -548,6 +547,7 @@ class ExploreExecutor:
                 benchmark_script=override_script,
                 extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
+                grading=getattr(shared_state, "grading", None),
             )
         except FrameworkScriptMismatchError as exc:
             return {

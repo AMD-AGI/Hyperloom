@@ -1337,6 +1337,7 @@ async def run_conc_sweep(
             gpu_type=resolved_gpu or None,
             benchmark_script=benchmark_script,
             out_name="conc_sweep_base.with_envs.yaml",
+            grading=getattr(state, "grading", None),
         )
     except FrameworkScriptMismatchError as exc:
         return _declined(
