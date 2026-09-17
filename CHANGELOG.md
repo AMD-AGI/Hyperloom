@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **GEAK adoptions retain their engine identity in Session Breakdown.** Measured
+  GEAK configuration and kernel gains now enter the GEAK source bucket instead
+  of the unattributed backend bucket. Configuration wins retain their existing
+  lever and operation kinds without claiming an authored kernel.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
