@@ -106,7 +106,7 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     return ""
 
 
-_SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")
+_SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*(?:ServerArgs\s*\(|\{)")
 _SGLANG_SERVER_ARGS_MAX_CHARS = 512 * 1024
 _SGLANG_SERVER_ARGS_MAX_LINES = 2048
 _SGLANG_SERVER_ARGS_MAX_FIELDS = 2048
@@ -133,12 +133,13 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
 
 
 def _extract_balanced_server_args(text: str) -> str:
-    """Return the balanced ``ServerArgs(...)`` argument text."""
+    """Return a balanced dictionary or inert ``_ServerArgs(...)`` expression."""
     match = _SGLANG_SERVER_ARGS_LOG_RE.search(text)
     if match is None:
         return ""
     start = match.end() - 1
-    depth = 0
+    closing: list[str] = []
+    delimiters = {"(": ")", "[": "]", "{": "}"}
     quote = ""
     escaped = False
     for index, char in enumerate(text[start:], start):
@@ -152,12 +153,14 @@ def _extract_balanced_server_args(text: str) -> str:
             continue
         if char in ("'", '"'):
             quote = char
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return text[start + 1 : index]
+        elif char in delimiters:
+            closing.append(delimiters[char])
+        elif char in ")]}":
+            if not closing or char != closing.pop():
+                return ""
+            if not closing:
+                expression = text[start : index + 1]
+                return f"_ServerArgs{expression}" if text[start] == "(" else expression
     return ""
 
 
@@ -188,7 +191,7 @@ def _bounded_server_args_value(value: Any, *, depth: int = 0) -> Any:
 
 
 def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse a capped archived SGLang ``server_args=ServerArgs(...)`` record."""
+    """Parse allowlisted identity from a capped SGLang ``server_args`` record."""
     chunks: list[str] = []
     remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
     scanned_lines = 0
@@ -196,12 +199,10 @@ def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8", errors="replace") as handle:
             for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
-                line = handle.readline()
+                line = handle.readline(remaining)
                 if not line:
                     break
                 scanned_lines += 1
-                if len(line) > remaining:
-                    line = line[:remaining]
                 remaining -= len(line)
                 if chunks or _SGLANG_SERVER_ARGS_LOG_RE.search(line):
                     chunks.append(line)
@@ -224,16 +225,29 @@ def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
             )
         return {}
     try:
-        call = ast.parse(f"_ServerArgs({content})", mode="eval").body
-        if not isinstance(call, ast.Call) or len(call.keywords) > _SGLANG_SERVER_ARGS_MAX_FIELDS:
+        record = ast.parse(content, mode="eval").body
+        fields: list[tuple[str, ast.expr]] = []
+        if isinstance(record, ast.Dict):
+            if len(record.keys) > _SGLANG_SERVER_ARGS_MAX_FIELDS:
+                return {}
+            for key, value in zip(record.keys, record.values):
+                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                    return {}
+                fields.append((key.value, value))
+        elif isinstance(record, ast.Call):
+            if len(record.keywords) > _SGLANG_SERVER_ARGS_MAX_FIELDS:
+                return {}
+            for keyword in record.keywords:
+                if keyword.arg is None:
+                    return {}
+                fields.append((keyword.arg, keyword.value))
+        else:
             return {}
         values: dict[str, Any] = {}
-        for keyword in call.keywords:
-            if keyword.arg is None:
-                return {}
-            if keyword.arg not in _SGLANG_OBSERVED_IDENTITY_FIELDS:
+        for name, value in fields:
+            if name not in _SGLANG_OBSERVED_IDENTITY_FIELDS:
                 continue
-            values[keyword.arg] = _safe_server_args_value(keyword.value)
-    except (SyntaxError, ValueError, TypeError):
+            values[name] = _safe_server_args_value(value)
+    except (SyntaxError, ValueError, TypeError, RecursionError):
         return {}
     return {key: values[key] for key in sorted(values)}
