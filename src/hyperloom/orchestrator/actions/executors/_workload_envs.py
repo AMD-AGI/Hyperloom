@@ -797,6 +797,52 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
     return isinstance(auto_map, dict) and bool(auto_map.get("AutoTokenizer"))
 
 
+#: Tokenizer modes the benchmark client actually implements a loader for.
+#:
+#: A tokenizer mode is a loader backend, not a model type: naming one the client
+#: does not implement makes it reject the flag, which fails exactly the way the
+#: unnamed tokenizer did. So "transformers cannot map this model_type" is
+#: necessary but not sufficient -- the mode has to be one the client knows.
+#: ``deepseek_v4`` is routed by InferenceX's ``benchmark_serving.py`` to vLLM's
+#: own loader; other custom-code checkpoints (``kimi_k25``, say) are served by
+#: the trust-remote-code path above and must NOT be named here.
+_CLIENT_TOKENIZER_MODES: frozenset[str] = frozenset({"deepseek_v4"})
+
+
+def _client_tokenizer_mode(model_path: str | None) -> str:
+    """Return the tokenizer mode the benchmark client must be told, or ``""``.
+
+    The generic bench client resolves a checkpoint through HF ``AutoConfig``. A
+    model whose ``model_type`` this transformers build does not know dies there
+    with ``KeyError: '<model_type>'`` before issuing a request, so no throughput
+    result is written and the round is graded a boot failure with the server up
+    and serving. InferenceX's client already routes ``--tokenizer-mode`` to
+    vLLM's own loader, which does know it; this names the mode to pass.
+
+    Model-agnostic on purpose: the question asked is "can HF resolve this
+    model_type", not "is this DeepSeek-V4". A model HF understands returns ``""``
+    and the client argv is unchanged.
+    """
+    model = str(model_path or "").strip()
+    if not model:
+        return ""
+    data = _load_model_config_dict(model)
+    if data is None:
+        return ""
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if model_type not in _CLIENT_TOKENIZER_MODES:
+        return ""
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+    except ImportError:
+        # No transformers, no HF resolution to reason about; naming a mode here
+        # would be a guess.
+        return ""
+    if model_type in CONFIG_MAPPING:
+        return ""
+    return model_type
+
+
 def inject_vllm_expert_parallel(
     server_args: str | None,
     framework: Any,
@@ -1862,6 +1908,12 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    # ── Client tokenizer mode (model-agnostic) ───────────────────────────
+    # Trusting remote code is not enough when transformers cannot map the
+    # model_type at all: the client has to be told which loader to use.
+    _client_tok_mode = _client_tokenizer_mode(model_path or bench.get("model"))
+    if _client_tok_mode:
+        envs.setdefault("HYPERLOOM_CLIENT_TOKENIZER_MODE", _client_tok_mode)
     if _model_requires_remote_code(model_path or bench.get("model")):
         add_server_arg_unless_pinned(
             envs,
