@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from hyperloom.orchestrator.phases import _enablement_artifacts as art
+from hyperloom.orchestrator.enablement import artifacts as art
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
 

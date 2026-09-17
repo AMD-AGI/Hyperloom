@@ -166,7 +166,7 @@ def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[st
     from dataclasses import asdict, is_dataclass
     from pathlib import Path
 
-    from ..collectors.sessions import collect_enablement
+    from .enablement_section import collect_enablement
     from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
 
     section: dict[str, Any] = {}

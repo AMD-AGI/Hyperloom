@@ -1149,7 +1149,7 @@ def test_a_server_that_dies_after_serving_yields_a_classifiable_excerpt(tmp_path
     that cascade, so nothing was ever returned and the specialist was handed
     ``failure_kind: unknown``.
     """
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     excerpt = server_log_death_excerpt(str(_engine_death_log(tmp_path)))
 
@@ -1196,7 +1196,7 @@ def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
     only the marker and what follows -- right for a post-startup engine death --
     would drop that cause and classify the failure as unknown.
     """
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     log = tmp_path / "server.log"
     log.write_text(
@@ -1226,7 +1226,7 @@ def test_a_death_past_any_head_bound_and_outside_the_tail_is_still_found(tmp_pat
     downstream errors puts its fatal marker beyond any fixed head window and
     before any fixed tail window.
     """
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     log = tmp_path / "server.log"
     filler = "(APIServer pid=1) INFO:     healthy request served fine and produced ordinary output\n"
@@ -1258,7 +1258,7 @@ def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_pat
     post-startup path, which keeps no leading context -- and for these markers
     the actionable cause is exactly the line above.
     """
-    from hyperloom.agents.framework.enablement import classify_failure
+    from hyperloom.common.failure_signature import classify_failure
 
     for legacy in ("AsyncEngineDeadError", "raise EngineDeadError"):
         log = tmp_path / f"server-{legacy.replace(' ', '_')}.log"
