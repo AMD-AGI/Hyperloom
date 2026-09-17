@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import atomic_write_json, atomic_write_text
 
 from .controller_publication import ControllerPatchPublication
@@ -33,6 +34,10 @@ _VERDICT_LOG = {
     "Blocked": "BLOCKED",
     "Inconclusive": "INCONCLUSIVE",
 }
+
+
+def _short_id(value: str, n: int = 12) -> str:
+    return str(value).replace("sha256:", "")[:n]
 
 
 def _log(*lines: str) -> None:
@@ -63,7 +68,7 @@ def _parse_map(raw: str) -> dict[str, str]:
 def _git_sha(root: Path) -> str | None:
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
+            ["git", *safe_directory_args(["rev-parse", "HEAD"], cwd=root)],
             cwd=root,
             capture_output=True,
             text=True,
@@ -78,7 +83,7 @@ def _git_sha(root: Path) -> str | None:
 
 def _working_tree_digest(repo: Path) -> str:
     completed = subprocess.run(
-        ["git", "-C", str(repo), "diff", "HEAD"],
+        ["git", *safe_directory_args(["-C", str(repo), "diff", "HEAD"])],
         capture_output=True,
         timeout=60,
         check=False,
@@ -216,8 +221,9 @@ class KthQualificationProvider:
             },
         }
         atomic_write_json(request_path, request, trailing_newline=True)
-        _log(f"Candidate ready: sha256:{patch_sha}")
+        _log(f"Candidate: {_short_id(patch_sha)}")
         _log("Requesting independent KTH qualification")
+        _log("Provider: kth-qualify")
         command = [
             self.executable,
             "--request",
@@ -332,7 +338,7 @@ class KthQualificationProvider:
             _log("Candidate: REJECTED")
         else:
             _log("Performance benchmark: PERMITTED")
-        _log(f"Evidence retained: {artifacts_dir}")
+        _log(f"Evidence retained: {Path(artifacts_dir).name}")
         return self._persist(
             KthQualificationResult(
                 status=status,
