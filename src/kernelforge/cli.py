@@ -2308,6 +2308,15 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
 @click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
 @click.option(
+    "--applyback/--no-applyback",
+    default=True,
+    show_default=True,
+    help="Integrate the optimized kernel back into the framework repository and "
+    "publish the patch. Disable it to deliver only the standalone kernel: the "
+    "stage is skipped, its 20-minute reserve returns to the search, and the "
+    "run's success no longer depends on a patch the caller did not ask for.",
+)
+@click.option(
     "--max-applyback-attempts",
     default=2,
     show_default=True,
@@ -2373,6 +2382,7 @@ def forge_rewrite(
     model,
     permission_mode,
     max_port_attempts,
+    applyback,
     max_applyback_attempts,
     max_hours,
     deadline_unix,
@@ -2455,6 +2465,7 @@ def forge_rewrite(
         invocation_spec_file=invocation_spec_file,
         applyback_import_modules=applyback_import_modules,
         max_applyback_attempts=max_applyback_attempts,
+        applyback_enabled=bool(applyback),
         rewrite_kb_enabled=rewrite_kb_enabled,
     )
     # The structured result and sentinel were already emitted for callers to parse.

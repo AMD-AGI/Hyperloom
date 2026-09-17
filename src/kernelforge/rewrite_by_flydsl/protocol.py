@@ -27,6 +27,10 @@ SUPPORTED_SOURCE_KINDS = ("triton", "hip_cpp")
 # This producer can author or repair a non-conforming measurement driver from the caller's invocation evidence.
 DRIVER_PREPARATION_SUPPORTED = True
 
+#: Whether the framework apply-back stage can be declined, leaving the
+#: standalone kernel as the whole deliverable.
+APPLYBACK_OPTIONAL = True
+
 # The outer rewrite exposes the same result sentinel as forge-loop so callers consume one backend-neutral contract.
 RESULT_SENTINEL = "__FORGE_RESULT__"
 
@@ -64,6 +68,9 @@ def capabilities() -> dict:
         "source_kinds": list(SUPPORTED_SOURCE_KINDS),
         "result_sentinel": RESULT_SENTINEL,
         "driver_preparation": DRIVER_PREPARATION_SUPPORTED,
+        # A consumer that only wants the standalone kernel can ask for it, and
+        # can tell this engine from one whose apply-back was unconditional.
+        "applyback_optional": APPLYBACK_OPTIONAL,
     }
 
 

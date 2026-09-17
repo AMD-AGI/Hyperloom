@@ -1088,6 +1088,76 @@ def _wire_stub_pipeline(monkeypatch, *, port_ok=True, best_ms=0.5, source_ms=1.0
     )
 
 
+def _rewrite_repo(tmp_path):
+    """A workspace with a resolvable HEAD, which apply-back bases its patch on."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    (tmp_path / "driver.py").write_text("print('drive')\n")
+    for command in (
+        ["init", "--quiet", "--initial-branch=work"],
+        ["config", "user.email", "t@local"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "--quiet", "-m", "base"],
+    ):
+        subprocess.run(["git", *command], cwd=tmp_path, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return src, tmp_path / "driver.py", head
+
+
+def _run_rewrite_in(tmp_path, src, driver, **kwargs):
+    return runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        source_entry="softmax",
+        shapes=[{"M": 256, "N": 1024, "dtype": "f32"}],
+        config=Config.from_env(workspace=str(tmp_path)),
+        **kwargs,
+    )
+
+
+def test_applyback_is_required_by_default(tmp_path, monkeypatch):
+    """The framework patch stays part of a default run's success."""
+    src, driver, head = _rewrite_repo(tmp_path)
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    out = _run_rewrite_in(tmp_path, src, driver)
+    assert out["applyback_required"] is True and out["applyback_ok"] is True
+    assert out["base_commit"] == ""  # the stub publishes no base commit of its own
+    assert out["best_commit"] == "framework-best" != out["flydsl_best_commit"]
+    assert out["budget_policy"]["applyback_reserve_sec"] == 1200
+
+
+def test_declined_applyback_skips_the_stage_and_returns_its_reserve(tmp_path, monkeypatch, capsys):
+    """Declining the patch must not run the stage nor judge the run on it."""
+    src, driver, head = _rewrite_repo(tmp_path)
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError("apply-back ran for a caller that declined it")
+
+    monkeypatch.setattr(runner, "generate_applyback_patch", _refuse)
+    out = _run_rewrite_in(tmp_path, src, driver, applyback_enabled=False)
+
+    # A resolvable HEAD no longer implies a patch was wanted.
+    assert out["applyback_required"] is False and out["applyback_ok"] is False
+    assert out["success"] is True and out["port_ok"] is True
+    # Nothing is published, and no field claims an artifact that does not exist.
+    assert out["canonical_manifest"] == "" and out["patch_path"] == ""
+    assert out["changed_files"] == [] and out["artifact_kind"] == ""
+    assert out["artifact_schema_version"] == 0
+    # The standalone selection is the whole deliverable.
+    assert out["best_commit"] == out["flydsl_best_commit"] == head
+    # The reserve is reported as returned rather than silently still held.
+    assert out["budget_policy"]["applyback_reserve_sec"] == 0
+    assert "apply-back not requested" in capsys.readouterr().out
+
+
 def test_run_rewrite_happy_path_reports_speedup(tmp_path, monkeypatch, capsys):
     src = tmp_path / "softmax.py"
     src.write_text("def softmax(x):\n    return x\n")

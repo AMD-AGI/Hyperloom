@@ -205,6 +205,7 @@ the same `__FORGE_RESULT__` contract as `forge-loop`.
 |:--|:--|:--|
 | `--framework <name>` | inferred | Apply-back target: `aiter`, `vllm` or `sglang`. Inferred from the source path when omitted. |
 | `--applyback-import-module <mod>` | inferred | Import target required to load before and after apply-back. Repeatable; defaults to the source module inferred from its package. |
+| `--applyback` / `--no-applyback` | on | Integrate the optimized kernel back into the framework repository and publish the patch. Disabling it delivers only the standalone kernel: the stage is skipped, its 20-minute reserve returns to the search, and `success` no longer depends on a patch the caller did not ask for. `applyback_required` is then `false`, and `best_commit` names the standalone selection instead of an apply-back commit. |
 | `--max-applyback-attempts <n>` | `2` | Maximum clean-room framework integration sessions. |
 
 ### Hardware, provider and output
