@@ -34,6 +34,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
     intvty_grading_enabled,
     agentx_active as _agentx_active,
@@ -229,7 +230,11 @@ GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
 GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
 
 
-def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
+def geak_metric_axis(
+    *,
+    benchmark_mode: str = "",
+    grading: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
     """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
 
     The handoff must name the token-throughput axis this session actually reads.
@@ -251,7 +256,12 @@ def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
     Returns:
         The ``E2E_METRIC`` value and the ``metric_basis`` name that goes with it.
     """
-    if intvty_grading_enabled(benchmark_mode=benchmark_mode):
+    objective = str((grading or {}).get("objective") or "").strip()
+    if objective:
+        on_intvty = objective == GRADED_INTVTY
+    else:
+        on_intvty = intvty_grading_enabled(benchmark_mode=benchmark_mode)
+    if on_intvty:
         return GEAK_METRIC_TOTAL
     return GEAK_METRIC_OUTPUT
 
@@ -273,6 +283,7 @@ def build_agentx_workload_spec(
     *,
     model_path: str | None = None,
     env: Mapping[str, str] | None = None,
+    grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe the AgentX trace-replay workload for downstream consumers.
 
@@ -342,8 +353,12 @@ def build_agentx_workload_spec(
         # ``benchmark_mode`` is "agentx" because the caller returned early
         # otherwise; the resolver still honours an explicit HYPERLOOM_PERF_METRIC
         # in both directions.
-        "metric_basis": geak_metric_axis(benchmark_mode="agentx")[1],
-        "intvty_p90_veto_pct": parse_intvty_noise_pct(),
+        "metric_basis": geak_metric_axis(benchmark_mode="agentx", grading=grading)[1],
+        "intvty_p90_veto_pct": (
+            float(grading["noise_pct"])
+            if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
+            else parse_intvty_noise_pct()
+        ),
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],

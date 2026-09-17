@@ -3128,9 +3128,12 @@ class WritebackCollaborator:
         cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
         if not prebaseline_enablement:
             graded = resolve_graded_comparison(self.shared_state, cand_source)
-            if not graded.comparable:
-                log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
-                return False
+            if graded.degrade_reason:
+                log.info(
+                    "current_best: %s winner graded on output throughput (%s)",
+                    task_kind,
+                    graded.degrade_reason,
+                )
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
                     "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",

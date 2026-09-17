@@ -275,7 +275,7 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the shape the ladder is swept over. Which axis pair the points
         are drawn on follows from ``benchmark_mode``, so a reader never infers
-        it from whether ``intvty_p90`` happens to be null."""
+        it from whether ``e2e_norm_intvty_p90`` happens to be null."""
         self._record_action(
             {
                 "workload": {

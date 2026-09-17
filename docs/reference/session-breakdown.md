@@ -448,6 +448,13 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
     "final": {
       "throughput_tok_s_per_gpu": 150.0,
+      "graded_on": "output_throughput",
+      "perf": {
+        "e2e_norm_intvty_p90": null,
+        "total_throughput": null,
+        "input_throughput": null,
+        "tpot_p90_ms": null
+      },
       "cumulative_gain_pct_validated": 50.0,
       "validated_at_stack_len": 4,
       "validated_ts": "2026-05-17T13:48:01Z",

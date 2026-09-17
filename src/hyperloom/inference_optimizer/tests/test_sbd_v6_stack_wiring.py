@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -109,6 +110,37 @@ def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
         assert ext["chain_total_gain_pct"] == 25.0
         assert ext["unattributed_gain_pct"] == 0.0
         assert status == stack_event.STATUS_SUCCEEDED
+
+
+def test_a_degraded_lift_records_why_the_output_axis_was_used(session_dir, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 1000.0,
+            "output_throughput": 1000.0,
+            "total_throughput": 20000.0,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert coord._lift_to_current_best(
+            "explore",
+            1100.0,
+            {
+                "name": "degraded-winner",
+                "output_throughput": 1100.0,
+                "total_throughput": 22000.0,
+                "e2e_norm_intvty_p90": 30.0,
+            },
+        ) is True
+
+        row = _rows()[0]
+        assert row["degrade_reason"] == "current_best_axes_missing"
+        assert row["objective"] == GRADED_OUTPUT
 
 
 def test_a_refused_lift_records_nothing(session_dir):

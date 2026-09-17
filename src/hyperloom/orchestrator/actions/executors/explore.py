@@ -24,7 +24,6 @@ from hyperloom.common.perf_metric import (
     GRADED_OUTPUT,
     VERDICT_RECORDED,
     VERDICT_REVERT,
-    intvty_serving_grading_enabled,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
 )
@@ -42,6 +41,7 @@ from ...state.shared_state import (
     framework_is_scriptable,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
+    resolved_grading,
     stack_base_params,
 )
 from ..stop_attribution import (
@@ -873,10 +873,7 @@ class ExploreExecutor:
         # Round-local grading anchor. Variants stack within a round, so a KEEP
         # advances the figure the next variant is graded against; the session
         # anchor would grade every variant against the round's opening state.
-        grade_on_intvty = intvty_serving_grading_enabled(
-            scriptable=framework_is_scriptable(framework),
-            benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
-        )
+        grade_on_intvty, _ = resolved_grading(ss)
         running_base_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_intvty else (None, "")
         if grade_on_intvty and running_base_perf is None:
             log.info("explore: grading this round on output throughput (%s)", _anchor_reason)

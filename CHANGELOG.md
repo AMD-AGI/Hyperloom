@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **SBD V6 degrade findings now surface on the production lift path.** When an
+  AgentX session could not grade on interactivity and fell back to output
+  throughput, ``_lift_to_current_best`` had been refusing the adoption because
+  ``comparable`` was false, so ``record_adoption`` never carried a
+  ``degrade_reason`` and the breakdown could not name mixed-axis ledgers.
+  Degraded winners that beat the output anchor are promoted again and the reason
+  is recorded on the adoption row.
+
 ### Changed
 
 - **Bare-metal `vllm` default bumped from `0.28.0` to `0.29.0` (still `rocm723`).**

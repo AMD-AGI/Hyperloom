@@ -393,8 +393,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
 
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
         INTVTY_V1,
-        intvty_grading_enabled,
         intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
@@ -419,10 +419,21 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
             lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
-    if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
+    grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
+    objective = str(grading.get("objective") or "").strip()
+    if objective == GRADED_INTVTY:
+        noise_pct = grading.get("noise_pct")
+        band = float(noise_pct) if isinstance(noise_pct, (int, float)) else parse_intvty_noise_pct()
+        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{band:.1f}%`)")
+    elif objective:
+        lines.append(f"- grading mode        : `{objective}`")
     else:
-        lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+        from hyperloom.common.perf_metric import intvty_grading_enabled
+
+        if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
+            lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
+        else:
+            lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 
 
 def _cumulative_validation_status(summary: dict[str, Any]) -> str:
@@ -481,6 +492,7 @@ def _build_summary_dict(
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
         # from a resumed session still names the mode the run was graded under.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "grading": dict(getattr(state, "grading", None) or {}),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
         "performance_comparison": {

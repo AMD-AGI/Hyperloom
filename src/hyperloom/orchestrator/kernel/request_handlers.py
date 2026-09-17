@@ -4547,7 +4547,10 @@ async def _run_geak_gemm_tuning(
 
     from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
 
-    _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+    _geak_e2e_metric, _ = geak_metric_axis(
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        grading=getattr(state, "grading", None),
+    )
 
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
