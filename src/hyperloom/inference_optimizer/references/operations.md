@@ -104,37 +104,93 @@ export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
 export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+# $RUN_TAG is timestamped and cannot be recomputed. Persist the run-scoped vars
+# so later blocks can source them: under Claw the launch is its own background
+# tool call and the health check is a separate foreground call, which inherits
+# none of these exports. Session-scoped filename for the same WekaFS reason
+# setup_env.sh must never be shared; set $RUN_ENV yourself if two non-Claw runs
+# share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
+
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
   --launch-info-file "$LAUNCH_INFO_FILE" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs longer than 5 minutes. The `$!`
-written above may be a **setsid wrapper** PID rather than the optimizer PID.
-After launch, reconcile `$PID_FILE` to the **real** optimizer PID, which the
-CLI records as `.pid` in the launch-info JSON. A dead wrapper is not evidence
-that the optimizer needs restarting.
+**Detach it the way the harness understands.** When `$CLAW_SESSION_ID` is set
+*and* your bash tool takes a `run_in_background` parameter, hand that block to it
+with `run_in_background=true` — no `setsid nohup`, no trailing `&`. Otherwise
+prefix the `python3 ... optimize` command with `setsid nohup`, append ` &`, and
+`echo $! > "$PID_FILE"`; that form is required for runs longer than 5 minutes
+under Cursor. See the **Launch** section of `SKILL.md` for why the distinction
+matters: a hand-detached run is invisible to Claw, and the sandbox is reclaimed
+about fifteen minutes after the agent turn ends, with the run still going.
 
-Health-check after 30 seconds (the launch-info JSON carries the authoritative
-`.pid` and `.session_dir`; `jq` is not guaranteed on every node, so fall back to
-a tiny `python3` reader):
+Either way, reconcile `$PID_FILE` to the **real** optimizer PID, which the CLI
+records as `.pid` in the launch-info JSON. Under `setsid`, `$!` may be a wrapper
+that exits immediately; on the background-tool path the tool returns a
+`shell_id`, not a pid. A dead wrapper is not evidence that the optimizer needs
+restarting.
+
+When no authoritative pid can be had — no `.pid` in the launch-info JSON and a
+`pgrep` that is empty or ambiguous — **delete** `$PID_FILE` instead of leaving
+the wrapper pid in it. A missing pidfile means the optimizer PID is unknown,
+not that it stopped. Inspect the launch log and persisted state before making
+an explicit recovery decision; never resume automatically.
+
+Health-check after 30 seconds in a **separate foreground tool call**, not
+appended to the background launch block. Source `$RUN_ENV` again because that
+shell inherits none of the launch block's exports. The launch-info JSON carries
+the authoritative `.pid` and `.session_dir`; `jq` is not guaranteed on every
+node, so use a tiny `python3` reader:
 
 ```bash
 sleep 30
+# Separate shell from the launch under Claw, so re-source the run-scoped env
+# instead of assuming $RUN_DIR/$PID_FILE/$LAUNCH_INFO_FILE carried over.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
 
 # Real optimizer PID (NOT the setsid wrapper in $!): take it from launch-info
 # and rewrite $PID_FILE for accurate process checks.
 REAL_PID="$(read_json "$LAUNCH_INFO_FILE" pid)"
-[ -z "$REAL_PID" ] && REAL_PID="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' | head -1)"
-[ -n "$REAL_PID" ] && echo "$REAL_PID" > "$PID_FILE"
-test -d "/proc/$REAL_PID" && echo "optimizer_alive=true pid=$REAL_PID"
+if [ -z "$REAL_PID" ]; then
+  # Best-effort only, and UNSAFE when several sessions optimize on this host:
+  # the pattern matches all of them and nothing in it ties a hit to this run.
+  # Accept it only when unambiguous; never `head -1` a multi-hit list, which
+  # silently adopts another session's pid and reports the wrong process.
+  MATCHES="$(pgrep -f 'hyperloom.inference_optimizer.cli .*optimize' || true)"
+  N_MATCHES="$(printf '%s\n' "$MATCHES" | grep -c . || true)"
+  if [ "$N_MATCHES" = "1" ]; then
+    REAL_PID="$MATCHES"
+  else
+    echo "ERROR: no .pid in $LAUNCH_INFO_FILE and pgrep is ambiguous" \
+         "($N_MATCHES matches); refusing to guess. Inspect the" \
+         "HYPERLOOM_LAUNCH line and $RUN_LOG." >&2
+  fi
+fi
+if [ -n "$REAL_PID" ]; then
+  echo "$REAL_PID" > "$PID_FILE"
+else
+  # A stale wrapper pid is not the optimizer's identity. Missing means unknown;
+  # inspect the launch log and persisted state without restarting anything.
+  rm -f "$PID_FILE"
+  echo "WARN: removed $PID_FILE (no authoritative pid); inspect $RUN_LOG" \
+       "and persisted state. Do not auto-resume." >&2
+fi
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry and sandbox PID 1
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
+# Ask for the process state and reject Z.
+ps -o stat= -p "$REAL_PID" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$REAL_PID"
 
 SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$SESSION_DIR" ]; then
@@ -145,6 +201,11 @@ fi
 test -f "$SESSION_DIR/manifest.json" && echo "manifest_present=true session_dir=$SESSION_DIR"
 test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 ```
+
+Under Claw, prefer `bash_output` on the returned `shell_id` for harness liveness;
+keep the zombie-aware `ps` check for the optimizer PID. Health checks only observe
+and reconcile launch metadata; they must not kill, restart, or automatically
+resume the optimizer.
 
 ## Resume Existing Session
 
@@ -167,7 +228,10 @@ watchdog or automatic resume loop. A stopped process requires explicit diagnosis
 and an operator decision before resuming the same session.
 
 ```bash
-export SESSION_DIR="$(jq -r '.session_dir // empty' "$LAUNCH_INFO_FILE")"
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+export SESSION_DIR="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 test -n "$SESSION_DIR"
 "$PYTHON" "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION_DIR"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION_DIR"

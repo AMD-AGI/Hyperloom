@@ -52,8 +52,9 @@ killed the moment the turn ends. So:
 1. Finish the install and the launch **inside this turn**. Do **not** end the turn with a
    progress note such as "install started" or "waiting on the pull" — that kills the
    work you just started and the leg ends up with nothing running at all.
-2. Start `optimize` **detached** with `setsid nohup` (as the demo skill does) so it
-   survives the end of this turn.
+2. Start `optimize` **detached** the way the demo skill does — `run_in_background=true`
+   when `$CLAW_SESSION_ID` is set and the bash tool offers it, `setsid nohup` otherwise —
+   so it survives the end of this turn.
 3. Before you finish, confirm the run is really live and report the paths: the nested
    session run dir exists, `state.json` is present in it, and the optimizer PID is alive.
 

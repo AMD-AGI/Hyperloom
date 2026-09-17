@@ -372,9 +372,9 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    `kernel-agent.env.sh`, and confirm it before launch. In docker mode, set it
    inside the same `docker exec` that runs `optimize`. Leave
    `KERNEL_OPT_BACKEND_ORDER` unset so the ATOM default applies.
-3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
-   and critic subprocesses can import `hyperloom.agents` after changing cwd.
-4. Run in background with `setsid nohup`.
+3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so critic
+   subprocesses can import `hyperloom.agents` after changing cwd.
+4. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
@@ -382,8 +382,8 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    `--no-kernel` would skip the very phase this demo exists to exercise.
 7. Report the session ID, log path, PID, and initial health check result.
 8. Monitor the process every 300 seconds until work is done.
-9. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `FRAMEWORK=atom` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-10. If a relaunch is needed after a crash, clear any surviving ATOM workers
+9. Unexpected crashes are not automatically resumed. After explicit operator approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `FRAMEWORK=atom` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+10. If an approved relaunch is needed after a crash, clear any surviving ATOM workers
     first (see [Prior workload cleanup](#prior-workload-cleanup-required)); an
     orphaned worker still holding VRAM makes the replacement launch fail on a
     card that looks full.

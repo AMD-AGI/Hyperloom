@@ -93,7 +93,9 @@ the mirrors by hand.
 ``manifest.json`` / ``state.json`` / ``coordinator.db`` from the
 **session dir**. For monitoring after launch, learn the session dir from
 the **launch-info JSON** written by ``--launch-info-file`` (``jq -r
-.session_dir <file>``) or, equivalently, from the single
+.session_dir <file>``, or the ``read_json`` python3 one-liner used in the
+health check below — ``jq`` is not installed on every node) or,
+equivalently, from the single
 ``HYPERLOOM_LAUNCH key=value …`` sentinel line the CLI prints to stdout
 (``session_dir=…``). Those are the authoritative, machine-readable
 sources. Never guess by walking ``$USER_DATA_PATH/<model_basename>/`` for
@@ -1104,8 +1106,22 @@ fill in the workload block, and `.` it each call.
 **IMPORTANT**: never use a shared filename like `setup_env.sh` — concurrent
 sessions on different pods share `$USER_DATA_PATH` via WekaFS; a single file
 causes MODEL_PATH race conditions where sessions launch the wrong model.
-After `setsid nohup ... &`, locate the optimizer via
+After launching, locate the optimizer via
 `pgrep -af 'hyperloom.inference_optimizer.*optimize'` — `$!` may be a wrapper PID.
+
+**How you launch depends on the harness.** Two things have to hold before the
+bash tool's `run_in_background=true` is the right form: `$CLAW_SESSION_ID` must
+be set, and your bash tool must take a `run_in_background` parameter. Both, or
+`setsid nohup ... &` stays correct.
+
+Each answers half the question. The session id says a platform is reclaiming
+this sandbox on what it can see, so a run detached by hand is one it cannot see.
+The parameter says this deployment serves background shells at all — switched
+off, the tool does not offer one, and there is nothing to hand the block to.
+Off-platform neither holds, and `setsid` is what you want there anyway: nothing
+is reclaiming anything, and a harness's own background shell may not outlive the
+connection that started it. Both forms are detached — the difference is whether
+anything outside the process knows it exists.
 
 ```bash
 cd "$REPO_ROOT"
@@ -1125,21 +1141,89 @@ export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 export RUN_DIR="${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs"
 export RUN_LOG="$RUN_DIR/run_${RUN_TAG}.log"
 export PID_FILE="$RUN_DIR/run_${RUN_TAG}.pid"
+export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
 mkdir -p "$RUN_DIR"
 
-setsid nohup python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
+# $RUN_TAG carries a timestamp, so it cannot be recomputed later. Persist the
+# run-scoped vars where the health check can source them: under Claw the launch
+# is its own background tool call, so the health check necessarily runs in a
+# DIFFERENT shell and inherits none of these exports. Session-scoped name, for
+# the same WekaFS reason setup_env.sh must never be a shared filename. Outside
+# Claw, set $RUN_ENV yourself before launching if two runs share a host.
+export RUN_ENV="$RUN_DIR/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh"
+printf 'export RUN_TAG=%q RUN_DIR=%q RUN_LOG=%q PID_FILE=%q LAUNCH_INFO_FILE=%q\n' \
+  "$RUN_TAG" "$RUN_DIR" "$RUN_LOG" "$PID_FILE" "$LAUNCH_INFO_FILE" > "$RUN_ENV"
+
+python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
   --model "$MODEL_PATH" \
   --framework "${FRAMEWORK:-sglang}" \
   --target-gain "${TARGET_GAIN:-10}" \
   --max-hours "${MAX_HOURS:-5}" \
   --tick-interval-sec 30 \
-  --launch-info-file "$RUN_DIR/launch_${RUN_TAG}.json" \
-  > "$RUN_LOG" 2>&1 < /dev/null &
-echo $! > "$PID_FILE"
+  --launch-info-file "$LAUNCH_INFO_FILE" \
+  > "$RUN_LOG" 2>&1 < /dev/null
 ```
 
-`setsid nohup ... &` is required for runs > 5 min — Cursor's background
-shell can die on SSH disconnect.
+**When both conditions hold**, pass that block to the bash tool with
+`run_in_background=true` and no `setsid nohup` and no trailing `&` — the tool is
+what detaches it. The
+tool returns a `shell_id`, not a pid, so `$PID_FILE` is written in the health
+check below from the launch-info JSON, which carries the real one. Do not skip
+that reconciliation when checking the optimizer process.
+
+If that reconciliation cannot find a real pid, the health check **removes**
+`$PID_FILE` rather than leaving whatever the launch put there. On the `setsid`
+path that leftover may be a dead wrapper pid. An absent pidfile means the
+optimizer PID is unknown, not that the optimizer stopped. Inspect the launch
+log and persisted state before making an explicit recovery decision; a dead
+wrapper alone never justifies restarting.
+
+Because that launch is its own background tool call, the health check has to be
+a **separate foreground** call — it cannot be appended to the same block, or the
+`sleep 30` and every line it prints would run in the background too, invisible
+until you poll `bash_output`. A separate call means a separate shell with none of
+the launch block's `export`s, which is what `$RUN_ENV` above is for: the health
+check and later status queries source it instead of assuming carried-over state.
+
+**Everywhere else**, prefix the `python3 ... optimize` command with `setsid nohup`,
+append ` &`, and `echo $! > "$PID_FILE"`. That form is required for runs > 5 min
+under Cursor, whose background shell can die on SSH disconnect. Reconcile the
+file afterwards all the same: `$!` may be a setsid wrapper that exits immediately,
+not the optimizer PID.
+
+**Why the difference is load-bearing under Claw.** `setsid nohup ... &` detaches
+the run from everything, including the platform. The sandbox is deleted once
+`lastActivity + 15m` passes, `lastActivity` only moves for traffic through the
+Router, and Claw stops pinging the moment the agent turn reaches a terminal
+state — so a hand-detached optimizer is indistinguishable from an abandoned
+sandbox, and the pod is reclaimed out from under it about fifteen minutes after
+the turn ends. That is not hypothetical: on 2026-09-02 four dispatches lost a
+live sandbox exactly this way, the cleanest of them reporting `task.completed`
+at 10:43:14 and losing its pod at 10:57:46, with no error in between and the
+optimizer still working.
+
+`run_in_background=true` detaches the same way but through the door the platform
+can see: Hands registers the shell against the session, which is what lets the
+sandbox be kept alive for as long as the run needs and reclaimed normally once
+it does not. It also gives `bash_output` and `kill_shell`, which are better than
+a pidfile — a `/proc` check answers "alive" for a zombie, and sandbox PID 1 does
+not reap.
+
+One thing has to be true on the Claw side for that to hold, and it is the same
+thing the second condition above tests: `BG_SHELL_ENABLED` must be on in the
+deployment, or the tool refuses `run_in_background` outright and the foreground
+ceiling is the only route.
+
+The other half is already there. Claw's keepalive consults the shell registry
+before treating a sandbox as idle, so a registered shell holds the sandbox for
+as long as it runs and stops holding it once it exits — both directions
+confirmed against a live deployment, with a thirty-minute run held across the
+end of its turn and the sandbox reclaimed a few minutes after the run finished.
+
+One thing it costs: a background shell is registered in Hands' memory and Hands
+takes its shells down with it on SIGTERM, so a Hands restart ends the run where
+`setsid nohup` would have outlived it. A sandbox restart ends it either way, and
+being visible is worth more than surviving a restart nothing would have noticed.
 
 Critic defaults to `--critic-agent`. See
 [Critic Backend Selection](#critic-backend-selection) for `--critic-mock` and
@@ -1149,14 +1233,37 @@ After launching, do a short health check:
 
 ```bash
 sleep 30
-pid="$(cat "$PID_FILE")"
-test -d "/proc/$pid" && echo "optimizer_alive=true pid=$pid"
+# Re-enter the launch shell's environment. Required under Claw, where this is a
+# separate foreground tool call and the `export`s from the launch block are gone;
+# harmless when it is the same shell.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+
+# `jq` is not on every node, so read the launch-info JSON with python3.
+read_json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.argv[2],''))" "$1" "$2" 2>/dev/null; }
+
+# Authoritative pid, from the CLI rather than from whatever launched it: under
+# Claw the tool returned a shell_id, and under setsid `$!` is the wrapper.
+pid="$(read_json "$LAUNCH_INFO_FILE" pid)"
+if [ -n "$pid" ]; then
+  echo "$pid" > "$PID_FILE"
+else
+  # A stale wrapper pid is not the optimizer's identity. Missing means unknown;
+  # inspect the launch log and persisted state without restarting anything.
+  rm -f "$PID_FILE"
+  echo "ERROR: no .pid in $LAUNCH_INFO_FILE; removed $PID_FILE rather than" \
+       "leave a stale wrapper pid. Inspect $RUN_LOG; do not auto-resume." >&2
+fi
+# Not `test -d /proc/$pid`: a zombie keeps its /proc entry, and sandbox PID 1
+# does not reap, so that check reports a dead optimizer as alive indefinitely.
+# Ask for the state and reject Z.
+ps -o stat= -p "$pid" 2>/dev/null | grep -qv '^Z' \
+  && echo "optimizer_alive=true pid=$pid"
 # Authoritative session dir from the launch-info JSON (--launch-info-file).
 # Never guess by timestamp: overlapping sessions break any "latest dir" pick.
-launch_info="$RUN_DIR/launch_${RUN_TAG}.json"
-session_dir="$(jq -r '.session_dir // empty' "$launch_info" 2>/dev/null)"
+session_dir="$(read_json "$LAUNCH_INFO_FILE" session_dir)"
 if [ -z "$session_dir" ]; then
-  echo "ERROR: no .session_dir in $launch_info (launch-info JSON missing or" \
+  echo "ERROR: no .session_dir in $LAUNCH_INFO_FILE (launch-info JSON missing or" \
        "malformed). The optimizer likely died before emitting launch info;" \
        "inspect the HYPERLOOM_LAUNCH line and errors in $RUN_LOG." \
        "Refusing to guess the session dir from timestamps." >&2
@@ -1169,6 +1276,12 @@ test -f "$session_dir/state.json" && echo "state_exists=true" \
 
 Healthy = optimizer process alive + `manifest.json` + `state.json`
 exist + no early `stop_reason`.
+
+Under Claw the launch also returns a `shell_id`; `bash_output` on it is the
+cheaper liveness answer and the one that survives the pid moving, so prefer it
+and keep the `ps` check for the optimizer PID recorded in the pidfile.
+Health checks only observe and reconcile launch metadata; they must not kill,
+restart, or automatically resume the optimizer.
 
 ## Resume Existing Session
 
@@ -1229,7 +1342,10 @@ Resolve `$SESSION` from the launch-info JSON — never from `$USER_DATA_PATH`,
 which is the workspace root, not the session dir.
 
 ```bash
-export LAUNCH_INFO_FILE="$RUN_DIR/launch_${RUN_TAG}.json"
+# Another separate tool call under Claw: source the run-scoped env for
+# $LAUNCH_INFO_FILE before resolving the session dir from it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
 export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
@@ -1241,6 +1357,11 @@ It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_
 Recent action counts from SQLite (last 500 events grouped by category):
 
 ```bash
+# Self-sufficient: $SESSION from the block above is gone if this is its own
+# tool call, so re-source and re-resolve rather than inheriting it.
+RUN_ENV="${RUN_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/optimizer_runs/run_env_${CLAW_SESSION_ID:-$(hostname)}.sh}"
+. "$RUN_ENV"
+export SESSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["session_dir"])' "$LAUNCH_INFO_FILE")"
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/event_counts.py" "$SESSION"
 ```
 

@@ -197,7 +197,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
    critic subprocesses can import `hyperloom.agents` after changing cwd.
-3. Run in background with `setsid nohup`.
+3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 5. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
