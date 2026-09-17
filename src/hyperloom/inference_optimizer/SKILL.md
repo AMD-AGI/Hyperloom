@@ -1215,15 +1215,16 @@ it does not. It also gives `bash_output` and `kill_shell`, which are better than
 a pidfile — a `/proc` check answers "alive" for a zombie, and sandbox PID 1 does
 not reap.
 
-Two things have to be true on the Claw side for that to hold, so check them
-before concluding this does not work:
+One thing has to be true on the Claw side for that to hold, and it is the same
+thing the second condition above tests: `BG_SHELL_ENABLED` must be on in the
+deployment, or the tool refuses `run_in_background` outright and the foreground
+ceiling is the only route.
 
-- `BG_SHELL_ENABLED` must be on in the deployment, or the tool refuses
-  `run_in_background` outright and the foreground ceiling is the only route.
-- Claw's keepalive has to consult the shell registry before treating a sandbox
-  as idle (AMD-AGI/PrimusClaw#22). Until that lands the shell is *visible* but
-  the sandbox is still reclaimed on the old timer — this change is necessary for
-  the fix and not by itself sufficient.
+The other half is already there. Claw's keepalive consults the shell registry
+before treating a sandbox as idle, so a registered shell holds the sandbox for
+as long as it runs and stops holding it once it exits — both directions
+confirmed against a live deployment, with a thirty-minute run held across the
+end of its turn and the sandbox reclaimed a few minutes after the run finished.
 
 One thing it costs: a background shell is registered in Hands' memory and Hands
 takes its shells down with it on SIGTERM, so a Hands restart ends the run where
