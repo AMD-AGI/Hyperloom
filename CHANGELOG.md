@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- SGLang launch evidence now reads dictionary-form `server_args` logs as well as
+  `ServerArgs(...)` records, preserving observed model and configuration identity
+  when launch arguments are unavailable. Both forms retain the same field
+  allowlist and literal-value bounds; identity records do not supply launch argv.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
