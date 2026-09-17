@@ -173,12 +173,11 @@ def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
 def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side can authenticate an agent CLI run.
 
-    Asks for every OpenAI-side name :mod:`hyperloom.common.codex_session`
-    authenticates with, so a gateway deployment carrying only
-    ``LLM_GATEWAY_KEY`` is not ranked uncredentialed and handed to Claude,
-    which such a box cannot authenticate either. A bare ``OPENAI_BASE_URL``
-    with none of them set is an endpoint hint, not a credential, and treating
-    the URL alone as configured is what sends an unauthenticated Codex run.
+    Reads the same OpenAI-side names :mod:`hyperloom.common.codex_session`
+    authenticates with, so the side cannot rank as uncredentialed against a key
+    the session would have accepted. A bare ``OPENAI_BASE_URL`` with none of
+    them set is an endpoint hint, not a credential, and treating the URL alone
+    as configured is what sends an unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
     return bool(_first_set_value(OPENAI_AGENT_KEY_ENV_ORDER, source))

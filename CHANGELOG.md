@@ -111,27 +111,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   single-shot Anthropic transport, Codex through `achat_completion` -- and is
   skipped entirely when neither side is credentialed.
 
-- **A gateway deployment was told it had no OpenAI credential and handed to
-  Claude, which it could not authenticate either.** `openai_agent_credentialed`
-  recognised `OPENAI_API_KEY` alone while `codex_session` authenticates with
-  `OPENAI_API_KEY` or `LLM_GATEWAY_KEY`, so a box carrying only the gateway key
-  ranked as uncredentialed on both sides and fell through to the Claude
-  default. That is the failure #1472 set out to fix, reached through a
-  different variable name. The accepted key names are now one tuple in
-  `llm_config` that `codex_session` reads too. It moves the roles that resolve a
-  backend on their own -- the Forge registry, the kernel request handlers, the
-  specialist runner; the optimizer CLI refuses a gateway-key-only box in
-  preflight long before it builds a backend.
-
-  **Orchestration picked its CLI from the endpoint shape rather than the shared
-  rule.** `cli/backends.py` was outside #1472's reach and still asked
-  `is_openai_only()` for the coordinator, so a deployment that configured both
-  sides got Claude whether or not the Claude SDK was importable. It now falls
-  through to `preferred_agent_backend()`, which moves one shape: both sides
-  configured with only the Codex extra installed runs orchestration on Codex
-  instead of on a `ClaudeBackend` that cannot import its SDK. A single-provider
-  launch still pins its own CLI ahead of the shared rule, because by that point
-  the CLI has already rewritten the model ids to match it.
+- **Orchestration picked its CLI from the endpoint shape instead of the rule
+  every other agentic role had been moved onto.** `cli/backends.py` was outside
+  #1472's reach and still asked `is_openai_only()` for the coordinator, so it
+  read neither credential nor installed SDK. Two shapes move now that it falls
+  through to `preferred_agent_backend()`: both sides configured with only the
+  Codex extra installed runs orchestration on Codex rather than on a
+  `ClaudeBackend` that cannot import its SDK, and a Bedrock or Vertex box
+  carrying an OpenAI key runs Claude rather than Codex, because a managed
+  gateway authenticates the Claude CLI and the endpoint shape could not see it.
+  A single-provider launch still pins its own CLI ahead of the shared rule,
+  because by that point the CLI has already rewritten the model ids to match it.
 
   **The ranking was written twice.** `preferred_agent_backend` and the Forge
   registry's `select_default_agent_provider` each built the credential-then-SDK
@@ -140,7 +130,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   the optional SDKs through `llm_config` instead of repeating `find_spec`, and
   the CLI's pass-through wrappers around `is_anthropic_only` / `is_openai_only`
   are gone along with the model defaults that re-derived the same shape test by
-  hand.
+  hand. That last one was a narrower copy: it compared the two base URLs and
+  never read `OPENAI_API_KEY`, so an `ANTHROPIC_API_KEY` + `OPENAI_BASE_URL`
+  launch defaulted `--claude-model` to a Codex model id.
+
+  **The OpenAI-side key names are one tuple.** `openai_agent_credentialed`
+  recognised `OPENAI_API_KEY` while `codex_session` authenticates with
+  `OPENAI_API_KEY` or `LLM_GATEWAY_KEY`, each keeping its own copy of the list.
+  The predicate now reads the same tuple the session does. No deployment
+  changes hands over it: the shape it would move -- a gateway key with no
+  `OPENAI_API_KEY` and no Anthropic credential -- is refused by
+  `_validate_credentials`, `install.sh` mirrors that refusal, and every env
+  overlay that forwards the gateway key forwards `OPENAI_API_KEY` beside it or
+  strips both. It is the two lists that were the exposure, not a live
+  misroute.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
