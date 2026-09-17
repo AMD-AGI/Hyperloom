@@ -226,3 +226,44 @@ def test_a_timed_out_init_leaves_stdout_usable(monkeypatch, capsys):
     print("visible-after-timeout")
     assert "visible-after-timeout" in capsys.readouterr().out
     release.set()
+
+
+def test_an_abandoned_ray_init_shuts_the_session_it_finished_building(monkeypatch):
+    """A connect that lands after the timeout must not leave the process connected.
+
+    ``ray.init`` cannot be cancelled, so a timed-out attempt is abandoned. If it
+    then succeeds, this long-lived coordinator is holding a session nobody asked
+    for, and the next leg's attempt races it. The call's effect is undone where
+    the call itself could not be stopped.
+    """
+    import threading
+    import types
+
+    started = threading.Event()
+    release = threading.Event()
+    shutdowns = []
+
+    def _slow_init(**_kw):
+        started.set()
+        release.wait(5)
+
+    fake_ray = types.SimpleNamespace(
+        init=_slow_init,
+        shutdown=lambda: shutdowns.append(1),
+        is_initialized=lambda: False,
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+
+    assert started.is_set()
+    assert shutdowns == [], "nothing to undo while the connect is still running"
+
+    release.set()
+    for _ in range(100):
+        if shutdowns:
+            break
+        threading.Event().wait(0.05)
+    assert shutdowns == [1], "the late connect left the process connected"

@@ -1013,3 +1013,25 @@ def test_aiter_build_e2e_real_rocm(tmp_path):
     result = run_aiter_build(action, str(tmp_path / "e2e_attempt"))
     assert result.ok, f"e2e AITER build failed: {result.failure_class} - {result.failure_summary}"
     assert result.installed_versions.get("aiter_ref")
+
+
+def test_a_provision_result_round_trip_keeps_its_acquisition_identity():
+    """``resolved_ref`` and ``resolved_packages`` ARE the identity, not a cache of it.
+
+    ``to_state`` wrote both and ``from_state`` restored neither, so every
+    serialize/rehydrate cycle -- which is how this crosses a round boundary --
+    silently handed the recipe a pinned runtime it could no longer tell from an
+    unpinned one, and dropped the resolved package artifacts with it.
+    """
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import ProvisionResult
+
+    original = ProvisionResult(
+        ok=True,
+        resolved_ref="c" * 40,
+        resolved_packages={"aiter": {"version": "0.1.4", "artifact_digest": "sha256:ab"}},
+    )
+
+    restored = ProvisionResult.from_state(original.to_state())
+
+    assert restored.resolved_ref == "c" * 40
+    assert restored.resolved_packages == {"aiter": {"version": "0.1.4", "artifact_digest": "sha256:ab"}}
