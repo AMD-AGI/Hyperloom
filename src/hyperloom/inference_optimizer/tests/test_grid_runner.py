@@ -21,6 +21,9 @@ import yaml
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter
+from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    strip_benchmark_harness_flags,
+)
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -2527,12 +2530,16 @@ class TestRemoveServerArgsPreservesJson:
 
         Live regression: every variant of an explore round died at vLLM argv
         parse with ``Invalid JSON: key must be a string`` -- including a control
-        leg that added one env var and zero args, because
-        ``strip_benchmark_harness_flags`` routes EVERY composed variant through
+        leg that added one env var and zero args, because at the time
+        ``strip_benchmark_harness_flags`` routed EVERY composed variant through
         ``remove_server_args`` with a non-empty denylist. The old POSIX
         ``shlex.split``/rejoin stripped the JSON quotes, and the bareword repair
         heuristic could not re-quote ``+fused_rms_norm_gated`` (its ``+`` was
         outside the charset), so the corruption reached the server verbatim.
+
+        The launch path no longer applies the denylist, but the exposure remains:
+        explicit ``remove_args`` specs and every KEEP writeback still come through
+        here, so the round trip stays under test.
         """
         raw = (
             "--compilation-config "
@@ -2676,13 +2683,12 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
 
 
 class TestServerArgTokenizerOnTheSyntheticPath:
-    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not.
+    """``compose_server_args`` tokenizes for every variant, AgentX or not.
 
-    The PR note "AgentX-off is a no-op" does not hold in this file:
-    ``compose_server_args`` always calls ``strip_benchmark_harness_flags``, which
-    is ``remove_server_args`` with a non-empty denylist, so every synthetic grid
-    variant goes through the replaced tokenizer. These lock the behaviour that
-    matters there, with HYPERLOOM_AGENTX unset.
+    The PR note "AgentX-off is a no-op" does not hold in this file: the merge
+    itself round-trips every synthetic grid variant through the quote-preserving
+    tokenizer, so these lock the behaviour that matters there with
+    HYPERLOOM_AGENTX unset.
     """
 
     def _off(self, monkeypatch):
@@ -2693,11 +2699,17 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
         assert _grid_runner.compose_server_args(base_extra_args=args) == args
 
-    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+    def test_the_denylisted_flag_reaches_the_launch(self, monkeypatch):
+        """A harness flag is measured with, and only withheld from the recipe.
+
+        It used to be dropped here, which silently benchmarked variants under
+        settings the baseline never ran with.
+        """
         self._off(monkeypatch)
         out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
-        assert "--no-enable-prefix-caching" not in out
+        assert "--no-enable-prefix-caching" in out
         assert "--max-num-seqs 512" in out
+        assert "--no-enable-prefix-caching" not in strip_benchmark_harness_flags(out)
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
@@ -2726,6 +2738,13 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     string, so damage done during removal made the "before" side unparseable
     too, ``healthy_before`` False, and the tripwire silent on precisely the
     failure it was written for.
+
+    The damage simulated here is a wildcard value, because the final
+    ``normalize_server_args`` pass re-quotes ordinary barewords: a ``{mode:3}``
+    would simply be repaired and there would be nothing left to warn about. A
+    wildcard like ``*.mlp.gate`` falls outside that heuristic, which is the real
+    shape the tripwire exists for. It rides on ``--compilation-config`` because
+    the tripwire only inspects :data:`SPACE_VALUE_FLAGS`.
     """
     from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
 
@@ -2733,10 +2752,33 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
 
     def _lossy(server_args, remove_args):
         out = real(server_args, remove_args)
-        return out.replace('{"mode":3}', "{mode:3}")
+        return out.replace('{"ignore":["*.mlp.gate"]}', "{ignore:[*.mlp.gate]}")
 
-    args = '--compilation-config {"mode":3} --max-num-seqs 512'
+    args = '--compilation-config {"ignore":["*.mlp.gate"]} --max-num-seqs 512'
     with patch.object(gsa, "remove_server_args", side_effect=_lossy):
         with caplog.at_level("ERROR"):
             gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
     assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+def test_the_normalize_pass_repairs_bareword_json_from_the_removal_pass(caplog):
+    """Repairable damage is repaired, not merely reported.
+
+    ``compose_server_args`` ends on ``normalize_server_args``, so a bareword blob
+    that the heuristic can re-quote never reaches the server and the tripwire
+    stays quiet. Locked because the previous version of this path ended on the
+    denylist removal instead, where that repair was incidental.
+    """
+    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+
+    real = gsa.remove_server_args
+
+    def _lossy(server_args, remove_args):
+        return real(server_args, remove_args).replace('{"mode":3}', "{mode:3}")
+
+    args = '--compilation-config {"mode":3} --max-num-seqs 512'
+    with patch.object(gsa, "remove_server_args", side_effect=_lossy):
+        with caplog.at_level("ERROR"):
+            out = gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
+    assert out == '--compilation-config {"mode":3}'
+    assert not [r.getMessage() for r in caplog.records if "CORRUPTED" in r.getMessage()]

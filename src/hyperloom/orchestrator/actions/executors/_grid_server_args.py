@@ -148,8 +148,9 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     raw for a caller that inspects them, and fails closed when a blob was split
     by embedded whitespace. Rewriting a string means the wrappers must come off
     (see :func:`_unwrap_shell_quotes`), and a removal must degrade to "leave it
-    alone" rather than reject the whole string — ``strip_benchmark_harness_flags``
-    routes every composed variant through here.
+    alone" rather than reject the whole string — every explicit ``remove_args``
+    spec and every writeback through ``strip_benchmark_harness_flags`` comes
+    through here.
     """
     try:
         tokens = shlex.split(_reserialize_json_blobs(text), posix=False)
@@ -180,9 +181,9 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     Tokenization is quote-preserving (:func:`_split_args_preserving_json`), so
     every flag this function does NOT remove survives byte-for-byte, JSON values
     included. This matters far beyond explicit removals:
-    :func:`strip_benchmark_harness_flags` routes EVERY composed variant through
-    here with a non-empty denylist, so a lossy round trip would corrupt a
-    sibling ``--compilation-config`` even for a variant that removes nothing.
+    :func:`strip_benchmark_harness_flags` routes every KEEP's recipe through here
+    with a non-empty denylist, so a lossy round trip would corrupt a sibling
+    ``--compilation-config`` in a recipe that removes nothing.
     """
     # Compact the JSON values first, then split without POSIX quote processing.
     # Compacting leaves every JSON value as one whitespace-free word, so the
@@ -258,14 +259,44 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return " ".join(out)
 
 
-# Serving-ineligible harness flags. Enroll here; compose_server_args strips them
-# from what a grid launches and _lift_to_current_best from what a KEEP persists.
+# Serving-ineligible harness flags: legal to benchmark with, wrong to hand back
+# as a serving recipe. Enroll here and _lift_to_current_best drops them from what
+# a KEEP persists.
+#
+# Deliberately NOT applied on the launch path. Stripping a flag the operator
+# passed changes what gets measured, and the baseline does not go through
+# compose_server_args, so stripping there ran the baseline and the variants under
+# different settings: on DeepSeek-V4-Flash-FP8 the sealed baseline had prefix
+# caching off at 1345.2 tok/s while every variant had it on, and the champion's
+# +27.5% did not survive a re-bench with the flag actually applied (1161.8, a
+# 13.6% regression). A recipe must be honest about what was run; the place to
+# keep a harness flag out of it is the writeback, not the launch.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+def normalize_server_args(server_args: str | None) -> str:
+    """Round-trip a server-arg string through the quote-preserving tokenizer.
+
+    Compacts JSON values and drops one layer of shell wrappers from plain
+    operands, removing nothing. :func:`compose_server_args` needs this in its own
+    right: Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--tool-call-parser
+    'kimi_k3'`` wrapper reaches argv literally. It used to arrive for free as a
+    side effect of the denylist round trip, which the launch path no longer runs
+    -- so it is spelled out here rather than left to depend on a removal
+    happening to be configured.
+    """
+    args = _reserialize_json_blobs(str(server_args or "").strip())
+    if not args:
+        return ""
+    tokens = _split_args_preserving_json(args)
+    if tokens is None:
+        return args
+    return " ".join(tokens)
 
 
 def compose_server_args(
@@ -278,7 +309,11 @@ def compose_server_args(
 ) -> str:
     """Compose inherited/base/variant args with optional remove/replace semantics.
 
-    Always applies :func:`strip_benchmark_harness_flags` to the result.
+    Does NOT apply :func:`strip_benchmark_harness_flags`: a variant launches with
+    the flags it was given, so that it is measured against a baseline carrying the
+    same ones. Keeping a harness flag out of the persisted recipe is
+    ``_lift_to_current_best``'s job -- see the note on
+    :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST`.
     """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
@@ -291,7 +326,7 @@ def compose_server_args(
         raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    result = strip_benchmark_harness_flags(composed)
+    result = normalize_server_args(composed)
     # Compare against the RAW inputs, not against ``composed``. The tripwire
     # exists to catch a lossy round trip inside ``remove_server_args`` -- and
     # ``composed`` is already that function's output, so damage done there makes

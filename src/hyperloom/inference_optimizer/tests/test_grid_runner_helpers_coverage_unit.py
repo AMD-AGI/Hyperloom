@@ -15,6 +15,9 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    strip_benchmark_harness_flags,
+)
 
 # Patch compatibility-filter helpers in the ``_grid_variant_filter`` sibling,
 # where apply_compatibility_filter resolves them (not via the re-export).
@@ -400,25 +403,61 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+def test_compose_server_args_keeps_denylisted_harness_flag_on_the_launch_path() -> None:
+    """A variant launches with the flags it was given.
+
+    The denylist governs what a KEEP persists, not what gets measured. The
+    baseline does not go through ``compose_server_args``, so stripping here would
+    run the baseline and the variants under different settings and make the
+    comparison meaningless -- which is what happened on
+    DeepSeek-V4-Flash-FP8 (baseline prefix-caching off, every variant on).
+    """
     out = gr.compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
-        variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
+        variant_extra_args="--kv-cache-dtype fp8",
     )
-    assert "--no-enable-prefix-caching" not in out
+    assert "--no-enable-prefix-caching" in out
     assert "--block-size 128" in out
     assert "--kv-cache-dtype fp8" in out
 
 
-def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+def test_compose_server_args_keeps_denylisted_flag_in_replace_mode() -> None:
     out = gr.compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
         args_mode="replace",
     )
+    assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_strip_benchmark_harness_flags_still_drops_the_denylist() -> None:
+    """The writeback side of the split keeps working.
+
+    ``_lift_to_current_best`` calls this so a persisted recipe never hands back a
+    benchmark-only flag; only the launch path stopped calling it.
+    """
+    out = strip_benchmark_harness_flags(
+        "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+    )
+    assert "--no-enable-prefix-caching" not in out
     assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_launch_keeps_what_writeback_strips() -> None:
+    """The two halves of the split, asserted together.
+
+    Written as one test because the bug was not in either function -- each did
+    what it said -- but in the same denylist being applied at both points.
+    """
+    passed = "--no-enable-prefix-caching --max-num-seqs 256"
+    launched = gr.compose_server_args(base_extra_args=passed)
+    persisted = strip_benchmark_harness_flags(launched)
+    assert "--no-enable-prefix-caching" in launched
+    assert "--no-enable-prefix-caching" not in persisted
+    assert "--max-num-seqs 256" in launched
+    assert "--max-num-seqs 256" in persisted
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:
