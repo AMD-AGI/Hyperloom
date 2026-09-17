@@ -16,7 +16,7 @@ import hashlib
 from typing import Any, Mapping
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
-from hyperloom.orchestrator.framework import targeted_build
+from hyperloom.orchestrator.enablement.runtime import targeted_build
 
 from .credentials import (
     classify_credential_class,

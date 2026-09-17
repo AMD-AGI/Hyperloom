@@ -8,10 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hyperloom.inference_optimizer.breakdown.collectors.sessions import (
-    _build_attempt_summary,
-    collect_enablement,
-)
+from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
 from hyperloom.orchestrator.enablement.recipe.steps import build_recipe_steps
 
 SPEC_TASK = "spec-final"

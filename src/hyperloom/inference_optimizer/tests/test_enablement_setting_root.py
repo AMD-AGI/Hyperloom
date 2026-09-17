@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.orchestrator.phases._enablement_artifacts import _root_the_patches_name
+from hyperloom.orchestrator.enablement.artifacts import _root_the_patches_name
 
 
 def _patches(tmp_path: Path, *headers: str) -> tuple[Path, list[dict]]:

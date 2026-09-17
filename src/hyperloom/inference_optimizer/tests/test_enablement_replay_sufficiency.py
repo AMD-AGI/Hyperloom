@@ -10,7 +10,7 @@ import json
 import pytest
 from pathlib import Path
 
-from hyperloom.inference_optimizer.breakdown.collectors.sessions import _build_attempt_summary
+from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
 from hyperloom.orchestrator.enablement.recipe import (
     build_recipe_steps,
     classify_credential_class,
@@ -38,8 +38,8 @@ from hyperloom.orchestrator.enablement.recipe.setup_ledger import (
     build_execution_row,
     mark_round_disposition,
 )
-from hyperloom.orchestrator.framework import targeted_build
-from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction
+from hyperloom.orchestrator.enablement.runtime import targeted_build
+from hyperloom.orchestrator.enablement.runtime.build_actions import TargetedBuildAction
 
 NO_FS = "/nonexistent-probe-root"
 
@@ -1403,7 +1403,7 @@ def test_a_recorded_decision_reads_back_as_the_producer_wrote_it():
 
 
 def test_new_keys_do_not_change_the_r1a_projections():
-    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement as collect
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement as collect
 
     out = collect(
         Path("/tmp/sess"),
@@ -1476,7 +1476,7 @@ def test_evidence_builder_carries_the_binding_and_the_requested_digest(tmp_path)
 
 
 def test_provision_result_carries_the_resolved_identity_fields():
-    from hyperloom.orchestrator.framework.stack_actions import ProvisionResult
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import ProvisionResult
 
     state = ProvisionResult(
         ok=True,
@@ -1488,7 +1488,7 @@ def test_provision_result_carries_the_resolved_identity_fields():
 
 
 def test_resolved_clone_ref_reads_the_commit_the_clone_landed_on():
-    from hyperloom.orchestrator.framework.adapters import _resolved_clone_ref
+    from hyperloom.orchestrator.enablement.runtime.adapters import _resolved_clone_ref
 
     class _Completed:
         returncode = 0
@@ -1498,7 +1498,7 @@ def test_resolved_clone_ref_reads_the_commit_the_clone_landed_on():
 
 
 def test_resolved_packages_reports_version_and_record_digest():
-    from hyperloom.orchestrator.framework.adapters import _resolved_packages
+    from hyperloom.orchestrator.enablement.runtime.adapters import _resolved_packages
 
     class _Completed:
         returncode = 0
@@ -1510,7 +1510,7 @@ def test_resolved_packages_reports_version_and_record_digest():
 
 
 def _collect(state):
-    from hyperloom.inference_optimizer.breakdown.collectors.sessions import collect_enablement
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
 
     return collect_enablement(Path("/tmp/sess"), {"enablement": {"attempts": 1, **state}}, [])
 

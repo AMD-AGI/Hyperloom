@@ -369,7 +369,7 @@ def test_kernel_over_the_device_shared_memory_budget() -> None:
     that kind is marked as needing no code change and this one is fixed in the
     source being edited.
     """
-    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+    from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
 
     sig = classify_failure(
         "RuntimeError: Worker failed with error 'out of resource: shared memory, "
@@ -381,7 +381,7 @@ def test_kernel_over_the_device_shared_memory_budget() -> None:
 
 
 def test_kernel_over_the_device_register_budget() -> None:
-    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+    from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
 
     assert classify_failure("out of resource: registers, Required: 512, Hardware limit: 256").kind == (
         KERNEL_RESOURCE_LIMIT
@@ -395,7 +395,7 @@ def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel()
     alongside the resource wording -- so ordering it after that rule would have
     classified the most specific case as a missing kernel image.
     """
-    from hyperloom.agents.framework.enablement import HIP_KERNEL_MISSING, KERNEL_RESOURCE_LIMIT
+    from hyperloom.common.failure_signature import HIP_KERNEL_MISSING, KERNEL_RESOURCE_LIMIT
 
     sig = classify_failure(
         "hipErrorLaunchOutOfResources: out of resource: shared memory, "
@@ -408,14 +408,14 @@ def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel()
 
 def test_a_plain_hip_error_is_still_a_missing_kernel() -> None:
     """The counterpart: the HIP rule keeps everything it had."""
-    from hyperloom.agents.framework.enablement import HIP_KERNEL_MISSING
+    from hyperloom.common.failure_signature import HIP_KERNEL_MISSING
 
     assert classify_failure("hipErrorNoBinaryForGpu: no kernel image is available").kind == HIP_KERNEL_MISSING
 
 
 def test_a_host_out_of_memory_is_still_not_a_kernel_budget() -> None:
     """The two must not blur: one is fixed in source, the other cannot be."""
-    from hyperloom.agents.framework.enablement import KERNEL_RESOURCE_LIMIT
+    from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
 
     for text in (
         "RuntimeError: HIP out of memory. Tried to allocate 10.54 GiB",
