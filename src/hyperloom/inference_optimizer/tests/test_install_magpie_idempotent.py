@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 PREFLIGHT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
 
-MAGPIE_V020_COMMIT = "e6833b8183c6c41adf6038252337550876ca0433"
+MAGPIE_PINNED_COMMIT = "d4de63dffe8df0229a88d4c364442051387ec00e"
 
 PIP_MARKER = "pip-install-called"
 
@@ -127,9 +127,9 @@ def test_io_install_magpie_reinstall_is_idempotent_guarded() -> None:
     assert "pip install" in body, "reinstall path must still exist for the miss case"
 
 
-def test_default_magpie_pin_is_v020_and_consistent() -> None:
+def test_default_magpie_pin_is_consistent() -> None:
     install_text = IO_INSTALL.read_text(encoding="utf-8")
     preflight_text = PREFLIGHT.read_text(encoding="utf-8")
 
-    assert f'MAGPIE_REF="${{MAGPIE_REF:-{MAGPIE_V020_COMMIT}}}"' in install_text
-    assert f'os.environ.get("MAGPIE_REF", "{MAGPIE_V020_COMMIT}")' in preflight_text
+    assert f'MAGPIE_REF="${{MAGPIE_REF:-{MAGPIE_PINNED_COMMIT}}}"' in install_text
+    assert f'os.environ.get("MAGPIE_REF", "{MAGPIE_PINNED_COMMIT}")' in preflight_text
