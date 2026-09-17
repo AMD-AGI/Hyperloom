@@ -23,6 +23,7 @@ from typing import Any, NamedTuple
 from hyperloom.common import provenance
 from hyperloom.common.eval_tasks import (
     DEFAULT_EVAL_TASKS,
+    EVAL_INSTALL_FROZEN_DEPS,
     TINYBENCHMARKS_MODULE,
     TINYBENCHMARKS_PINNED_REF,
     TINYBENCHMARKS_PINNED_SPECS,
@@ -1161,9 +1162,7 @@ _LM_EVAL_PINNED_SPECS = (
     ("git", f"lm_eval[api] @ git+https://{_LM_EVAL_REPO}.git@{_LM_EVAL_PINNED_REF}"),
     ("archive", f"lm_eval[api] @ https://{_LM_EVAL_REPO}/archive/{_LM_EVAL_PINNED_REF}.tar.gz"),
 )
-# Settled by install.sh (or the image) and load-bearing elsewhere in the stack: pandas for rocprof-compute's CSV
-# converter, torch/triton for the ROCm build PyPI has no equivalent of, numpy because both pin against it.
-_LM_EVAL_FROZEN_DEPS = ("torch", "pandas", "numpy", "triton")
+_LM_EVAL_FROZEN_DEPS = EVAL_INSTALL_FROZEN_DEPS
 
 
 def _frozen_constraints(python_exe: str) -> list[str]:

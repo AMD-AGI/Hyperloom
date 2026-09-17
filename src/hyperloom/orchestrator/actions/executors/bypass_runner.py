@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ import yaml
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.eval_tasks import (
     DEFAULT_EVAL_TASKS,
+    EVAL_INSTALL_FROZEN_DEPS,
     TINYBENCHMARKS_MODULE,
     TINYBENCHMARKS_PINNED_SPECS,
     eval_tasks_need_tinybenchmarks,
@@ -667,18 +669,47 @@ def _module_importable(python_exe: str, module: str) -> bool:
     return probe.returncode == 0
 
 
+def _frozen_constraints(python_exe: str) -> list[str]:
+    """Pin the packages this install must not move, as ``pip -c`` arguments.
+
+    This install runs against the interpreter that is serving the benchmark, so a resolver free to move torch or numpy
+    under it would break the run it is meant to score.
+    """
+    pins: list[str] = []
+    for name in EVAL_INSTALL_FROZEN_DEPS:
+        probe = subprocess.run(
+            [python_exe, "-c", f"import importlib.metadata as m; print(m.version({name!r}))"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        version = probe.stdout.strip()
+        if probe.returncode == 0 and version:
+            pins.append(f"{name}=={version}")
+    if not pins:
+        return []
+    handle, path = tempfile.mkstemp(prefix="hyperloom_pip_constraints_", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(pins) + "\n")
+    return ["-c", path]
+
+
 def _ensure_tinybenchmarks(python_exe: str) -> None:
     """Install the ``tinyBenchmarks`` estimator under *python_exe*, best-effort.
 
     lm-eval imports it lazily from inside the ``tiny*`` aggregation functions, so a missing install would otherwise
     surface only after the whole generation pass has already been paid for. Upstream ships no PyPI distribution, so
     the install is from source: git first, then the archive, because the sandbox may not ship a git binary.
+
+    Its own requirements are declared unpinned (``numpy``, ``scipy``, ``requests``), so the install is constrained:
+    on an image without scipy, resolving it is what would otherwise drag numpy along with it.
     """
     if _module_importable(python_exe, TINYBENCHMARKS_MODULE):
         return
+    constraints = _frozen_constraints(python_exe)
     for _kind, spec in TINYBENCHMARKS_PINNED_SPECS:
         subprocess.run(
-            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", spec],
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, spec],
             check=False,
         )
         if _module_importable(python_exe, TINYBENCHMARKS_MODULE):

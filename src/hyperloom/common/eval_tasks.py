@@ -41,6 +41,13 @@ TINYBENCHMARKS_PINNED_SPECS: tuple[tuple[str, str], ...] = (
     ("archive", f"tinyBenchmarks @ https://{TINYBENCHMARKS_REPO}/archive/{TINYBENCHMARKS_PINNED_REF}.tar.gz"),
 )
 
+# Packages an eval-dependency install must not move, pinned as ``pip -c`` arguments at their installed versions.
+# Settled by install.sh (or the image) and load-bearing elsewhere in the stack: pandas for rocprof-compute's CSV
+# converter, torch/triton for the ROCm build PyPI has no equivalent of, numpy because both pin against it. scipy is
+# here because tinyBenchmarks declares numpy/scipy/requests unpinned: on an image without scipy, resolving it is what
+# would drag numpy along with it.
+EVAL_INSTALL_FROZEN_DEPS = ("torch", "pandas", "numpy", "scipy", "triton")
+
 
 def split_eval_tasks(tasks: str | None) -> tuple[str, ...]:
     """Split an ``lm_eval --tasks`` value into its individual task names."""
