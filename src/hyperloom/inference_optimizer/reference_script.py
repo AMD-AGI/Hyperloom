@@ -380,6 +380,35 @@ def _apply_patch_func(framework_root_vcs: str) -> str:
     return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
 
 
+
+def _shell_ready_server_args(server_args: Any) -> str:
+    """Return ``server_args`` with every token quoted for the shell that will run it.
+
+    The script this renders is executed by a shell, and the args were stored as
+    a command line, not as shell source. ``--compilation-config
+    {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}`` interpolated raw
+    is brace-expanded and quote-stripped into three words -- the flag, a value
+    that is no longer JSON, and a stray operand -- so the one setting that kept
+    the server from segfaulting silently did not reach it. Patches and artifacts
+    on the lines above are already quoted; this line was not.
+
+    Tokenized by the splitter the launch path itself uses, so the script hands
+    the server the same argv every other consumer got, rather than a second
+    opinion about where the tokens are.
+    """
+    text = str(server_args or "").strip()
+    if not text:
+        return ""
+    from hyperloom.orchestrator.actions.executors._grid_server_args import _split_args_preserving_json
+
+    tokens = _split_args_preserving_json(text)
+    if tokens is None:
+        # Unparseable to the canonical splitter: quote it whole rather than
+        # guess where it breaks. A single odd operand beats three wrong ones.
+        return shlex.quote(text)
+    return " ".join(shlex.quote(tok) for tok in tokens)
+
+
 def render_reference_script(
     *,
     framework: str,
@@ -481,7 +510,7 @@ def render_reference_script(
                     src = f'"$SCRIPT_DIR"/{shlex.quote(art["archive_path"])}'
                     lines.append(f"install -D {src} {shlex.quote(art['target'])}")
 
-    args = str(server_args or "").strip()
+    args = _shell_ready_server_args(server_args)
     lines.append("")
     if "atom" in fw:
         entry = f"python3 -m atom.entrypoints.openai_server {args}".rstrip()
