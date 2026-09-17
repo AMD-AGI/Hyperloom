@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **AgentX grading failures no longer fall back to throughput KEEP.** When an
+  AgentX session cannot grade on interactivity because either side is missing
+  the axis pair, explore, ``_lift_to_current_best``, and
+  ``resolve_graded_comparison`` fail closed instead of promoting on the
+  diagnostic output figure. The removed ``ANCHOR_DEGRADED`` round-local output
+  fallback is part of the same rule. ``degrade_reason`` still travels on the
+  explore, stack-validation and integrate rows that record a refused
+  comparison, so the breakdown can still name why a variant did not KEEP; an
+  *adoption* row can no longer carry one, because the resolver now returns
+  REVERT on a degraded pair and a REVERT never reaches the adoption writeback.
+
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The
   `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
@@ -55,6 +66,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   says fingerprint and whose behaviour would have been workload shape.
 
 ### Changed
+
+- **breaking: the SBD V6 concurrency-sweep comparison rows are named for the
+  axis they carry rather than for throughput.** `baseline_throughput` →
+  `baseline_value` and `optimized_throughput` → `optimized_value` in each
+  `conc_sweep` event's `comparison` rows. The old names were a lie on an AgentX
+  session: the figure they held is whatever `result.metric` names, which is the
+  slow-tail interactivity percentile (`e2e_norm_intvty_p90`, milliseconds)
+  whenever the session grades on one, so a consumer reading `*_throughput` was
+  plotting latencies as throughputs against rungs measured in tokens/s. No
+  alias is kept — an alias would preserve exactly the misreading the rename
+  exists to stop. External parsers of `reports/sbd_v6/` must be updated.
+
+  The rows also gained `baseline_guard`, `optimized_guard` and `guard_holds`,
+  and the roll-up gained `guard_axis` and `best_conc_guard_holds`: the throughput
+  the session would have held a promotion to, reported beside the ranked axis
+  rather than enforced, so a rung that bought interactivity by giving up
+  throughput is visible as such instead of reading as a clean win. All are null
+  off the interactivity objective. `guard_holds` is tri-state — `null` means the
+  framework never answered, which is not the same fact as `false`.
+
+- **SBD V6 publishes the axis a session graded on, at the session level and on
+  each settled figure.** Three additions to the wire shape, all of them facts no
+  consumer could previously recover:
+
+  - `metadata.grading` — `{benchmark_mode, objective, tput_guard: {enabled,
+    noise_pct}}`. An AgentX replay is ranked on `e2e_norm_intvty_p90` with total
+    throughput held as a guard; a synthetic run is ranked on output throughput
+    alone. Every throughput field elsewhere in the document is the output axis by
+    construction and `benchmark_mode` never reached the breakdown at all, so
+    without this block the two kinds of session are indistinguishable — and on
+    the canonical corpus the two axes differ by roughly two orders of magnitude,
+    which is enough for a consumer to sort one against the other and never
+    notice. Recorded from `SharedState.grading` rather than re-derived at export:
+    the axis is settled once at seed, where the run can still see its own
+    configuration, and re-deriving it here would read the exporting subprocess's
+    environment. `tput_guard.noise_pct` is `null` on a session seeded before the
+    band was recorded — the band that session applied is unknown, and today's
+    default is not evidence of it.
+  - `outcome.baseline.perf` and `outcome.final.perf` — the four graded axes the
+    measurement reported (`e2e_norm_intvty_p90`, `total_throughput`,
+    `input_throughput`, `tpot_p90_ms`), each an explicit `null` where nothing
+    measured it. All four keys are always present: absent would be
+    indistinguishable from an axis the framework failed to report, and zero reads
+    as "measured, and it was zero". A synthetic run publishes four nulls.
+  - `outcome.final.graded_on` and `outcome.validation.graded_on` — the axis the
+    gain beside them is on. The stack reconciliation has to be single-axis, since
+    an attributed figure on one axis against an unattributed figure on another
+    makes the gap meaningless, and `graded_on` is what names it.
+    `outcome.validation.perf` carries the settled measurement's own axes on the
+    same row as the gain they produced, because a revalidation moves the
+    cumulative figure without re-promoting the recipe.
 
 - **Roofline CUDA graph capture failures are classified instead of retried in
   eager mode.** When profiling cannot capture a graph, the executor records a

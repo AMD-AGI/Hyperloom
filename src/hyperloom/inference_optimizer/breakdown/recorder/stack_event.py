@@ -27,6 +27,7 @@ from typing import Any
 from .event_fields import (
     as_list as _as_list,
     float_or_none as _float_or_none,
+    graded_axes as _graded_axes,
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
 )
@@ -249,6 +250,7 @@ def record_validation(
     source: str = "",
     measurement_basis: str = "",
     graded_objective: str = "",
+    measurement: Mapping[str, Any] | None = None,
     ts: str = "",
     ttft_mean_ms: Any = None,
     e2el_mean_ms: Any = None,
@@ -266,11 +268,16 @@ def record_validation(
     ``stack_len`` keys the row, so a later validation at one length supersedes
     the earlier. ``measurement_basis`` is ``e2e_rebench`` for a full-stack
     revalidation or ``e2e_decision_round`` for the round a variant was graded
-    on. ``graded_objective`` names the axis the figure was measured on, so a
-    total- or intvty-graded gain is not later read as an output gain. The
-    latency pair and ``server_launch_flags`` are carried here because the run
-    that produced ``validated_tput`` resolves them and they cannot be recovered
-    afterwards.
+    on. ``graded_objective`` names the axis the figure was measured on, so an
+    intvty-graded gain is not later read as an output gain; the caller only
+    records a comparison it found comparable, so this is always the axis the
+    session was configured for. ``measurement`` is projected to its graded
+    axes and recorded beside the gain they produced, because a later
+    revalidation moves the cumulative figure without re-promoting the recipe,
+    so reading the axes off ``current_best`` at export can pair this gain with
+    a different measurement. The latency pair and ``server_launch_flags`` are
+    carried here because the run that produced ``validated_tput`` resolves them
+    and they cannot be recovered afterwards.
     """
     try:
         sink = _sink()
@@ -288,6 +295,7 @@ def record_validation(
                 "source": str(source or ""),
                 "measurement_basis": str(measurement_basis or ""),
                 "graded_objective": str(graded_objective or ""),
+                "perf": _graded_axes(measurement),
                 "ttft_mean_ms": _float_or_none(ttft_mean_ms),
                 "e2el_mean_ms": _float_or_none(e2el_mean_ms),
                 "ttft_e2el_source": str(ttft_e2el_source or ""),
