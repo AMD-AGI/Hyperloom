@@ -841,3 +841,29 @@ def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, mo
     assert [r["code"] for r in decision["reasons"]] == ["not_evaluated"]
     # Nothing of the oversized payload survives to be read as partial evidence.
     assert set(recipe) == {"replay_sufficiency"}
+
+def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_session):
+    """Two fields describing one patch may not disagree about what it is called.
+
+    ``kept_rounds`` was normalized and ``kept_patches`` was not, so a recipe
+    carried the same patch twice -- once by name and once by an absolute path
+    into a directory the consumer does not have. Both use the one rule now:
+    session-relative where the patch is in the session, the bare name where it
+    is not, never the authoring host's directory.
+    """
+    from pathlib import Path as _Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+
+    state = {
+        "enablement": {
+            "kept_patches": ["/authoring/ws/a.patch"],
+            "kept_rounds": [{"task_id": "s1", "patches": ["/authoring/ws/a.patch"], "artifacts": []}],
+        },
+        "enablement_mode": "all",
+    }
+    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+
+    assert collected["kept_patches"] == ["a.patch"]
+    assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
+
