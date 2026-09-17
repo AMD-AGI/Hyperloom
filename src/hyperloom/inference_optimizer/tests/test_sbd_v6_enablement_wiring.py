@@ -229,6 +229,7 @@ def _writeback(session_dir: Path, **overrides: Any):
     fake = types.SimpleNamespace(
         shared_state=state,
         rounds=overrides.get("rounds") or _rounds(session_dir),
+        session_dir=str(session_dir),
     )
     for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
@@ -606,3 +607,43 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     assert task_id
     assert lane.shared_state.enablement.validation_pending is True
     assert lane.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_the_rearm_closes_the_lane_with_a_replay_verdict(tmp_path):
+    """The lane's own close must carry the recipe, not just the recorder's.
+
+    :mod:`test_sbd_v6_enablement_timeline` pins the recorder given the state;
+    this pins the call site that supplies it. Drop the ``enablement=`` argument
+    from ``_record_enablement_round``'s ``finish`` call and the recorder is
+    still correct while the verdict is computed nowhere -- which is the state
+    this PR found the branch in.
+    """
+    lane = _lane(tmp_path)
+
+    await lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "patches_applied": ["/p/1.patch"],
+        }
+    )
+
+    recipe = _ext()["recipe"]
+    assert recipe is not None, "the lane closed without judging the stack it kept"
+    assert recipe["replay_sufficiency"]["status"] == "insufficient"
+    assert [step["kind"] for step in recipe["recipe_steps"]] == ["patch"]
+
+
+@pytest.mark.asyncio
+async def test_the_writeback_close_also_carries_a_replay_verdict(tmp_path):
+    """The second terminal. A guard on one path is a guard on one path."""
+    writeback = _writeback(tmp_path)
+
+    await writeback._close_enablement_lane(
+        outcome=enablement_event.OUTCOME_STALLED,
+        reason="cap reached",
+    )
+
+    assert _ext()["recipe"] is not None

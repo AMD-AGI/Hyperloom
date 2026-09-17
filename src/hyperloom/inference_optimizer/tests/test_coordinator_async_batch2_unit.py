@@ -2107,3 +2107,199 @@ async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coo
     assert "unavailable" in out and "coordinator loop thread" in out
     create_action.assert_not_called()
     schedule.assert_not_called()
+
+# -- atomic config levers ride with the patch they are inseparable from -----
+def _autosubmitted_integrate_params(coord: Coordinator) -> dict:
+    """Return the params of the integrate_patch proposal the bridge just queued."""
+    rows = [p for p in coord.state.pending_proposals.values() if getattr(p, "action_name", "") == "integrate_patch"]
+    assert rows, "the bridge queued no integrate_patch proposal"
+    return dict((getattr(rows[-1], "payload", {}) or {}).get("params") or {})
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) -> None:
+    """A lever the specialist marked ``atomic`` reaches integrate_patch with its patch.
+
+    The patch clears a framework guard that the server then asserts on through the
+    flag, so a round that applies one without the other cannot boot.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-atomic-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")  # noqa: E501
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [
+                {
+                    "name": "deepseek-v4-rocm-enable",
+                    "atomic": True,
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "extra_envs": {"VLLM_MHC_TORCH_FALLBACK": "1"},
+                }
+            ],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert params["extra_server_args"] == "--kv-cache-dtype fp8"
+    assert params["extra_envs"] == {"VLLM_MHC_TORCH_FALLBACK": "1"}
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_omits_non_atomic_config_lever(coord: Coordinator) -> None:
+    """An ordinary companion lever stays the config bridge's business, not the patch's."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-plain-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-plain")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "opt-only", "extra_args": "--speculative-num-steps 3"}],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert "extra_server_args" not in params
+    assert "extra_envs" not in params
+
+
+@pytest.mark.asyncio
+async def test_enablement_patch_carries_its_companion_lever_even_when_not_atomic(coord: Coordinator) -> None:
+    """An ENABLEMENT round takes the lever from the lane, not from ``atomic``.
+
+    Observed live: a specialist emitted ``atomic: false`` on a lever whose own
+    reason read "Required to boot at all once the patch lands". Trusting that
+    boolean drops ``--kv-cache-dtype fp8``, every launch dies on the assertion the
+    patch was written to get past, no round is ever kept, and the recipe the run
+    exists to produce is never emitted.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-enablement-lever"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-enablement",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [
+                {
+                    "name": "dsv4-flash-fp8-kvcache-fp8",
+                    "atomic": False,
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "reason": "Required to boot at all once the patch lands.",
+                }
+            ],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert params["extra_server_args"] == "--kv-cache-dtype fp8"
+
+
+@pytest.mark.asyncio
+async def test_optimization_patch_still_omits_a_non_atomic_lever(coord: Coordinator) -> None:
+    """Outside enablement the precedence is unchanged: a patch is its own outcome."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-opt-lever"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-opt")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "opt-only", "atomic": False, "extra_args": "--speculative-num-steps 3"}],
+        },
+    )
+    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_enablement_round_inherits_the_flags_earlier_rounds_established(coord: Coordinator) -> None:
+    """A flag the architecture requires outlives the deliverable that first named it.
+
+    Observed live: round 1 established ``--kv-cache-dtype fp8``, round 3's specialist
+    was working a different blocker and restated no lever at all, and the round went
+    straight back to ``AssertionError: DeepseekV4 only supports fp8 kv-cache format
+    for now, got auto`` -- a wall round 1 had already cleared. ``_rearm_on_advanced``
+    accumulates these into ``accepted_config``; the launch has to read them back.
+    """
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {
+        "extra_server_args": "--kv-cache-dtype fp8",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    sid = "spec-inherit"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-inherit",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            # This round restates nothing, exactly as the live round-3 deliverable did.
+            "proposal_set": [{"name": "rocm-aiter-sparse-indexer", "atomic": False, "extra_args": ""}],
+        },
+    )
+    params = _autosubmitted_integrate_params(coord)
+    assert "--kv-cache-dtype fp8" in params["extra_server_args"]
+    assert params["extra_envs"]["VLLM_ROCM_USE_AITER"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_this_round_overrides_an_inherited_flag(coord: Coordinator) -> None:
+    """Inheriting is not pinning: the current round still has the last word."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {"extra_server_args": "--max-num-seqs 64"}
+    sid = "spec-override"
+    _make_real_patch(coord, sid)
+    task = Task(
+        task_id=sid,
+        kind="specialist",
+        state="running",
+        params={"enablement": True},
+        idempotency_key="kv-override",
+    )
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={
+            "patches_written": ["kernel.py"],
+            "proposal_set": [{"name": "raise-seqs", "atomic": False, "extra_args": "--max-num-seqs 128"}],
+        },
+    )
+    args = _autosubmitted_integrate_params(coord)["extra_server_args"]
+    assert "--max-num-seqs 128" in args
+    assert "64" not in args
+
+
+@pytest.mark.asyncio
+async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
+    """The inheritance is an enablement rule; optimization keeps its own precedence."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord.shared_state.enablement.accepted_config = {"extra_server_args": "--kv-cache-dtype fp8"}
+    sid = "spec-no-inherit"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-noinherit")
+    await coord._maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
+    )
+    assert "extra_server_args" not in _autosubmitted_integrate_params(coord)

@@ -155,3 +155,74 @@ def test_force_restart_raises_when_start_fails(tmp_path):
     with mock.patch.object(ray_runtime.subprocess, "run", _fake_run):
         with pytest.raises(RuntimeError, match="restart local Ray"):
             ray_runtime.force_restart_local_cluster(num_gpus=1, log_path=log_path)
+
+
+# ---- ray.init is bounded -----------------------------------------------------
+
+
+def test_quiet_ray_init_times_out_instead_of_hanging(monkeypatch):
+    """A raylet that accepts the socket and never replies must not block forever.
+
+    Observed live: a coordinator sat inside this call for 44 minutes holding
+    tick 1, with no child process, no server log and no failure to read -- the
+    stall was indistinguishable from a slow model load.
+    """
+    import threading as _threading
+
+    release = _threading.Event()
+
+    class _WedgedRay:
+        def init(self, **_kwargs):
+            release.wait(30)  # never released within the test's timeout
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(ray_runtime, "safe_runtime_env", lambda: {"env_vars": {}})
+    monkeypatch.setitem(__import__("sys").modules, "ray", _WedgedRay())
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.5")
+
+    with pytest.raises(TimeoutError, match="did not complete within"):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+    release.set()
+
+
+def test_quiet_ray_init_timeout_is_configurable(monkeypatch):
+    """The bound is a knob, so a genuinely slow cold start can be waited out."""
+    monkeypatch.delenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", raising=False)
+    assert ray_runtime._ray_init_timeout_sec() == ray_runtime.DEFAULT_RAY_INIT_TIMEOUT_SEC
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "12.5")
+    assert ray_runtime._ray_init_timeout_sec() == 12.5
+
+
+def test_a_timed_out_init_leaves_stdout_usable(monkeypatch, capsys):
+    """The abandoned thread must not take the process's stdout with it.
+
+    ``sys.stdout`` is process-global. A redirection held on the thread the caller
+    abandons would never unwind, so every later write from every thread would
+    disappear into a buffer nobody reads -- trading a bounded stall for a
+    permanent one.
+    """
+    import threading as _threading
+
+    release = _threading.Event()
+
+    class _WedgedRay:
+        def init(self, **_kwargs):
+            release.wait(30)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(ray_runtime, "safe_runtime_env", lambda: {"env_vars": {}})
+    monkeypatch.setitem(sys.modules, "ray", _WedgedRay())
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.5")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+
+    # The wedged connect is still alive; the caller's stream must still work.
+    assert _threading.active_count() >= 1
+    print("visible-after-timeout")
+    assert "visible-after-timeout" in capsys.readouterr().out
+    release.set()
