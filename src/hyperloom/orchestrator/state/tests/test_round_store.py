@@ -109,9 +109,10 @@ async def test_only_one_of_two_contending_acquires_wins_and_the_loser_is_told_wh
     retry = await store.open("round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q3")
     assert not retry.ok
     await store.settle("round-a", holder_task_id="t-1", fence=1, outcome=BOOTED, now_unix=clock.wall(), request_id="q4")
-    assert (
-        await store.open("round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q5")
-    ).ok
+    acquired = await store.open(
+        "round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q5"
+    )
+    assert acquired.ok
 
 
 @pytest.mark.asyncio
