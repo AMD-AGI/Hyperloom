@@ -1211,3 +1211,26 @@ def test_baseline_names_the_script_from_the_config(tmp_path):
 
     cfg.write_text(yaml.safe_dump({"benchmark": {}}), encoding="utf-8")
     assert bl.BaselineExecutor._client_script_from_config(cfg) is None
+
+
+def test_an_unfittable_sibling_script_does_not_fail_the_install():
+    """The hook is workload-specific; the install contract is not.
+
+    A Magpie layout carries sibling scripts -- the multimodal ``*_mm.sh`` among
+    them -- whose client shape this hook does not fit and was never meant to.
+    Folding ``client_tokenizer_ok`` into ``ok`` failed installation over a
+    script the run would never execute, on a layout the run would never touch.
+    The status still reports it; the hard failure lives where the config names
+    both the model that needs the hook and the one script that will run it.
+    """
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import MagpiePatchStatus
+
+    status = MagpiePatchStatus(
+        atomic_ok=True,
+        remote_trust_ok=True,
+        eval_flag_ok=True,
+        client_tokenizer_ok=False,
+    )
+
+    assert status.ok is True, "an unfittable sibling must not fail the install"
+    assert status.client_tokenizer_ok is False, "it must still be reported"

@@ -346,7 +346,13 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         """
         timeout = _ray_init_timeout_sec()
         outcome: dict[str, BaseException] = {}
-        abandoned = threading.Event()
+        # One lock decides, for a connect that lands near the deadline, whether
+        # the caller got it or the runner has to undo it. Checking a flag and
+        # setting it on separate threads leaves the interleaving where the
+        # runner reads "not abandoned", returns, and the caller then declares
+        # abandonment -- the process connected and nobody responsible for it.
+        verdict_lock = threading.Lock()
+        verdict: dict[str, bool] = {"landed": False, "abandoned": False}
 
         def _runner() -> None:
             try:
@@ -354,14 +360,17 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
                 outcome["error"] = exc
                 return
-            if abandoned.is_set():
-                # Finished after the caller was told the cluster is unusable.
-                # Leaving the process connected would hand the next attempt a
-                # session nobody asked for -- and this is a long-lived
-                # coordinator, so "the next attempt" is a later leg of the same
-                # run. The connect cannot be cancelled; its effect can be undone.
-                with contextlib.suppress(Exception):
-                    ray.shutdown()
+            with verdict_lock:
+                if not verdict["abandoned"]:
+                    verdict["landed"] = True
+                    return
+            # Finished after the caller was told the cluster is unusable.
+            # Leaving the process connected would hand the next attempt a
+            # session nobody asked for -- and this is a long-lived coordinator,
+            # so "the next attempt" is a later leg of the same run. The connect
+            # cannot be cancelled; its effect can be undone.
+            with contextlib.suppress(Exception):
+                ray.shutdown()
 
         thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
         # The banner suppression is held here, across a join that always returns, so
@@ -370,10 +379,14 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         with contextlib.redirect_stdout(buf):
             thread.start()
             thread.join(timeout)
-        if thread.is_alive():
-            # Set before raising, so a connect that lands between the join
-            # returning and this line still sees it and undoes itself.
-            abandoned.set()
+        with verdict_lock:
+            # Decided here rather than from ``thread.is_alive()``: a runner that
+            # returned a microsecond ago is alive to that check and has already
+            # connected, and one still inside ``_connect`` will find the flag.
+            timed_out = not verdict["landed"] and "error" not in outcome
+            if timed_out:
+                verdict["abandoned"] = True
+        if timed_out:
             raise TimeoutError(
                 f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
                 "the raylet accepted the connection but never finished registration. "

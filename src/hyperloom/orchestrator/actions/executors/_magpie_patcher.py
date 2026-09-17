@@ -935,15 +935,20 @@ class MagpiePatchStatus:
     # Whether the redundant ``--concurrent-requests`` eval flag was stripped from every generic benchmark script (or
     # none needed it).
     eval_flag_ok: bool = True
-    # Whether every generic client script can be told which tokenizer to load. Tracked apart from
-    # ``eval_flag_ok``: that one is fail-soft, and a missing hook is a hard failure -- the client dies
-    # in HF AutoConfig and the round is graded a boot failure with the server serving.
+    # Whether every generic client script can be told which tokenizer to load. Reported, and
+    # deliberately NOT part of ``ok``: the hook is workload-specific, and a Magpie layout carries
+    # sibling scripts -- the multimodal ``*_mm.sh`` among them -- whose client shape it does not fit
+    # and was never meant to. Folding it in failed install for a layout the run would never touch,
+    # over a script the run would never execute. The hard failure lives where the materialized config
+    # names both the model that needs the hook and the one script that will run it
+    # (``BaselineExecutor`` -> ``client_tokenizer_unpatchable``), which is the only place the two
+    # facts are known together.
     client_tokenizer_ok: bool = True
 
     @property
     def ok(self) -> bool:
         """Whether the patch result is fully successful."""
-        return self.atomic_ok and self.remote_trust_ok and self.eval_flag_ok and self.client_tokenizer_ok
+        return self.atomic_ok and self.remote_trust_ok and self.eval_flag_ok
 
     @property
     def atomic_genuine_failure(self) -> bool:
