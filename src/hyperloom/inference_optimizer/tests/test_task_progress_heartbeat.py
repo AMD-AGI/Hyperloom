@@ -21,6 +21,7 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     PROGRESS_OWNER_AGENT,
+    ExecutionCleanupUnconfirmed,
     SubAgentRunner,
     _format_progress,
 )
@@ -222,9 +223,23 @@ async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confi
         return confirmed
 
     sub.register_executor("explore", execute)
-    result = await sub.run_task(task, prebound_lease=lease, release_resources=cleanup)
-    assert result.state == ("failed" if fails else "succeeded")
-    assert bool(await sub.locks.lane_holders()) is not confirmed
+    try:
+        execution = sub.run_task(task, prebound_lease=lease, release_resources=cleanup)
+        if confirmed:
+            result = await execution
+            assert result.state == ("failed" if fails else "succeeded")
+        else:
+            with pytest.raises(ExecutionCleanupUnconfirmed, match=task.task_id):
+                await execution
+        row = await sub.tasks.get(task.task_id)
+        assert row.state == ("failed" if fails else "succeeded")
+        if fails:
+            assert "executor failed" in row.history[-1]["evidence"]["error"]
+        assert bool(await sub.locks.lane_holders()) is not confirmed
+        retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
+        assert (retained is not None) is not confirmed
+    finally:
+        sub.tasks.db.close()
 
 
 @pytest.mark.asyncio

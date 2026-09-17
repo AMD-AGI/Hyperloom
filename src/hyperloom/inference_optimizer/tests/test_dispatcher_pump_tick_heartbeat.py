@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -39,58 +39,43 @@ async def _build_coord(tmp_path: Path):
     )
 
 
-def _pump_joins_one_task(monkeypatch, *, release: asyncio.Event) -> dict[str, int]:
-    """Strip the pump down to one dispatched task that ends only when released."""
-    from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-
-    counts = {"spawned": 0, "reaped": 0}
-
-    async def _held() -> SimpleNamespace:
-        await release.wait()
-        return SimpleNamespace(ok=True)
-
-    async def _spawn_fitting_queued(self, *_args, **_kwargs):
-        if counts["spawned"]:
-            return []
-        counts["spawned"] += 1
-        task = SimpleNamespace(task_id="long-baseline", kind="baseline")
-        return [(task, asyncio.create_task(_held()), None)]
-
-    async def _reap(self, *_args, **_kwargs) -> None:
-        counts["reaped"] += 1
-
-    async def _noop(self, *_args, **_kwargs) -> None:
-        return None
-
-    async def _not_shutting_down(self, *_args, **_kwargs) -> bool:
-        return False
-
-    monkeypatch.setattr(DispatcherCollaborator, "_spawn_fitting_queued", _spawn_fitting_queued)
-    monkeypatch.setattr(DispatcherCollaborator, "_reap_dispatched_task", _reap)
-    monkeypatch.setattr(DispatcherCollaborator, "_reclaim_stale_dispatch_state", _noop)
-    monkeypatch.setattr(DispatcherCollaborator, "cancel_inflight_actions", _noop)
-    monkeypatch.setattr(
-        DispatcherCollaborator,
-        "_cancel_inflight_that_outlived_the_session",
-        _not_shutting_down,
-    )
-    monkeypatch.setattr(DispatcherCollaborator, "_dispatch_paused_for_phase_budget", lambda self: False)
-    return counts
-
-
 @pytest.mark.asyncio
 async def test_pump_joins_long_work_without_a_supervisor_stamp(tmp_path, monkeypatch):
     release = asyncio.Event()
-    counts = _pump_joins_one_task(monkeypatch, release=release)
+    entered = asyncio.Event()
     coord = await _build_coord(tmp_path)
     coord._dispatcher_poll_sec = 0.02
     assert not hasattr(coord.reconciler, "stamp_progress")
+    reaped = AsyncMock(wraps=coord.dispatcher._reap_dispatched_task)
+    monkeypatch.setattr(coord.dispatcher, "_reap_dispatched_task", reaped)
+    monkeypatch.setattr(coord.dispatcher, "_is_promotable_result", lambda *_args: True)
+    monkeypatch.setattr(coord.dispatcher, "_promote_to_shared_state", AsyncMock())
+    monkeypatch.setattr(coord.dispatcher, "_fact_write_hook", AsyncMock())
+    calls = []
 
+    async def execute(ctx):
+        calls.append(ctx.task.task_id)
+        entered.set()
+        await release.wait()
+        return {"status": "ok"}
+
+    coord.sub.register_executor("profile", execute)
+    task = await coord.tasks.create(kind="profile", params={}, idempotency_key="long-profile")
     pump = asyncio.create_task(coord._pump_dispatcher_once())
     try:
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(entered.wait(), 5)
         assert not pump.done()
+        assert (await coord.tasks.get(task.task_id)).state == "running"
+        reaped.assert_not_awaited()
     finally:
         release.set()
         await asyncio.wait_for(pump, timeout=5)
-    assert counts == {"spawned": 1, "reaped": 1}
+    try:
+        assert calls == [task.task_id]
+        reaped.assert_awaited_once()
+        assert (await coord.tasks.get(task.task_id)).state == "succeeded"
+        events = await coord.db.fetchall("SELECT payload FROM events WHERE topic='delegated_result'")
+        assert len(events) == 1
+        assert not coord.dispatcher._executions
+    finally:
+        await coord.stop()

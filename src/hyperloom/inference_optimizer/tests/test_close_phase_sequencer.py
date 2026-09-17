@@ -423,45 +423,54 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
     assert coord.sub.run_calls == []
 
 
-class _HangsUntilCancelled(_StubSubAgentRunner):
-    """A report writer that never returns unless the waiter cancels it."""
-
-    def __init__(self):
-        super().__init__()
-        self.cancelled = False
-
-    async def run_task(self, task, *args, **kwargs):
-        self.run_calls.append(task)
-        try:
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
-        return _StubSubResult(state="succeeded")
-
-
 @pytest.mark.asyncio
 async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
-    """The in-flight wait had a bound; a newly started report must too."""
-    coord.sub = _HangsUntilCancelled()
+    """The close-step timeout cancels its waiter, not the execution's ownership."""
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+    db = SqliteConnection(coord.session_dir / "close-task.db")
+    coord.tasks = TaskRegistry(db)
+    coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
+    coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
-    queued = _StubTaskRow(
-        task_id="fresh-report",
-        kind="report",
-        state="queued",
-        params={},
-        idempotency_key="internal-report-close_phase_entry",
-    )
+    finish = asyncio.Event()
+    calls = []
 
-    started = time.monotonic()
-    state = await coord._run_close_task(queued, step="1 (report)")
-    elapsed = time.monotonic() - started
+    async def execute(ctx):
+        calls.append(ctx.task.task_id)
+        await finish.wait()
+        return {"status": "ok"}
 
-    assert state == "running"
-    assert elapsed < 2.0
-    assert coord.sub.run_calls == [queued]
-    assert coord.sub.cancelled is True
+    coord.sub.register_executor("report", execute)
+    queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    try:
+        started = time.monotonic()
+        state = await coord._run_close_task(queued, step="1 (report)")
+        elapsed = time.monotonic() - started
+
+        assert state == "running"
+        assert elapsed < 2.0
+        assert calls == [queued.task_id]
+        assert (await coord.tasks.get(queued.task_id)).state == "running"
+        handle = coord.dispatcher._inflight_actions[queued.task_id]
+        assert handle.scope.cancelled
+        assert handle.scope.reason == "caller_cancelled"
+        assert coord.dispatcher._executions
+        assert all(not execution.done() for execution in coord.dispatcher._executions)
+    finally:
+        executions = tuple(coord.dispatcher._executions)
+        finish.set()
+        await asyncio.gather(*executions)
+    try:
+        assert (await coord.tasks.get(queued.task_id)).state == "succeeded"
+        assert not coord.dispatcher._inflight_actions
+        assert not coord.dispatcher._executions
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio
