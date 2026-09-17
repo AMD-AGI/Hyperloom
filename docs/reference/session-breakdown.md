@@ -98,7 +98,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
   "critic":             { /* the critic agent's own run, iteration by iteration */ },
-  "robustness":         { /* empty for new sessions; historical compatibility */ },
+  "robustness":         { "turns": [] /* historical turns remain readable */ },
 }
 ```
 
@@ -246,8 +246,9 @@ records. This is where the facts the older flat sections projected now live,
 attached to the stage that produced them.
 
 `close` is what the session settled at close: the `steps` the close sequencer
-ran and the `artifacts` it published. Its `robustness` field is empty for new
-sessions and remains readable when present in historical records.
+ran and the `artifacts` it published. Its `robustness` field retains the
+`escalated` verdict and recorded `stop_reason`. Historical findings remain
+readable; new sessions do not run a Robustness agent to produce them.
 
 `V6Outcome`, `V6TimelineEvent` and `V6Close` in
 `src/hyperloom/inference_optimizer/breakdown/schema.py` are the authority on
@@ -287,10 +288,11 @@ reporting either alone misreads the round.
 
 ## `robustness`
 
-New sessions emit `{}`. No Robustness agent, runtime RCA, monitor, or supervisor
-runs, and new report UI omits this section. The V6 key and historical readers
-remain so archived sessions can still be inspected without inventing activity.
-The same compatibility rule applies to `close.robustness`.
+New sessions emit `{"turns": []}`. No Robustness agent, runtime RCA, monitor, or
+supervisor runs, and new report UI omits this section. The V6 key and historical
+readers remain so archived sessions can still be inspected without inventing
+activity. `close.robustness` separately retains `escalated` and `stop_reason`,
+plus any findings recorded in historical sessions.
 
 Historical `turns` rows may contain `turn_idx`, `tick_index`, `ts`, `intents`,
 `parse_warnings`, and `outcome`. In those records, `invalid_envelope` or
@@ -450,7 +452,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "end_time": "2026-05-17T13:58:42Z",
     "steps": [],
     "artifacts": {},
-    "robustness": {}
+    "robustness": { "escalated": false, "stop_reason": "time_exhausted" }
   },
 
   "critic": {
@@ -482,7 +484,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     ]
   },
 
-  "robustness": {}
+  "robustness": { "turns": [] }
 }
 ```
 
