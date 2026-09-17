@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import time
@@ -442,6 +443,61 @@ def _default_grid_for_framework(
     return []
 
 
+# A scriptable / bypass workload has no framework source for the model to infer levers from, so it
+# declares its own tunable knob space instead. Inline JSON wins over the file in the scripts dir.
+_DECLARED_LEVERS_ENVS: tuple[str, ...] = ("HYPERLOOM_DECLARED_LEVERS", "HLHPC_LEVERS")
+_DECLARED_LEVERS_FILENAMES: tuple[str, ...] = ("declared_levers.json", "hlhpc_levers.json")
+_BYPASS_SCRIPTS_DIR_ENV = "HYPERLOOM_BYPASS_SCRIPTS_DIR"
+
+
+def _declared_lever_grid() -> list[dict[str, Any]]:
+    """Variants a scriptable adapter declares for itself.
+
+    Read from ``HYPERLOOM_DECLARED_LEVERS`` (inline JSON), else
+    ``declared_levers.json`` in the bypass scripts dir. Returns ``[]`` when
+    nothing is declared or the declaration is unusable -- a malformed
+    declaration must not fail the task, it just seeds nothing.
+
+    Returns:
+        A list of variant payload dicts, each with at least a ``name``.
+    """
+    raw = ""
+    for env_name in _DECLARED_LEVERS_ENVS:
+        raw = (os.environ.get(env_name) or "").strip()
+        if raw:
+            break
+    if not raw:
+        scripts_dir = (os.environ.get(_BYPASS_SCRIPTS_DIR_ENV) or "").strip()
+        if not scripts_dir:
+            return []
+        for filename in _DECLARED_LEVERS_FILENAMES:
+            candidate = Path(scripts_dir) / filename
+            if candidate.is_file():
+                try:
+                    raw = candidate.read_text(encoding="utf-8").strip()
+                except OSError as exc:
+                    log.warning("explore: declared levers unreadable at %s: %s", candidate, exc)
+                    return []
+                break
+    if not raw:
+        return []
+    try:
+        declared = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        log.warning("explore: declared levers are not valid JSON: %s", exc)
+        return []
+    if isinstance(declared, dict):
+        declared = declared.get("levers") or declared.get("variants") or []
+    if not isinstance(declared, list):
+        log.warning("explore: declared levers must be a list of variants, got %s", type(declared).__name__)
+        return []
+    variants = [v for v in declared if isinstance(v, dict) and str(v.get("name") or "").strip()]
+    for variant in variants:
+        variant.setdefault("provenance", "declared_lever")
+        variant.setdefault("note", "declared_lever")
+    return variants
+
+
 # Auto-derived per-variant hard timeout: derive the cap from the Coordinator-injected measured baseline runtime plus a
 # safety margin above the soft-kill ratio (preserves soft-kill → hard-cap layering).
 DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
@@ -672,6 +728,20 @@ class ExploreExecutor:
                     len(fresh),
                 )
                 grid_payload = fresh + list(grid_payload)
+        # A scriptable adapter declares its own knob space: merge it in (prepend, dedupe by name) so
+        # it sweeps even when the model proposed nothing, or proposed variants that get filtered out.
+        if framework_is_scriptable(framework):
+            declared = _declared_lever_grid()
+            if declared:
+                existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
+                fresh_declared = [v for v in declared if str(v.get("name") or "") not in existing_names]
+                if fresh_declared:
+                    log.info(
+                        "explore: seeding %d declared lever variant(s) for scriptable framework=%s",
+                        len(fresh_declared),
+                        framework or "?",
+                    )
+                    grid_payload = fresh_declared + list(grid_payload)
         if not grid_payload:
             # No LLM variants: fall through to the framework's programmatic seed grid instead of failing the task.
             seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
