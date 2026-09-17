@@ -346,6 +346,27 @@ def _clip(text: str, clip: int) -> str:
     return text if clip <= 0 or len(text) <= clip else text[:clip] + "..."
 
 
+
+def _holds_a_credential(path: Path) -> bool:
+    """Whether ``path`` is a credential store with something in it.
+
+    Some of these locations are directories -- ``etc/apt/auth.conf.d`` is one --
+    and a distribution ships them empty. Existence alone therefore marked the
+    channel live on a stock Debian or Ubuntu image, which is most of them, and
+    every recipe produced there carried ``credential_required`` and could never
+    be replayed. A drop-in directory is evidence only when something has been
+    dropped in.
+    """
+    try:
+        if path.is_dir():
+            return any(True for _ in path.iterdir())
+        return path.exists()
+    except OSError:
+        # Unreadable is not absent: a store this process cannot stat is one it
+        # cannot rule out, and the refusal it causes is the safe direction.
+        return True
+
+
 def detect_credential_channels(env: Mapping[str, str] | None, *, fs_root: str | Path = "/") -> list[str]:
     """Name the ambient credential channels ``env`` makes available.
 
@@ -365,9 +386,9 @@ def detect_credential_channels(env: Mapping[str, str] | None, *, fs_root: str | 
     home = str(environ.get("HOME") or "").strip()
     if home:
         for channel, rels in _HOME_RELATIVE_CHANNEL_FILES:
-            if any(Path(home, rel).exists() for rel in rels):
+            if any(_holds_a_credential(Path(home, rel)) for rel in rels):
                 found.add(channel)
     for channel, rels in _ROOT_RELATIVE_CHANNEL_FILES:
-        if any(Path(fs_root, rel).exists() for rel in rels):
+        if any(_holds_a_credential(Path(fs_root, rel)) for rel in rels):
             found.add(channel)
     return sorted(found)
