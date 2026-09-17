@@ -415,6 +415,11 @@ def recipe_from_spec(spec: ServingSpec) -> dict[str, Any]:
     method, k = parse_speculative(spec.extra_server_args)
     return {
         "model": spec.model_path or None,
+        # The engines differ in scheduler, paging and kernel selection, so one
+        # engine's anchor cannot price another's run. Omitting this axis leaves
+        # it missing on our side, and regime_distance skips an axis missing on
+        # either side -- a vLLM and an SGLang anchor would both score 0 here.
+        "engine": spec.framework or None,
         "weight_dtype": spec.weight_dtype,
         "kv_cache_dtype": spec.kv_cache_dtype,
         "moe_expert_dtype": None,

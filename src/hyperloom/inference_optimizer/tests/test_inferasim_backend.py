@@ -437,6 +437,18 @@ def test_recipe_marks_speculative_candidates_apart():
     assert plain["speculative"] != mtp["speculative"]
 
 
+def test_recipe_names_the_serving_engine():
+    """Two engines serving one checkpoint are two regimes, not one.
+
+    InferaSim scores an axis as matching when it is absent on either side, so
+    leaving the engine off the recipe lets a vLLM anchor price an SGLang run.
+    """
+    engines = ("vllm", "sglang", "atom")
+    recipes = [ib.recipe_from_spec(ib.ServingSpec(framework=fw, model_path="m")) for fw in engines]
+    assert [r["engine"] for r in recipes] == list(engines)
+    assert len({r["engine"] for r in recipes}) == len(engines)
+
+
 def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
     """A corrupt curve is worse than no anchor: fall back to pure analysis.
 
