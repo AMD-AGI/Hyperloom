@@ -159,8 +159,24 @@ def test_legacy_watchdog_options_do_not_change_resumed_measurements():
     }
     persisted = {
         "session_id": "existing",
-        "grading": {"objective": "interactivity", "noise_pct": 3.5},
         "benchmark_mode": "agentx",
+        "baseline_tput": 1200.0,
+        "baseline_perf": {
+            "output_throughput": 1200.0,
+            "total_throughput": 2400.0,
+            "e2e_norm_intvty_p90": 10.0,
+        },
+        "current_best": {
+            "tput": 1320.0,
+            "output_throughput": 1320.0,
+            "total_throughput": 2640.0,
+            "e2e_norm_intvty_p90": 11.0,
+        },
+        "current_best_measurement": {
+            "output_throughput": 1320.0,
+            "total_throughput": 2640.0,
+            "e2e_norm_intvty_p90": 11.0,
+        },
         "operator_server_args": "--max-num-seqs 512",
         "operator_extra_env": {"SGLANG_USE_AITER": "0"},
     }
