@@ -34,6 +34,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.perf_metric import (
+    GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
     intvty_grading_enabled,
     agentx_active as _agentx_active,
@@ -229,7 +230,11 @@ GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
 GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
 
 
-def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
+def geak_metric_axis(
+    *,
+    benchmark_mode: str = "",
+    grading: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
     """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
 
     The handoff must name the token-throughput axis this session actually reads.
@@ -247,11 +252,20 @@ def geak_metric_axis(*, benchmark_mode: str = "") -> tuple[str, str]:
         benchmark_mode: The session's persisted mode, when the caller holds one.
             Passing it matters for a round driven from a subprocess that did not
             inherit ``HYPERLOOM_AGENTX``.
+        grading: The session's ``SharedState.grading``. Its ``objective`` was
+            resolved at seed, where the run could still see its own
+            configuration, so it wins outright over the mode-based derivation
+            below -- which reads this process's environment.
 
     Returns:
         The ``E2E_METRIC`` value and the ``metric_basis`` name that goes with it.
     """
-    if intvty_grading_enabled(benchmark_mode=benchmark_mode):
+    objective = str((grading or {}).get("objective") or "").strip()
+    if objective:
+        on_intvty = objective == GRADED_INTVTY
+    else:
+        on_intvty = intvty_grading_enabled(benchmark_mode=benchmark_mode)
+    if on_intvty:
         return GEAK_METRIC_TOTAL
     return GEAK_METRIC_OUTPUT
 
@@ -273,6 +287,7 @@ def build_agentx_workload_spec(
     *,
     model_path: str | None = None,
     env: Mapping[str, str] | None = None,
+    grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Describe the AgentX trace-replay workload for downstream consumers.
 
@@ -340,10 +355,17 @@ def build_agentx_workload_spec(
         "geak_loop_duration_s": min(duration, 900),
         "concurrency": conc,
         # ``benchmark_mode`` is "agentx" because the caller returned early
-        # otherwise; the resolver still honours an explicit HYPERLOOM_PERF_METRIC
-        # in both directions.
-        "metric_basis": geak_metric_axis(benchmark_mode="agentx")[1],
-        "intvty_p90_veto_pct": parse_intvty_noise_pct(),
+        # otherwise, and it only decides the axis when no ``grading`` reached
+        # here. A session that recorded one already resolved
+        # HYPERLOOM_PERF_METRIC at seed, so honouring the override again here
+        # would let a subprocess that lost the variable -- or gained a different
+        # one -- publish an axis the session never graded on.
+        "metric_basis": geak_metric_axis(benchmark_mode="agentx", grading=grading)[1],
+        "intvty_p90_veto_pct": (
+            float(grading["noise_pct"])
+            if isinstance(grading, Mapping) and isinstance(grading.get("noise_pct"), (int, float))
+            else parse_intvty_noise_pct()
+        ),
         # Hyperloom's analyzer window is the canonical duration plus grace/drain.
         "metric_window_s": float(duration) + 40.0,
         "trajectory_start_ratio": [0.25, 0.75],
@@ -367,12 +389,18 @@ def apply_agentx_switch(
     *,
     conc: Any = None,
     active: bool | None = None,
+    grading: Mapping[str, Any] | None = None,
 ) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap,
     the client's warmup grace and the published ``workload_spec.concurrency`` are
     all derived from it (see :func:`agentx_env_for_conc`).
+
+    ``grading`` is the session's own ``SharedState.grading``, resolved once at
+    seed. It settles the axis and band the published ``workload_spec`` hands to
+    GEAK; callers that cannot reach the live state leave it ``None`` and the
+    spec derives both from the environment as before.
     """
     if active is None:
         active = agentx_enabled()
@@ -472,7 +500,13 @@ def apply_agentx_switch(
     # while the client ran with the scaled one. ``_agentx_env`` carries this
     # round's CONC, so the spec's concurrency is the served concurrency by
     # construction rather than by later repair.
-    bench["workload_spec"] = build_agentx_workload_spec(bench, envs, model_path=model_path, env=_agentx_env)
+    bench["workload_spec"] = build_agentx_workload_spec(
+        bench,
+        envs,
+        model_path=model_path,
+        env=_agentx_env,
+        grading=grading,
+    )
 
 
 def prepare_agentx_runtime(
@@ -1188,6 +1222,7 @@ def materialize_config_with_envs(
     drop_moe_runner_backend: bool = False,
     flydsl_source_dirs: bool = False,
     agentx_mode: bool | None = None,
+    grading: Mapping[str, Any] | None = None,
 ) -> Path:
     """Render a per-run Magpie YAML with caller-provided overrides.
 
@@ -1237,6 +1272,9 @@ def materialize_config_with_envs(
             cache key. Off by default: only a run that applied such a patch needs it.
         agentx_mode: Explicit session-level AgentX decision. ``None`` preserves
             the legacy environment-based fallback.
+        grading: The session's ``SharedState.grading``, which settles the axis
+            and noise band the AgentX ``workload_spec`` publishes to GEAK.
+            ``None`` preserves the environment-derived fallback.
 
     Returns:
         The materialized YAML path (stable file name across calls).
@@ -1274,7 +1312,7 @@ def materialize_config_with_envs(
         gpu_type=gpu_type,
         explicit_benchmark_script=bool(benchmark_script),
     )
-    apply_agentx_switch(bench, model_path, active=agentx_mode)
+    apply_agentx_switch(bench, model_path, active=agentx_mode, grading=grading)
     # Fail fast on framework/script mismatch (e.g. vllm image + sglang script).
     # Only trip when the script carries a DIFFERENT known framework's prefix, so
     # custom/non-prefixed scripts are not falsely rejected.

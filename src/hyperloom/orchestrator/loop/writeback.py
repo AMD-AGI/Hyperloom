@@ -852,9 +852,8 @@ class WritebackCollaborator:
         Returns:
             Whether a comparable measurement updated the validation watermark.
         """
-        graded = resolve_graded_comparison(
-            self.shared_state, _graded_source(measurement, new_tput), against_baseline=True
-        )
+        graded_source = _graded_source(measurement, new_tput)
+        graded = resolve_graded_comparison(self.shared_state, graded_source, against_baseline=True)
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
             return False
@@ -878,6 +877,9 @@ class WritebackCollaborator:
                 source=source,
                 measurement_basis=measurement_basis,
                 graded_objective=graded.objective,
+                # The figures grading actually read, not the raw measurement: the caller's resolved output
+                # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
+                measurement=graded_source,
                 ts=ts,
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
@@ -3132,7 +3134,15 @@ class WritebackCollaborator:
         if not prebaseline_enablement:
             graded = resolve_graded_comparison(self.shared_state, cand_source)
             if not graded.comparable:
-                log.info("current_best held: %s winner not comparable (%s)", task_kind, graded.degrade_reason)
+                # AgentX sessions fail closed when the interactivity axis could
+                # not apply. The output figure on a degraded pair is diagnostic
+                # only; promoting on it would record a throughput KEEP the
+                # session never asked for.
+                log.info(
+                    "current_best held: %s winner not comparable (%s)",
+                    task_kind,
+                    graded.degrade_reason,
+                )
                 return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(

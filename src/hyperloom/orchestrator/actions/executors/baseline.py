@@ -2656,6 +2656,7 @@ class BaselineExecutor:
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
+                grading=getattr(live_shared_state, "grading", None),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.

@@ -227,7 +227,9 @@ def test_report_performance_comparison_snapshots_effective_axes(
         "gain_pct": pytest.approx(20.0 if graded else 50.0),
         "comparable": missing_side is None,
         "degrade_reason": reason,
-        "verdict": VERDICT_KEEP,
+        # A degraded pair fails closed at the resolver, so the output figures
+        # beside it are a diagnostic rather than a verdict that could promote.
+        "verdict": VERDICT_KEEP if missing_side is None else VERDICT_REVERT,
         # The guard axis is snapshotted only when the objective actually applied.
         "tput_reference": 1000.0 if graded else 0.0,
         "tput_candidate": 1200.0 if graded else 0.0,
