@@ -25,7 +25,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
     DEFAULT_TP,
 )
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )

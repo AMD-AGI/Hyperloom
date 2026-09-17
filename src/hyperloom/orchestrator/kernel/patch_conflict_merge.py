@@ -394,7 +394,6 @@ def _anthropic_resolver() -> ConflictResolver:
             build_http_timeout,
             resolve_forge_llm_model,
         )
-        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CLAUDE_MODEL
 
         prompt = _resolver_prompt(
             relative_path=relative_path,
@@ -408,9 +407,7 @@ def _anthropic_resolver() -> ConflictResolver:
         result = await aanthropic_completion(
             component="forge",
             operation="patch_conflict_merge",
-            # A default is mandatory: `CLAUDE_MODEL` is unset on every run that
-            # authenticates by OAuth token, and the resolver would post `""`.
-            model=resolve_forge_llm_model("claude", default=DEFAULT_CLAUDE_MODEL),
+            model=resolve_forge_llm_model("claude"),
             system=_RESOLVER_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_LLM_MAX_TOKENS,
@@ -443,7 +440,6 @@ def _codex_resolver() -> ConflictResolver:
             get_async_openai_client,
             resolve_forge_llm_model,
         )
-        from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
         from hyperloom.orchestrator.roles.base import build_chat_messages
 
         prompt = _resolver_prompt(
@@ -456,7 +452,7 @@ def _codex_resolver() -> ConflictResolver:
             intent=intent,
         )
         params: dict[str, object] = {
-            "model": resolve_forge_llm_model("codex", default=DEFAULT_CODEX_MODEL),
+            "model": resolve_forge_llm_model("codex"),
             "messages": build_chat_messages(_RESOLVER_SYSTEM, prompt),
             "max_completion_tokens": _LLM_MAX_TOKENS,
         }

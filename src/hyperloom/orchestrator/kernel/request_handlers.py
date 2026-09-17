@@ -37,11 +37,6 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
-from hyperloom.orchestrator.roles.agent_role import (
-    DEFAULT_CLAUDE_MODEL,
-    DEFAULT_CODEX_MODEL,
-)
-
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import (
     LANE_FUSION,
@@ -4771,12 +4766,10 @@ def _resolve_forge_agent(
         raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
 
     agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
-    default_model = DEFAULT_CODEX_MODEL if agent_backend == llm_config.AGENT_BACKEND_CODEX else DEFAULT_CLAUDE_MODEL
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,
         explicit=str(payload.get("llm_model") or ""),
-        default=default_model,
     )
     return agent_backend, llm_model
 
