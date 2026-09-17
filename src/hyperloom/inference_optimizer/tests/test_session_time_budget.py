@@ -992,8 +992,9 @@ async def test_cancelled_thread_keeps_capacity_until_execution_cleanup(coord, mo
         assert (await coord.tasks.get(task.task_id)).state == "running"
         assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
     finally:
+        executions = tuple(coord.dispatcher._executions)
         stopped.set()
-        await asyncio.sleep(0.1)
+        await asyncio.gather(*executions)
     assert (await coord.tasks.get(task.task_id)).state == "succeeded"
     assert not await coord.locks.lane_holders()
 
@@ -1008,35 +1009,48 @@ async def test_stop_defers_db_close_until_pending_worker_cleanup(coord, monkeypa
     entered = threading.Event()
     finish = threading.Event()
     closed = asyncio.Event()
+    draining = asyncio.Event()
+    worker_done = threading.Event()
     real_close = coord.db.close
+    real_drain = coord.dispatcher.close_db_after_executions
+
+    async def drain():
+        draining.set()
+        await real_drain()
 
     def close():
+        assert worker_done.is_set()
         real_close()
         closed.set()
 
     def work():
         entered.set()
-        finish.wait(5)
+        assert finish.wait(5)
+        worker_done.set()
 
     async def execute(_ctx):
         await asyncio.to_thread(work)
         return {"ok": True}
 
     monkeypatch.setattr(coord.db, "close", close)
+    monkeypatch.setattr(coord.dispatcher, "close_db_after_executions", drain)
     coord.sub.register_executor(_CHEAP_ACTION, execute)
     task = await coord.tasks.create(
         kind=_CHEAP_ACTION, params={}, idempotency_key="deferred-db", requires_lanes=[_CHEAP_ACTION_LANE]
     )
     action = asyncio.create_task(coord.dispatcher.run_task_registered(task))
-    await asyncio.to_thread(entered.wait, 2)
+    assert await asyncio.to_thread(entered.wait, 2)
+    stopping = asyncio.create_task(coord.stop())
     try:
-        await coord.stop()
+        await asyncio.wait_for(draining.wait(), 2)
+        assert not stopping.done()
         assert not closed.is_set()
         assert (await coord.tasks.get(task.task_id)).state == "running"
         assert (await coord.locks.lane_holders())[_CHEAP_ACTION_LANE] == 1
     finally:
         finish.set()
-    await asyncio.wait_for(closed.wait(), 2)
+        await asyncio.wait_for(stopping, 2)
+    assert closed.is_set()
     assert action.cancelled()
     with pytest.raises(sqlite3.ProgrammingError):
         coord.db.raw.execute("SELECT 1")
@@ -1083,7 +1097,10 @@ async def test_cancelled_result_bookkeeping_does_not_release_gpu_capacity(coord)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("confirmed", [True, False])
 async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed):
+    from unittest.mock import AsyncMock
+
     from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 
     coord.gpu_specialist_pool = SpecialistGpuPool(coord.db, gpu_ids=[0])
     events = []
@@ -1106,7 +1123,19 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
         await real_release(lease)
 
     coord.gpu_specialist_pool.release = release
-    await coord.dispatcher.run_task_registered(task, gpu_lease=gpu, gpu_specialist_lease=RayLease())
+    on_complete = AsyncMock()
+    execution = coord.dispatcher.run_task_registered(
+        task, gpu_lease=gpu, gpu_specialist_lease=RayLease(), on_complete=on_complete
+    )
+    if confirmed:
+        await execution
+        on_complete.assert_awaited_once()
+    else:
+        with pytest.raises(ExecutionCleanupUnconfirmed):
+            await execution
+        on_complete.assert_not_awaited()
+        await coord.dispatcher.close_db_after_executions()
+        assert await coord.db.fetchone("SELECT 1 FROM gpu_leases") is not None
     assert events == (["close", "gpu_release"] if confirmed else ["close"])
     holders = await coord.locks.lane_holders()
     assert bool(holders) is not confirmed
