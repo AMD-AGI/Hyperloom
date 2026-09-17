@@ -41,7 +41,10 @@ Advisory review. Flag only what static gates can't.
 - **Fix-around instead of fix-upstream**: a local workaround for what is really a
   GEAK/Magpie/TraceLens/framework defect.
 - **Debt growth**: a new feature flag / env toggle used to route around a design
-  problem, or a new suppression without a stated reason.
+  problem, a new suppression without a stated reason, or dead code left in place —
+  unreachable statements after a `return`/`raise`, commented-out blocks, `# removed …`
+  tombstones. Pylint's `W0101` is warning-category, so CI's `--errors-only` invocation
+  never reports it.
 - **Missing changelog entry**: an observable change — a behaviour, interface, default,
   flag, or artifact — with no `CHANGELOG.md` entry under `[Unreleased]`, and no note in
   the description saying why the change is unobservable.
@@ -49,8 +52,9 @@ Advisory review. Flag only what static gates can't.
 ## What NOT to flag
 
 - Bare `except:`, formatting, import order, naming, line length → ruff.
-- Unused variables, unreachable code → ruff/pylint. (Cyclomatic complexity is *not*
-  covered by either — review it under **Size and complexity** above.)
+- Unused variables and unused imports → ruff (`F841`/`F401`). (Cyclomatic complexity is
+  *not* covered by ruff or by `pylint --errors-only` — review it under **Size and
+  complexity** above.)
 - Known-vuln patterns, injection, secrets → CodeQL / gitleaks / bandit.
 
 ## How to comment
