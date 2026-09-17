@@ -907,25 +907,37 @@ def test_ensure_bench_serving_deps_probe_failure_installs_all(monkeypatch):
         assert dep in install
 
 
-# _unset_hip_visible_devices
-def test_unset_hip_visible_devices_pops_when_rocr_present(monkeypatch, capsys):
-    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+# _normalize_hip_visible_devices
+def test_normalize_hip_visible_devices_reindexes_the_rocr_view(monkeypatch, capsys):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "3")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
 
-    cli_preflight._unset_hip_visible_devices()
+    cli_preflight._normalize_hip_visible_devices()
 
     import os as _os
 
-    assert "HIP_VISIBLE_DEVICES" not in _os.environ
-    assert _os.environ["ROCR_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert _os.environ["HIP_VISIBLE_DEVICES"] == "0"
+    assert _os.environ["ROCR_VISIBLE_DEVICES"] == "3"
     assert "WARNING" in capsys.readouterr().out
 
 
-def test_unset_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
+def test_normalize_hip_visible_devices_keeps_an_already_reindexed_view(monkeypatch, capsys):
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "3")
+
+    cli_preflight._normalize_hip_visible_devices()
+
+    import os as _os
+
+    assert _os.environ["HIP_VISIBLE_DEVICES"] == "0"
+    assert capsys.readouterr().out == ""
+
+
+def test_normalize_hip_visible_devices_keeps_hip_when_rocr_unset(monkeypatch):
     monkeypatch.setenv("HIP_VISIBLE_DEVICES", "0,1,2,3")
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
 
-    cli_preflight._unset_hip_visible_devices()
+    cli_preflight._normalize_hip_visible_devices()
 
     import os as _os
 

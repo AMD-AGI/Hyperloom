@@ -135,29 +135,11 @@ def ensure_fd_limit(
     return soft, hard
 
 
-def ray_cli_env() -> dict:
-    """Return the environment every ``ray`` CLI call runs under.
-
-    Ray's AMD accelerator probe raises at import time when
-    ``ROCR_VISIBLE_DEVICES`` is set without ``HIP_VISIBLE_DEVICES``, and the
-    optimizer's preflight drops the latter so the benchmark path sees the
-    device through ROCR alone. Re-index it for Ray's single-device view.
-    """
-    env = dict(os.environ)
-    if env.get("HIP_VISIBLE_DEVICES"):
-        return env
-    visible = [part for part in env.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
-    if visible:
-        env["HIP_VISIBLE_DEVICES"] = ",".join(str(index) for index in range(len(visible)))
-    return env
-
-
 def ray_status_ok() -> bool:
     """Check whether a Ray cluster is currently reachable."""
     try:
         proc = subprocess.run(
             ["ray", "status"],
-            env=ray_cli_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
@@ -179,16 +161,9 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
                 if reason:
                     log.write(f"{reason}\n")
                 log.write(f"$ {' '.join(cmd)}\n")
-                subprocess.run(cmd, env=ray_cli_env(), stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+                subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True, timeout=timeout)
         else:
-            subprocess.run(
-                cmd,
-                env=ray_cli_env(),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=timeout,
-            )
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError):
         pass
 
@@ -221,11 +196,11 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"$ {' '.join(cmd)}\n")
-            proc = subprocess.run(cmd, env=ray_cli_env(), stdout=log, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_start_exit_code] {proc.returncode}\n")
     else:
         # Without a log sink to name, this output is the only evidence a failure leaves.
-        proc = subprocess.run(cmd, env=ray_cli_env(), capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
         captured = f"{proc.stdout or ''}{proc.stderr or ''}".strip()
     if proc.returncode != 0:
         raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(log_path, captured)}")
@@ -257,12 +232,10 @@ def force_restart_local_cluster(
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
             log.write(f"$ {' '.join(start_cmd)}\n")
-            proc = subprocess.run(start_cmd, env=ray_cli_env(), stdout=log, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.run(start_cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_restart_exit_code] {proc.returncode}\n")
     else:
-        proc = subprocess.run(
-            start_cmd, env=ray_cli_env(), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True
-        )
+        proc = subprocess.run(start_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
     if proc.returncode != 0:
         raise RuntimeError(f"failed to restart local Ray after version mismatch; see {log_path}")
 
