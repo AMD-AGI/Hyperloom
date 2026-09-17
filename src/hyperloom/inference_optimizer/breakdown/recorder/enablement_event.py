@@ -128,6 +128,15 @@ _RECIPE_KEYS: tuple[str, ...] = (
     "installed_versions_at_keep",
     "accepted_config_source",
     "launch_evidence",
+    # Tri-state, and inputs to the verdict above: ``None`` says the scan could
+    # not be made, ``[]`` that it came back clean. The collector distinguishes
+    # them with a sentinel and omits the key entirely when the state never
+    # recorded one, so the copy below carries all three readings. Left out, a
+    # consumer reading ``build_extensions_not_carried`` or ``levers_unverified``
+    # in the reasons had no way to see what they were decided over -- which is
+    # the one thing this block exists to keep beside the verdict.
+    "build_extensions_not_carried",
+    "levers_without_readers",
 )
 
 #: Ceiling on the serialized recipe. A real host's environment closure runs to
