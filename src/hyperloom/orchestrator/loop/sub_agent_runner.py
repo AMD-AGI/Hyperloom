@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 import logging
 
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
+from ..actions.cancel_channel import current_cancel_scope
 from ..bus.resource_lock import Lease, ResourceLockManager
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
@@ -108,6 +109,10 @@ class SubAgentResult:
     result: dict
     error: str | None = None
     error_class: str = ""
+
+
+class ExecutionCleanupUnconfirmed(RuntimeError):
+    """Physical cleanup did not acknowledge release of an execution's resources."""
 
 
 class SubAgentRunner:
@@ -352,12 +357,21 @@ class SubAgentRunner:
             )
         finally:
             # Cancellation of an await does not establish that its worker stopped.
-            if not isinstance(sys.exc_info()[1], asyncio.CancelledError):
+            if isinstance(sys.exc_info()[1], asyncio.CancelledError):
+                scope = current_cancel_scope()
+                if scope is not None:
+                    scope.cancel(reason="execution_cancelled")
+            else:
                 try:
                     released = release_resources is None or await release_resources()
-                    if released and lease is not None:
+                    if not released:
+                        raise ExecutionCleanupUnconfirmed(f"task={task.task_id}: physical cleanup unconfirmed")
+                    if lease is not None:
                         await self.locks.release(lease)
                 except asyncio.CancelledError:
+                    scope = current_cancel_scope()
+                    if scope is not None:
+                        scope.cancel(reason="execution_cleanup_cancelled")
                     log.warning(
                         "sub_agent_runner: task=%s cleanup cancelled; retaining unconfirmed capacity", task.task_id
                     )

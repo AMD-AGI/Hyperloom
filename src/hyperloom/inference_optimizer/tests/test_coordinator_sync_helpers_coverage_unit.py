@@ -56,7 +56,7 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
     """Bench-capable specialists receive enough time for their advertised rebench."""
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
-    from hyperloom.orchestrator.specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
     budget = coord._specialist_wall_budget_sec(
@@ -64,7 +64,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
         params=params,
     )
 
-    assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
+    assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
     assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 

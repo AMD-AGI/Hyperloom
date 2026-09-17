@@ -1273,7 +1273,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        self.dispatcher.close_db_after_executions()
+        await self.dispatcher.close_db_after_executions()
 
     def _bind_session_deadline(
         self,

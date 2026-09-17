@@ -10,7 +10,8 @@ import json
 import math
 import os
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Awaitable, Callable, Collection
+from functools import partial
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
@@ -154,21 +155,32 @@ class DispatcherCollaborator:
     def __getattr__(self, name: str):
         return getattr(object.__getattribute__(self, "_coord"), name)
 
-    def close_db_after_executions(self) -> None:
-        """Close immediately when idle, otherwise after the last cleanup returns."""
-        pending = {execution for execution in self._executions if not execution.done()}
-        if not pending:
-            self.db.close()
+    async def close_db_after_executions(self) -> None:
+        """Drain physical cleanup and completion before the entry-point loop exits.
+
+        An unconfirmed execution retains its database and capacity. In particular,
+        cancelling an asyncio task cannot establish that its worker thread stopped.
+        """
+        for entry in self._inflight_actions.values():
+            entry.scope.cancel(reason="dispatcher_shutdown")
+        executions = set(self._executions)
+        pending = {execution for execution in executions if not execution.done()}
+        if pending:
+            log.warning("dispatcher: draining %d execution cleanup(s) before database close", len(pending))
+            _done, pending = await asyncio.wait(pending, timeout=_COOPERATIVE_CANCEL_GRACE_SEC)
+        unconfirmed = {
+            execution
+            for execution in executions - pending
+            if execution.cancelled() or execution.exception() is not None
+        }
+        if pending or unconfirmed:
+            log.error(
+                "dispatcher: shutdown cleanup unconfirmed (%d pending, %d interrupted); retaining database and ownership",
+                len(pending),
+                len(unconfirmed),
+            )
             return
-        log.warning("dispatcher: deferring database close for %d pending execution cleanup(s)", len(pending))
-
-        def finished(execution: asyncio.Task[Any]) -> None:
-            pending.discard(execution)
-            if not pending:
-                self.db.close()
-
-        for execution in pending:
-            execution.add_done_callback(finished)
+        self.db.close()
 
     def _registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
         """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
@@ -432,21 +444,9 @@ class DispatcherCollaborator:
                 if not done:
                     # Poll elapsed with no completion; re-scan in case a lane freed.
                     continue
-                remaining: list[tuple[Task, asyncio.Task[SubAgentResult], Any]] = []
-                completed: list[tuple[Task, Any, Any]] = []
-                for entry in inflight:
-                    task, atask, gpu_lease = entry
-                    if atask in done:
-                        try:
-                            maybe_result: Any = atask.result()
-                        except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001 — mirror gather(return_exceptions=True); capture task error + cancellation, never KeyboardInterrupt/SystemExit
-                            maybe_result = exc
-                        completed.append((task, maybe_result, gpu_lease))
-                    else:
-                        remaining.append(entry)
-                inflight = remaining
-                for task, maybe_result, gpu_lease in completed:
-                    await self._reap_dispatched_task(task, maybe_result, gpu_lease)
+                # Execution owns completion too, so a cancelled pump cannot lose it.
+                await asyncio.gather(*done, return_exceptions=True)
+                inflight = [entry for entry in inflight if entry[1] not in done]
         finally:
             # ``_inflight_actions`` is dispatcher-wide: the inline path registers
             # a handle there too, and that action is meant to outlive the caller
@@ -832,6 +832,9 @@ class DispatcherCollaborator:
                     gpu_lease=gpu_lease,
                     gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
+                    on_complete=partial(self._reap_dispatched_task, task, gpu_lease=gpu_lease)
+                    if join_in_pump
+                    else None,
                 ),
             )
             self._inflight_actions[task.task_id] = _InflightAction(task.kind, atask, cancel_scope)
@@ -873,6 +876,7 @@ class DispatcherCollaborator:
         gpu_lease: Any = None,
         gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
+        on_complete: Callable[[SubAgentResult], Awaitable[None]] | None = None,
     ) -> "SubAgentResult | None":
         """Run one task under the wall-clock defences, and hand back what it held.
 
@@ -891,6 +895,8 @@ class DispatcherCollaborator:
             cancel_scope: The caller's cancel channel. The pump passes one
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
+            on_complete: Completion owned by the execution, independent of its
+                caller's lifetime. Inline and unjoined tasks retain their own policies.
 
         Returns:
             The runner's result, or ``None`` when the task's lanes were busy, in
@@ -948,17 +954,22 @@ class DispatcherCollaborator:
                 await self.gpu_specialist_pool.release(gpu_lease)
             return True
 
-        with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
-            execution = asyncio.create_task(
-                self.sub.run_task(
-                    task,
-                    prebound_lease=lease,
-                    extra_context=extra_context,
-                    release_resources=release_resources,
-                )
+        async def execute_and_complete() -> SubAgentResult:
+            result = await self.sub.run_task(
+                task,
+                prebound_lease=lease,
+                extra_context=extra_context,
+                release_resources=release_resources,
             )
+            if on_complete is not None:
+                await on_complete(result)
+            self._inflight_actions.pop(task.task_id, None)
+            self._executions.discard(asyncio.current_task())
+            return result
+
+        with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
+            execution = asyncio.create_task(execute_and_complete())
         self._executions.add(execution)
-        execution.add_done_callback(self._executions.discard)
         execution.add_done_callback(self._report_unjoined_failure(task))
         try:
             return await asyncio.shield(execution)
@@ -972,8 +983,6 @@ class DispatcherCollaborator:
                     task.task_id,
                 )
             raise
-        finally:
-            self._inflight_actions.pop(task.task_id, None)
 
     def _specialist_progress_publisher(self, task: Task) -> Any:
         """Build the callback that turns partial checkpoints into observations.
@@ -1056,11 +1065,11 @@ class DispatcherCollaborator:
         budget_min = min(base_min * (macro_cycle + 1), 240.0)
         budget_sec = budget_min * 60.0
         from ..specialists.profile import resolve_specialist_profile
-        from ..specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
         profile = resolve_specialist_profile(params or {})
         if profile.reserves_benchmark_lane:
-            budget_sec = max(budget_sec, float(DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60))
+            budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec
 
     def _specialist_deadline(
