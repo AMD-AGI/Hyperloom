@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
+
+import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
 from hyperloom.orchestrator.enablement.recipe.attempts import build_attempt_summary as _build_attempt_summary
@@ -91,7 +94,7 @@ def test_recipe_steps_patch_order_follows_kept_patches():
 def test_recipe_steps_fields_trace_to_state():
     steps = _steps(setup_commands=["pip install a"], kept_patches=["/p/1.patch"], framework_root="/fr")
     setup, patch = steps
-    assert set(setup) == {"kind", "cmd", "occurrence", "credential_class"}
+    assert set(setup) == {"kind", "cmd", "cmd_sanitized", "occurrence", "credential_class"}
     assert set(patch) == {"kind", "path", "root", "root_id", "targets"}
     assert patch["path"] == "/p/1.patch" and patch["root"] == "/fr"
 
@@ -113,6 +116,54 @@ def test_recipe_steps_patch_paths_equal_kept_patches():
     kept = ["/p/a.patch", "/p/b.patch", "/p/c.patch"]
     steps = _steps(kept_patches=kept, kept_rounds=[{"patches": list(reversed(kept)), "artifacts": []}])
     assert [s["path"] for s in steps] == kept
+
+
+@pytest.mark.parametrize(
+    "cmd, secret",
+    [
+        ("pip install --index-url https://user:hunter2@pypi.internal/simple pkg", "hunter2"),
+        ("git clone https://oauth2:ghp_AAAAAAAAAAAAAAAAAAAA@github.example/x.git", "ghp_AAAAAAAAAAAAAAAAAAAA"),
+        ("HF_TOKEN=hf_BBBBBBBBBBBBBBBBBBBB pip install pkg", "hf_BBBBBBBBBBBBBBBBBBBB"),
+    ],
+)
+def test_a_credentialed_setup_command_is_never_emitted_verbatim(cmd, secret):
+    """``cmd`` lands in session_breakdown.json, which is written out and shipped.
+
+    The ledger has always sanitised its own copy; the step reconstructed the raw
+    text beside it and carried the credential into the artifact. Withholding it
+    costs no consumer anything: a step with a ``credential_class`` already
+    raises ``credential_required``, so the replay is refused whether or not the
+    verbatim command travels with it.
+    """
+    digest = hashlib.sha256(cmd.encode("utf-8")).hexdigest()
+    steps = _steps(
+        setup_commands=[cmd],
+        setup_executions=[
+            {"seq": 1, "cmd_digest": digest, "outcome": "applied", "round_task_id": "t-1"},
+        ],
+    )
+    setup = [s for s in steps if s["kind"] == "setup"]
+    assert setup, "an applied setup row must project a step"
+    blob = json.dumps(steps)
+    assert secret not in blob, f"the recipe carried the credential: {blob}"
+    assert setup[0]["credential_class"]
+    assert setup[0]["cmd_sanitized"] is True
+
+
+def test_a_clean_setup_command_stays_verbatim_so_it_can_be_replayed():
+    """Sanitising one that carries nothing would cost the replay its command."""
+    cmd = "pip install --no-build-isolation ninja"
+    digest = hashlib.sha256(cmd.encode("utf-8")).hexdigest()
+    steps = _steps(
+        setup_commands=[cmd],
+        setup_executions=[
+            {"seq": 1, "cmd_digest": digest, "outcome": "applied", "round_task_id": "t-1"},
+        ],
+    )
+    setup = [s for s in steps if s["kind"] == "setup"]
+    assert setup[0]["cmd"] == cmd
+    assert setup[0]["credential_class"] is None
+    assert setup[0]["cmd_sanitized"] is False
 
 
 def test_each_patch_step_names_the_root_it_was_resolved_against():

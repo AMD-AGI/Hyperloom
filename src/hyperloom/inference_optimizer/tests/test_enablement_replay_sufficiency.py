@@ -1994,25 +1994,36 @@ def test_a_session_bundle_missing_the_captured_overlay_fails_closed(tmp_path):
     assert "source_snapshot_missing" in _codes(decision)
 
 
-def test_an_unrelated_file_sorted_ahead_does_not_refuse_a_referenced_payload(tmp_path, monkeypatch):
-    """Each payload is judged on its own bytes, not on the bundle's running total.
+def test_a_payload_the_budget_drops_is_not_deliverable(tmp_path, monkeypatch):
+    """The verdict answers what the consumer will have, not what exists on disk.
 
-    Spending the packager's cumulative budget before looking at the reference
-    would refuse a recipe over content it does not name -- a small overlay file
-    reported undeliverable because an unrelated report sorted ahead of it. The
-    size test is therefore per payload. What a truncated bundle actually dropped
-    stays the packager manifest's to report, so a consumer reads the verdict for
-    "were these bytes referenced and present" and PACKAGE_MANIFEST.json for
-    "did every selected file fit".
+    This used to assert the opposite: each payload was judged on its own bytes,
+    on the argument that charging it for unrelated files sorted ahead would
+    refuse a recipe over content it does not name. But the packager spends its
+    budget in selection order and those files do consume it, so a referenced
+    payload behind an exhausted cap is one the consumer never receives. Calling
+    it deliverable is how a ``sufficient`` recipe came to ship with its own
+    evidence missing -- and a refusal here is not over content the recipe does
+    not name, it is over bytes it names and will not get.
     """
     from hyperloom.inference_optimizer.breakdown import session_package
 
     session = _session_bundle(tmp_path)
+    # Sorts ahead of launch_config.yaml inside the same glob, so it is charged to
+    # the budget first and leaves the referenced config with nowhere to fit.
+    bulky = session / "reports" / "enablement" / "spec-1" / "aaa-unrelated.log"
+    bulky.write_bytes(b"z" * 4000)
+    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 4000)
+
+    decision = _bundle_decision(session)
+    assert decision["status"] == "insufficient"
+
+
+def test_a_bundle_with_room_for_everything_still_delivers(tmp_path):
+    """The positive control: the refusal above must come from the cap, not the fixture."""
+    session = _session_bundle(tmp_path)
     bulky = session / "reports" / "enablement" / "spec-1" / "unrelated.log"
     bulky.write_bytes(b"z" * 4096)
-    # A cap that the unrelated file alone would exhaust cumulatively, while each
-    # referenced payload still fits inside it on its own.
-    monkeypatch.setattr(session_package, "_MAX_TOTAL_BYTES", 4096)
 
     assert _bundle_decision(session)["status"] == "sufficient"
 

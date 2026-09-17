@@ -477,28 +477,34 @@ def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) ->
     the byte cap, and -- where a digest was recorded -- the bytes still hash to
     it.
 
-    Each payload is judged alone. The bundle's byte budget is spent in selection
-    order, so charging a referenced payload for unrelated files sorted ahead of
-    it would refuse a recipe over content it does not name; what a truncated
-    bundle actually dropped is the packager's own manifest to report.
+    Judged against what this session would actually ship, by running the same
+    selection and the same caps the packer runs. Each payload used to be judged
+    alone, against the per-file ceiling only, on the argument that charging it
+    for unrelated files sorted ahead of it would refuse a recipe over content it
+    does not name. But the budget is spent in selection order and those files do
+    consume it: a payload the cap drops is a payload the consumer will not have,
+    and reporting it deliverable is how a ``sufficient`` recipe came to ship
+    with its own evidence missing. A refusal here is not over content the recipe
+    does not name -- it is over bytes it names and will not get.
     """
     try:
         sd = Path(session_dir).resolve()
     except OSError:
         log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
         return set()
+    try:
+        matched, _unmatched, _refused = _select(sd)
+        packed, _truncated, _overflow, _dropped, _total = _pack(sd, matched)
+    except OSError:
+        log.debug("session package: deliverable pack simulation failed for %s", sd, exc_info=True)
+        return set()
+    shipping = {rel for _path, rel, _size in packed}
     out: set[tuple[str, str]] = set()
     for raw_path, raw_digest in expected:
         rel = str(raw_path).strip("/")
-        if not rel or not any(_glob_match(rel, pattern) for pattern in PACKAGE_GLOBS):
+        if rel not in shipping:
             continue
         candidate = sd / rel
-        try:
-            if not _is_packageable(candidate, sd) or candidate.stat().st_size > _MAX_TOTAL_BYTES:
-                continue
-        except OSError:
-            log.debug("session package: deliverable check failed for %s", rel, exc_info=True)
-            continue
         digest = str(raw_digest or "")
         if _digest_matches(candidate, digest):
             out.add((rel, digest))
