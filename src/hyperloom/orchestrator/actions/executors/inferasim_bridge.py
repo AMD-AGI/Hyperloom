@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+
 # Env knobs (all optional unless noted). Documented in the module docstring and
 # the runner --help.
 ENV_ROOT = "HYPERLOOM_INFERASIM_ROOT"  # path to the Infera checkout (added to sys.path)
@@ -327,12 +329,13 @@ def spec_from_benchmark(bench: dict) -> ServingSpec:
     envs = dict(bench.get("envs") or {})
     framework = str(bench.get("framework") or "sglang").lower()
     model_path = str(bench.get("model") or os.environ.get("MODEL", ""))
-    extra_key = {
-        "sglang": "EXTRA_SGLANG_ARGS",
-        "vllm": "EXTRA_VLLM_ARGS",
-        "atom": "EXTRA_ATOM_ARGS",
-    }.get(framework, "")
-    extra_args = str(_first_env_or(envs, extra_key, "")) if extra_key else ""
+    # Infera names the engine as a free string, so a build ("mori-sglang") is a
+    # regime of its own and reaches us as one. Resolving the args env through the
+    # registry rather than an exact table means such a build still has its server
+    # args read -- the hand-rolled table returned nothing for it, which silently
+    # dropped the attention backend, KV dtype and speculative flags that decide
+    # the regime.
+    extra_args = str(_first_env_or(envs, server_args_env_name(framework), ""))
 
     tp = _as_int(_first_env_or(envs, "TP", 1), 1)
     # EP/PP: explicit bridge env, else parse from server args, else 1.
