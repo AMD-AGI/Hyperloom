@@ -163,6 +163,12 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
     default=True,
     help="Measure empirical roofs with rocprof-compute --roof-only. Disabling falls back to datasheet peaks.",
 )
+@click.option(
+    "--remeasure-device",
+    is_flag=True,
+    default=False,
+    help="Measure this box's roofs again instead of reading the profile an earlier run cached.",
+)
 @click.option("--cache/--no-cache", default=True, help="Reuse and update the cached ceiling for this identity")
 @click.option("--op-name", default="", help="Operator name used in the cache identity. Defaults to the workspace name.")
 @click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
@@ -182,6 +188,7 @@ def roofline_ceiling_command(
     arch: str,
     device_id: int,
     roof_only: bool,
+    remeasure_device: bool,
     cache: bool,
     op_name: str,
     agent_provider: str,
@@ -218,6 +225,7 @@ def roofline_ceiling_command(
         arch=arch,
         device_id=device_id,
         roof_only=roof_only,
+        remeasure_device=remeasure_device,
         run_timeout_sec=float(run_timeout_sec),
         roof_timeout_sec=float(roof_timeout_sec),
     )

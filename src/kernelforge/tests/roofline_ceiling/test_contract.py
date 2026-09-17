@@ -15,7 +15,11 @@ from kernelforge.roofline_ceiling.contract import (
     load_report,
     response_schema,
 )
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import (
+    PEAK_SOURCE_DATASHEET,
+    PEAK_SOURCE_EMPIRICAL,
+    PEAK_SOURCE_REFERENCE,
+)
 
 _ANALYSIS = """# Performance ceiling analysis
 
@@ -178,8 +182,17 @@ def test_a_missing_confidence_is_refused():
 def test_datasheet_peaks_add_the_caveat_that_says_so():
     report = _build(_payload(), hardware=_hardware(peak_source=PEAK_SOURCE_DATASHEET))
 
-    assert any("not measured on this box" in caveat for caveat in report.caveats)
+    assert any("not measured on any card" in caveat for caveat in report.caveats)
     assert any("absolute lower bound" in caveat for caveat in report.caveats)
+
+
+def test_reference_peaks_say_they_came_from_another_card():
+    """Measured, so not the datasheet warning -- but not this box's, so not silence either."""
+    report = _build(_payload(), hardware=_hardware(peak_source=PEAK_SOURCE_REFERENCE))
+
+    assert any("not from this box" in caveat for caveat in report.caveats)
+    assert not any("absolute lower bound" in caveat for caveat in report.caveats)
+    assert report.hardware.is_measured and not report.hardware.is_empirical
 
 
 def test_an_unmeasured_dispatch_floor_is_declared_rather_than_absorbed():

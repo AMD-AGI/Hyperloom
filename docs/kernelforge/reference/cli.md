@@ -399,12 +399,24 @@ means nothing, so whoever holds a baseline divides by these numbers themselves.
 The estimate is an agent's, composition included, because no table covers MoE
 routing, paged attention, fusion legality or occupancy derating for an arbitrary
 operator, and a fixed composition rule makes the analyst distort its model to
-fit the rule. The hardware is not the agent's: every peak, bandwidth and launch
-cost comes from `rocprof-compute --roof-only` and a dispatch probe run on the
-box, and the analyst is told to use those and nothing it recalls. Each published
-report carries the analyst's own derivation — formulas, figures used and
-assumptions — because nothing recomputes the latencies and that document is the
-only record of how they were reached.
+fit the rule. The hardware is not the agent's: it is handed measured peaks,
+bandwidths and a launch cost, and told to use those and nothing it recalls. Each
+published report carries the analyst's own derivation — formulas, figures used
+and assumptions — because nothing recomputes the latencies and that document is
+the only record of how they were reached.
+
+Those hardware figures are a property of the machine, not of the operator, so
+they are established once and read thereafter, in this order:
+
+| `peak_source` | Where the figures came from |
+|:--|:--|
+| `roof_only_empirical` | Measured on this box by `rocprof-compute --roof-only`, then cached per machine — including partition mode, since slicing a card changes what one slice reaches. |
+| `reference_profile` | Measured on a reference card of the same architecture, device and partition, shipped with the package. For a host without `rocprof-compute` this is far better than a datasheet, and the report says the figures are not this box's. |
+| `datasheet` | Vendor peaks. An absolute lower bound no implementation reaches — roughly a factor of two below achievable, and the factor varies by instruction path, so cases of different dtypes stop being comparable. |
+
+Shipped reference profiles live in `kernelforge/data/roofline_ceiling/device_profiles/`
+and record when, with which tool versions, and under which partition and power
+cap they were measured, plus any figure their author did not trust.
 
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.
@@ -419,7 +431,8 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
 | `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
 | `--device <n>` | `0` | GPU ordinal to measure and profile on. |
-| `--roof-only` / `--no-roof-only` | on | Measure this box's roofs with `rocprof-compute --roof-only`. Disabling, or a host without the profiler, falls back to vendor datasheet peaks — which are an absolute lower bound no implementation reaches, roughly a factor of two below achievable. Which one was used is recorded in `peak_source` and stated in the report; it is never a silent degrade. |
+| `--roof-only` / `--no-roof-only` | on | Measure this box's roofs with `rocprof-compute --roof-only` the first time, and cache them per machine. Roofs do not depend on the operator, so later campaigns on the same box read the cached profile instead of remeasuring. |
+| `--remeasure-device` | off | Measure this box's roofs again rather than reading the cached profile. Use after a ROCm upgrade, a partition change or a power-cap change. |
 | `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The cache key includes `peak_source`, so a datasheet answer is never served to a caller who asked for a measured one. |
 | `--op-name <name>` | workspace name | Operator name used in the cache identity. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |

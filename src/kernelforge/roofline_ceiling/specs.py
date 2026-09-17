@@ -28,8 +28,13 @@ from dataclasses import dataclass, field
 
 #: ``hardware.peak_source`` value for a peak read off this table.
 PEAK_SOURCE_DATASHEET = "datasheet"
-#: ``hardware.peak_source`` value for a peak measured by ``--roof-only``.
+#: ``hardware.peak_source`` value for a peak measured on this box, either by
+#: ``--roof-only`` during this run or by an earlier run that cached it.
 PEAK_SOURCE_EMPIRICAL = "roof_only_empirical"
+#: ``hardware.peak_source`` value for a peak measured on another card of the
+#: same configuration and shipped with the package. Better than a datasheet,
+#: and distinguished from a local measurement because it is not one.
+PEAK_SOURCE_REFERENCE = "reference_profile"
 
 
 @dataclass(frozen=True)
@@ -145,6 +150,7 @@ __all__ = [
     "KNOWN_INSTRUCTION_PATHS",
     "PEAK_SOURCE_DATASHEET",
     "PEAK_SOURCE_EMPIRICAL",
+    "PEAK_SOURCE_REFERENCE",
     "ArchSpec",
     "arch_spec",
     "supported_arches",

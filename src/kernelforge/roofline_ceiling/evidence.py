@@ -25,14 +25,24 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
 from kernelforge.roofline_ceiling.contract import Hardware
+from kernelforge.roofline_ceiling.device_profile import (
+    DeviceIdentity,
+    DeviceProfile,
+    describe_device,
+    load_local,
+    load_reference,
+    store_local,
+)
 from kernelforge.roofline_ceiling.specs import (
     PEAK_SOURCE_DATASHEET,
     PEAK_SOURCE_EMPIRICAL,
+    PEAK_SOURCE_REFERENCE,
     arch_spec,
 )
 from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
@@ -99,16 +109,28 @@ DISPATCH_FLOOR_WARMUP = 500
 
 _PROBE_SENTINEL = "__FORGE_DISPATCH_FLOOR__"
 
-# Back-to-back trivial dispatches on one stream. What this times is the cost of
-# getting one more kernel onto the device when the queue is already warm, which
-# is the quantity a stage's serial dispatch count should be charged at -- not the
-# cost of a cold first launch, and not host-side submission that a graph removes.
+# Back-to-back trivial dispatches, timed from inside a captured graph.
+#
+# The graph is the whole point. Timed eagerly, each iteration also pays the
+# framework's per-op host cost -- on an MI355X that was 4.27 us against 1.55 us
+# for the same kernel replayed from a graph, so nearly two thirds of the eager
+# figure is host submission. Charging a stage's serial dispatches at the eager
+# rate overstates the latency term threefold, and it does so exactly on the small
+# shapes where that term decides the ceiling.
+#
+# The graphed figure is also the one that matches how the campaign measures: a
+# forge driver is graph-timed, so host submission is already outside its clock.
+# Eager remains as a labelled fallback for a runtime without graph capture; a
+# caller can tell the two apart by ``mode``.
 _DISPATCH_FLOOR_PROBE = f'''
 import json
 import sys
 import time
 
 SENTINEL = "{_PROBE_SENTINEL}"
+ROUNDS = {DISPATCH_FLOOR_ROUNDS}
+BATCH = {DISPATCH_FLOOR_BATCH}
+WARMUP = {DISPATCH_FLOOR_WARMUP}
 
 
 def main() -> int:
@@ -121,31 +143,70 @@ def main() -> int:
         print(SENTINEL + json.dumps({{"ok": False, "detail": "no ROCm/CUDA device is visible to torch"}}))
         return 0
 
-    device = torch.device("cuda")
-    buffer = torch.zeros(1, device=device)
-
-    for _ in range({DISPATCH_FLOOR_WARMUP}):
+    buffer = torch.zeros(1, device=torch.device("cuda"))
+    for _ in range(WARMUP):
         buffer.add_(1.0)
     torch.cuda.synchronize()
 
-    samples = []
-    for _ in range({DISPATCH_FLOOR_ROUNDS}):
+    def eager_once():
+        """One batch of launches, paying host submission on every one."""
         torch.cuda.synchronize()
         started = time.perf_counter()
-        for _ in range({DISPATCH_FLOOR_BATCH}):
+        for _ in range(BATCH):
             buffer.add_(1.0)
         torch.cuda.synchronize()
-        samples.append((time.perf_counter() - started) / {DISPATCH_FLOOR_BATCH})
+        return (time.perf_counter() - started) / BATCH
+
+    mode = "eager"
+    detail = ""
+    replay = None
+    try:
+        graph = torch.cuda.CUDAGraph()
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(3):
+                buffer.add_(1.0)
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        with torch.cuda.graph(graph):
+            for _ in range(BATCH):
+                buffer.add_(1.0)
+        torch.cuda.synchronize()
+        for _ in range(10):
+            graph.replay()
+        torch.cuda.synchronize()
+
+        def replay_once():
+            """The same batch, replayed, so only device launch is on the clock."""
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            graph.replay()
+            torch.cuda.synchronize()
+            return (time.perf_counter() - started) / BATCH
+
+        replay = replay_once
+        mode = "graph_replay"
+    except Exception as exc:  # noqa: BLE001 - graph capture is the preferred path, not a required one
+        detail = "graph capture unavailable, timed eagerly: " + str(exc)[:200]
+
+    measure = replay if replay is not None else eager_once
+    samples = [measure() for _ in range(ROUNDS)]
+    eager_samples = [eager_once() for _ in range(ROUNDS)] if replay is not None else samples
 
     payload = {{
         "ok": True,
         "dispatch_floor_s": min(samples),
         "median_s": sorted(samples)[len(samples) // 2],
-        "rounds": {DISPATCH_FLOOR_ROUNDS},
-        "batch": {DISPATCH_FLOOR_BATCH},
+        "eager_floor_s": min(eager_samples),
+        "mode": mode,
+        "rounds": ROUNDS,
+        "batch": BATCH,
         "device_name": torch.cuda.get_device_name(0),
         "kernel": "trivial in-place elementwise add on a 1-element tensor",
     }}
+    if detail:
+        payload["detail"] = detail
     print(SENTINEL + json.dumps(payload))
     return 0
 
@@ -443,16 +504,18 @@ def resolve_hardware(
     empirical_bandwidth: dict[str, float] | None = None,
     dispatch_floor_s: float = 0.0,
     provenance: dict[str, Any] | None = None,
+    identity: DeviceIdentity | None = None,
+    allow_reference: bool = True,
 ) -> Hardware:
-    """Settle the hardware figures, preferring measured roofs over datasheet.
+    """Settle the hardware figures, best available source first.
 
-    The two are never mixed. In a record half measured and half datasheet, one
-    term would be roughly twice as generous as the next and no field could say
-    which, so a missing HBM measurement drops the whole record to datasheet
-    rather than filling one hole from the other source.
+    The order is: measured here, then measured on a reference card of the same
+    configuration, then the datasheet. Sources are never blended. In a record
+    half measured and half datasheet one term would be roughly twice as generous
+    as the next and no field could say which, so a missing HBM figure drops the
+    whole record to the next source rather than filling one hole from it.
     """
     resolved_arch = canon_arch(arch) or detect_arch() or canon_arch(arch)
-    spec = arch_spec(resolved_arch)
     notes = dict(provenance or {})
     notes["arch_resolved_from"] = "caller" if canon_arch(arch) else "rocminfo"
 
@@ -468,9 +531,37 @@ def resolve_hardware(
             provenance=notes,
         )
 
+    if allow_reference:
+        device = identity or describe_device(resolved_arch)
+        reference = load_reference(device)
+        if reference is not None:
+            notes["reference_profile"] = {
+                "origin": reference.origin,
+                "measurement": reference.measurement,
+                "source_by_figure": reference.source_by_figure,
+                "notes": list(reference.notes),
+                "matched_device": {
+                    "arch": device.arch,
+                    "device_name": device.device_name,
+                    "compute_partition": device.compute_partition,
+                    "memory_partition": device.memory_partition,
+                },
+            }
+            return Hardware(
+                arch=resolved_arch or device.arch,
+                peak_flops=dict(reference.peak_flops),
+                bandwidth=dict(reference.bandwidth),
+                peak_source=PEAK_SOURCE_REFERENCE,
+                # A launch cost measured elsewhere still beats none, but one
+                # measured here wins: this box's probe is cheap and always ran.
+                dispatch_floor_s=float(dispatch_floor_s or reference.dispatch_floor_s),
+                provenance=notes,
+            )
+
+    spec = arch_spec(resolved_arch)
     if spec is None:
         raise ValueError(
-            f"no empirical roofs and no datasheet peaks for arch {resolved_arch or '<undetected>'}; "
+            f"no measured roofs and no datasheet peaks for arch {resolved_arch or '<undetected>'}; "
             "pass --arch with one of: " + ", ".join(sorted(_datasheet_arches()))
         )
     notes.setdefault("datasheet_source", spec.source)
@@ -541,18 +632,26 @@ def collect_evidence(
     arch: str = "",
     device_id: int = 0,
     roof_only: bool = True,
+    remeasure_device: bool = False,
     run_timeout_sec: float = 1800.0,
     roof_timeout_sec: float = 3600.0,
     env: dict[str, str] | None = None,
+    project_root: str | Path | None = None,
 ) -> tuple[EvidenceBundle, list[str]]:
     """Gather every measured input one ceiling run needs.
 
     Returns ``(bundle, scored_case_ids)``. Each step degrades independently and
     records why, so a host without a profiler still produces a labelled answer
     instead of no answer or, worse, an unlabelled one.
+
+    The roofs are measured at most once per machine. They do not depend on the
+    operator, so a second campaign on the same box reads the profile this one
+    cached; ``remeasure_device`` forces a fresh measurement when the box has
+    changed underneath it.
     """
     artifacts = Path(artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
+    identity = describe_device(arch)
 
     scored, observed, notes = discover_scored_cases(
         command=performance_command,
@@ -574,7 +673,20 @@ def collect_evidence(
     peaks: dict[str, float] = {}
     bandwidth: dict[str, float] = {}
     roof_provenance: dict[str, Any] = {"measured": False, "detail": "--roof-only was not requested"}
-    if roof_only:
+
+    cached = None if remeasure_device else load_local(identity, project_root)
+    if cached is not None:
+        peaks, bandwidth = dict(cached.peak_flops), dict(cached.bandwidth)
+        roof_provenance = {
+            "measured": True,
+            "reused": True,
+            "origin": cached.origin,
+            "measurement": cached.measurement,
+            "source_by_figure": cached.source_by_figure,
+            "notes": list(cached.notes),
+        }
+        notes.append(f"reused this box's cached roofs from {cached.origin}; pass --remeasure-device to refresh")
+    elif roof_only:
         peaks, bandwidth, roof_provenance = collect_empirical_peaks(
             command=performance_command,
             workdir=workdir,
@@ -583,7 +695,30 @@ def collect_evidence(
             timeout_sec=roof_timeout_sec,
             env=env,
         )
-        if not roof_provenance.get("measured"):
+        if roof_provenance.get("measured"):
+            # Keyed by the machine, so the next operator on this box reads it
+            # instead of paying for the same microbenchmarks again.
+            stored = store_local(
+                DeviceProfile(
+                    peak_flops=peaks,
+                    bandwidth=bandwidth,
+                    dispatch_floor_s=dispatch_floor_s,
+                    source_by_figure={
+                        path: f"rocprof-compute --roof-only, column {column}"
+                        for path, column in (roof_provenance.get("column_by_instruction_path") or {}).items()
+                    },
+                    measurement={
+                        "measured_at": time.strftime("%Y-%m-%d"),
+                        "tool": roof_provenance.get("tool", ""),
+                        "roofline_csv": roof_provenance.get("roofline_csv", ""),
+                        "dispatch_floor_mode": dispatch_provenance.get("mode", ""),
+                    },
+                ),
+                identity,
+                project_root,
+            )
+            notes.append(f"cached this box's roofs at {stored}")
+        else:
             notes.append("empirical roofs unavailable: " + str(roof_provenance.get("detail") or "unknown"))
 
     trace_provenance = capture_kernel_trace(
@@ -601,12 +736,18 @@ def collect_evidence(
         empirical_peaks=peaks,
         empirical_bandwidth=bandwidth,
         dispatch_floor_s=dispatch_floor_s,
+        identity=identity,
         provenance={
             "roofs": roof_provenance,
             "dispatch_floor": dispatch_provenance,
             "kernel_trace": trace_provenance,
         },
     )
+    if hardware.peak_source == PEAK_SOURCE_REFERENCE:
+        notes.append(
+            "roofs came from a shipped reference card of this configuration, not from this box; "
+            "install rocprof-compute and rerun to measure locally"
+        )
 
     return (
         EvidenceBundle(

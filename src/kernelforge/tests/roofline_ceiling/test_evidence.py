@@ -196,7 +196,7 @@ def test_the_datasheet_path_offers_no_cache_roof_rather_than_an_invented_one():
 def test_an_arch_with_neither_measurement_nor_datasheet_refuses_to_guess(monkeypatch):
     monkeypatch.setattr(evidence_module, "detect_arch", lambda: "")
 
-    with pytest.raises(ValueError, match="no empirical roofs and no datasheet peaks"):
+    with pytest.raises(ValueError, match="no measured roofs and no datasheet peaks"):
         resolve_hardware(arch="gfx1100")
 
 

@@ -37,7 +37,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import (
+    PEAK_SOURCE_DATASHEET,
+    PEAK_SOURCE_EMPIRICAL,
+    PEAK_SOURCE_REFERENCE,
+)
 
 #: Bumped from 1 when the stage-level work model was dropped. A cached v1 report
 #: describes a differently-derived number and is refused rather than read.
@@ -79,6 +83,11 @@ class Hardware:
     def is_empirical(self) -> bool:
         """Whether these were measured on this box rather than read off a datasheet."""
         return self.peak_source == PEAK_SOURCE_EMPIRICAL
+
+    @property
+    def is_measured(self) -> bool:
+        """Whether these came from a real card, here or on one of the same configuration."""
+        return self.peak_source in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_REFERENCE}
 
     @property
     def hbm_bw_bytes_per_s(self) -> float:
@@ -218,7 +227,7 @@ def build_report(
     the case's ``issues``, because a ceiling whose doubts are invisible is worse
     than one that names them.
     """
-    if hardware.peak_source not in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_DATASHEET}:
+    if hardware.peak_source not in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_REFERENCE, PEAK_SOURCE_DATASHEET}:
         raise CeilingContractError(f"unknown peak_source {hardware.peak_source!r}")
 
     raw_cases = payload.get("cases")
@@ -292,10 +301,16 @@ def build_report(
         raise CeilingContractError(f"'confidence' must be one of {', '.join(CONFIDENCE_LEVELS)}")
 
     caveats = [str(entry).strip() for entry in (payload.get("caveats") or ()) if str(entry).strip()]
-    if not hardware.is_empirical:
+    if hardware.peak_source == PEAK_SOURCE_DATASHEET:
         caveats.append(
-            "Peaks are vendor datasheet figures, not measured on this box: these latencies are an "
+            "Peaks are vendor datasheet figures, not measured on any card: these latencies are an "
             "absolute lower bound that no implementation reaches, not an achievable target."
+        )
+    elif hardware.peak_source == PEAK_SOURCE_REFERENCE:
+        caveats.append(
+            "Peaks come from a reference card of the same configuration, not from this box. Clocks, "
+            "power cap and cooling move them by a few percent, so read these latencies as close "
+            "rather than exact."
         )
     if hardware.dispatch_floor_s <= 0:
         caveats.append(
