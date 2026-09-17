@@ -22,16 +22,18 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
-from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
+from hyperloom.common.llm_config import (
+    LLMConfigError,
+    OPENAI_AGENT_KEY_ENV_ORDER,
+    parse_custom_headers,
+    resolve_openai_client_config,
+)
 
 # Name Codex records the gateway under in its own TOML config.
 CODEX_PROVIDER_NAME = "hyperloom"
 
 _CLIENT_NAME = "hyperloom"
 _CLIENT_TITLE = "Hyperloom"
-
-# OpenAI-side API key names in the established Codex precedence order.
-_API_KEY_ENV_FALLBACKS: tuple[str, ...] = ("OPENAI_API_KEY", "LLM_GATEWAY_KEY")
 
 # TOML bare-key charset.
 _TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -141,7 +143,7 @@ def api_key_env_name(
 
 def _api_key_env_name(*, api_key_env: str, source: Mapping[str, str]) -> str:
     """Resolve the API key variable name from an already-effective mapping."""
-    candidates = list(dict.fromkeys([api_key_env, *_API_KEY_ENV_FALLBACKS]))
+    candidates = list(dict.fromkeys([api_key_env, *OPENAI_AGENT_KEY_ENV_ORDER]))
     for name in candidates:
         if (source.get(name) or "").strip():
             return name

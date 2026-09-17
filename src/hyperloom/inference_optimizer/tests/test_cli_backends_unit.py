@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common import llm_config
 from hyperloom.inference_optimizer.cli import backends as clib
 
 
@@ -62,6 +63,10 @@ def _build(**over):
 def _isolated_provider_env(monkeypatch):
     """Every case in this module resolves backends from the environment, so the machine running the suite must not be able to change the answer."""
     _clear_provider_env(monkeypatch)
+    # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
+    # run with is exactly the kind of machine state this fixture exists to hold still.
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: True)
 
 
 def test_build_backends_mock_defaults() -> None:
@@ -249,6 +254,7 @@ def test_backends_have_no_provider_specific_branch() -> None:
 def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) -> None:
     _clear_provider_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -256,6 +262,23 @@ def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) ->
     assert b["orchestration"][0] == "codex"
     assert b["critic"][0] == "critic_agent"
     assert "kernel_agent" not in b
+
+
+def test_build_backends_gateway_key_alone_still_reaches_codex(monkeypatch) -> None:
+    """The Codex session authenticates with LLM_GATEWAY_KEY, so the coordinator must be allowed to use it."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
+
+    assert _build()["orchestration"][0] == "codex"
+
+
+def test_build_backends_keeps_claude_for_an_endpoint_with_no_credential(monkeypatch) -> None:
+    """Codex refuses to start without a key, so a bare base URL is no reason to hand it the coordinator."""
+    _clear_provider_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+
+    assert _build()["orchestration"][0] == "claude"
 
 
 def test_build_backends_invalid_robustness_choice() -> None:

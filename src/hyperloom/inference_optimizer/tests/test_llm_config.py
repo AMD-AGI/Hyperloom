@@ -251,9 +251,14 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 
-def test_openai_agent_credential_requires_the_api_key_not_a_bare_base_url():
+def test_openai_agent_credential_requires_a_key_not_a_bare_base_url():
     assert not llm_config.openai_agent_credentialed({"OPENAI_BASE_URL": "https://gw/v1"})
     assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
+
+
+def test_a_gateway_key_alone_credentials_the_openai_side():
+    """Codex authenticates with it, so ranking the side uncredentialed sends a runnable box to Claude."""
+    assert llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
 
 
 @pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
@@ -275,6 +280,8 @@ def test_a_managed_gateway_drives_the_claude_cli_without_naming_a_key(gateway):
         (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
         (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
         (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
+        # A gateway deployment names no OPENAI_API_KEY, and Claude cannot authenticate on it at all.
+        (True, True, {"OPENAI_BASE_URL": "https://gw/v1", "LLM_GATEWAY_KEY": "gw"}, llm_config.AGENT_BACKEND_CODEX),
         # The one shape a managed gateway decides: it holds the Anthropic side
         # against a real OpenAI key that would otherwise win on its own.
         (
@@ -292,8 +299,8 @@ def test_preferred_agent_backend_ranks_credentials_then_sdk(
     env: dict[str, str],
     expected: str,
 ) -> None:
-    monkeypatch.setattr(llm_config, "_claude_agent_sdk_installed", lambda: claude_sdk)
-    monkeypatch.setattr(llm_config, "_codex_agent_sdk_installed", lambda: codex_sdk)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: claude_sdk)
+    monkeypatch.setattr(llm_config, "codex_agent_sdk_installed", lambda: codex_sdk)
     assert llm_config.preferred_agent_backend(env) == expected
 
 
