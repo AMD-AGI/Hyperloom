@@ -138,6 +138,7 @@ def run_rewrite(
     invocation_spec_file: str = "",
     applyback_import_modules: list[str] | tuple[str, ...] = (),
     max_applyback_attempts: int = 2,
+    applyback_enabled: bool = True,
     rewrite_kb_enabled: bool = True,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
@@ -153,7 +154,7 @@ def run_rewrite(
     started_at = time.time()
     if not deadline_unix or deadline_unix <= 0:
         deadline_unix = started_at + optimize_max_hours * 3600.0
-    rewrite_budget = DEFAULT_REWRITE_BUDGET
+    rewrite_budget = DEFAULT_REWRITE_BUDGET if applyback_enabled else DEFAULT_REWRITE_BUDGET.without_applyback()
     search_stop_unix = rewrite_budget.search_stop_unix(deadline_unix)
     print(
         "  [forge-rewrite] budget: "
@@ -169,6 +170,12 @@ def run_rewrite(
     rewrite_base_commit = (
         base_result.stdout.strip().splitlines()[0] if base_result.returncode == 0 and base_result.stdout.strip() else ""
     )
+    # A resolvable HEAD is what the agent sessions need, not evidence that the caller wants a framework patch. Asking
+    # is what makes one required: a consumer of the standalone kernel has no framework tree for a patch to target, and
+    # its run must not be judged on a stage it declined.
+    applyback_required = applyback_enabled and bool(rewrite_base_commit)
+    if not applyback_enabled:
+        print("  [forge-rewrite] apply-back not requested; the standalone kernel is the whole deliverable", flush=True)
 
     # Producer-owned scratch the consumer may reclaim.
     temporary_paths: list[str] = []
@@ -201,6 +208,7 @@ def run_rewrite(
             failure_class=failure_class,
             failure_detail=reason,
             temporary_paths=temporary_paths,
+            budget_policy=rewrite_budget,
         )
         payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
@@ -388,6 +396,7 @@ def run_rewrite(
             failure_class=PORT_FAILED,
             failure_detail=port.error_tail,
             temporary_paths=temporary_paths,
+            budget_policy=rewrite_budget,
         )
         payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
@@ -466,14 +475,15 @@ def run_rewrite(
             "best_ms": flydsl_baseline_ms,
             "mean_case_speedup": flydsl_baseline_speedup,
         },
-        applyback_result={"ok": False, "error": "apply-back pending"},
-        applyback_required=bool(rewrite_base_commit),
+        applyback_result={"ok": False, "error": "apply-back pending"} if applyback_enabled else None,
+        applyback_required=applyback_required,
         llm_usage=_total_usage(),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": port_kb_write,
         },
         temporary_paths=temporary_paths,
+        budget_policy=rewrite_budget,
     )
     if result_json:
         report.emit_result(interim, result_json)
@@ -591,46 +601,49 @@ def run_rewrite(
         kb_write = {"written": False, "reason": "disabled"}
 
     # The standalone best is now restored in the rewrite workspace.
-    applyback = generate_applyback_patch(
-        spec,
-        config,
-        base_commit=rewrite_base_commit,
-        experiments_dir=experiments_dir,
-        framework=framework,
-        best_commit=str(opt.get("best_commit") or ""),
-        source_ms=source_ms,
-        flydsl_best_ms=opt.get("best_ms"),
-        speedup=opt.get("mean_case_speedup"),
-        reference_snr_db=port.snr_db,
-        deadline_unix=deadline_unix,
-        import_modules=applyback_import_modules,
-        max_attempts=max_applyback_attempts,
-        usage=usage,
-    )
-    if applyback.ok:
-        print(
-            f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}",
-            flush=True,
+    applyback = None
+    if applyback_enabled:
+        applyback = generate_applyback_patch(
+            spec,
+            config,
+            base_commit=rewrite_base_commit,
+            experiments_dir=experiments_dir,
+            framework=framework,
+            best_commit=str(opt.get("best_commit") or ""),
+            source_ms=source_ms,
+            flydsl_best_ms=opt.get("best_ms"),
+            speedup=opt.get("mean_case_speedup"),
+            reference_snr_db=port.snr_db,
+            deadline_unix=deadline_unix,
+            import_modules=applyback_import_modules,
+            max_attempts=max_applyback_attempts,
+            usage=usage,
         )
-    else:
-        print(
-            f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}",
-            flush=True,
-        )
+        if applyback.ok:
+            print(
+                f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}",
+                flush=True,
+            )
+        else:
+            print(
+                f"  [forge-rewrite] APPLY-BACK FAILED: {applyback.error}",
+                flush=True,
+            )
     result = report.build_result(
         op_name=op_name,
         port_ok=True,
         port_attempts=port.attempts,
         source_ms=source_ms,
         optimize_result=opt,
-        applyback_result=applyback.to_dict(),
-        applyback_required=bool(rewrite_base_commit),
+        applyback_result=applyback.to_dict() if applyback is not None else None,
+        applyback_required=applyback_required,
         llm_usage=_total_usage(opt, optimize_ran=optimize_ran),
         kb_experience={
             "read": kb_read.to_dict(),
             "write": kb_write,
         },
         temporary_paths=temporary_paths,
+        budget_policy=rewrite_budget,
     )
     payload = report.emit_result(result, result_json)
     sp = result.speedup
