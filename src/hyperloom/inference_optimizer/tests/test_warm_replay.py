@@ -2286,6 +2286,61 @@ def test_every_patched_tree_is_promoted(tmp_path):
     assert promotion["target_repos"] == [str(sglang), str(tuning)]
 
 
+def test_a_nogit_tree_promotes_on_the_backups_that_restore_it(tmp_path):
+    """A pip-installed framework has no sha; its backups are the restore channel."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": str(install_root),
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [{"path": "vllm/fp8.py", "backup": str(tmp_path / "b.bin")}],
+                },
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(install_root)]
+
+
+def test_a_tree_with_no_way_back_is_still_refused(tmp_path):
+    """Neither a snapshot nor backups means nothing could unwind a rejected replay."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {"root": str(install_root), "pre_sha": "", "snapshot_manifest": None, "nogit_backups": []},
+            ],
+        },
+        task,
+    )
+
+    assert ok is False
+    assert promotion["failure"] == "validated_recipe_checkout_incomplete"
+
+
 def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     """The gain came from the whole set, so a half-promoted replay is not a win."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())

@@ -1142,21 +1142,6 @@ def _apply_warm_patches(
             continue
         git_tree = _is_git_tree(Path(root))
         pre_sha = _git_head_sha(root) if git_tree else ""
-        # prelude promotes a required timeline's tree only against a pre_sha and a git snapshot manifest. nogit
-        # produces neither, so serving this path from it turned a successful replay into
-        # validated_recipe_checkout_incomplete -- worse than the fast failure it replaced.
-        if required_timeline and not pre_sha:
-            return {
-                "required": True,
-                "status": "failed",
-                "patches": [],
-                "applied": [],
-                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                "failure": "missing_git_head",
-                "pre_sha": "",
-                "target_repo": root,
-                "rolled_back": False,
-            }
         trees[root] = {
             "root": root,
             "pre_sha": pre_sha,

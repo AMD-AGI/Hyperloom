@@ -1605,7 +1605,12 @@ class PreludePhase(PhaseHandler):
             target = str(tree.get("root") or "").strip()
             pre_sha = str(tree.get("pre_sha") or "").strip()
             manifest = tree.get("snapshot_manifest")
-            if not target or not pre_sha or not isinstance(manifest, Mapping):
+            # Promotion needs a way to unwind the tree if the replay is rejected, not a sha. A git checkout
+            # answers with a pre_sha and a snapshot manifest; a pip-installed framework -- the tree a KB recipe
+            # is usually measured on -- answers with the backups nogit wrote as it applied.
+            backups = list(tree.get("nogit_backups") or [])
+            snapshotted = bool(pre_sha) and isinstance(manifest, Mapping)
+            if not target or not (snapshotted or backups):
                 return False, {
                     "status": "failed",
                     "failure": "validated_recipe_checkout_incomplete",
@@ -1613,7 +1618,9 @@ class PreludePhase(PhaseHandler):
                 }
             try:
                 target_path = Path(target).resolve(strict=True)
-                manifest_target = Path(str(manifest.get("repo_path") or "")).resolve(strict=True)
+                manifest_target = (
+                    Path(str(manifest.get("repo_path") or "")).resolve(strict=True) if snapshotted else target_path
+                )
             except (OSError, ValueError) as exc:
                 return False, {
                     "status": "failed",
