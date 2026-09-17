@@ -34,6 +34,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
+kernelforge roofline-ceiling --workspace <W> [options]
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -114,6 +115,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
+| `--roofline-ceiling <auto\|off\|file>` | `auto` | Show the planner the per-shape theoretical achievable latency published by `kernelforge roofline-ceiling`, together with the headroom it implies against the current per-case times. `auto` uses `<W>/forge_experiments/roofline_ceiling/performance_ceiling.json` when it exists and is silently skipped when it does not; `off` declines one that is present; any other value is a path, and a path that does not resolve is an error rather than a silent skip. Advisory only: a ceiling is derived from a work model, not measured, so it informs where to look and never enters the KEEP decision. Session-scoped, so a corrected ceiling takes effect on the next `--resume` without invalidating the campaign. |
 
 ### Rounds and lanes
 
@@ -376,3 +378,54 @@ and `plan` then consume as their highest-priority shape source.
 | `<logs...>` | required | One or more serving logs to read. |
 | `--out <file>` | stdout summary only | Write `demand.json` here. |
 | `--verbose` / `-v` | off | Verbose logging. |
+
+## roofline-ceiling
+
+Estimates the **theoretical achievable latency** of one kernel, for each scored
+test shape, on the accelerator it runs on. The answer is an optimistic lower
+bound under hardware limits and legal algorithm constraints; it does not claim
+an implementation reaching it exists.
+
+The command is self-contained: it collects its own evidence, runs its own
+analyst session, and shares no state with a campaign. It runs before
+`forge-loop` or `forge-rewrite-by-flydsl` and publishes
+`performance_ceiling.json` plus `performance_ceiling_analysis.md`, which those
+commands pick up through their `--roofline-ceiling auto` default.
+
+What it does **not** do is measure a baseline or report an attainment ratio. A
+ceiling and a baseline timed by two different methodologies produce a ratio that
+means nothing, so whoever holds a baseline divides by these numbers themselves.
+
+The work model — the serial stages, their minimum legal FLOPs and semantic
+bytes, their instruction path and their unavoidable dispatches — is derived by an
+agent, because no table covers MoE routing, paged attention and fusion legality
+for an arbitrary operator. The arithmetic and the hardware constants are not:
+peaks come from `rocprof-compute --roof-only` measured on the box, the dispatch
+floor from a probe, and the latency from the framework. Every stage's terms are
+published so the number can be checked without rerunning the agent.
+
+The scored case set comes from the driver's own `case_ms:` lines, not from a
+configuration file, and cases the driver tags `unscored` get no ceiling.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Kernel workspace to analyse. |
+| `--kernel <file>` | config.yaml `source_file_path` | Source file the analyst models; repeatable. |
+| `--driver <file>` | `''` | Measurement driver, passed to the analyst as context. |
+| `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
+| `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
+| `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--device <n>` | `0` | GPU ordinal to measure and profile on. |
+| `--roof-only` / `--no-roof-only` | on | Measure this box's roofs with `rocprof-compute --roof-only`. Disabling, or a host without the profiler, falls back to vendor datasheet peaks — which are an absolute lower bound no implementation reaches, roughly a factor of two below achievable. Which one was used is recorded in `peak_source` and stated in the report; it is never a silent degrade. |
+| `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The cache key includes `peak_source`, so a datasheet answer is never served to a caller who asked for a measured one. |
+| `--op-name <name>` | workspace name | Operator name used in the cache identity. |
+| `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
+| `--agent-model <name>` | provider default | Analyst model. |
+| `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
+| `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
+| `--roof-timeout-sec <s>` | `3600` | Wall-clock budget for the `--roof-only` microbenchmarks. |
+
+The result dict (`ideal_ms` per case, `bound`, `arch`, `peak_source`,
+`confidence`) is printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__`
+sentinels.

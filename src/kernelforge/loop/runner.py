@@ -167,6 +167,10 @@ LOOP_ARTIFACT_ROOT = "forge_experiments"
 CONFIG_COVERAGE_MIN_MOVE_RATIO = 0.01
 CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
 
+# Distinguishes "the ceiling report has not been looked for yet" from "it was looked for and is not there", so a
+# missing or corrupt report is read from disk once per campaign rather than once per iteration.
+_CEILING_UNLOADED = object()
+
 
 def _measurement_case_times(
     bench_detail: dict | None,
@@ -464,6 +468,11 @@ class IterationConfig:
     # How large a per-case improvement has to be, relative to the case's own time, before a KEEP counts as having been
     # configured for that case.
     config_coverage_min_move_ratio: float = CONFIG_COVERAGE_MIN_MOVE_RATIO
+    # Published ``performance_ceiling.json`` whose per-shape theoretical latencies are shown to the planner as
+    # advisory context. Session-scoped rather than part of the campaign configuration, because a ceiling is a derived
+    # estimate that can be recomputed, corrected or withdrawn between sessions without invalidating the campaign.
+    # It never reaches the KEEP decision: see ``_render_ceiling_advisory``.
+    ceiling_report_path: str = ""
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -2927,6 +2936,38 @@ class IterationLoop(AnalysisRuntimeMixin):
             ),
         )
 
+    def _render_ceiling_advisory(self) -> str:
+        """Render the per-shape theoretical ceiling, if one was published for this kernel.
+
+        Advisory only, and deliberately kept away from every decision the loop
+        makes. A ceiling is derived from a work model, not measured, so a
+        pessimistic one presented as fact is how a case that still has headroom
+        gets abandoned at "already at 95%". It informs where to look; KEEP stays
+        a measurement.
+
+        Loaded on demand rather than in ``__init__`` so a ceiling published
+        part-way through a campaign is picked up at the next iteration, and a
+        missing or corrupt one costs a log line rather than the run.
+        """
+        path = str(self.ic.ceiling_report_path or "").strip()
+        if not path:
+            return ""
+        cached = getattr(self, "_ceiling_report", _CEILING_UNLOADED)
+        if cached is _CEILING_UNLOADED:
+            try:
+                from kernelforge.roofline_ceiling.report import read_report
+
+                cached = read_report(path)
+            except Exception as exc:  # noqa: BLE001 - advisory context is never worth failing a campaign for
+                log.warning("ceiling advisory unavailable from %s: %s", path, exc)
+                cached = None
+            self._ceiling_report = cached
+        if cached is None:
+            return ""
+        from kernelforge.roofline_ceiling.report import render_for_prompt
+
+        return render_for_prompt(cached, self._baseline_case_times)
+
     def _render_case_config_coverage(self) -> str:
         """Render the configuration-coverage ledger for the Implementer."""
         coverage = self._case_config_coverage()
@@ -5043,6 +5084,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if coverage_block:
                     history = f"{coverage_block}\n\n{history}"
                     print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
+                ceiling_block = self._render_ceiling_advisory()
+                if ceiling_block:
+                    history = f"{ceiling_block}\n\n{history}"
+                    print(f"  [agent] injected theoretical ceiling advisory: {len(ceiling_block)} chars")
                 new_file_block = self._render_uncommittable_new_paths()
                 if new_file_block:
                     history = f"{new_file_block}\n\n{history}"

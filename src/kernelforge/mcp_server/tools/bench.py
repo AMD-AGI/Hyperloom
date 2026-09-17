@@ -97,6 +97,31 @@ class CaseCoverageError(ValueError):
     """Raised when a candidate cannot be scored against baseline cases."""
 
 
+def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]]:
+    """Read a driver's ``case_ms:`` lines out of one run's output.
+
+    Returns ``(case_times, unscored_case_ids, duplicate_case_ids)``. This is the
+    driver contract every consumer has to agree on: a second reader with its own
+    regex would eventually disagree about which cases exist, and a set of cases
+    that does not match the scored set is a silently wrong answer rather than a
+    loud one.
+    """
+    case_times: dict[str, float] = {}
+    unscored: list[str] = []
+    duplicates: set[str] = set()
+    for case_id, case_ms, tag in _CASE_MS_RE.findall(text):
+        try:
+            value = float(case_ms)
+        except ValueError:
+            continue
+        if case_id in case_times:
+            duplicates.add(case_id)
+        case_times[case_id] = value
+        if tag == "unscored":
+            unscored.append(case_id)
+    return case_times, unscored, duplicates
+
+
 def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
     """Aggregate complete independent benchmark runs by per-case median."""
     if not measurements:
@@ -351,18 +376,7 @@ async def bench_wallclock(
     agg_match = re.search(r"(median_ms|mean_ms):\s*([\d.]+)", full_output)
 
     # Per-case timings for equal-weight suite scoring.
-    case_times: dict[str, float] = {}
-    duplicate_case_ids: set[str] = set()
-    unscored_cases: list[str] = []
-    for cid, cms, tag in _CASE_MS_RE.findall(full_output):
-        try:
-            if cid in case_times:
-                duplicate_case_ids.add(cid)
-            case_times[cid] = float(cms)
-        except ValueError:
-            continue
-        if tag == "unscored":
-            unscored_cases.append(cid)
+    case_times, unscored_cases, duplicate_case_ids = parse_case_timings(full_output)
 
     if duplicate_case_ids:
         return {

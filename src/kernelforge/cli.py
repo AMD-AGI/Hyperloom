@@ -325,6 +325,31 @@ def _is_long_horizon(max_hours: float) -> bool:
     return float(max_hours) > LONG_HORIZON_THRESHOLD_HOURS
 
 
+def _resolve_ceiling_report(selection: str, workspace_dir: str) -> str:
+    """Resolve ``--roofline-ceiling`` to a report path, or ``""`` when there is none.
+
+    An explicit path that does not exist is an error: the operator asked for a
+    specific ceiling and silently running without it would hide the typo behind
+    a campaign that merely planned slightly worse. ``auto`` is the opposite --
+    it means "use one if it is there" -- so a missing file is simply no ceiling.
+    """
+    choice = str(selection or "").strip()
+    if not choice or choice.lower() == "off":
+        return ""
+    if choice.lower() == "auto":
+        from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
+
+        candidate = Path(workspace_dir) / WORKSPACE_SUBDIR / REPORT_FILENAME
+        return str(candidate) if candidate.is_file() else ""
+    resolved = Path(choice).expanduser()
+    if not resolved.is_file():
+        raise click.BadParameter(
+            f"--roofline-ceiling {choice!r} is not a readable report",
+            param_hint="--roofline-ceiling",
+        )
+    return str(resolved)
+
+
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     """Read the ``--baseline-json`` scoring anchor, rejecting one that cannot anchor a speedup.
 
@@ -835,6 +860,17 @@ def _make_lane_agent_factory(
     "read back on --resume.",
 )
 @click.option(
+    "--roofline-ceiling",
+    "ceiling_report",
+    default="auto",
+    help="Per-shape theoretical achievable latency shown to the planner as "
+    "advisory context. 'auto' (default) uses "
+    "<workspace>/forge_experiments/roofline_ceiling/performance_ceiling.json "
+    "when `kernelforge roofline-ceiling` has published one, 'off' disables "
+    "it, and any other value is read as a path to a published report. It is "
+    "never a gate: KEEP stays a measurement.",
+)
+@click.option(
     "--prepare-task/--no-prepare-task",
     default=True,
     help="Pre-loop task preparation (default on, fresh campaigns only). "
@@ -1002,6 +1038,7 @@ def forge_loop(
     supervisor_backend,
     profile_timeout_sec,
     profiling,
+    ceiling_report,
     prepare_task,
     task_type,
     source_files,
@@ -1260,6 +1297,8 @@ def forge_loop(
         merge_stacking=merge_stacking,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
+        # Advisory per-shape theoretical ceiling, when one has been published.
+        ceiling_report_path=_resolve_ceiling_report(ceiling_report, workspace_dir),
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -2454,6 +2493,16 @@ def _register_gemm_tune() -> None:
 
 
 _register_gemm_tune()
+
+
+def _register_roofline_ceiling() -> None:
+    """Attach the per-shape theoretical-ceiling estimator under `roofline-ceiling`."""
+    from kernelforge.roofline_ceiling.command import roofline_ceiling_command
+
+    main.add_command(roofline_ceiling_command, name="roofline-ceiling")
+
+
+_register_roofline_ceiling()
 
 
 if __name__ == "__main__":
