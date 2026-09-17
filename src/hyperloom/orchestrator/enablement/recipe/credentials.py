@@ -77,6 +77,29 @@ _ROOT_RELATIVE_CHANNEL_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+
+#: Env vars whose value is a switch, not a location: a set-but-disabling value
+#: says the channel is OFF. ``GIT_TERMINAL_PROMPT=0`` is the standard way to
+#: forbid interactive credentials, and ``PIP_KEYRING_PROVIDER=disabled`` is one
+#: of pip's own documented values -- read as "nonempty, therefore a credential
+#: channel", each of them made every setup and build in that environment
+#: ``credential_required``, and the recipe permanently insufficient, for saying
+#: the opposite of what it says.
+_TOGGLE_CHANNEL_ENVS: dict[str, frozenset[str]] = {
+    "GIT_TERMINAL_PROMPT": frozenset({"0", "false", "no", "off"}),
+    "PIP_KEYRING_PROVIDER": frozenset({"disabled", "0", "false", "no", "off"}),
+}
+
+
+def _names_a_live_channel(name: str, raw: Any) -> bool:
+    """Whether ``name=raw`` is evidence of a credential channel that is on."""
+    value = str(raw or "").strip()
+    if not value:
+        return False
+    off = _TOGGLE_CHANNEL_ENVS.get(name)
+    return value.lower() not in off if off else True
+
+
 def installer_class(cmd: str) -> str:
     """Return the installer family that introduces ``cmd`` (``""`` when none).
 
@@ -337,7 +360,7 @@ def detect_credential_channels(env: Mapping[str, str] | None, *, fs_root: str | 
     environ = dict(env or {})
     found: set[str] = set()
     for channel, names in _ENV_CHANNELS:
-        if any(str(environ.get(name) or "").strip() for name in names):
+        if any(_names_a_live_channel(name, environ.get(name)) for name in names):
             found.add(channel)
     home = str(environ.get("HOME") or "").strip()
     if home:

@@ -135,10 +135,20 @@ def _resolved_packages(python_path: str, names: list[str], *, run: RunFn = _defa
     # is skipped and a ``RECORD`` it cannot read yields the empty digest, while
     # anything else fails the probe and is caught by the exit-status check below.
     probe = (
-        "import hashlib,json,sys\n"
+        "import hashlib,json,re,sys\n"
         "import importlib.metadata as m\n"
         "out={}\n"
-        "for name in sys.argv[1:]:\n"
+        # ``action.packages`` holds requirement strings -- ``vllm>=0.10``,
+        # ``vllm[all]``, ``aiter @ https://...`` -- and only a bare name resolves;
+        # everything else raised PackageNotFoundError, was skipped, and left the
+        # map empty, which reads downstream as an acquisition that pinned nothing.
+        "def _dist_name(spec):\n"
+        "    head=re.split(r'[;@]', spec, 1)[0]\n"
+        "    return re.split(r'[\\[<>=!~ ]', head.strip(), 1)[0].strip()\n"
+        "for spec in sys.argv[1:]:\n"
+        "    name=_dist_name(spec)\n"
+        "    if not name:\n"
+        "        continue\n"
         "    try:\n"
         "        dist=m.distribution(name)\n"
         "    except m.PackageNotFoundError:\n"

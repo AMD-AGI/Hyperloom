@@ -2705,3 +2705,22 @@ def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
         assert IntegratePatchExecutor._levers_without_readers(
             state, root, framework="vllm", effective_config=junk
         ) == ["VLLM_HL_OLD"], junk
+
+
+def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):
+    """``GIT_TERMINAL_PROMPT=0`` forbids interactive credentials; it does not supply them.
+
+    Read as "nonempty, therefore a channel", the standard CI spelling for "no
+    interactive credentials" made every setup and build in that environment
+    ``credential_required`` and the recipe permanently insufficient -- for
+    saying the opposite of what it says. ``PIP_KEYRING_PROVIDER=disabled`` is
+    pip's own documented value for the same thing.
+    """
+    from hyperloom.orchestrator.enablement.recipe.credentials import _names_a_live_channel
+
+    assert _names_a_live_channel("GIT_TERMINAL_PROMPT", "0") is False
+    assert _names_a_live_channel("PIP_KEYRING_PROVIDER", "disabled") is False
+    # ...and the values that do mean a channel is live still do.
+    assert _names_a_live_channel("GIT_TERMINAL_PROMPT", "1") is True
+    assert _names_a_live_channel("PIP_KEYRING_PROVIDER", "subprocess") is True
+    assert _names_a_live_channel("GIT_ASKPASS", "/usr/bin/askpass") is True

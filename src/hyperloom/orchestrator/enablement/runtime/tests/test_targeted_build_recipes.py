@@ -1035,3 +1035,21 @@ def test_a_provision_result_round_trip_keeps_its_acquisition_identity():
 
     assert restored.resolved_ref == "c" * 40
     assert restored.resolved_packages == {"aiter": {"version": "0.1.4", "artifact_digest": "sha256:ab"}}
+
+
+def test_a_requirement_string_still_resolves_to_its_distribution():
+    """``action.packages`` holds requirements, not distribution names.
+
+    ``vllm>=0.10``, ``vllm[all]`` and ``aiter @ https://...`` all raise
+    PackageNotFoundError verbatim, so every one was skipped and the map came
+    back empty -- which reads downstream as an acquisition that pinned nothing,
+    and reports a valid pinned wheel as ``runtime_rebuild_required``.
+    """
+    import sys
+
+    from hyperloom.orchestrator.enablement.runtime.adapters import _resolved_packages
+
+    resolved = _resolved_packages(sys.executable, ["pytest>=7", "pytest[extra]", "pytest"])
+
+    assert sorted(resolved) == ["pytest"], resolved
+    assert resolved["pytest"]["version"]
