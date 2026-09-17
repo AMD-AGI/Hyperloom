@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Callable, Mapping
 
-from .credentials import classify_credential_class
+from .credentials import classify_credential_class, sanitize_command_text
 from .projections import project_build_inputs, select_linked_build
 
 SETUP_KIND = "setup"
@@ -116,12 +116,23 @@ def _setup_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _setup_step(cmd: str, *, occurrence: int | None) -> dict[str, Any]:
-    """Project one applied setup execution."""
+    """Project one applied setup execution.
+
+    A command carrying a credential is never emitted verbatim. ``cmd`` here is
+    what lands in ``session_breakdown.json``, which is written to disk and
+    shipped in the session package, and an index token or an authenticated VCS
+    URL would travel with it. Nothing is lost by withholding it: a step with a
+    ``credential_class`` already raises ``credential_required``, which refuses
+    the replay, so the verbatim text serves no consumer that the sanitised form
+    does not -- the consumer has to supply the credential itself either way.
+    """
+    credential_class = classify_credential_class(cmd)
     return {
         "kind": SETUP_KIND,
-        "cmd": cmd,
+        "cmd": cmd if credential_class is None else sanitize_command_text(cmd),
+        "cmd_sanitized": credential_class is not None,
         "occurrence": occurrence,
-        "credential_class": classify_credential_class(cmd),
+        "credential_class": credential_class,
     }
 
 
