@@ -1,6 +1,7 @@
 - Description: what and why
 - Linked issue(s): close/fix refs
 - Tests: added/updated? commands run?
+- `CHANGELOG.md` entry under `[Unreleased]`: yes/no (if no, why the change is unobservable):
 - Breaking changes: yes/no (details if yes)
 - PR addresses single concern: yes/no (details if no):
 - Root cause is upstream (Magpie/TraceLens/GEAK/IntelliKit/AgentKernelArena), ticket filed:

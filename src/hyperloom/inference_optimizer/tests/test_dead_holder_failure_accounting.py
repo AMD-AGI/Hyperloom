@@ -96,7 +96,9 @@ async def test_pump_counts_lease_reaped_baseline_as_failure(session_dir):
 
 @pytest.mark.asyncio
 async def test_three_lease_reaped_baselines_trip_the_streak_stop(session_dir):
+    """--enablement=off: three lease-reaped baselines trip the three-strike stop."""
     c = Coordinator(session_dir, backends=_silent_backends())
+    c.shared_state.enablement_mode = "off"
     try:
         for i in range(3):
             await _running_task_with_dead_lease(c, key=f"k-dead-streak-{i}")

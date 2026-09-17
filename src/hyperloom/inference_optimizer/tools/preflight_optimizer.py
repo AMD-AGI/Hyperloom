@@ -18,16 +18,21 @@ from hyperloom.common import rocm_smi
 
 
 #: Command-line fragments that identify a leftover optimizer or serving
-#: process. Both frameworks are matched twice over: by the module path an older
+#: process. vLLM and SGLang are matched twice over: by the module path an older
 #: launch used, and by the ``setproctitle`` name the current one rewrites argv
 #: to. Magpie launches the server as ``vllm serve``, and vLLM then renames its
 #: own processes to ``VLLM::APIServer`` / ``VLLM::EngineCore`` /
 #: ``VLLM::Worker_TP<n>``, so a scan for ``vllm.entrypoints`` alone sees
 #: nothing. That blind spot is not covered by the VRAM check either: an orphan
-#: that is still reading weights holds no VRAM yet and reads as idle.
+#: that is still reading weights holds no VRAM yet and reads as idle. ATOM is
+#: matched on its entrypoint alone: its per-rank workers are
+#: ``multiprocessing.spawn`` children carrying no identifying argv, so only
+#: descent from the wrapper reaches them, which is teardown's job and not this
+#: scan's.
 STALE_PROCESS_PATTERNS = (
     "hyperloom.inference_optimizer.cli",
     "Magpie",
+    "atom.entrypoints",
     "sglang.launch_server",
     "sglang::",
     "vllm.entrypoints",
@@ -45,6 +50,32 @@ def _read_cmdline(pid: str) -> str:
     except OSError:
         return ""
     return raw.replace(b"\0", b" ").decode("utf-8", "ignore")
+
+
+def _parent_pid(pid: int) -> int:
+    """Return the parent pid from ``/proc/<pid>/status``, or 0 when it is gone."""
+    try:
+        status = pathlib.Path("/proc", str(pid), "status").read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    for line in status.splitlines():
+        if line.startswith("PPid:"):
+            return int(line.split()[1])
+    return 0
+
+
+def _own_process_chain() -> set[int]:
+    """Return this process and every ancestor up to init.
+
+    The launcher shell carries the whole command text in its own argv, so it and
+    everything above it match the patterns without a leftover run existing.
+    """
+    chain: set[int] = set()
+    pid = os.getpid()
+    while pid > 1 and pid not in chain:
+        chain.add(pid)
+        pid = _parent_pid(pid)
+    return chain
 
 
 def _print_torch_visibility() -> bool:
@@ -83,8 +114,9 @@ def _check_gpu_occupancy() -> bool:
 def _find_stale_processes() -> list[tuple[str, str]]:
     """Scan ``/proc`` for running processes matching known stale patterns."""
     matches: list[tuple[str, str]] = []
+    own = _own_process_chain()
     for pid in filter(str.isdigit, os.listdir("/proc")):
-        if int(pid) == os.getpid():
+        if int(pid) in own:
             continue
         text = _read_cmdline(pid)
         if text and any(pattern in text for pattern in STALE_PROCESS_PATTERNS):

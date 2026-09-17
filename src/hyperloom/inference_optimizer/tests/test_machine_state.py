@@ -33,9 +33,10 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     )
     assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
-    # A dropped entry falls back to its default rather than vanishing: a phase with no share would run to whatever it
-    # costs.
-    assert set(out) == set(ps.PHASE_NAMES)
+    # A dropped entry falls back to its default rather than vanishing: a capped phase with no share would run to
+    # whatever it costs. ENABLEMENT carries no default, so it stays absent and uncapped.
+    assert set(out) == set(ps.DEFAULT_PHASE_BUDGET_PCT)
+    assert ps.PHASE_ENABLEMENT not in out
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
@@ -227,4 +228,7 @@ def test_phase_budget_help_quotes_the_real_default() -> None:
     real["FRAMEWORK"] = real.pop("FRAMEWORK_AGENT")
     real["KERNEL"] = real.pop("KERNEL_AGENT")
 
+    # A capped phase has a flag quoting its default; an uncapped one has no flag
+    # at all, since nothing would enforce what it set.
     assert quoted == real
+    assert ps.PHASE_ENABLEMENT not in ps.DEFAULT_PHASE_BUDGET_PCT

@@ -266,8 +266,8 @@ class SqliteLeaseBackend:
                 )
                 cur.execute(
                     "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, priority, ts) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "in_reply_to, payload, ts) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (
                         uuid.uuid4().hex,
                         "resource_lock",
@@ -277,7 +277,6 @@ class SqliteLeaseBackend:
                         json.dumps(
                             {"lane": lane, "previous_holder": prev_holder},
                         ),
-                        2,
                         now_iso,
                     ),
                 )
@@ -389,8 +388,8 @@ class SqliteLeaseBackend:
                 )
                 cur.execute(
                     "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, priority, ts) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "in_reply_to, payload, ts) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     (
                         uuid.uuid4().hex,
                         "resource_lock",
@@ -404,7 +403,6 @@ class SqliteLeaseBackend:
                                 "reap_pass": True,
                             }
                         ),
-                        2,
                         now_iso_str,
                     ),
                 )

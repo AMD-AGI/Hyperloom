@@ -83,7 +83,6 @@ def test_orchestration_permissions():
     assert IntentType.PRUNE_BRANCH in role.allowed_intents
     assert IntentType.ESCALATE_STRATEGY_CHANGE in role.allowed_intents
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
-    assert IntentType.RESPONSE not in role.allowed_intents
 
 
 def test_critic_review_only_codex_no_tools():
@@ -143,6 +142,14 @@ def test_kill_task_is_not_a_valid_intent_type():
     """kill_task left the vocabulary; an envelope carrying it must be rejected."""
     assert "kill_task" not in {member.value for member in IntentType}
     envelope = {"intents": [{"intent_type": "kill_task", "payload": {"task_id": "t1", "reason": "stalled"}}]}
+    with pytest.raises(IntentValidationError, match="not in allowed set"):
+        validate_envelope(envelope)
+
+
+def test_response_is_not_a_valid_intent_type():
+    """response left the vocabulary; requests are answered inline on the ``response`` topic."""
+    assert "response" not in {member.value for member in IntentType}
+    envelope = {"intents": [{"intent_type": "response", "payload": {"in_reply_to": "m1", "kind": "profile_done"}}]}
     with pytest.raises(IntentValidationError, match="not in allowed set"):
         validate_envelope(envelope)
 

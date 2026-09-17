@@ -127,10 +127,12 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == pytest.approx(0.03)
     assert out["CLOSE"] == pytest.approx(0.02)
-    # FRAMEWORK_AGENT and SWEEP split the freed KERNEL share by base weight,
-    # so FRAMEWORK_AGENT ends up with essentially the whole wall clock.
-    assert out[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.9902, abs=1e-4)
-    assert out["SWEEP"] == pytest.approx(0.0198, abs=1e-4)
+    # FRAMEWORK_AGENT and SWEEP split the freed KERNEL share by base weight, so
+    # the two keep the ratio the overrides set and FRAMEWORK_AGENT ends up with
+    # essentially the whole wall clock. Stated as the ratio rather than the two
+    # products, which depend on KERNEL's share and go stale when it moves.
+    assert out[PHASE_FRAMEWORK_AGENT] / out["SWEEP"] == pytest.approx(0.50 / 0.01)
+    assert 0.95 < out[PHASE_FRAMEWORK_AGENT] <= 1.0
     # The redistributed value must survive the downstream re-normalize instead
     # of being dropped back to the default.
     assert normalize_budget_pct(out)[PHASE_FRAMEWORK_AGENT] == pytest.approx(out[PHASE_FRAMEWORK_AGENT])

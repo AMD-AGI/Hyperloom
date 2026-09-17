@@ -1637,7 +1637,6 @@ class ExplorePhase(CoordinatorCollaborator):
             "*",
             "proposal",
             {**propose_payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
         self.state.pending_proposals[msg.msg_id] = PendingProposal(
@@ -1796,7 +1795,6 @@ class ExplorePhase(CoordinatorCollaborator):
             "*",
             "proposal",
             {**propose_payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
         self.state.pending_proposals[msg.msg_id] = PendingProposal(

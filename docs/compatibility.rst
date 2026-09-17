@@ -53,8 +53,9 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
-| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), plus             |
-|                     | ``custom`` for your own benchmark script               |
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0),                  |
+|                     | Atom (>= 0.1.7-rc0), plus ``custom`` for your own      |
+|                     | benchmark script                                       |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
 +---------------------+--------------------------------------------------------+
@@ -74,7 +75,7 @@ The following table lists the validated Hyperloom version and component combinat
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 | Hyperloom version | Component                 | GPU                    | ROCm version                       | Ubuntu        | Python      | GitHub                      |
 +===================+===========================+========================+====================================+===============+=============+=============================+
-| 1.1.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
+| 1.1.1             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 |                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
@@ -124,6 +125,9 @@ The following inference frameworks are supported:
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
+   * - Atom
+     - 7.2.4
+     - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset). On a quantized non-vLLM backend GEAK must resolve a live rewrite seam rather than guess one, which forge does not require.
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -133,8 +137,9 @@ Container images
 
 Pick the image that matches your environment. Public Docker Hub refs are used
 on your own GPU machine: the official upstream ``lmsysorg/sglang-rocm:<tag>``
-for SGLang and ``vllm/vllm-openai-rocm:<tag>`` for vLLM. If your deployment
-uses a private registry mirror, set the registry prefix accordingly.
+for SGLang, ``vllm/vllm-openai-rocm:<tag>`` for vLLM and
+``rocm/atom-dev:<tag>`` for Atom. If your deployment uses a private registry
+mirror, set the registry prefix accordingly.
 
 .. list-table::
    :header-rows: 1
@@ -148,14 +153,20 @@ uses a private registry mirror, set the registry prefix accordingly.
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.29.0``
      - MI300X / MI325X / MI355X
+   * - ``rocm/atom-dev:v0.1.7-rc0``
+     - MI355X (verified); MI300X / MI325X untested
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.
 
+``rocm/atom-dev`` also publishes a ``latest`` tag, which tracks the newest
+nightly build and moves. Pin the versioned tag so a session stays reproducible.
+
 Browse all available tags at
-`hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_
+`hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_,
+`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_
 and
-`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_.
+`hub.docker.com/r/rocm/atom-dev/tags <https://hub.docker.com/r/rocm/atom-dev/tags>`_.
 
 Bare-metal recommended environment
 -----------------------------------

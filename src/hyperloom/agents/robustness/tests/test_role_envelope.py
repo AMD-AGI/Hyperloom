@@ -20,10 +20,8 @@ from hyperloom.agents.robustness.role.envelope import (
     build_alert,
     build_delegate,
     build_envelope_dict,
-    build_escalate,
     build_prune_branch,
     build_send_message,
-    build_update_state,
 )
 
 
@@ -67,19 +65,6 @@ def test_alert_builder_serialises_with_detail():
     assert item["payload"]["detail"] == {"pod": "brain-0", "phase": "Failed"}
 
 
-def test_escalate_builder_carries_hint_and_severity():
-    intent = build_escalate(
-        "repeated_failure",
-        "switch to fp16 baseline",
-        severity="high",
-    )
-    assert intent.type is IntentType.ESCALATE_STRATEGY_CHANGE
-    payload = intent.payload
-    assert payload["reason"] == "repeated_failure"
-    assert payload["next_action_hint"] == "switch to fp16 baseline"
-    assert payload["severity"] == "high"
-
-
 def test_prune_branch_builder():
     intent = build_prune_branch("backends.sglang", "3 consecutive failures")
     assert intent.type is IntentType.PRUNE_BRANCH
@@ -100,12 +85,6 @@ def test_delegate_builder_passes_params_and_idempotency():
     }
 
 
-def test_update_state_builder_only_allows_robustness_fields():
-    intent = build_update_state({"crash_count": 3, "current_action": "recover"})
-    assert intent.type is IntentType.UPDATE_STATE
-    assert intent.payload["changes"] == {"crash_count": 3, "current_action": "recover"}
-
-
 # Builders — defensive errors
 
 
@@ -123,13 +102,6 @@ def test_alert_rejects_empty_summary():
         build_alert("medium", "")
 
 
-def test_escalate_requires_reason_and_hint():
-    with pytest.raises(ValueError):
-        build_escalate("", "hint")
-    with pytest.raises(ValueError):
-        build_escalate("reason", "")
-
-
 def test_delegate_rejects_kernel_owned_action():
     for kernel_owned in ("kernel_opt", "integrate", "gemm_tuning"):
         with pytest.raises(ValueError):
@@ -142,21 +114,6 @@ def test_delegate_accepts_every_allowlisted_action():
         assert intent.payload["action_name"] == action
 
 
-def test_update_state_rejects_core_fields():
-    with pytest.raises(ValueError):
-        build_update_state({"current_best": {"tput": 1.0}})
-
-
-def test_update_state_rejects_unknown_fields():
-    with pytest.raises(ValueError):
-        build_update_state({"random_field": 1})
-
-
-def test_update_state_rejects_empty_changes():
-    with pytest.raises(ValueError):
-        build_update_state({})
-
-
 # Envelope serialisation
 
 
@@ -164,7 +121,7 @@ def test_envelope_dict_is_json_serialisable():
     intents = [
         build_send_message("observation", body_md="ok (robustness-agent)"),
         build_alert("medium", "stall detected"),
-        build_escalate("crash_count_high", "trigger recover"),
+        build_prune_branch("backends.sglang", "3 consecutive failures"),
     ]
     env = build_envelope_dict(intents)
     payload = json.dumps(env)
@@ -173,7 +130,7 @@ def test_envelope_dict_is_json_serialisable():
     assert [item["intent_type"] for item in restored["intents"]] == [
         "send_message",
         "alert",
-        "escalate_strategy_change",
+        "prune_branch",
     ]
 
 
