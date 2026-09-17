@@ -53,6 +53,20 @@ def _make_fake_ray(init_side_effects):
     return fake
 
 
+
+@pytest.fixture(autouse=True)
+def _clear_stale_connect_flag():
+    """``_STALE_CONNECT_POSSIBLE`` is process-wide by design, so tests must isolate it.
+
+    A timeout in one test otherwise makes the next one's first ``ray.init``
+    clear a session it never left behind -- the coupling is real in production
+    too, where it is exactly the intended behaviour across legs.
+    """
+    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+    yield
+    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+
+
 def test_is_version_mismatch_detects_banner():
     assert ray_runtime._is_ray_version_mismatch(_VERSION_MISMATCH_MSG)
     assert ray_runtime._is_ray_version_mismatch("ray Version Mismatch: foo")
@@ -228,29 +242,27 @@ def test_a_timed_out_init_leaves_stdout_usable(monkeypatch, capsys):
     release.set()
 
 
-def test_an_abandoned_ray_init_shuts_the_session_it_finished_building(monkeypatch):
-    """A connect that lands after the timeout must not leave the process connected.
+def test_an_abandoned_runner_never_tears_down_a_session(monkeypatch):
+    """The late thread is no longer the owner, so it must not clean up.
 
-    ``ray.init`` cannot be cancelled, so a timed-out attempt is abandoned. If it
-    then succeeds, this long-lived coordinator is holding a session nobody asked
-    for, and the next leg's attempt races it. The call's effect is undone where
-    the call itself could not be stopped.
+    ``ignore_reinit_error=True`` means a late ``ray.init`` on an
+    already-connected process is a no-op that attaches to whatever session is
+    current. A shutdown from that thread would therefore tear down a LATER
+    leg's working connection rather than its own -- a cross-leg teardown in a
+    long-lived coordinator, which is worse than the stale session it was meant
+    to clear.
     """
     import threading
     import types
 
-    started = threading.Event()
     release = threading.Event()
     shutdowns = []
 
     def _slow_init(**_kw):
-        started.set()
         release.wait(5)
 
     fake_ray = types.SimpleNamespace(
-        init=_slow_init,
-        shutdown=lambda: shutdowns.append(1),
-        is_initialized=lambda: False,
+        init=_slow_init, shutdown=lambda: shutdowns.append(1), is_initialized=lambda: False
     )
     monkeypatch.setitem(sys.modules, "ray", fake_ray)
     monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
@@ -258,15 +270,39 @@ def test_an_abandoned_ray_init_shuts_the_session_it_finished_building(monkeypatc
     with pytest.raises(TimeoutError):
         ray_runtime.quiet_ray_init(num_gpus=1)
 
-    assert started.is_set()
-    assert shutdowns == [], "nothing to undo while the connect is still running"
+    release.set()
+    threading.Event().wait(0.3)
+    assert shutdowns == [], "the abandoned runner must not shut anything down"
+
+
+def test_the_next_attempt_clears_what_an_abandoned_runner_may_have_left(monkeypatch):
+    """Responsibility sits with the thread that owns the process from then on."""
+    import threading
+    import types
+
+    release = threading.Event()
+    shutdowns = []
+    inits = []
+
+    def _init(**_kw):
+        inits.append(1)
+        if len(inits) == 1:
+            release.wait(5)
+
+    fake_ray = types.SimpleNamespace(
+        init=_init, shutdown=lambda: shutdowns.append(1), is_initialized=lambda: False
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+    assert shutdowns == []
 
     release.set()
-    for _ in range(100):
-        if shutdowns:
-            break
-        threading.Event().wait(0.05)
-    assert shutdowns == [1], "the late connect left the process connected"
+    ray_runtime.quiet_ray_init(num_gpus=1)
+
+    assert shutdowns == [1], "the next attempt must clear the stale session first"
 
 
 def test_a_connect_landing_on_the_deadline_is_claimed_by_exactly_one_side(monkeypatch):

@@ -30,6 +30,12 @@ RAY_SERVING_SLOT = "serving_slot"
 _HEAD_CUSTOM_RESOURCES = {RAY_SERVING_SLOT: 1}
 
 
+#: Set when a ``ray.init`` attempt timed out and its runner was abandoned mid-connect.
+#: The next attempt clears the session that runner may have left, because it is the
+#: one that owns the process from then on.
+_STALE_CONNECT_POSSIBLE = threading.Event()
+
+
 def _resources_start_args() -> list[str]:
     """Return the ``ray start`` argv for the head node's custom resources."""
     return ["--resources", json.dumps(_HEAD_CUSTOM_RESOURCES)]
@@ -345,6 +351,13 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         abandoned runner shuts the session back down on its way out.
         """
         timeout = _ray_init_timeout_sec()
+        if _STALE_CONNECT_POSSIBLE.is_set():
+            # A previous attempt timed out and its runner may have connected
+            # since. Clear whatever it left before taking the process for this
+            # one; done here, on the thread that is about to own the session.
+            _STALE_CONNECT_POSSIBLE.clear()
+            with contextlib.suppress(Exception):
+                ray.shutdown()
         outcome: dict[str, BaseException] = {}
         # One lock decides, for a connect that lands near the deadline, whether
         # the caller got it or the runner has to undo it. Checking a flag and
@@ -361,16 +374,7 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
                 outcome["error"] = exc
                 return
             with verdict_lock:
-                if not verdict["abandoned"]:
-                    verdict["landed"] = True
-                    return
-            # Finished after the caller was told the cluster is unusable.
-            # Leaving the process connected would hand the next attempt a
-            # session nobody asked for -- and this is a long-lived coordinator,
-            # so "the next attempt" is a later leg of the same run. The connect
-            # cannot be cancelled; its effect can be undone.
-            with contextlib.suppress(Exception):
-                ray.shutdown()
+                verdict["landed"] = True
 
         thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
         # The banner suppression is held here, across a join that always returns, so
@@ -382,11 +386,17 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         with verdict_lock:
             # Decided here rather than from ``thread.is_alive()``: a runner that
             # returned a microsecond ago is alive to that check and has already
-            # connected, and one still inside ``_connect`` will find the flag.
+            # connected.
             timed_out = not verdict["landed"] and "error" not in outcome
-            if timed_out:
-                verdict["abandoned"] = True
         if timed_out:
+            # The abandoned runner may still connect. It must not clean up after
+            # itself: ``ignore_reinit_error=True`` means a late ``ray.init`` on
+            # an already-connected process is a no-op that attaches to whatever
+            # session is current, so a shutdown from that thread would tear down
+            # a LATER leg's working connection, not its own. The next attempt
+            # clears it instead -- that one is the current owner, and legs in
+            # this process are sequential.
+            _STALE_CONNECT_POSSIBLE.set()
             raise TimeoutError(
                 f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
                 "the raylet accepted the connection but never finished registration. "
