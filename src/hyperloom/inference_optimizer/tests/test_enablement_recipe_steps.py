@@ -115,6 +115,35 @@ def test_recipe_steps_patch_paths_equal_kept_patches():
     assert [s["path"] for s in steps] == kept
 
 
+def test_each_patch_step_names_the_root_it_was_resolved_against():
+    """A stack spanning two trees must bind each patch to its own.
+
+    ``root`` used to carry the round's framework root while ``root_id`` carried
+    the patch's own -- agreeing on a single-root stack and contradicting each
+    other on exactly the multi-root one this projection exists to describe. A
+    consumer reading ``root`` would apply the patch to the wrong tree, and
+    nothing said so, because the two fields disagreed silently.
+    """
+    steps = [
+        s
+        for s in _steps(
+            framework_root="/srv/vllm",
+            kept_patches=["/p/a.patch", "/p/b.patch"],
+            patch_roots={"/p/a.patch": "/srv/vllm", "/p/b.patch": "/srv/aiter"},
+            roots=[
+                {"id": "r-vllm", "path": "/srv/vllm"},
+                {"id": "r-aiter", "path": "/srv/aiter"},
+            ],
+        )
+        if s["kind"] == "patch"
+    ]
+
+    assert [s["root"] for s in steps] == ["/srv/vllm", "/srv/aiter"]
+    # The pair must agree: a step whose root and root_id name different trees is
+    # a step no replay can act on.
+    assert [s["root_id"] for s in steps] == ["r-vllm", "r-aiter"]
+
+
 def test_recipe_steps_reuses_build_attempt_summary():
     entry = _attempt(action={"component": "aiter", "max_jobs": 4})
     steps = _steps(build_manifest=[entry, _sentinel()], last_specialist_task_id=SPEC_TASK)
