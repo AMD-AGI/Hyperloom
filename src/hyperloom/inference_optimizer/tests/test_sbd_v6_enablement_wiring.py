@@ -610,14 +610,17 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_the_rearm_closes_the_lane_with_a_replay_verdict(tmp_path):
-    """The lane's own close must carry the recipe, not just the recorder's.
+async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
+    """A KEEP is provisional, so it is not the terminal that judges the stack.
 
-    :mod:`test_sbd_v6_enablement_timeline` pins the recorder given the state;
-    this pins the call site that supplies it. Drop the ``enablement=`` argument
-    from ``_record_enablement_round``'s ``finish`` call and the recorder is
-    still correct while the verdict is computed nowhere -- which is the state
-    this PR found the branch in.
+    This used to be the lane's terminal: a KEEP set ``succeeded`` and closed the
+    lane, and the close carried the replay verdict. Upstream made every KEEP open
+    a revalidation window instead -- ``succeeded`` is now set only where the
+    promote happens -- so the round that lands a KEEP closes nothing, and a
+    verdict recorded here would describe a stack no measurement had confirmed.
+
+    The guard that the close still computes a verdict lives on the terminal that
+    remains: :func:`test_the_writeback_close_also_carries_a_replay_verdict`.
     """
     lane = _lane(tmp_path)
 
@@ -630,10 +633,9 @@ async def test_the_rearm_closes_the_lane_with_a_replay_verdict(tmp_path):
         }
     )
 
-    recipe = _ext()["recipe"]
-    assert recipe is not None, "the lane closed without judging the stack it kept"
-    assert recipe["replay_sufficiency"]["status"] == "insufficient"
-    assert [step["kind"] for step in recipe["recipe_steps"]] == ["patch"]
+    assert lane.shared_state.enablement.validation_pending is True
+    assert lane.shared_state.enablement.succeeded is False
+    assert _ext()["recipe"] is None, "a provisional KEEP must not publish a terminal verdict"
 
 
 @pytest.mark.asyncio
