@@ -291,6 +291,61 @@ async def test_conflicting_patch_is_skipped_without_reverting_prior_keep(tmp_pat
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
 
 
+# No blank line lands in a hunk's trailing context: ``_git`` strips them, which
+# would truncate the diff this fixture publishes.
+_TWO_LANE_MODULE = """import os
+TILE = 64
+SCALE = 2
+def compute(x):
+    return x * TILE * SCALE
+"""
+
+
+@pytest.mark.asyncio
+async def test_two_lanes_inserting_at_one_anchor_both_land(tmp_path: Path) -> None:
+    """Lanes diff against one base, so the second one's context has moved.
+
+    Both insert their own sweep helpers after the imports. Dropping the second
+    is how ``flydsl_moe_stage2`` lost a measured 1.1727x on 2026-09-13.
+    """
+    repo, _ = _repo(tmp_path)
+    (repo / "first.py").write_text(_TWO_LANE_MODULE, encoding="utf-8")
+    _git(repo, "commit", "-am", "two-lane module")
+    base = _git(repo, "rev-parse", "HEAD")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, helper in (
+        ("a_stage1", 'PAD_ZERO = os.environ.get("FORGE_SWEEP_PAD_ZERO", "1") == "1"\n'),
+        ("b_stage2", 'TILE_N = int(os.environ.get("FORGE_SWEEP_TILE_N", "0"))\n'),
+    ):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path="first.py",
+            patch=_patch(repo, "first.py", _TWO_LANE_MODULE.replace("import os\n", f"import os\n{helper}", 1)),
+        )
+
+    async def _keep(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_keep,
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert [result.merge_strategy for result in summary.results] == ["strict", "union_disjoint"]
+    merged = (repo / "first.py").read_text(encoding="utf-8")
+    assert "PAD_ZERO" in merged
+    assert "TILE_N" in merged
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 4
+
+
 @pytest.mark.asyncio
 async def test_e2e_failure_reverts_only_current_patch_and_continues(tmp_path: Path) -> None:
     repo, base = _repo(tmp_path)

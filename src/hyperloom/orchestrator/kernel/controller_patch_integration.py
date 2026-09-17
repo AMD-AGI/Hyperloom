@@ -18,7 +18,6 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _patch_touched_paths,
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_apply,
     _git_apply_reverse,
     _git_restore_to_head,
 )
@@ -29,6 +28,7 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
+from .patch_conflict_merge import apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -47,6 +47,9 @@ class PatchIntegrationResult:
     keep_commit: str = ""
     new_tput: float = 0.0
     gain_pct: float = 0.0
+    #: How the patch reached the worktree; anything but ``strict`` was rebuilt
+    #: against the KEEPs that landed ahead of it.
+    merge_strategy: str = ""
 
 
 @dataclass(frozen=True)
@@ -243,6 +246,9 @@ async def integrate_controller_patches(
     pinned_bases: dict[Path, str] = {}
     pinned_heads: dict[Path, str] = {}
     pin_errors: dict[Path, str] = {}
+    # Patches already committed into each repository, so a merge can be held to
+    # keeping what they added.
+    landed: dict[Path, list[tuple[str, Path]]] = {}
 
     for index, patch_dir in enumerate(discover_controller_patch_dirs(patches_root)):
         try:
@@ -336,36 +342,21 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
-        applies, apply_error = _git_apply(
+        # Lanes all diff against the pinned base, so every KEEP committed above
+        # makes the diffs still queued stale on the files it touched.
+        merge = await apply_patch_resolving_conflicts(
             repo,
             publication.patch_path,
-            three_way=False,
-            check_only=True,
+            operator_id=publication.operator_id,
+            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
+            landed_patches=[patch for _, patch in landed.get(repo, [])],
+            intent=f"{publication.operator_name} in {publication.kernel_path}",
         )
-        if not applies:
+        if not merge.applied:
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
-                status="reverted_apply_conflict",
-                reason=apply_error or "git apply check failed",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-        applied, apply_error = _git_apply(
-            repo,
-            publication.patch_path,
-            three_way=False,
-            check_only=False,
-        )
-        if not applied:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_apply_failed",
-                reason=(apply_error or "git apply failed") + _revert_note(repo, publication.patch_path),
+                status="reverted_apply_conflict" if merge.conflicted else "reverted_apply_failed",
+                reason=merge.error + merge.note(),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -444,10 +435,12 @@ async def integrate_controller_patches(
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""
+        landed.setdefault(repo, []).append((publication.operator_id, publication.patch_path))
         result = PatchIntegrationResult(
             operator_id=publication.operator_id,
             status="kept",
-            reason=record_reason + _settle_apply_manifest(validation, kept=True),
+            merge_strategy=merge.strategy,
+            reason=record_reason + merge.note() + _settle_apply_manifest(validation, kept=True),
             base_commit=publication.base_commit,
             best_commit=publication.best_commit,
             repo_root=str(repo),

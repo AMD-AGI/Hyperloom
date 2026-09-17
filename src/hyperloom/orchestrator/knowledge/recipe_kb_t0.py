@@ -608,9 +608,16 @@ _GPU_ISA_BY_SKU = {
     "mi325x": "gfx942",
     "mi355x": "gfx950",
 }
+#: ``ep`` and the partition mode suffix at any node count, so they appear both inside a cluster suffix and on their
+#: own. Kept as a named fragment rather than repeated, so the two forms cannot drift.
+_SHAPE_SUFFIX = r"(?:_ep[1-9]\d*)?(?:_(?:dpx|qpx|cpx))?"
+#: A single-node shape suffix has to parse here too, or ``_hardware_fallback_values`` stops offering the same-ISA
+#: SKUs for exactly the rows these suffixes were added for. The alternation keeps ``_ws`` mandatory for the cluster
+#: form, so an unrecognised suffix still fails to parse instead of being mistaken for a backend name.
 _TOPOLOGY_SUFFIX_RE = re.compile(
-    r"_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"
-    r"(?:_tp[1-9]\d*)?(?:_ep[1-9]\d*)?(?:_[a-z0-9-]+)?$"
+    r"(?:_ws[1-9]\d*(?:_pd[1-9]\d*p[1-9]\d*d)?"
+    rf"(?:_tp[1-9]\d*)?{_SHAPE_SUFFIX}(?:_[a-z0-9-]+)?"
+    rf"|{_SHAPE_SUFFIX})$"
 )
 
 

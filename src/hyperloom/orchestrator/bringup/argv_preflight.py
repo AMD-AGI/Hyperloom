@@ -82,11 +82,15 @@ _IDENTITY_PROGRAM = (
     "}))\n"
 )
 
-# ``parse_known_args`` so an unrecognised flag comes back as a token this module
-# can name and drop. Required-ness is cleared first: the string under test is the
-# tail the harness appends, not the whole invocation.
+# ``parse_args``, not ``parse_known_args``: vLLM's FlexibleArgumentParser expands
+# ``--<group>-config.<field> <value>`` into the group's JSON inside ``parse_args``
+# only, so the ``parse_known_args`` entry point reports every dotted flag as
+# unrecognised. The leftover tokens are recovered from the intercepted
+# ``unrecognized arguments`` message instead, which keeps a genuinely unknown flag
+# nameable and droppable. Required-ness is cleared first: the string under test is
+# the tail the harness appends, not the whole invocation.
 _PARSE_PROGRAM = (
-    "import json, sys\n"
+    "import json, re, sys\n"
     "\n"
     "\n"
     "def _emit(status, message='', unknown=()):\n"
@@ -114,13 +118,12 @@ _PARSE_PROGRAM = (
     "parser.error = _reject\n"
     "parser.exit = _reject\n"
     "try:\n"
-    "    _ns, unknown = parser.parse_known_args(argv)\n"
+    "    parser.parse_args(argv)\n"
     "except _Rejected as exc:\n"
-    "    _emit('invalid', exc)\n"
+    "    leftover = re.search(r'unrecognized arguments:\\s*(.*)', str(exc), re.S)\n"
+    "    _emit('invalid', exc, leftover.group(1).split() if leftover else ())\n"
     "except BaseException as exc:\n"
     "    _emit('unavailable', '%s: %s' % (type(exc).__name__, exc))\n"
-    "if unknown:\n"
-    "    _emit('invalid', 'unrecognized arguments: ' + ' '.join(unknown), unknown)\n"
     "_emit('ok')\n"
 )
 
@@ -380,11 +383,11 @@ def check_server_argv(
     Returns:
         ArgvVerdict: The verdict, and the argv that should now launch.
     """
-    from hyperloom.orchestrator.framework.adapters import get_adapter
+    from hyperloom.orchestrator.framework.adapter_parsers import parser_source_for
 
     probe = probe if probe is not None else _default_probe
     name = framework.strip().lower()
-    parser_source = get_adapter(name).argv_parser_source()
+    parser_source = parser_source_for(name)
     if not parser_source:
         return ArgvVerdict(
             status=UNAVAILABLE,

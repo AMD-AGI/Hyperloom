@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.gpu_partition import published_shape
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
     external_service_url,
     load_multi_node_state,
@@ -121,6 +122,14 @@ def resolve_kb_topology() -> dict[str, Any]:
     tp = _int_pref_env("TP", "tp", "last_restart_tp", default=0)
     ep = _int_pref_env("EP", "ep", "last_restart_ep", default=0)
 
+    # Compute-partition mode. Fixed at launch like tp/ep, and it decides how much card a rank actually gets, so it
+    # belongs in the key. State wins on resume; the launch env is the live source. ``kb_hardware_slug`` drops SPX and
+    # an unpublished mode, so this stays "" for the overwhelming majority of runs.
+    partition = state.get("compute_partition")
+    partition_mode = str((partition or {}).get("mode") or "").strip().upper() if isinstance(partition, dict) else ""
+    if not partition_mode:
+        partition_mode = str((published_shape() or {}).get("mode") or "").strip().upper()
+
     # Multi-node backend (rayjob / infera): the CLI exports the resolved value; state is the resume fallback; default
     # to the CLI's own multi-node default.
     backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "").strip().lower()
@@ -135,6 +144,7 @@ def resolve_kb_topology() -> dict[str, Any]:
         "pd_decode_nodes": dn,
         "tp": tp,
         "ep": ep,
+        "partition_mode": partition_mode,
         "backend": backend,
     }
 

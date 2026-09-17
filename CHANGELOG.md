@@ -7,6 +7,82 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A partitioned card is now a different machine in the KB key, so a warm-start
+  hit can no longer replay a config tuned on a differently shaped one.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. The compute-partition mode was
+  not among those dimensions, and neither was expert parallelism on a single
+  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
+  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
+  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
+  not just on a cluster: both are fixed at launch rather than explored, which is
+  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
+  read an SPX row because it is asking a different `canonical_id` — no flag, no
+  demotion, and no second comparison that could be applied to a different row
+  than the one that gets replayed, since `resolve_kb_topology` is the single call
+  both the reader and the writer build the key from. Every suffix is omitted at
+  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
+  this build does not recognise), so existing keys stay byte-identical and
+  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
+  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
+  exactly the rows these suffixes were added for.
+
+  `workload_shape` still publishes `ep` and `partitions` as a description of the
+  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
+  to 1, so publishing it would have every dense run claim a formation it never
+  chose, and one partition is the whole card. The count a launch published wins
+  over one re-derived from the mode name, so there is only ever one derivation to
+  keep in agreement.
+
+### Removed
+
+- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
+  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
+  with the pod — which was never the exposure, since framework version and
+  precision are already identity dimensions. Encoding the partition mode in the
+  key makes the mismatch it would have caught unrepresentable, so a read-side
+  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
+  written into every row's `stack_fingerprint` and compared nowhere at read time;
+  that is a real gap and is tracked in #1507 rather than under a flag whose name
+  says fingerprint and whose behaviour would have been workload shape.
+
+### Changed
+
+- **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
+  run inside FRAMEWORK_AGENT, which left it a lane with no lifecycle of its
+  own: it could not be entered, exited or reported on, and a phase that owned
+  optimisation work was also carrying the work of making the combo run at all.
+  It is now a phase of its own between PRELUDE and FRAMEWORK_AGENT, with entry
+  and exit predicates in `compute_next_phase`, its own `phase_history` rows and
+  a section in the Markdown session report. `PHASE_NAMES` is six long.
+
+  **No wall-clock budget is apportioned to it.** `DEFAULT_PHASE_BUDGET_PCT` has
+  no ENABLEMENT key, and an absent key means no cap rather than a zero one: a
+  budget apportions optimisation effort, and a combo that cannot run has
+  nothing to optimise yet. `PHASE_FRAMEWORK_AGENT` drops 0.40 → 0.38 and
+  `PHASE_KERNEL_AGENT` 0.50 → 0.47, so the table now sums to 0.95 and bring-up
+  is bounded by the run's wall clock and by `ENABLEMENT_MAX_ATTEMPTS` instead.
+  The phase's terminal exit is `enablement_attempts_exhausted`, which
+  `enablement/lane.py` sets.
+
+  **Runnability is decided from the measurement, not from a log scan.** A combo
+  counts as served once it has produced positive throughput and completed
+  requests, which is a signal the baseline already carries; the `booted`
+  property it replaces scanned the server log for bring-up milestones and could
+  not witness one past the head of a chatty log. Both enablement origins — a
+  boot failure and the accuracy gate — now open the same baseline revalidation
+  window, and the baseline is Coordinator-owned while the phase is ENABLEMENT.
+
+### Fixed
+
 - **A KernelForge Controller KEEP now reaches the stack ledger in every
   benchmark mode, not only under AgentX.** `_run_kernel_rewrite_controller`
   handed `integrate_controller_patches` the session-owned writeback only when
@@ -26,6 +102,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   recorder and the `record_keep is None` branch that selected it are gone and
   `record_keep` is now required, so a caller cannot silently reacquire the
   no-ledger path.
+
+- **A measured Controller patch was dropped because the patch kept before it
+  had moved its context.** Lanes run in parallel from one pinned base commit,
+  so two lanes touching the same file each ship a diff written against that
+  same base; integration applies them one at a time and commits every KEEP,
+  which leaves the later diff stale by the time its turn comes. Measured in the
+  Kimi-K3 session of 2026-09-13: `flydsl_moe_stage2` (1.1727x micro) was lost
+  to `error: patch failed: aiter/ops/flydsl/moe_kernels.py:14` once
+  `flydsl_moe_stage1` had landed, although the two touched disjoint functions
+  and defined disjoint module-level symbols -- they collided only because each
+  inserted its own sweep helpers at the same anchor. A refused diff is now
+  rebuilt in escalating steps: `git apply -3` for pure line drift, then keeping
+  both sides of every conflict region whose merge base is empty, then an LLM
+  for the regions where the lanes genuinely edited the same lines -- one region
+  at a time, carrying the surrounding source as context rather than the file to
+  rewrite. Whatever the last two steps reconstruct is discarded unless it still
+  contains every line the incoming patch and every landed KEEP added, parses,
+  carries no conflict marker and redefines no module-level name; a lane that
+  fails any of those is dropped exactly as it was before, with the worktree put
+  back to HEAD. Nothing here decides a KEEP: the E2E gate downstream still
+  measures and still reverts, so a bad merge costs what a dropped patch already
+  cost and can never produce an unmeasured KEEP. A lane that landed as a merge
+  rather than verbatim is reported as `merge_strategy` on the integration
+  result and in `summary.json`. A patch that applies cleanly takes the path it
+  always took, and the resolver runs on whichever backend
+  `preferred_agent_backend` picks for this deployment -- Claude through the
+  single-shot Anthropic transport, Codex through `achat_completion` -- and is
+  skipped entirely when neither side is credentialed.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
@@ -80,6 +184,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   anonymous workers whose leader had already exited before recovery began;
   the generic subprocess teardown and third-party benchmark scripts are unchanged.
 
+- **A bare `--resume-from` rebuilt the budget and the stop target from the
+  flags.** `--max-hours` carried an argparse default, so a resume passing no
+  flags at all was indistinguishable from one passing the default: a 24 h
+  session was shortened to 2 h and closed as `time_exhausted` before its first
+  action, and the objective was dropped on the way. This is the path
+  `robustness_monitor.sh` takes, which auto-resumes with no flags. The flag now
+  defaults to `None` and resolves to `DEFAULT_MAX_HOURS` only after the archive
+  has had its chance at the persisted budget, so an absent flag restores 8 h
+  while an explicit `--max-hours 2` wins over it.
+
+- **Argv preflight read every dotted vLLM flag as unrecognised.** It probed
+  through `parse_known_args`, which is not what vLLM's parser uses to expand
+  `--<group>-config.<field>`, so preflight spent its one repair dropping flags
+  the server would have accepted. One of them bounded the profiler, and the
+  roofline that followed recorded 25.7 GB of trace over the whole workload
+  instead of over a steady-state window. The probe goes through the entry point
+  that performs the expansion.
+
+- **The robustness monitor called a session over while it was still running.**
+  It read the presence of `reports/final.*` as terminal, but the crash path
+  writes one as a safety net and a resume clears `stop_reason` without removing
+  it. `state.json` decides now, and the artifacts stand in only when there is
+  no state to read.
+
+- **The IR-1 stale-process scan failed on an idle machine, and could not see an
+  ATOM server.** It excluded only `os.getpid()`, so the launcher shell — whose
+  argv quotes the whole command — matched the scan's own patterns and failed the
+  gate; it now excludes its ancestry. Separately, the pattern list named only
+  vLLM and SGLang, so a leftover ATOM server still holding every rank's VRAM
+  read as a clean machine. Matched on `atom.entrypoints` alone: the per-rank
+  workers are `multiprocessing.spawn` children carrying no identifying argv, so
+  only descent from the wrapper reaches them, which teardown already covers.
+
 ### Removed
 
 - **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
@@ -125,6 +262,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   divisor, holding the other two lanes down to 0.3 and 0.2 of the phase. It
   becomes `REWRITE_RESERVE_SHARE`, taken off the top before the two real lanes
   divide the rest, and each lane's share of the phase is unchanged.
+
+- **`--max-minutes-enablement-pct` / `--phase-budget-enablement-pct`.** The
+  flag parsed and reached `DEFAULT_PHASE_BUDGET_PCT`, but no ENABLEMENT branch
+  in `compute_next_phase` ever calls `phase_cap_exceeded`, so the cap it
+  advertised was never enforced against anything. Wiring it up would have
+  contradicted the phase having no budget by design. It was new in this
+  release and nothing depended on it.
 
 ## [v1.1.1] - 2026-09-16
 Current packaged version (`pyproject.toml`). See

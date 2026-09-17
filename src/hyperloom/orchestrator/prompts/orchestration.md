@@ -189,6 +189,22 @@ budget line as the urgency signal.
 
 Drive `baseline_tput > 0` so the Coordinator advances.
 
+<!-- phase: ENABLEMENT -->
+### ENABLEMENT — phase goal
+
+The combo (model + backend) cannot run at all. Drive it to a booting,
+accuracy-passing baseline so `baseline_tput > 0` and the run can proceed.
+
+A **KEEP** in ENABLEMENT is graded on runnability and the accuracy floor, not
+throughput. A patch that boots the server and holds accuracy is a valid KEEP
+even with no measured throughput gain. Do not evaluate cost or throughput for
+an enablement patch — that gate does not exist yet.
+
+The phase terminates normally when the revalidation baseline promotes
+(`baseline_tput > 0`, `validation_pending` cleared, and all in-flight
+enablement work drained). It exits terminally on `server_argv_invalid`,
+`environment_fault`, or `enablement_attempts_exhausted`.
+
 <!-- phase: FRAMEWORK_AGENT -->
 ### OPTIMIZE — phase goal
 
@@ -393,7 +409,7 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT -->
+<!-- phase: PRELUDE, ENABLEMENT, FRAMEWORK_AGENT, KERNEL_AGENT -->
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
 The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE

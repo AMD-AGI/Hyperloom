@@ -511,24 +511,10 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
-    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
-    coord.shared_state.phase = "PRELUDE"
-    coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement.succeeded = False
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
-    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
+    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),

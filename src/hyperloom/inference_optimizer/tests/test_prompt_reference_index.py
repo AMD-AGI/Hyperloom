@@ -87,14 +87,14 @@ def test_empty_refs_dir_produces_no_section(tmp_path):
 # Phase filtering
 
 
-def test_specialist_rescue_only_in_explore_and_framework(refs_dir):
-    """specialist_rescue is phase-tagged EXPLORE,FRAMEWORK_AGENT; other phases hide it."""
+def test_specialist_rescue_only_in_framework(refs_dir):
+    """specialist_rescue is phase-tagged FRAMEWORK_AGENT; other phases hide it."""
     rescue_path = refs_dir / "specialist_rescue.md"
     if not rescue_path.exists():
         pytest.skip("specialist_rescue.md not present")
     for phase in _ps.PHASE_NAMES:
         index = "\n".join(_section_reference_index(references_dir=refs_dir, phase=phase))
-        if phase in ("EXPLORE", "FRAMEWORK_AGENT"):
+        if phase == "FRAMEWORK_AGENT":
             assert "specialist_rescue" in index, f"specialist_rescue missing from index in {phase}"
         else:
             assert "specialist_rescue" not in index, f"specialist_rescue leaked into index in {phase}"
