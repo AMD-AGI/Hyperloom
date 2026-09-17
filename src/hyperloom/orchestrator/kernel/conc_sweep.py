@@ -36,9 +36,11 @@ from ..actions.executors._grid_runner import (
     VariantResult,
     _kill_stale_servers,
     run_grid,
+    session_grid_bounds,
     variant_conc,
 )
-from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
+from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -101,6 +103,46 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
     )
 
 
+def _session_budget_skip_result(variant: GridVariant) -> VariantResult:
+    """Keep the session stop distinct from the sweep's own optional budget."""
+    return VariantResult(
+        name=variant.name,
+        extra_server_args=variant.extra_server_args,
+        extra_envs=dict(variant.extra_envs),
+        status="skipped",
+        error=STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS].never_started,
+        error_class=SESSION_TIME_EXHAUSTED_CLASS,
+        note=variant.note,
+    )
+
+
+async def _run_session_bounded_grid(
+    *,
+    grid: list[GridVariant],
+    session_deadline_sec: float | None,
+    variant_expected_sec: float | None,
+    budget_state: dict[str, Any],
+    **kwargs: Any,
+) -> list[VariantResult]:
+    """Carry a grid admission or in-flight session stop across the whole sweep."""
+    if budget_state.get("budget_skip_reason") == SESSION_TIME_EXHAUSTED_CLASS:
+        return [_session_budget_skip_result(variant) for variant in grid]
+    results = await run_grid(
+        grid=grid,
+        session_deadline_sec=session_deadline_sec,
+        variant_expected_sec=variant_expected_sec,
+        **kwargs,
+    )
+    if any(result.error_class == SESSION_TIME_EXHAUSTED_CLASS for result in results):
+        remaining = session_deadline_to_remaining_sec(session_deadline_sec)
+        budget_state.update(
+            budget_exhausted=True,
+            budget_skip_reason=SESSION_TIME_EXHAUSTED_CLASS,
+            budget_remaining_sec=max(0.0, remaining) if remaining is not None else 0.0,
+        )
+    return results
+
+
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
     """Flatten a ``VariantResult`` into one row of the curve."""
     envs = v.extra_envs or {}
@@ -153,7 +195,7 @@ def _budget_limited_without_valid_pair(
     for point in points:
         status = str(point.get("status") or "").lower()
         error_class = str(point.get("error_class") or "")
-        if error_class == "budget_exhausted":
+        if error_class in {"budget_exhausted", SESSION_TIME_EXHAUSTED_CLASS}:
             saw_budget_skip = True
             continue
         if status not in ("succeeded", "skipped"):
@@ -410,6 +452,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     _budget_state: dict[str, Any],
     recorder: Any = None,
     benchmark_script: str | None = None,
+    session_deadline_sec: float | None = None,
+    variant_expected_sec: float | None = None,
 ) -> list[VariantResult]:
     """Sweep one arm across all CONC values reusing a single persistent server.
 
@@ -513,6 +557,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 benchmark_script=benchmark_script,
                 benchmark_timeout_sec=benchmark_timeout_sec,
                 deadline=deadline,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,
@@ -555,7 +601,10 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         boot_started_iso = now_iso("seconds")
         boot_started_at = time.time()
         try:
-            boot_results = await run_grid(
+            boot_results = await _run_session_bounded_grid(
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
+                budget_state=_budget_state,
                 base_yaml_path=base_yaml_path,
                 base_extra_args="",
                 grid=[boot_variant],
@@ -590,6 +639,38 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         br = boot_results[0] if boot_results else None
         boot_failed = br is None or br.status in {"failed", "skipped"}
         boot_elapsed = round(time.time() - boot_started_at, 3)
+
+        if br is not None and br.error_class == SESSION_TIME_EXHAUSTED_CLASS:
+            for failed in failed_boots:
+                arm_results.append(failed)
+                _all_results_ref.append(failed)
+                if recorder is not None:
+                    recorder.commit_variant(
+                        arm_name,
+                        stage=STAGE_BOOT_ATTEMPT,
+                        conc=variant_conc(failed),
+                        point=_point_from_variant(failed, arm=arm_name),
+                    )
+            stopped_results = [br, *[_session_budget_skip_result(v) for v in grid[boot_idx + 1 :]]]
+            arm_results.extend(stopped_results)
+            _all_results_ref.extend(stopped_results)
+            for stopped in stopped_results:
+                _record_rung(
+                    recorder,
+                    arm_name,
+                    stopped,
+                    stage=STAGE_BUDGET_SKIP,
+                    budget_remaining_sec=_budget_state["budget_remaining_sec"],
+                    granted_cap_sec=benchmark_timeout_sec,
+                )
+            try:
+                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
+            finally:
+                if arm_lease is not None:
+                    arm_lease.close()
+                if recorder is not None:
+                    recorder.finish_arm(arm_name, status=_arm_status(arm_results))
+            return arm_results
 
         if boot_failed:
             # Ensure server is torn down before retrying at a lower CONC.
@@ -716,6 +797,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             benchmark_script=benchmark_script,
             benchmark_timeout_sec=benchmark_timeout_sec,
             deadline=deadline,
+            session_deadline_sec=session_deadline_sec,
+            variant_expected_sec=variant_expected_sec,
             state=state,
             session_dir=session_dir,
             json_path=json_path,
@@ -805,7 +888,10 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 "port": port,
             }
             try:
-                reuse_results = await run_grid(
+                reuse_results = await _run_session_bounded_grid(
+                    session_deadline_sec=session_deadline_sec,
+                    variant_expected_sec=variant_expected_sec,
+                    budget_state=_budget_state,
                     base_yaml_path=base_yaml_path,
                     base_extra_args="",
                     grid=[variant],
@@ -909,6 +995,8 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     serving_lease: Any = None,
     recorder: Any = None,
     benchmark_script: str | None = None,
+    session_deadline_sec: float | None = None,
+    variant_expected_sec: float | None = None,
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
@@ -975,7 +1063,10 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
         rung_started_iso = now_iso("seconds")
         rung_started_at = time.time()
         try:
-            sub = await run_grid(
+            sub = await _run_session_bounded_grid(
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
+                budget_state=_budget_state,
                 base_yaml_path=base_yaml_path,
                 base_extra_args="",
                 grid=[variant],
@@ -1224,12 +1315,13 @@ async def run_conc_sweep(
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
 
     ``concs`` of ``None`` uses the default ladder. ``total_budget_sec`` of
-    ``None`` runs the ladder unbounded, while ``<=0`` means the caller's clamp
+    ``None`` removes only the sweep budget, not the session deadline; ``<=0`` means the caller's clamp
     left no time and the sweep skips immediately. A ``None`` recorder records
     nothing, which is what a direct caller with no session bound wants.
     Returns a skip envelope when prerequisites are unmet.
     """
     _, benchmark_timeout_sec = resolve_benchmark_timeouts()
+    session_deadline_sec, variant_expected_sec = session_grid_bounds(state)
     session_dir = Path(session_dir)
     # Whether the ladder was handed to the sweep or picked for the workload --
     # a distinction only this line can still see, since the two are the same
@@ -1404,6 +1496,16 @@ async def run_conc_sweep(
                 arm_controls=controls_of(normalize_proposal(state.current_best or {})) if _an == "optimized" else {},
             )
 
+            if _budget_state["budget_skip_reason"] == SESSION_TIME_EXHAUSTED_CLASS:
+                results.extend(_session_budget_skip_result(v) for v in skip_grid_fn())
+                if recorder is not None:
+                    recorder.record_arm_refused(
+                        arm_name,
+                        reason=SESSION_TIME_EXHAUSTED_CLASS,
+                        remaining_sec=_budget_state["budget_remaining_sec"],
+                    )
+                continue
+
             # Check overall budget before starting each arm.
             _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
             if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
@@ -1459,6 +1561,8 @@ async def run_conc_sweep(
                 benchmark_script=benchmark_script,
                 benchmark_timeout_sec=benchmark_timeout_sec,
                 deadline=deadline,
+                session_deadline_sec=session_deadline_sec,
+                variant_expected_sec=variant_expected_sec,
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,
