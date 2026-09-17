@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import baseline as _baseline
+from hyperloom.orchestrator.actions.executors import _agentx_timeouts as _timeouts
 from hyperloom.orchestrator.actions.executors.baseline import (
     AGENTX_BASELINE_OVERHEAD_SEC,
     AGENTX_CANON_WARMUP_CONC,
@@ -27,7 +27,7 @@ _COLD_CORPUS_SEC = 840  # the client's own "4-14 min" upper bound
 
 def _clear(monkeypatch):
     # The derivation logs each distinct payload once per process so a conc sweep cannot reprint them per rung.
-    _baseline._AGENTX_SAID.clear()
+    _timeouts._AGENTX_SAID.clear()
     for k in (
         "HYPERLOOM_AGENTX",
         "AGENTX_DURATION",

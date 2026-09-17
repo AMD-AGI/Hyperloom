@@ -14,20 +14,27 @@ from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import provider_model_defaults
+
+# Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
+# can read the same numbers without importing this module, which would close a
+# cycle. Only the ones this module quotes in help text are pulled in here.
+from hyperloom.common.workload_defaults import (
+    DEFAULT_CONC,
+    DEFAULT_ISL,
+    DEFAULT_OSL,
+    DEFAULT_PRECISION,
+    DEFAULT_TP,
+)
 from hyperloom.orchestrator.roles.agent_role import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
-# Workload knob fallbacks applied when the operator passes neither the CLI flag nor an inherited value.
-DEFAULT_ISL = 1024
-DEFAULT_OSL = 1024
-DEFAULT_CONC = 64
-DEFAULT_TP = 1
-DEFAULT_EP = 1
-DEFAULT_PRECISION = "bf16"
-
+#: Fallback wall-clock budget. Named because ``--resume-from`` reads it back as
+#: the "operator did not set this" signal: unlike the target flags, this one has
+#: a real default, so the value alone cannot say whether it was asked for.
+DEFAULT_MAX_HOURS = 2.0
 
 # Substrings that mark a flag or a NAME=VALUE name as carrying a credential.
 _SECRET_NAME_HINTS = (
@@ -449,7 +456,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "state.json under `explore_search.last_round.skipped_dup`, and in the "
         "action's per-variant outcomes, tagged `user_skip`.",
     )
-    opt.add_argument("--max-hours", type=float, default=2.0, help="Wall-clock budget in hours (default 2.0)")
+    opt.add_argument(
+        "--max-hours",
+        type=float,
+        # No argparse default: ``--resume-from`` must tell "the operator asked
+        # for this many hours" from "the operator said nothing", and a default
+        # would make an explicit value indistinguishable from absence.
+        default=None,
+        help=f"Wall-clock budget in hours (default {DEFAULT_MAX_HOURS})",
+    )
     opt.add_argument(
         "--extend-hours",
         dest="extend_hours",
@@ -839,16 +854,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "Manifest records the reason as ``explicit_flag`` when set "
         "explicitly.",
     )
-    opt.add_argument(
-        "--recipe-kb-strict-fingerprint",
-        dest="recipe_kb_strict_fingerprint",
-        action="store_true",
-        default=False,
-        help="When set, T0 refuses warm_start_recipe rows whose "
-        "stack_fingerprint does not match the current pod (recorded "
-        "in manifest.json). Default: lenient (M1 records the flag "
-        "in manifest only; consumed by M5 specialist assembly).",
-    )
     # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
         "--no-warm-replay",
@@ -1185,17 +1190,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "``state.json.preReset.<unix_ts>`` and start the session "
         "from a blank SharedState. Recipe KB is NOT touched.",
     )
-    # observability
-    opt.add_argument(
-        "--breakdown-include-transcripts",
-        dest="breakdown_include_transcripts",
-        type=str,
-        choices=("true", "false"),
-        default="false",
-        help="Inline specialist transcript bodies into "
-        "``specialist_runs`` (true) or reference them by path "
-        "only (false, default). KB_design §3.12 §7.",
-    )
     # plateau threshold tuning: override defaults; locked at session start.
     opt.add_argument(
         "--plateau-explore-keep-gain",
@@ -1265,7 +1259,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.38.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1273,7 +1267,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.47.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

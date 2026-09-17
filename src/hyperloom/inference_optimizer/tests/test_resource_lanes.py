@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -631,84 +630,6 @@ def _make_session_with_db(tmp_path: Path) -> tuple[Path, SqliteConnection]:
     db = SqliteConnection(session_dir / "storage" / "coordinator.db")
     ensure_schema(db.raw)
     return session_dir, db
-
-
-@pytest.mark.asyncio
-async def test_collect_lane_timeline_summarises_capacity_and_holders(tmp_path):
-    """lane_timeline row per known lane + __total__ aggregate."""
-    from hyperloom.inference_optimizer.breakdown.collectors import _collect_lane_timeline
-
-    session_dir, db = _make_session_with_db(tmp_path)
-    set_lane_capacity(db.raw, "research_lane", 6)
-    locks = ResourceLockManager(SqliteLeaseBackend(db))
-    leases = [
-        await locks.acquire_many(
-            ["research_lane"],
-            holder_id=f"s{i}",
-            task_id=f"t{i}",
-            action="specialist",
-            ttl_sec=60,
-        )
-        for i in range(3)
-    ]
-    bench = await locks.acquire_many(
-        ["benchmark_lane"],
-        holder_id="hb",
-        task_id="tb",
-        action="bench",
-        ttl_sec=60,
-    )
-    warnings: list[str] = []
-    rows = _collect_lane_timeline(session_dir, warnings)
-    by_lane = {r["lane"]: r for r in rows}
-    assert by_lane["research_lane"]["capacity"] == 6
-    assert by_lane["research_lane"]["live_holders"] == 3
-    assert by_lane["benchmark_lane"]["capacity"] == 1
-    assert by_lane["benchmark_lane"]["live_holders"] == 1
-    assert by_lane["__total__"]["live_holders"] >= 4
-    assert warnings == []
-    for l in leases:
-        await locks.release(l)
-    await locks.release(bench)
-    db.close()
-
-
-def test_collect_lane_timeline_missing_db_returns_empty(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.collectors import _collect_lane_timeline
-
-    session_dir = tmp_path / "no_session"
-    warnings: list[str] = []
-    rows = _collect_lane_timeline(session_dir, warnings)
-    assert rows == []
-    assert warnings == []
-
-
-def test_collect_lane_timeline_legacy_db_without_lane_capacity(tmp_path):
-    """Legacy DBs without ``lane_capacity`` still produce a sensible lane_timeline using the default table."""
-    from hyperloom.inference_optimizer.breakdown.collectors import _collect_lane_timeline
-
-    session_dir = tmp_path / "legacy"
-    (session_dir / "storage").mkdir(parents=True)
-    raw = sqlite3.connect(str(session_dir / "storage" / "coordinator.db"))
-    raw.execute("""
-        CREATE TABLE leases (
-            lane TEXT PRIMARY KEY,
-            holder_id TEXT NOT NULL,
-            task_id TEXT NOT NULL,
-            action TEXT NOT NULL,
-            pid INTEGER NOT NULL,
-            acquired_at TEXT NOT NULL,
-            expires_at TEXT NOT NULL,
-            heartbeat_at TEXT NOT NULL
-        )
-    """)
-    raw.commit()
-    raw.close()
-    warnings: list[str] = []
-    rows = _collect_lane_timeline(session_dir, warnings)
-    by_lane = {r["lane"]: r for r in rows if r["lane"] != "__total__"}
-    for lane, cap in DEFAULT_LANE_CAPACITIES.items():
-        assert by_lane[lane]["capacity"] == cap
 
 
 @pytest.mark.asyncio

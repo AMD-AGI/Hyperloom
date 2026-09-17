@@ -11,10 +11,21 @@ from pathlib import Path
 import pytest
 
 from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
+from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors._patch_snapshot import _git_commit_kept
 from hyperloom.orchestrator.kernel import controller_patch_integration as integration
 from hyperloom.orchestrator.kernel.controller_patch_integration import (
     integrate_controller_patches,
+)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.roles import (
+    MockBackend,
+    MockCriticBackend,
+    MockRobustnessBackend,
+    ScriptedPlan,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -24,6 +35,24 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_NAME": "integration-test",
     "GIT_COMMITTER_EMAIL": "integration-test@local",
 }
+
+
+@pytest.fixture(autouse=True)
+def _grading_follows_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grade on the session's own ``benchmark_mode``, not on the shell's."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _user_data_under_tmp(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep every session these tests build inside ``tmp_path``.
+
+    The KEEP recorder is the Coordinator's, so each test constructs one, and an
+    unset ``USER_DATA_PATH`` resolves to the shared ``/workspace/hyperloom``
+    default.
+    """
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -119,6 +148,59 @@ def _state(session_dir: Path, repo: Path) -> SharedState:
     return state
 
 
+def _silent_backends() -> dict[str, object]:
+    silent = ScriptedPlan(
+        turns=[],
+        default_intent=Intent(
+            type=IntentType.SEND_MESSAGE,
+            payload={"topic": "heartbeat", "body_md": "ok"},
+        ),
+    )
+    return {
+        "orchestration": MockBackend(silent, name="orch"),
+        "critic": MockCriticBackend(),
+        "robustness": MockRobustnessBackend(),
+    }
+
+
+def _coordinator(session_dir: Path, repo: Path) -> Coordinator:
+    """A session whose KEEPs are recorded the way the live loop records them.
+
+    Promotion semantics live on the Coordinator's writeback, so a test that
+    asserts them has to go through one rather than through a bare SharedState.
+    """
+    coordinator = Coordinator(session_dir, backends=_silent_backends())
+    state = coordinator.shared_state
+    state.baseline_tput = 100.0
+    state.current_best = {"action": "baseline", "tput": 100.0}
+    state.framework_repo_path = str(repo)
+    state.save(session_dir)
+    return coordinator
+
+
+async def _integrate(
+    *,
+    patches_root: Path,
+    session_dir: Path,
+    shared_state: SharedState,
+    validator,
+):
+    """Integrate through the production KEEP recorder bound to *shared_state*.
+
+    The recorder is the Coordinator's own integrate writeback, so what these
+    tests observe in SharedState is what the live loop would have written.
+    """
+    coordinator = Coordinator(session_dir, backends=_silent_backends())
+    coordinator.shared_state = shared_state
+    return await integrate_controller_patches(
+        patches_root=patches_root,
+        session_dir=session_dir,
+        shared_state=shared_state,
+        record_keep=coordinator.writeback._record_integrate_keep,
+        validator=validator,
+    )
+
+
 @pytest.mark.asyncio
 async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path) -> None:
     repo, base = _repo(tmp_path)
@@ -152,7 +234,7 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -194,7 +276,7 @@ async def test_conflicting_patch_is_skipped_without_reverting_prior_keep(tmp_pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -207,6 +289,61 @@ async def test_conflicting_patch_is_skipped_without_reverting_prior_keep(tmp_pat
     ]
     assert (repo / "first.py").read_text(encoding="utf-8") == "VALUE = 2\n"
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 2
+
+
+# No blank line lands in a hunk's trailing context: ``_git`` strips them, which
+# would truncate the diff this fixture publishes.
+_TWO_LANE_MODULE = """import os
+TILE = 64
+SCALE = 2
+def compute(x):
+    return x * TILE * SCALE
+"""
+
+
+@pytest.mark.asyncio
+async def test_two_lanes_inserting_at_one_anchor_both_land(tmp_path: Path) -> None:
+    """Lanes diff against one base, so the second one's context has moved.
+
+    Both insert their own sweep helpers after the imports. Dropping the second
+    is how ``flydsl_moe_stage2`` lost a measured 1.1727x on 2026-09-13.
+    """
+    repo, _ = _repo(tmp_path)
+    (repo / "first.py").write_text(_TWO_LANE_MODULE, encoding="utf-8")
+    _git(repo, "commit", "-am", "two-lane module")
+    base = _git(repo, "rev-parse", "HEAD")
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, helper in (
+        ("a_stage1", 'PAD_ZERO = os.environ.get("FORGE_SWEEP_PAD_ZERO", "1") == "1"\n'),
+        ("b_stage2", 'TILE_N = int(os.environ.get("FORGE_SWEEP_TILE_N", "0"))\n'),
+    ):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path="first.py",
+            patch=_patch(repo, "first.py", _TWO_LANE_MODULE.replace("import os\n", f"import os\n{helper}", 1)),
+        )
+
+    async def _keep(_publication):
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=_state(session_dir, repo),
+        validator=_keep,
+    )
+
+    assert [result.status for result in summary.results] == ["kept", "kept"]
+    assert [result.merge_strategy for result in summary.results] == ["strict", "union_disjoint"]
+    merged = (repo / "first.py").read_text(encoding="utf-8")
+    assert "PAD_ZERO" in merged
+    assert "TILE_N" in merged
+    assert int(_git(repo, "rev-list", "--count", "HEAD")) == 4
 
 
 @pytest.mark.asyncio
@@ -237,7 +374,7 @@ async def test_e2e_failure_reverts_only_current_patch_and_continues(tmp_path: Pa
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -273,7 +410,7 @@ async def test_a_revert_leaves_the_operators_untracked_files_alone(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -324,7 +461,7 @@ async def test_a_revert_unstages_a_patch_whose_commit_never_landed(tmp_path: Pat
     original = integration._git_commit_kept
     integration._git_commit_kept = _commit_nothing  # type: ignore[assignment]
     try:
-        summary = await integrate_controller_patches(
+        summary = await _integrate(
             patches_root=patches,
             session_dir=session_dir,
             shared_state=_state(session_dir, repo),
@@ -360,7 +497,7 @@ async def test_controller_base_mismatch_is_rejected_before_apply(tmp_path: Path)
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -393,7 +530,7 @@ async def test_a_dirty_patch_path_is_skipped_without_cleaning_the_repository(tmp
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -434,7 +571,7 @@ async def test_a_note_alongside_a_real_commit_does_not_revert_the_keep(
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -484,7 +621,7 @@ async def test_a_commit_that_never_lands_reverts_without_poisoning_the_next_patc
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -532,7 +669,7 @@ async def test_patches_from_separate_repositories_each_keep_their_own_baseline(t
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         # The configured root is their common parent so both repositories are admissible; the point under test is the
@@ -577,7 +714,7 @@ async def test_second_base_within_one_repository_is_still_rejected(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -619,7 +756,7 @@ async def test_an_invalid_publication_is_skipped_and_the_next_one_still_lands(tm
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -654,7 +791,7 @@ async def test_a_patch_that_does_not_apply_is_reverted_not_left_half_staged(tmp_
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -697,7 +834,7 @@ async def test_a_validator_that_raises_reverts_its_patch_and_continues(tmp_path:
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -739,7 +876,7 @@ async def test_a_keep_carries_the_server_settings_its_validation_measured(tmp_pa
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     state = _state(session_dir, repo)
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -776,7 +913,7 @@ async def test_a_commit_that_lands_is_reported_even_if_the_ledger_write_fails(tm
         raise RuntimeError("state file is read-only")
 
     state.save = _boom  # type: ignore[method-assign]
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=state,
@@ -826,7 +963,7 @@ async def test_a_revert_the_diff_cannot_undo_restores_what_head_knows(tmp_path: 
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -866,7 +1003,7 @@ async def test_dirt_on_a_file_the_patch_never_touches_does_not_block_it(tmp_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -901,7 +1038,7 @@ async def test_dirt_on_a_file_the_patch_does_touch_still_blocks_it(tmp_path: Pat
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -936,7 +1073,7 @@ async def test_a_run_that_admitted_nothing_does_not_report_as_completed(tmp_path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -969,7 +1106,7 @@ async def test_a_repo_root_git_cannot_read_is_skipped_not_applied(tmp_path: Path
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, plain),
@@ -1014,7 +1151,7 @@ async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
-    summary = await integrate_controller_patches(
+    summary = await _integrate(
         patches_root=patches,
         session_dir=session_dir,
         shared_state=_state(session_dir, repo),
@@ -1025,3 +1162,328 @@ async def test_a_revert_that_cannot_run_is_named_in_the_reason(tmp_path: Path) -
     assert summary.results[0].status == "reverted_e2e_failed"
     assert "revert failed" in summary.results[0].reason
     assert _git(repo, "rev-parse", "HEAD").lower() == base
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["agentx", "synthetic"])
+async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, monkeypatch, mode):
+    from hyperloom.orchestrator.kernel import controller_submit
+    from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+    repo, _ = _repo(tmp_path)
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    coordinator.shared_state.benchmark_mode = mode
+    phase = coordinator.phase_kernel
+    monkeypatch.setattr(phase, "_kernel_rewrite_controller_timeouts", lambda: (60, 90))
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", lambda **kwargs: {"patch_count": 1})
+    monkeypatch.setattr(controller_submit, "record_controller_llm_usage", lambda **kwargs: None)
+    callbacks = []
+
+    async def capture_callback(**kwargs):
+        callbacks.append(kwargs["record_keep"])
+        return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
+
+    monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
+
+    assert len(callbacks) == 1
+    assert callbacks[0].__func__ is WritebackCollaborator._record_integrate_keep
+    assert callbacks[0].__self__.shared_state is coordinator.shared_state
+
+
+@pytest.mark.asyncio
+async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path: Path) -> None:
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="ledger",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    coordinator = _coordinator(session_dir, repo)
+    state = coordinator.shared_state
+    state.benchmark_mode = "synthetic"
+    state.current_best = {"action": "explore", "tput": 110.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "framework", "tput": 110.0}]
+    state.gain_per_stack_entry = [10.0]
+    state.cumulative_gain_validated = 10.0
+    state.cumulative_gain_validated_stack_len = 1
+    state.cumulative_gain_validated_ts = "2026-09-15T08:58:18+00:00"
+    state.save(session_dir)
+
+    async def _validate(_publication):
+        return {
+            "status": "ok",
+            "decision": "KEEP",
+            "base_tput": 110.0,
+            "new_tput": 140.0,
+            "gain_pct": 27.272727,
+            "bench_result": {"output_throughput": 140.0},
+        }
+
+    with session_scope(session_dir):
+        stack_event.record_adoption(
+            stack_index=0,
+            entry=state.optimization_stack[0],
+            throughput_before=100.0,
+            throughput_after=110.0,
+            baseline_tput=100.0,
+            objective="output_throughput",
+        )
+        stack_event.record_validation(
+            stack_len=1,
+            baseline_tput=100.0,
+            validated_tput=110.0,
+            validated_gain_pct=10.0,
+            source="writeback",
+            measurement_basis="e2e_decision_round",
+            graded_objective="output_throughput",
+            ts=state.cumulative_gain_validated_ts,
+        )
+
+        summary = await integrate_controller_patches(
+            patches_root=patches,
+            session_dir=session_dir,
+            shared_state=state,
+            record_keep=coordinator.writeback._record_integrate_keep,
+            validator=_validate,
+        )
+        ledger, _status = stack_event.assemble_stack_ext(
+            stack_event_parts(),
+            event=stack_event.stack_event_id(),
+        )
+
+    assert summary.kept_count == 1
+    assert len(state.optimization_stack) == 2
+    assert len(state.gain_per_stack_entry) == 2
+    assert state.cumulative_gain_validated == pytest.approx(40.0)
+    assert state.cumulative_gain_validated_stack_len == 2
+    assert state.cumulative_gain_validated_ts != "2026-09-15T08:58:18+00:00"
+
+    assert ledger["adoptions"]["count"] == 2
+    kernel = ledger["adoptions"]["by_source"]["kernel"]
+    assert kernel["count"] == 1
+    assert kernel["total_gain_pct"] == 30.0
+    assert kernel["by_backend"]["forge"]["count"] == 1
+    assert kernel["by_backend"]["forge"]["total_gain_pct"] == 30.0
+    assert ledger["validations"]["at_head"] is True
+    assert ledger["validations"]["settled"]["stack_len"] == 2
+    assert ledger["validated_total_gain_pct"] == pytest.approx(40.0)
+
+
+@pytest.mark.asyncio
+async def test_a_keep_carries_the_axes_of_the_measurement_it_was_graded_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KEEP publishes the axes it was measured on, not the ones it replaced.
+
+    ``current_best`` is the anchor the next candidate is graded against, so a
+    promotion that carries the new output throughput beside the previous
+    record's total, input and interactivity axes grades every later round
+    against a measurement that was never taken.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="axes",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {
+            "decision": "KEEP",
+            "new_tput": 120.0,
+            "gain_pct": 20.0,
+            "bench_result": {
+                "output_throughput": 120.0,
+                "input_throughput": 1200.0,
+                "total_throughput": 1320.0,
+                "e2e_norm_intvty_p90": 40.0,
+                "ttft_mean_ms": 55.0,
+            },
+        }
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _coordinator(session_dir, repo).shared_state
+    state.benchmark_mode = "agentx"
+    state.current_best = {
+        "action": "baseline",
+        "tput": 100.0,
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 30.0,
+        "ttft_mean_ms": 90.0,
+    }
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 1
+    assert state.current_best["tput"] == 120.0
+    assert state.current_best["total_throughput"] == 1320.0
+    assert state.current_best["input_throughput"] == 1200.0
+    assert state.current_best["e2e_norm_intvty_p90"] == 40.0
+    assert state.current_best["ttft_mean_ms"] == 55.0
+    entry = state.optimization_stack[-1]
+    assert entry["scope"] == "source_patch"
+    assert entry["operator_id"]
+    assert entry["base_sha"] == base
+    assert entry["keep_commit"] == _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_keep_validates_its_gain_on_the_axis_it_was_graded_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agentic session's realized gain is the one its objective grades.
+
+    The same KEEP reads as +20% on output, +32% on the throughput guard,
+    and +40% on normalized interactivity. Only the interactivity gain belongs
+    in the session figure, with the timestamp and stack length that let the
+    ledger cross-check it.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="stamped",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {
+            "decision": "KEEP",
+            "new_tput": 120.0,
+            "gain_pct": 40.0,
+            "bench_result": {
+                "output_throughput": 120.0,
+                "input_throughput": 1200.0,
+                "total_throughput": 1320.0,
+                "e2e_norm_intvty_p90": 42.0,
+            },
+        }
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _coordinator(session_dir, repo).shared_state
+    state.benchmark_mode = "agentx"
+    state.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 30.0,
+    }
+    state.current_best = {
+        "action": "baseline",
+        "tput": 100.0,
+        "output_throughput": 100.0,
+        "input_throughput": 900.0,
+        "total_throughput": 1000.0,
+        "e2e_norm_intvty_p90": 30.0,
+    }
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+    )
+
+    assert summary.kept_count == 1
+    assert len(state.optimization_stack) == 1
+    assert state.cumulative_gain_validated == pytest.approx(40.0)
+    assert state.cumulative_gain_validated_ts
+    assert state.cumulative_gain_validated_stack_len == 1
+    assert len(state.gain_per_stack_entry) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The commit stands; the promotion does not.
+
+    A patch graded against its own base can KEEP while measuring below the
+    configuration already promoted this session. Publishing it as
+    ``current_best`` would launch every later round on the slower recipe, so
+    the lift refuses it -- without pretending the Git commit did not land.
+    """
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    _publish(
+        patches,
+        repo,
+        base,
+        kernel_name="slower",
+        kernel_path="first.py",
+        patch=_patch(repo, "first.py", "VALUE = 2\n"),
+    )
+
+    async def _validate(_publication):
+        return {
+            "decision": "KEEP",
+            "new_tput": 120.0,
+            "gain_pct": 20.0,
+            # Fully measured, and below the promoted recipe on the axis this
+            # session grades: refused for what it measured, not for what it
+            # failed to report.
+            "bench_result": {
+                "output_throughput": 120.0,
+                "input_throughput": 1200.0,
+                "total_throughput": 1320.0,
+                "e2e_norm_intvty_p90": 30.0,
+            },
+        }
+
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "user_data"))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _coordinator(session_dir, repo).shared_state
+    state.benchmark_mode = "agentx"
+    state.current_best = {
+        "action": "explore",
+        "tput": 150.0,
+        "output_throughput": 150.0,
+        "input_throughput": 1300.0,
+        "total_throughput": 1450.0,
+        "e2e_norm_intvty_p90": 40.0,
+    }
+
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+    )
+
+    assert summary.results[0].status == "kept"
+    assert _git(repo, "rev-parse", "HEAD").lower() != base
+    assert state.current_best["tput"] == 150.0
+    assert state.optimization_stack == []

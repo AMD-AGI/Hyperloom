@@ -1,18 +1,122 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.0, including the vendored KernelForge kernel-optimization agent, the merged framework optimization phase, agentic-replay grading on total token throughput, compute-partition awareness, and the single concurrency sweep."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.1, a patch release that corrects the Recipe knowledge base warm-start path, unifies agent-backend selection, bounds supervisor watchdog restarts, and bumps the bare-metal vLLM default; plus the 1.1.0 feature release."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.0 (`pyproject.toml`). For the
+The current packaged version is 1.1.1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, see
 [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
 or view a detailed breakdown of all previous Hyperloom pre-release versions under
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
+
+## Hyperloom 1.1.1 release
+
+The [1.1.1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.1)
+is a patch release on top of 1.1.0. The session record does not move, so a
+session recorded by 1.1.0 resumes on this build. The command line and the
+environment contract do: one optimizer option, one console script and eight
+environment variables that 1.1.0 accepted are gone, one variable's accepted
+values narrow, and one option is added. See "Before upgrading from 1.1.0"
+below.
+
+Most of it is the Recipe knowledge base telling the truth: the prior work a
+session had actually earned was not reaching the model at all. The other
+corrections are in agent-backend selection, which three places answered
+differently, and in the supervisor watchdog, whose restarts are now resumable
+and bounded.
+
+### Before upgrading from 1.1.0
+
+One optimizer option 1.1.0 accepted is removed. The parser is strict, so it is
+not an ignored token: a launch or resume command that still carries it exits
+with `unrecognized arguments` before the session starts. Check operator scripts
+before upgrading.
+
+| Removed option | What to do |
+|---|---|
+| `--breakdown-include-transcripts` | Delete it. The Session Breakdown section it inlined into is gone, so there is nothing left to inline; specialist transcripts are still written to disk and carried as `transcript_path`. |
+
+The deprecated KernelForge console-script alias is also gone, so a script
+invoking it fails with `command not found` rather than a parser error. Call
+`kernelforge`, which has been the name since v1.0.0b2; the retired spelling is
+in [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
+
+Eight environment variables 1.1.0 read are also gone, and these fail differently
+from the options above: nothing refuses them. A box that still exports them
+starts normally and behaves as though they were never set, so they have to be
+found by reading launch scripts and `.env` rather than by watching a run fail.
+
+| Removed variable | What to do |
+|---|---|
+| `FORGE_CLAUDE_MODEL`, `FORGE_CODEX_MODEL`, `FORGE_AGENT_MODEL` | Set `CLAUDE_MODEL` / `CODEX_MODEL` instead. Forge now walks Hyperloom's ladder and nothing above it, so one spelling configures both. A box left on the old names does not fail; it falls through to the provider default. |
+| `HYPERLOOM_SKIP_COLLECTIVE`, `HYPERLOOM_COLLECTIVE_ONLY`, `HYPERLOOM_COLLECTIVE_KEEP_PCT`, `FORGE_COLLECTIVE_TIMEOUT`, `FORGE_COLLECTIVE_AGENT_TIMEOUT` | Delete them. They steered the collective optimization lane, which is now part of the rewrite controller; communication operators are picked up as ordinary rewrite candidates and need no separate switches. |
+
+One more variable survives with a narrower accepted set rather than being
+removed. `HYPERLOOM_REASONING_EFFORT` no longer takes `minimal` or `none`; the
+ladder is `low | medium | high | xhigh | max`. The two sides that read it
+disagree about a value outside that ladder, which is why it needs naming here:
+Forge refuses at startup (`'minimal' is not a reasoning effort`), while
+Hyperloom's own `chat.completions` drops the field and takes the gateway
+default, deeper and more expensive than `minimal` was. A deployment sitting on
+either value has to move to `low` by hand, and only one half of the run will
+say so.
+
+### 1.1.1 highlights
+
+- **The warm-start block, the KB's lessons, and its pitfalls reach the model
+  again.** All three read field shapes no writer produces. An exact hit carrying
+  a full config printed `(no recipe text — first session for this workload/hw)`,
+  and sections 5b and 5c rendered `(none)` no matter how much a prior session had
+  learned. The block now renders `warm_start_context`, the view `recipe_kb_t0`
+  already persists on every anchor, and a borrowed config is labelled with the
+  model it came from. No recorded knowledge was lost; until now none of it was
+  being shown.
+
+- **One rule picks the agent backend across both packages: a configured
+  credential first, then an installed SDK, with Claude ahead of Codex.** Four
+  places answered this and three disagreed, so `forge-loop` on an OpenAI-only
+  host could resolve to Claude and then fail to authenticate. The Robustness
+  Agent's RCA engine follows the same precedence instead of checking the OpenAI
+  side unconditionally. One consequence worth naming: a deployment whose runtime
+  is logged in by other means is no longer refused up front — `forge-fuse`
+  dropped its `--agent-backend auto` usage error and forge-fusion dropped the
+  `llm_provider_unconfigured` result, leaving the real authentication failure to
+  the preflight that can see it.
+
+- **Supervisor watchdog restarts are resumable and bounded.** A wedged
+  coordinator takes SIGHUP and keeps its interrupted phase segment rather than
+  recording a session outcome; three restart attempts, counted durably before
+  the signal goes out, make the wedge terminal. Separately, the robustness
+  monitor now reads the real stop-reason vocabulary — it had been importing a
+  module that does not exist and silently falling back to a subset missing 16
+  terminal reasons, so a finished session could be relaunched.
+
+- **`--extend-hours` grants a resumed session more budget.** Elapsed time is
+  summed forward across every leg and never reset, so this is the only way to
+  continue a run that has already spent its budget. The grant is applied on
+  `--resume-from` and recorded in the session state with its reason; it defaults
+  to `0.0`, so an invocation that does not pass it behaves as before.
+
+- **The bare-metal `vllm` default is `0.29.0+rocm723`, up from `0.27.1`.**
+  `install_baremetal.sh`, the compatibility matrix, the install guide, the
+  example `SKILL.md` recipes, and `assets/slurm/models.tsv` all name it, and the
+  pinned TraceLens ref ships the matching profiler-config patch.
+  `VLLM_VERSION` and `VLLM_ROCM_VARIANT` override it as before.
+
+- **Dead surfaces are removed**: the pre-rename KernelForge
+  console script kept as an alias since v1.0.0b2, superseded by `kernelforge`
+  (see [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md)
+  for the retired spelling); and its `learning/` tuning database with the
+  tracker's superseded scoring layer, about 1.4k lines whose writes had already
+  been disabled. The one observable difference: a `forge-loop` run no longer
+  writes lesson markdown under the writable knowledge base's `learned/`
+  directory and no longer prints `Lessons learned: N`. Nothing read that
+  directory.
 
 ## Hyperloom 1.1.0 release
 

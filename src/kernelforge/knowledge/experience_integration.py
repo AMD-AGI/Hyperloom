@@ -1112,7 +1112,10 @@ def kb_warmstart(
                 "read_error": read_status["read_error"],
             }
 
-        read_status = {"read_reason": "hit", "read_error": ""}
+        # Keep identity-match metadata populated by the reader (for example a
+        # fuzzy donor's requested/selected canonical ids) while normalizing the
+        # final read verdict.
+        read_status.update(read_reason="hit", read_error="")
 
         statuses = ["not_attempted" for _ in sols]
         _persist_kb_references(workspace_dir, sols, statuses)

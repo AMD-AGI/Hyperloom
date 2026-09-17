@@ -1086,11 +1086,11 @@ def _run_registered_author(
     spec = AgentRunSpec(
         system_prompt=_author_system_prompt(guard.new_module_dirs),
         user_prompt=prompt,
+        role="fusion author",
         cwd=workdir,
         model=model,
         writable=True,
         timeout_sec=max(1, int(timeout_s)),
-        reasoning_effort="max",
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,

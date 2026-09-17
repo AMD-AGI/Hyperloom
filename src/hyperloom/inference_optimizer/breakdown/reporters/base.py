@@ -18,14 +18,164 @@ __all__ = [
     "RendererFn",
     "REGISTRY",
     "as_dict",
+    "close_of",
+    "critic_iterations_of",
+    "dict_rows",
+    "events_of",
+    "outcome_of",
     "register_renderer",
     "render_section",
+    "robustness_turns_of",
+    "session_of",
+    "stop_reason_of",
+    "task_config_of",
+    "timeline_of",
+    "validation_of",
 ]
 
 
 def as_dict(value: Any) -> dict[str, Any]:
     """Narrow a breakdown section to a mapping, since no producer is schema-checked."""
     return value if isinstance(value, dict) else {}
+
+
+def dict_rows(value: Any) -> list[dict[str, Any]]:
+    """Narrow a recorded row array to the mappings in it.
+
+    Args:
+        value: A row array as read off an event's ``ext``.
+
+    Returns:
+        The entries that are dicts, in order; ``[]`` when the value is not a
+        list.
+    """
+    if not isinstance(value, list):
+        return []
+    return [row for row in value if isinstance(row, dict)]
+
+
+def timeline_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The ordered event timeline.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``timeline``, oldest event first, or ``[]`` when absent.
+    """
+    return dict_rows(as_dict(breakdown).get("timeline"))
+
+
+def events_of(breakdown: Any, event_type: str) -> list[dict[str, Any]]:
+    """Every timeline event of one type, in timeline order.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+        event_type: The ``type`` to select on.
+
+    Returns:
+        The matching events, oldest first.
+    """
+    return [event for event in timeline_of(breakdown) if str(event.get("type") or "") == event_type]
+
+
+def session_of(breakdown: Any) -> dict[str, Any]:
+    """The session identity and lifecycle block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.session``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("session") or {}
+
+
+def task_config_of(breakdown: Any) -> dict[str, Any]:
+    """The launch-time workload and model configuration block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``metadata.task_config``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("metadata")).get("task_config") or {}
+
+
+def outcome_of(breakdown: Any) -> dict[str, Any]:
+    """The session result block.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``outcome``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("outcome"))
+
+
+def validation_of(breakdown: Any) -> dict[str, Any]:
+    """The stack ledger's reconciliation of its parts against the whole.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``outcome.validation``, or ``{}`` when absent.
+    """
+    return as_dict(outcome_of(breakdown).get("validation"))
+
+
+def close_of(breakdown: Any) -> dict[str, Any]:
+    """What the session settled at close.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``close``, or ``{}`` when absent.
+    """
+    return as_dict(as_dict(breakdown).get("close"))
+
+
+def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The critic agent's own review passes, in the order it ran them.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``critic.iterations``, or ``[]`` when the critic never ran.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("critic")).get("iterations"))
+
+
+def robustness_turns_of(breakdown: Any) -> list[dict[str, Any]]:
+    """The robustness agent's turns, in turn order.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        ``robustness.turns``, or ``[]`` when the agent never took a turn.
+    """
+    return dict_rows(as_dict(as_dict(breakdown).get("robustness")).get("turns"))
+
+
+def stop_reason_of(breakdown: Any) -> str:
+    """Why the run ended.
+
+    The reason is an outcome of the session rather than part of its identity,
+    so it lives on ``outcome`` and not alongside the session ids.
+
+    Args:
+        breakdown: The full ``session_breakdown.json`` dict.
+
+    Returns:
+        The stop reason, or ``""`` when the run recorded none.
+    """
+    return str(as_dict(as_dict(breakdown).get("outcome")).get("stop_reason") or "")
 
 
 @dataclass(frozen=True)

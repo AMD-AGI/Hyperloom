@@ -166,10 +166,11 @@ def _executor(
     )
 
 
-def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch):
+@pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch, framework):
     """The double-run reports the HOT second-round throughput."""
     base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
+    _write_yaml(base, framework=framework)
     output_dir = tmp_path / "ws"
 
     captured: list = []
@@ -208,7 +209,7 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert measure_lc["cleanup"] is True
     assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
     assert captured[0]["benchmark"]["envs"]["PORT"] == (captured[1]["benchmark"]["envs"]["PORT"])
-    assert captured[0]["benchmark"]["benchmark_script"] == "vllm_mi300x.sh"
+    assert captured[0]["benchmark"]["benchmark_script"] == f"{framework}_mi300x.sh"
 
 
 def _run_capturing_rounds(executor, ctx, notes):
@@ -949,7 +950,279 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     assert result["accuracy_stage"]["status"] == "succeeded"
 
 
-def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path):
+@pytest.fixture
+def deferred_accuracy_keep_policy(tmp_path, monkeypatch):
+    # Keep the built-in lifecycle script while exercising the interactivity objective.
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "0")
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "intvty_v1")
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "5")
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    executor = _executor(base, tmp_path)
+    shared = executor.shared_state
+    shared.framework = "vllm"
+    shared.benchmark_mode = "synthetic"
+    shared.baseline_tput = 100.0
+    shared.baseline_perf = {"output_throughput": 100.0, "total_throughput": 1000.0, "e2e_norm_intvty_p90": 100.0}
+    shared.current_best = {"action": "baseline", "tput": 100.0, **shared.baseline_perf}
+    shared.optimization_stack = []
+    output_dir = tmp_path / "ws"
+    params = {
+        "output_dir": str(output_dir),
+        "timeout_sec": 10,
+        "gpu_type": "mi300x",
+        "baseline_double_run": True,
+        "defer_accuracy_until_after_measure": True,
+        "post_measure_accuracy_min_tput": 101.0,
+        "post_measure_accuracy_keep_policy": {
+            "base_tput": 100.0,
+            "keep_threshold_pct": 1.0,
+            "stack_incremental_keep_threshold_pct": 0.5,
+        },
+    }
+    measurement = {
+        "output_throughput": 90.0,
+        "total_token_throughput": 1100.0,
+        "e2e_norm_intvty_p90": 100.0,
+    }
+    captured: list = []
+    inner, calls = _cold_then_hot_fake_run(captured)
+
+    def fake_run(cmd, *args, **kwargs):
+        completed = inner(cmd, *args, **kwargs)
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        workspace = next(slot.glob("benchmark_*"))
+        axes = (
+            measurement
+            if slot.name == "measure_round"
+            else {"output_throughput": 9999.0, "total_token_throughput": 99999.0, "e2e_norm_intvty_p90": 999.0}
+        )
+        report_path = workspace / "benchmark_report.json"
+        report = json.loads(report_path.read_text())
+        report["model"] = f"model-{slot.name}"
+        report["throughput"].update(
+            output_throughput=axes["output_throughput"],
+            request_throughput=axes["output_throughput"] / 1024,
+            total_token_throughput=axes.get("total_token_throughput"),
+        )
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        (workspace / "inferencex_result.json").write_text(json.dumps(axes), encoding="utf-8")
+        if captured[-1]["benchmark"]["envs"]["RUN_EVAL"] == "true":
+            (slot / "results_gsm8k.json").write_text(
+                json.dumps({"results": {"gsm8k": {"exact_match,strict-match": 0.9}}}),
+                encoding="utf-8",
+            )
+        return completed
+
+    def run_case():
+        with patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            return _run(executor(_make_ctx(params)))
+
+    return SimpleNamespace(
+        shared=shared,
+        params=params,
+        measurement=measurement,
+        captured=captured,
+        calls=calls,
+        output_dir=output_dir,
+        run=run_case,
+    )
+
+
+@pytest.mark.parametrize(
+    "output_tput,total_tput,intvty,stack,run_accuracy,gain_pct",
+    [
+        pytest.param(90.0, 1100.0, 110.0, False, True, 10.0, id="intvty-win-output-drop"),
+        pytest.param(100.1, 1507.5, 150.75, True, False, 0.5, id="stack-output-floor-does-not-apply"),
+        pytest.param(100.1, 1509.0, 150.9, True, False, 0.6, id="stack-below-primary"),
+        pytest.param(100.1, 1507.35, 152.985, True, False, 1.99, id="stack-below-agentx-floor"),
+        pytest.param(100.1, 1500.0, 153.0, True, True, 2.0, id="stack-exact-agentx-floor"),
+        pytest.param(110.0, 1010.0, 101.0, False, False, 1.0, id="primary-below-agentx-floor"),
+        pytest.param(90.0, 950.0, 102.0, False, True, 2.0, id="exact-floor-and-throughput-guard"),
+        pytest.param(110.0, 949.9, 110.0, False, False, 10.0, id="throughput-guard-breach"),
+        pytest.param(110.0, 1100.0, 90.0, False, False, -10.0, id="interactivity-tradeoff-recorded"),
+        pytest.param(110.0, 990.0, 100.0, False, False, 0.0, id="flat-interactivity-recorded"),
+        pytest.param(110.0, 900.0, 90.0, False, False, -10.0, id="both-axes-regress"),
+    ],
+)
+def test_deferred_accuracy_keep_policy_uses_graded_performance(
+    deferred_accuracy_keep_policy, output_tput, total_tput, intvty, stack, run_accuracy, gain_pct
+):
+    case = deferred_accuracy_keep_policy
+    case.measurement.update(
+        output_throughput=output_tput, total_token_throughput=total_tput, e2e_norm_intvty_p90=intvty
+    )
+    reference = 150.0 if stack else 100.0
+    if stack:
+        case.shared.current_best.update(action="integrate", total_throughput=1500.0, e2e_norm_intvty_p90=reference)
+        case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
+
+    result = case.run()
+
+    assert result["status"] == "succeeded", result
+    assert case.calls["calls"] == (3 if run_accuracy else 2), result
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in case.captured] == (
+        ["false", "false", "true"] if run_accuracy else ["false", "false"]
+    )
+    assert len({cfg["benchmark"]["envs"]["PORT"] for cfg in case.captured}) == 1
+    assert {cfg["benchmark"]["server_lifecycle"]["pid_dir"] for cfg in case.captured} == {str(case.output_dir)}
+    assert result["valid_measurement"] is True
+    assert result["output_throughput"] == pytest.approx(output_tput)
+    assert result["request_throughput"] == pytest.approx(output_tput / 1024)
+    assert result["total_token_throughput"] == pytest.approx(total_tput)
+    assert result["e2e_norm_intvty_p90"] == pytest.approx(intvty)
+    assert result["model"] == "model-measure_round"
+    workspace = Path(result["workspace"])
+    assert workspace.parent == case.output_dir / "measure_round"
+    assert Path(result["report_path"]) == workspace / "benchmark_report.json"
+    assert Path(result["raw_result_path"]) == workspace / "inferencex_result.json"
+    assert Path(result["launch_evidence_path"]).parent == case.output_dir / "warmup_round"
+    assert result["launch_evidence"]["warm_reuse"]["provenance"] == "warmup_round"
+    stage = result["accuracy_stage"]
+    if run_accuracy:
+        assert [cfg["benchmark"]["server_lifecycle"]["cleanup"] for cfg in case.captured] == [False, False, True]
+        assert result["accuracy"] == pytest.approx(0.9)
+        assert stage["status"] == "succeeded"
+        assert Path(stage["workspace"]).parent == case.output_dir / "accuracy_round"
+    else:
+        assert result.get("accuracy") is None
+        assert stage["status"] == "skipped"
+        both_axes_regress = intvty < reference * 0.95 and total_tput < (1500.0 if stack else 1000.0) * 0.95
+        assert stage["reason"] == ("intvty_regression" if both_axes_regress else "performance_keep_not_eligible")
+        assert stage["graded_objective"] == "e2e_norm_intvty_p90"
+        assert stage["candidate"] == pytest.approx(intvty)
+        assert stage["reference"] == pytest.approx(reference)
+        assert stage["gain_pct"] == pytest.approx(gain_pct)
+        assert stage["stack_incremental_gain_pct"] == pytest.approx(gain_pct)
+
+
+@pytest.mark.parametrize("output_tput", [1507.5, 1509.0], ids=["exact-floor", "below-primary"])
+def test_deferred_accuracy_keep_policy_allows_output_stack_gain(
+    deferred_accuracy_keep_policy, monkeypatch, output_tput
+):
+    case = deferred_accuracy_keep_policy
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC")
+    case.shared.current_best.update(action="integrate", tput=1500.0, output_throughput=1500.0)
+    case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
+    case.params["post_measure_accuracy_keep_policy"]["base_tput"] = 1500.0
+    case.params["post_measure_accuracy_min_tput"] = 1515.0
+    case.measurement["output_throughput"] = output_tput
+
+    result = case.run()
+
+    assert result["status"] == "succeeded", result
+    assert case.calls["calls"] == 3, result
+    assert result["output_throughput"] == pytest.approx(output_tput)
+    assert result["accuracy"] == pytest.approx(0.9)
+    assert result["accuracy_stage"]["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    "fallback",
+    ["output-override", "synthetic", "candidate-total", "candidate-intvty", "reference-total", "reference-intvty"],
+)
+@pytest.mark.parametrize("output_wins", [True, False], ids=["explicit-base-wins", "explicit-base-rejects"])
+def test_deferred_accuracy_keep_policy_preserves_output_fallback(
+    deferred_accuracy_keep_policy, monkeypatch, fallback, output_wins
+):
+    case = deferred_accuracy_keep_policy
+    case.measurement.update(output_throughput=102.0, total_token_throughput=900.0, e2e_norm_intvty_p90=80.0)
+    reference_tput = 120.0 if output_wins else 80.0
+    case.shared.current_best.update(tput=reference_tput, output_throughput=reference_tput)
+    base_tput = 100.0 if output_wins else 120.0
+    run_accuracy = output_wins and fallback in {"output-override", "synthetic"}
+    case.params["post_measure_accuracy_keep_policy"]["base_tput"] = base_tput
+    if fallback == "output-override":
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+    elif fallback == "synthetic":
+        monkeypatch.delenv("HYPERLOOM_PERF_METRIC")
+    elif fallback == "candidate-total":
+        case.measurement.pop("total_token_throughput")
+    elif fallback == "candidate-intvty":
+        case.measurement.pop("e2e_norm_intvty_p90")
+    elif fallback == "reference-total":
+        case.shared.current_best.pop("total_throughput")
+    else:
+        case.shared.current_best.pop("e2e_norm_intvty_p90")
+
+    result = case.run()
+
+    assert result["status"] == "succeeded", result
+    assert case.calls["calls"] == (3 if run_accuracy else 2), result
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in case.captured] == (
+        ["false", "false", "true"] if run_accuracy else ["false", "false"]
+    )
+    assert result["output_throughput"] == pytest.approx(102.0)
+    stage = result["accuracy_stage"]
+    if run_accuracy:
+        assert stage["status"] == "succeeded"
+        assert result["accuracy"] == pytest.approx(0.9)
+    else:
+        assert result.get("accuracy") is None
+        assert stage["status"] == "skipped"
+        assert stage["reason"] == "performance_keep_not_eligible"
+        assert stage["graded_objective"] == "output_throughput"
+        assert stage["candidate"] == pytest.approx(102.0)
+        assert stage["reference"] == pytest.approx(reference_tput)
+        assert stage["gain_pct"] == pytest.approx(2.0 if output_wins else -15.0)
+        assert stage["degrade_reason"] == (
+            "candidate_axes_missing"
+            if fallback.startswith("candidate-")
+            else "current_best_axes_missing"
+            if fallback.startswith("reference-")
+            else ""
+        )
+
+
+@pytest.mark.parametrize("missing_from", ["candidate", "reference"])
+@pytest.mark.parametrize("missing_axis", ["total", "intvty"])
+@pytest.mark.parametrize(
+    "output,stack",
+    [
+        pytest.param(200.0, False, id="large-output-gain"),
+        pytest.param(50.0, False, id="output-regression"),
+        pytest.param(100.75, True, id="stack-output-gain"),
+    ],
+)
+def test_deferred_accuracy_skips_incomparable_performance(
+    deferred_accuracy_keep_policy, missing_from, missing_axis, output, stack
+):
+    case = deferred_accuracy_keep_policy
+    case.measurement["output_throughput"] = output
+    if stack:
+        case.shared.current_best["action"] = "integrate"
+        case.shared.optimization_stack = [{"kernel_id": "kept-kernel"}]
+    if missing_from == "candidate":
+        case.measurement.pop("total_token_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+    else:
+        case.shared.current_best.pop("total_throughput" if missing_axis == "total" else "e2e_norm_intvty_p90")
+
+    result = case.run()
+
+    assert result["status"] == "succeeded", result
+    assert case.calls["calls"] == 2, result
+    assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in case.captured] == ["false", "false"]
+    assert result["valid_measurement"] is True
+    assert result["output_throughput"] == output
+    assert result.get("accuracy") is None
+    stage = result["accuracy_stage"]
+    assert stage["status"] == "skipped"
+    assert stage["reason"] == "performance_keep_not_eligible"
+    assert stage["graded_objective"] == "output_throughput"
+    assert stage["candidate"] == output
+    assert stage["reference"] == 100.0
+    assert stage["gain_pct"] == pytest.approx(output - 100.0)
+    assert stage["stack_incremental_gain_pct"] == pytest.approx(output - 100.0)
+    assert stage["degrade_reason"] == (
+        "candidate_axes_missing" if missing_from == "candidate" else "current_best_axes_missing"
+    )
+
+
+@pytest.mark.parametrize("with_policy", [False, True], ids=["legacy", "keep-policy"])
+def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path, with_policy):
     """The staged accuracy round is an eval, so ``--no-eval`` drops it."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -968,6 +1241,12 @@ def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path):
         }
     )
     ctx.extra["shared_state"] = SimpleNamespace(eval_disabled=True, baseline_double_run=True)
+    if with_policy:
+        ctx.task.params["post_measure_accuracy_keep_policy"] = {
+            "base_tput": _HOT_TPUT - 1,
+            "keep_threshold_pct": 1.0,
+            "stack_incremental_keep_threshold_pct": 0.5,
+        }
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -981,7 +1260,8 @@ def test_deferred_accuracy_is_cancelled_by_no_eval(tmp_path):
     assert "accuracy_stage" not in result
 
 
-def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
+@pytest.mark.parametrize("with_policy", [False, True], ids=["legacy", "keep-policy"])
+def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path, with_policy):
     """Ineligible lifecycle fallback must retain accuracy in its only round."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -1019,6 +1299,12 @@ def test_deferred_accuracy_single_round_keeps_eval_enabled(tmp_path):
             "post_measure_accuracy_min_tput": _HOT_TPUT - 1,
         }
     )
+    if with_policy:
+        ctx.task.params["post_measure_accuracy_keep_policy"] = {
+            "base_tput": _HOT_TPUT + 1,
+            "keep_threshold_pct": 1.0,
+            "stack_incremental_keep_threshold_pct": 0.5,
+        }
 
     with patch(
         "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
@@ -1761,193 +2047,6 @@ def test_baseline_fresh_workspace_succeeds_despite_stale_peer(tmp_path, monkeypa
 
     assert result["status"] == "succeeded", result
     assert result.get("output_throughput") == pytest.approx(4000.0)
-
-
-def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
-    """A checkout already on a local filesystem is returned unchanged."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: False)
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
-    """A checkout on a simulated network mount is mirrored to local disk and the returned path points at the local copy, not the original."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
-    (src / "utils").mkdir()
-    (src / "utils" / "marker.txt").write_text("payload")
-
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    dest = bl._ensure_local_inferencex(str(src))
-
-    assert dest != str(src)
-    assert str(local_root) in dest
-    assert (Path(dest) / "benchmarks" / "benchmark_lib.sh").read_text() == ("# patched lib")
-    assert (Path(dest) / "utils" / "marker.txt").read_text() == "payload"
-
-
-def test_ensure_local_inferencex_isolates_per_task_mirrors(
-    tmp_path,
-    monkeypatch,
-):
-    """Callers can include a task/output-dir key in the mirror hash so two overlapping baselines sharing one wekafs checkout never rmtree/replace a directory that another server is currently ``cd``-ed into."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    dest_a = bl._ensure_local_inferencex(str(src), mirror_key="task-a")
-    dest_b = bl._ensure_local_inferencex(str(src), mirror_key="task-b")
-
-    assert dest_a != dest_b
-    assert (Path(dest_a) / "benchmarks" / "benchmark_lib.sh").is_file()
-    assert (Path(dest_b) / "benchmarks" / "benchmark_lib.sh").is_file()
-
-
-def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
-    """The relocation can be opted out of via env even on a network mount."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_falls_back_on_copy_failure(
-    tmp_path,
-    monkeypatch,
-):
-    """When the mirror copy itself fails (e.g. local disk full), the helper degrades to the original network-mount path instead of raising, so the run still proceeds rather than aborting."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "benchmarks").mkdir(parents=True)
-    (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    def _boom(*_a, **_k):
-        raise OSError("no space left on device")
-
-    monkeypatch.setattr(bl.shutil, "copytree", _boom)
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-
-
-def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
-    tmp_path,
-    monkeypatch,
-):
-    """If the copy lands but the mirror is missing the load-bearing ``benchmarks/benchmark_lib.sh``, the helper rejects it and returns the original path rather than handing Magpie a broken ``cd`` target."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    src = tmp_path / "wekafs_InferenceX"
-    (src / "utils").mkdir(parents=True)
-    (src / "utils" / "marker.txt").write_text("payload")
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    assert bl._ensure_local_inferencex(str(src)) == str(src)
-    assert not [p for p in local_root.iterdir() if p.is_dir()]
-
-
-def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
-    """When INFERENCEX_PATH is on a network mount, the local mirror is what Magpie actually ``cd``-s into."""
-    from hyperloom.orchestrator.actions.executors import baseline as bl
-
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="sglang")
-    output_dir = tmp_path / "ws"
-
-    ix_src = tmp_path / "wekafs_InferenceX"
-    (ix_src / "benchmarks").mkdir(parents=True)
-    # This test is about which InferenceX dir Magpie cd-s into, but the launch path runs the real patcher, which
-    # refuses to start an eval whose patches cannot be applied.
-    (ix_src / "benchmarks" / "benchmark_lib.sh").write_text(
-        "# patched\n"
-        "run_eval() {\n"
-        '    export EVAL_RESULT_DIR="$results_dir"\n'
-        "}\n"
-        "append_lm_eval_summary() {\n"
-        '    mv -f "$jf" ./ || echo "WARN: failed to move ${jf}" >&2\n'
-        "}\n"
-    )
-    local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
-    monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
-    monkeypatch.setenv(
-        "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
-        str(local_root),
-    )
-
-    seen: dict = {}
-
-    def fake_run(cmd, *args, **kwargs):
-        seen["env"] = kwargs.get("env")
-        cfg_idx = cmd.index("--benchmark-config")
-        seen["materialized_cfg"] = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        _fake_workspace(slot, tput=_HOT_TPUT)
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    yaml_ix = seen["materialized_cfg"]["benchmark"]["inferencex_path"]
-    assert yaml_ix != str(ix_src), seen["materialized_cfg"]
-    assert str(local_root) in yaml_ix
-    magpie_ix = seen["env"]["MAGPIE_INFERENCEX_PATH"]
-    assert magpie_ix != str(ix_src), seen["env"]
-    assert str(local_root) in magpie_ix
-    # Relocation is task-local; process-wide env stays the original source path.
-    assert os.environ["INFERENCEX_PATH"] == str(ix_src)
 
 
 def test_baseline_anchors_server_cwd_to_output_dir(tmp_path, monkeypatch):

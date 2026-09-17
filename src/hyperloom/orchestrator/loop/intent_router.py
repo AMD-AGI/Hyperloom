@@ -9,11 +9,13 @@ import asyncio
 import hashlib
 import json
 import time
+from collections.abc import Mapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -55,7 +57,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
-    IntentType.RESPONSE: "_handle_response",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -70,6 +71,325 @@ def _is_upstream_pr_candidate(pending: Any) -> bool:
     if getattr(pending, "action_name", "") != "integrate_patch":
         return False
     return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
+
+
+def _record_config_proposal(router: Any, pending: Any) -> None:
+    """Record one config-arm grid on the framework event, as it is proposed.
+
+    Recorded at proposal time rather than at approval, so a grid the Critic
+    denies is still on record as a thing the phase pursued and dropped. One row
+    per grid, not per variant: the measured attempts point back at the grid
+    through their ``proposal_ref``.
+    """
+    if str(getattr(pending, "action_name", "") or "") != "explore":
+        return
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        ARM_CONFIG,
+        PRODUCER_ORCHESTRATION,
+        STEP_PROPOSED,
+        producer_for_provenance,
+    )
+
+    params = (getattr(pending, "payload", None) or {}).get("params") or {}
+    grid = [row for row in (params.get("grid") or []) if isinstance(row, dict)]
+    labels = {str(row.get("provenance") or "").strip() for row in grid}
+    if len(labels) == 1:
+        producer, producer_ref = producer_for_provenance(next(iter(labels)))
+    else:
+        # A grid mixing provenances was assembled by the orchestration agent.
+        # Each variant keeps its own label on its attempt, so naming the
+        # assembler here loses nothing.
+        producer, producer_ref = PRODUCER_ORCHESTRATION, ""
+    scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
+    try:
+        recorder.record_proposal(
+            proposal_id,
+            arm=ARM_CONFIG,
+            producer=producer,
+            producer_ref=producer_ref,
+            lever_kind=LEVER_CONFIG,
+            scope=scopes.pop() if len(scopes) == 1 else "",
+        )
+        recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: config proposal row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
+
+
+def _variant_review_rows(
+    payload: Mapping[str, Any] | None,
+    held_by_name: Mapping[str, str] | None,
+) -> list[dict[str, Any]]:
+    """Return one row per named variant, in the order the Critic wrote them.
+
+    A variant the Critic rejected never reaches a bench, so the map is the only
+    record that it was judged at all; a collapsed verdict says nothing about
+    which variants a grid proceeded on.
+    """
+    entries = (payload or {}).get("verdict_map")
+    if not isinstance(entries, Mapping):
+        return []
+    held = held_by_name or {}
+    rows: list[dict[str, Any]] = []
+    for name, entry in entries.items():
+        variant = str(name or "")
+        if not variant:
+            continue
+        fields = entry if isinstance(entry, Mapping) else {}
+        authored = str(fields.get("verdict") or "")
+        effective = str(held.get(variant) or "") or authored
+        rows.append(
+            {
+                "variant_name": variant,
+                "verdict": authored,
+                "effective_verdict": effective,
+                # A hold is visible in the pair, and naming the rule twice
+                # would be a second thing to keep in step with the hold itself.
+                "held_to_rule": str(fields.get("failure_reason_code") or "") if effective != authored else "",
+                "reason": str(fields.get("rationale") or fields.get("reasoning") or ""),
+                "failure_reason_code": str(fields.get("failure_reason_code") or ""),
+            }
+        )
+    return rows
+
+
+def _review_subject(pending: Any) -> str:
+    """Return the proposal row a ruling belongs on.
+
+    The two arms identify a proposal differently, so this is the candidate id
+    when the proposal carries one and the bus message id otherwise. Resolving it
+    here keeps a review on the proposal it judged instead of opening a second,
+    near-empty row beside it.
+    """
+    payload = getattr(pending, "payload", None) or {}
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    candidate = str(
+        payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id") or ""
+    ).strip()
+    return candidate or str(getattr(pending, "proposal_msg_id", "") or "")
+
+
+def _phase_scope(router: Any) -> tuple[str, int]:
+    """The phase and macro cycle a proposal is being raised in.
+
+    ``("", 0)`` when the stand-in carries no state.
+    """
+    state = getattr(router, "shared_state", None) or getattr(router, "state", None)
+    phase = str(getattr(state, "phase", "") or "")
+    try:
+        cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        cycle = 0
+    return phase, cycle
+
+
+def _record_phase_proposal(router: Any, pending: Any) -> None:
+    """Record one proposal against the phase that raised it.
+
+    Every proposal, not only the ones a framework arm claims: this is the row
+    the Critic's ruling is filed on.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    phase, macro_cycle = _phase_scope(router)
+    if not phase:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        payload = getattr(pending, "payload", None) or {}
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        phase_event.record_proposal(
+            proposal_msg_id=proposal_id,
+            action=str(getattr(pending, "action_name", "") or ""),
+            phase=phase,
+            macro_cycle=macro_cycle,
+            from_agent=str(getattr(pending, "from_agent", "") or ""),
+            tick=int(getattr(getattr(router, "shared_state", None), "tick", 0) or 0),
+            predicted_gain_pct=getattr(pending, "predicted_gain_pct", None),
+            candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
+            variant_name=payload.get("variant_name") or params.get("variant_name"),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_phase_proposal_review(
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """File the Critic's ruling on the proposal row the phase event holds.
+
+    Keyed on the bus message id the verdict named, rather than on the subject
+    the framework row is resolved under: the two differ for a proposal
+    carrying a candidate id, and this row is about the proposal itself.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        fields = payload or {}
+        advice = advisory or {}
+        phase_event.record_proposal_review(
+            proposal_msg_id=proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            source=str(fields.get("source") or ""),
+            reasoning=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            required_evidence=advice.get("required_evidence"),
+            risks=advice.get("risks"),
+            advice_text=advice.get("advice_text"),
+            alternative_action=advice.get("alternative_action"),
+            variants=variants,
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_critic_review(
+    router: Any,
+    pending: Any,
+    *,
+    authored: str,
+    effective: str,
+    reason: str,
+    payload: Mapping[str, Any] | None = None,
+    advisory: Mapping[str, Any] | None = None,
+    variants: list[dict[str, Any]] | None = None,
+) -> None:
+    """Record the Critic's ruling on one proposal, onto the proposal.
+
+    Every action the Critic reviews is recorded, not only the config-arm grid.
+    ``authored`` (what the Critic wrote) and ``effective`` (what the loop acted
+    on) are both kept: a reject held to a formatting rule is mirrored onto state
+    as the reject the Critic wrote. A rejected proposal is settled here, since
+    it never reaches a bench and nothing downstream would otherwise resolve it.
+    """
+    # The framework row below exists only while a framework event is open for
+    # this cycle, so the proposal's own row is what carries a ruling reached in
+    # any other phase.
+    _record_phase_proposal_review(
+        pending,
+        authored=authored,
+        effective=effective,
+        reason=reason,
+        payload=payload,
+        advisory=advisory,
+        variants=variants,
+    )
+
+    proposal_id = _review_subject(pending)
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+        DISPOSITION_DROPPED,
+        REVIEWER_CRITIC,
+        REVIEWER_CRITIC_UNAVAILABLE,
+        STEP_REVIEWED,
+    )
+
+    fields = payload or {}
+    grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
+    try:
+        recorder.record_proposal_review(
+            proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+            reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+            reason=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=str(fields.get("failure_reason_code") or ""),
+            advisory=advisory,
+            variants=variants,
+        )
+        recorder.record_proposal_step(
+            proposal_id,
+            step=STEP_REVIEWED,
+            outcome=effective,
+            reason=reason,
+        )
+        if effective == "reject":
+            recorder.settle_proposal(
+                proposal_id,
+                disposition=DISPOSITION_DROPPED,
+                reason=reason or "critic_rejected",
+            )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: critic review row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
+
+
+def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
+    """Record on the proposal row what the loop did with its ruling.
+
+    ``outcome`` carries ``materialized`` / ``denied`` / ``reauthored`` /
+    ``patch_verdict_key``, as the framework row names them.
+    """
+    proposal_id = str(getattr(pending, "proposal_msg_id", "") or "")
+    if not proposal_id:
+        return
+    try:
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+        phase_event.record_proposal_outcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
+        )
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
+
+
+def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
+    """Record what the loop did with a ruling, onto the ruling."""
+    _record_phase_proposal_outcome(pending, **outcome)
+
+    proposal_id = _review_subject(pending)
+    if not proposal_id:
+        return
+    getter = getattr(router, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    try:
+        recorder.record_proposal_review_outcome(proposal_id, **outcome)
+    except Exception:  # noqa: BLE001 — observability cannot change routing
+        log.debug(
+            "framework timeline: review outcome row failed for %s",
+            proposal_id,
+            exc_info=True,
+        )
 
 
 class IntentRouter:
@@ -231,7 +551,6 @@ class IntentRouter:
             "*",
             "proposal",
             {**payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
         from .coordinator import PendingProposal
@@ -244,6 +563,8 @@ class IntentRouter:
             payload=payload,
         )
         self.state.pending_proposals[msg.msg_id] = pending
+        _record_phase_proposal(self, pending)
+        _record_config_proposal(self, pending)
 
     async def _handle_review_verdict(self, source: str, intent: Intent) -> None:
         """Apply a Critic ``review_verdict`` to its target proposal."""
@@ -269,6 +590,7 @@ class IntentRouter:
         )
         authored = str(single_verdict or "").strip()
         approved_variant_names: set[str] | None = None
+        held_by_name: dict[str, str] = {}
         if not verdict and isinstance(verdict_map, dict) and verdict_map:
             held_by_name = await self._held_verdict_map(
                 verdict_map,
@@ -289,6 +611,8 @@ class IntentRouter:
             reasoning=str(intent.payload.get("reasoning") or ""),
             advisory=serialize_verdict_advisory(intent.payload),
             approved_variant_names=approved_variant_names,
+            payload=intent.payload,
+            variant_verdicts=_variant_review_rows(intent.payload, held_by_name),
         )
 
     async def _held_verdict_map(
@@ -370,8 +694,17 @@ class IntentRouter:
         authored_verdict: str = "",
         advisory: dict[str, Any] | None = None,
         approved_variant_names: set[str] | None = None,
+        payload: Mapping[str, Any] | None = None,
+        variant_verdicts: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Apply one collapsed verdict: approve/advise materialise, reject may rearm."""
+        """Apply one collapsed verdict: approve/advise materialise, reject may rearm.
+
+        ``verdict`` is one of approve / advise / reject / needs_review.
+        ``authored_verdict`` is what the Critic itself wrote before any hold to
+        a cited rule; it is mirrored onto ``specialist_patch_verdicts`` in place
+        of ``verdict`` and defaults to it. ``approved_variant_names`` restricts
+        an explore grid to the named variants; ``None`` keeps the full proposal.
+        """
         pending.decided = True
         pending.verdict = verdict
         if _is_upstream_pr_candidate(pending):
@@ -398,7 +731,6 @@ class IntentRouter:
                 pending.from_agent,
                 "review_verdict",
                 rebroadcast_payload,
-                priority=0 if verdict == "reject" else 1,
                 in_reply_to=pending.proposal_msg_id,
             )
         )
@@ -428,7 +760,26 @@ class IntentRouter:
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
                 )
-        # Both `approve` and `advise` mean "dispatch may proceed"; treat them identically for materialization.
+        _record_critic_review(
+            self,
+            pending,
+            authored=patch_verdict,
+            effective=str(verdict or "").strip(),
+            reason=str(reasoning or ""),
+            payload=payload,
+            advisory=advisory,
+            variants=variant_verdicts,
+        )
+        _record_review_outcome(
+            self,
+            pending,
+            materialized=verdict in ("approve", "advise"),
+            denied=verdict == "reject",
+            reauthored=verdict == "needs_review",
+            patch_verdict_key=sid_candidate if patch_verdict else "",
+        )
+        # Both `approve` and `advise` mean "dispatch may proceed"; treat them
+        # identically for materialization.
         if verdict in ("approve", "advise"):
             await self._materialize_approved_proposal(
                 pending,
@@ -663,6 +1014,40 @@ class IntentRouter:
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
+    def _record_trace_analyze_on_timeline(
+        self,
+        *,
+        request_msg: Any,
+        source: str,
+        payload: dict[str, Any],
+        result: dict[str, Any],
+        cache_hit: bool,
+    ) -> None:
+        """Mirror a bus-requested analysis onto the visit that was running.
+
+        An analysis dispatched this way opens no roofline event of its own, so
+        without this the snapshot counter it advanced has nothing on the
+        timeline to account for it. Best-effort: a failed record never breaks
+        the request.
+        """
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
+
+            record_trace_analyze_request(
+                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                run_id=str(getattr(request_msg, "msg_id", "") or ""),
+                status=str(result.get("status") or ""),
+                result=result,
+                requested_by=source,
+                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+                top_k=payload.get("top_k"),
+                snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+                cache_hit=cache_hit,
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change routing
+            log.debug("kernel timeline: trace_analyze request capture failed", exc_info=True)
+
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
         from .coordinator import _lifecycle_paths
@@ -673,13 +1058,12 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        # Always record the request on the bus for the kernel reactor / replay.
+        # Always record the request on the bus for replay.
         request_msg = Message.new(
             source,
             target_agent,
             "request",
             dict(intent.payload),
-            priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
@@ -703,7 +1087,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -729,7 +1112,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -842,7 +1224,6 @@ class IntentRouter:
                         "source": cache_hit_source or "programmatic_handler",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
@@ -851,6 +1232,14 @@ class IntentRouter:
             if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
                 self.shared_state.record_trace_analyze(merged_payload, result)
                 self.shared_state.save(self.session_dir)
+            if kind == "trace_analyze":
+                self._record_trace_analyze_on_timeline(
+                    request_msg=request_msg,
+                    source=source,
+                    payload=merged_payload,
+                    result=result,
+                    cache_hit=cache_hit_source is not None,
+                )
             if kind == "run_gemm_tuning":
                 await self._handle_gemm_tuning_result(result)
             if kind == "integrate":
@@ -883,27 +1272,9 @@ class IntentRouter:
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
-
-    async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester."""
-        in_reply_to = intent.payload["in_reply_to"]
-        # Locate the original requester so we can address the response.
-        original = await self.bus.lookup_by_id(in_reply_to)
-        target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                target,
-                "response",
-                dict(intent.payload),
-                in_reply_to=in_reply_to,
-                priority=1,
-            )
-        )
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""
@@ -1023,13 +1394,11 @@ class IntentRouter:
                 "*",
                 "strategy_change",
                 payload,
-                priority=0,
             )
         )
         from ..phases.machine_state import (
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
@@ -1038,29 +1407,6 @@ class IntentRouter:
 
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
-            return
-        # Pre-enablement close guard: drop a premature ``skip_to_close`` while the model is not yet runnable and let
-        # the enablement loop continue.
-        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
-            self.shared_state.enablement.skip_to_close_suppressions += 1
-            log.info(
-                "escalate_strategy_change: dropping premature skip_to_close from %s "
-                "(pre-enablement: baseline not established; enablement loop still active)",
-                source,
-            )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "observation",
-                    {
-                        "kind": "enablement_skip_to_close_suppressed",
-                        "source": source,
-                        "phase": (self.shared_state.phase or ""),
-                        "suppressions": self.shared_state.enablement.skip_to_close_suppressions,
-                    },
-                )
-            )
             return
         # extend_*_budget mutates phase_budget_pct directly.
         now_ts = datetime.now(timezone.utc).isoformat()
@@ -1135,15 +1481,13 @@ class IntentRouter:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity."""
-        prio = 0 if intent.payload.get("severity") == "high" else 1
+        """Broadcast an alert message."""
         await self.bus.append_and_seq(
             Message.new(
                 source,
                 "*",
                 "alert",
                 dict(intent.payload),
-                priority=prio,
             )
         )
 

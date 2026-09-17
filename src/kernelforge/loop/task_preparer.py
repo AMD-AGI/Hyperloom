@@ -31,7 +31,7 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.llm.git import git
+from kernelforge.llm.git import ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
@@ -127,7 +127,7 @@ class PreflightResult:
 # timing independently of whatever the driver prints: an eager driver replays zero times, a graph-timed one replays
 # once per timed iteration.
 _GRAPH_PROBE_SITECUSTOMIZE = r'''
-import atexit, json, os
+import atexit, json, os, sys
 
 _n = [0]
 # Collected only when the caller declares a rank count. A single-rank probe
@@ -159,17 +159,13 @@ _ancestors = _ancestor_pids()
 _import_pid = os.getpid()
 
 
-def _install():
+def _install(torch):
     """Patch CUDAGraph.replay lazily: torch may not be imported yet.
 
-    Everything is inside the guard, not only the import. A module named torch
-    that carries no ``cuda`` is a real shape -- a test stub, a partially
-    initialized package mid-import -- and reading the attribute outside would
-    raise out of an import hook that runs in every process on the path.
+    A module named torch may be a stub or partially initialized. Use the
+    existing module rather than importing through our own lazy hook again.
     """
     try:
-        import torch
-
         orig = torch.cuda.CUDAGraph.replay
 
         def _replay(self, *a, **k):
@@ -182,7 +178,7 @@ def _install():
         return False
 
 
-_graph_ready = _install()
+_graph_ready = _install(sys.modules.get("torch"))
 
 if not _graph_ready:
     # torch is imported by the driver, not by us. Hook the import so the patch
@@ -194,10 +190,10 @@ if not _graph_ready:
     def _hooked(name, *a, **k):
         global _graph_ready
         mod = _real_import(name, *a, **k)
-        if name == "torch" or name.startswith("torch."):
-            _graph_ready = _install()
-            if _graph_ready:
-                builtins.__import__ = _real_import
+        if not _graph_ready and (name == "torch" or name.startswith("torch.")):
+            _graph_ready = _install(sys.modules.get("torch"))
+        if _graph_ready and builtins.__import__ is _hooked:
+            builtins.__import__ = _real_import
         return mod
 
     builtins.__import__ = _hooked
@@ -1223,19 +1219,17 @@ def _ensure_agent_git_workspace(workspace: Path) -> None:
     """Create a private baseline commit when a backend requires a git cwd."""
     code, _ = _git(workspace, "rev-parse", "--show-toplevel")
     if code == 0:
+        ensure_commit_identity(workspace)
         return
     code, output = _git(workspace, "init")
     if code != 0:
         raise RuntimeError(f"could not initialize preparation workspace: {output}")
+    ensure_commit_identity(workspace)
     code, output = _git(workspace, "add", "-A")
     if code != 0:
         raise RuntimeError(f"could not stage preparation workspace: {output}")
     code, output = _git(
         workspace,
-        "-c",
-        "user.name=KernelForge",
-        "-c",
-        "user.email=kernel-forge@localhost",
         "commit",
         "--allow-empty",
         "-m",
@@ -1268,6 +1262,7 @@ async def _run_prepare_agent(
     spec = AgentRunSpec(
         system_prompt=system_prompt,
         user_prompt=prompt,
+        role="task preparation",
         cwd=str(workspace),
         writable=True,
         timeout_sec=max(1, int(timeout_sec)),
@@ -1951,6 +1946,9 @@ async def prepare_task(
                 ),
                 audit_dir=audit_dir_str,
             )
+        # The agent path that names an identity runs only when the backend needs
+        # a git cwd, and a commit with none to auto-detect cannot land.
+        ensure_commit_identity(workspace)
         _, commit_out = _git(
             workspace,
             "commit",

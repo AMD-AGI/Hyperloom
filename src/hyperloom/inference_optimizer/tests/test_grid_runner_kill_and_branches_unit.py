@@ -560,6 +560,7 @@ async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, mon
 
 @pytest.mark.asyncio
 async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
+    monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
 

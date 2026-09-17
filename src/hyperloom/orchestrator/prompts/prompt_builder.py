@@ -61,7 +61,7 @@ _PHASE_HEADERS: dict[str, str] = {
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
 _EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
-_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
+_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE", "ENABLEMENT"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
@@ -236,9 +236,11 @@ def _section_phase_semantics(
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
-            "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
-            "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
+            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
+            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
+            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
+            "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
             "current phase exhausted; the Coordinator validates the hint vocab",
@@ -567,6 +569,20 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     Returns:
         list[str]: Markdown lines for the decision framework.
     """
+    from ..phases.machine_state import allowed_actions_for
+
+    # An empty phase renders every phase-scoped block, so it keeps the proposal form.
+    phase_key = (phase or "").strip().upper()
+    if not phase_key or "baseline" in allowed_actions_for(phase_key):
+        measure_lines = [
+            "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
+            "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        ]
+    else:
+        measure_lines = [
+            "2. **Measure**: `baseline` is Coordinator-dispatched in this phase, so do",
+            "   not propose it; `baseline_tput` is set when that run promotes.",
+        ]
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -575,8 +591,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
         "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
-        "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
-        "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
@@ -713,19 +728,19 @@ def _idea_generation_lines() -> list[str]:
         "### IDEA GENERATION (apply after EVERY explore round)",
         "",
         "Compose the next `explore` grid from `explore_search` (winners +",
-        "rejected, each with `±x.xx% gain_pct`) and `discovered_flags`:",
+        "rejected, each with `±x.xx% gain_pct`):",
         "",
         "1. **Sibling values** — if `--max-num-seqs 256` won, try 128 / 512;",
         "   sweep a winning boolean's related `*_AITER_*` family.",
-        "2. **Synergy** — combine last round's winners via",
-        "   `synergy_mode='auto'` (deduped against `synergy_attempted`).",
+        "2. **Synergy** — combine last round's winners into one variant. Check",
+        "   `explore_search.winners_history` / `.rejected` first: a combination",
+        "   already measured there carries its result, so re-running it buys a",
+        "   number you already have.",
         "3. **Re-examine rejects** — per `explore_search.rejected` variant, judge",
         "   whether the failure is stale, fixable, or ruled out; re-propose the",
         "   same config to revalidate or change the value (a `-2%` reject is a",
         "   dead flag; `-0.3%` may clear the bar once patched).",
-        "4. **Mine flags** — when winners are empty, pull untested boolean",
-        "   toggles from `discovered_flags.<framework>.backend_flags`.",
-        "5. **Ablate harmful base config** — when a user/base flag or env may",
+        "4. **Ablate harmful base config** — when a user/base flag or env may",
         "   be slowing the workload, emit a variant with `remove_args` and/or",
         "   `unset_envs` instead of only adding more knobs.",
         "",

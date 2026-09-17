@@ -1,23 +1,76 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Breakdown recorder: author-time capture of ``session_breakdown.json`` data."""
+"""Breakdown recorder: author-time capture of ``session_breakdown.json`` data.
+
+Producers record facts where they are born (see :func:`get_recorder`); the
+exporter assembles them at finalize (see :func:`assemble_parts`). Each section
+has a single owning producer, so there is no cross-producer write contention.
+
+The session is bound once, at startup, so no entry point below takes a path::
+
+    from hyperloom.inference_optimizer.session.session_binding import bind_session
+
+    bind_session(session_dir)     # coordinator startup, the only place
+
+Write side::
+
+    from hyperloom.inference_optimizer.breakdown.recorder import get_recorder
+
+    rec = get_recorder(producer="sweep")
+    rec.record_singleton("sweep", sweep_payload)          # one final blob
+
+Read side::
+
+    from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, has_parts
+
+    sections = assemble_parts(session_dir)   # {section: list | dict}
+
+For SBD v6 timeline events there is a second surface on top of that primitive
+one, so the rules governing ids, keys and ordering live in one place instead of
+being restated per event type: :mod:`.event_ids` builds the two id forms,
+:mod:`.event_sink` writes a row into whichever event its caller decided it
+belongs to, :mod:`.event_rows` filters/orders/groups rows at assembly, and
+:mod:`.event_timeline` owns the two timeline writes an event makes and the
+residual states a killed session leaves behind.
+
+Recording is best-effort by design, so a fact that never arrived leaves nothing
+behind to explain itself. Set ``HYPERLOOM_BREAKDOWN_TRACE=1`` to log every
+write, naming its call site and, when a write merges into an existing fragment,
+the fields whose values it changed (see :mod:`.trace`).
+"""
 
 from __future__ import annotations
 
 from . import instrument
 from .assembler import (
     BASELINE_EVENT_SECTIONS,
+    CONC_SWEEP_EVENT_SECTIONS,
+    ENABLEMENT_EVENT_SECTIONS,
     EVENT_SECTIONS,
     KERNEL_EVENT_SECTIONS,
+    PHASE_EVENT_SECTIONS,
+    STACK_EVENT_SECTIONS,
     ROOFLINE_EVENT_SECTIONS,
     assemble_parts,
     baseline_event_parts,
+    close_steps,
+    conc_sweep_event_parts,
+    enablement_event_parts,
     event_parts,
     has_parts,
     kernel_event_parts,
     parts_dir,
+    phase_event_parts,
+    stack_event_parts,
     roofline_event_parts,
+)
+from .close_out import (
+    record_close_artifacts,
+    record_close_opened,
+    record_close_settled,
+    record_close_step,
+    record_roofline_progress,
 )
 from .event_ids import EVENT_ID_SEPARATOR, EventId, event_id, fragment_key, parse_event_id
 from .event_rows import (
@@ -46,36 +99,11 @@ from .event_timeline import (
 )
 from .trace import TRACE, TRACE_ENV, enable_trace, trace_enabled
 from .instrument import (
-    record_action_operation,
-    record_adoption,
-    record_artifact,
-    record_critic_iteration,
-    record_kernel_backend_result,
-    record_kernel_discovery,
-    record_kernel_dispatch,
-    record_kernel_e2e,
-    record_kernel_invocations,
-    record_kernel_strategy_selection,
-    record_native_kernel_run_start,
-    record_native_kernel_run_result,
-    record_geak_e2e_attempt,
-    record_geak_operation,
-    record_gemm_tuning_operation,
-    record_measurement,
-    record_operation,
-    record_phase_event,
-    record_phase_transition,
-    record_robustness_signal,
-    record_run_snapshot,
-    record_singleton_section,
-    record_specialist_round,
-    record_subject,
-    record_tool_version,
-    record_trace_event,
+    record_backend_versions_and_timeline,
     snapshot_state_sections,
 )
+from .tool_versions import record_tool_version
 from .recorder import (
-    DERIVED_SECTIONS,
     SECTION_SHAPES,
     Recorder,
     SectionShape,
@@ -83,16 +111,24 @@ from .recorder import (
     recorder_for,
     section_shape,
 )
+from .session_metadata import (
+    record_metadata_identity,
+    record_metadata_langfuse,
+    snapshot_metadata,
+)
 
 __all__ = [
     "BASELINE_EVENT_SECTIONS",
-    "DERIVED_SECTIONS",
+    "CONC_SWEEP_EVENT_SECTIONS",
+    "ENABLEMENT_EVENT_SECTIONS",
     "EVENT_ID_FIELD",
     "EVENT_ID_SEPARATOR",
     "EVENT_STATUS_INTERRUPTED",
     "EVENT_STATUS_RUNNING",
     "EVENT_SECTIONS",
     "KERNEL_EVENT_SECTIONS",
+    "PHASE_EVENT_SECTIONS",
+    "STACK_EVENT_SECTIONS",
     "ROOFLINE_EVENT_SECTIONS",
     "RESIDUAL_NO_EVENT",
     "RESIDUAL_RUNNING",
@@ -111,6 +147,9 @@ __all__ = [
     "assemble_parts",
     "baseline_event_parts",
     "build_envelope",
+    "close_steps",
+    "conc_sweep_event_parts",
+    "enablement_event_parts",
     "enable_trace",
     "event_id",
     "finalize_events",
@@ -127,35 +166,21 @@ __all__ = [
     "open_event",
     "parse_event_id",
     "parts_dir",
-    "record_action_operation",
-    "record_adoption",
-    "record_artifact",
-    "record_critic_iteration",
-    "record_kernel_backend_result",
-    "record_kernel_discovery",
-    "record_kernel_dispatch",
-    "record_kernel_e2e",
-    "record_kernel_invocations",
-    "record_kernel_strategy_selection",
-    "record_native_kernel_run_start",
-    "record_native_kernel_run_result",
-    "record_geak_e2e_attempt",
-    "record_geak_operation",
-    "record_gemm_tuning_operation",
-    "record_measurement",
-    "record_operation",
-    "record_phase_event",
-    "record_phase_transition",
-    "record_robustness_signal",
-    "record_run_snapshot",
-    "record_singleton_section",
-    "record_specialist_round",
-    "record_subject",
+    "phase_event_parts",
+    "stack_event_parts",
+    "record_close_artifacts",
+    "record_close_opened",
+    "record_close_settled",
+    "record_close_step",
+    "record_roofline_progress",
+    "record_metadata_identity",
+    "record_metadata_langfuse",
+    "record_backend_versions_and_timeline",
     "record_tool_version",
-    "record_trace_event",
     "recorder_for",
     "residual_events",
     "rows_for_event",
+    "snapshot_metadata",
     "snapshot_state_sections",
     "section_shape",
     "sort_rows",

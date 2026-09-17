@@ -301,6 +301,7 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
         Path | None: The capture folder if one exists nearby, else ``None``.
     """
 
+    capture_dir_priority = ("capture_traces", "graph_capture_profile", "graph_capture")
     search_roots: list[Path] = []
     if trace_input.is_dir():
         search_roots.append(trace_input)
@@ -312,11 +313,15 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
             continue
         seen.add(root)
         try:
-            children = sorted(root.iterdir())
+            children = [child for child in root.iterdir() if child.is_dir()]
         except OSError:
             continue
-        for child in children:
-            if child.is_dir() and is_capture_dir_name(child.name):
+        children_by_name = {child.name.lower(): child for child in children}
+        for name in capture_dir_priority:
+            if child := children_by_name.get(name):
+                return child
+        for child in sorted(children):
+            if is_capture_dir_name(child.name):
                 return child
     return None
 
@@ -433,13 +438,13 @@ def _should_use_codex_runner() -> bool:
     """Return true when the Codex Agent SDK runner should run this skill.
 
     An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The shape
-    test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
+    Agent SDK, so the Codex runner is the only one that can execute. The choice
+    itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
     disagree with backend selection or the forge kernel_backend.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
-    return llm_config.is_openai_only()
+    return llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:

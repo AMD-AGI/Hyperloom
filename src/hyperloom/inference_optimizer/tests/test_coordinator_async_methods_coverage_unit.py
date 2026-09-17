@@ -511,24 +511,10 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
-    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
-    coord.shared_state.phase = "PRELUDE"
-    coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement.succeeded = False
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
-    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
+    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),
@@ -848,6 +834,28 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.conc = 64
     assert coord._target_gap_advisory_block() == "GAP-SUMMARY"
     assert coord._current_primary_gap() == "throughput"
+
+
+def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.orchestrator.knowledge import research_hints as rh
+
+    target = {
+        "benchmark_mode": "agentx",
+        "throughput_basis": "total_token_throughput_per_gpu",
+        "per_conc": [
+            {"conc": 4, "tput_per_gpu": 800.0, "e2e_norm_intvty_p90": 20.0, "benchmark_id": "2", "source": "api"}
+        ],
+    }
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: target)
+    state = coord.shared_state
+    state.benchmark_mode = "agentx"
+    state.current_best = {"total_throughput": 800.0, "e2e_norm_intvty_p90": 5.0}
+    state.tp = 2
+    state.conc = 4
+    text = coord._target_gap_advisory_block()
+    assert "total throughput/GPU gap vs target: +50.0%" in text
+    assert "E2E normalized interactivity P90 gap vs target: +75.0%" in text
+    assert coord._current_primary_gap() == "latency"
 
 
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:

@@ -17,6 +17,7 @@ from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
 from kernelforge.llm.git import git
+from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
 from kernelforge.llm.workspace_policy import (
     is_protected_path,
     protected_path_inventory,
@@ -65,6 +66,7 @@ class WorkspaceGuard:
     ) -> None:
         """Initialize guard state from one run specification."""
         self.spec = spec
+        self.commit_new_paths = normalize_commit_new_paths(spec.commit_new_paths)
         self.allow_dirty_baseline = (
             dirty_baseline_default if spec.allow_dirty_baseline is None else bool(spec.allow_dirty_baseline)
         )
@@ -233,6 +235,12 @@ class WorkspaceGuard:
         if self._guards_dirty_baseline():
             self._snapshot_baseline(unstaged, staged, untracked)
         self.prepared = True
+
+    def _unsupported_untracked(self, untracked: list[str]) -> list[str]:
+        """List new paths the caller has not authorized as campaign sources."""
+        if self.spec.allow_untracked:
+            return []
+        return [path for path in untracked if not matches_commit_new_paths(path, self.commit_new_paths)]
 
     def _drop_ignored_untracked(self, untracked: list[str]) -> list[str]:
         """Drop untracked paths the caller declared as a tool's own droppings."""
@@ -698,6 +706,16 @@ class WorkspaceGuard:
                 continue
             if exists and (path.read_bytes() != content or (path.stat().st_mode & 0o777) != mode):
                 total += 1
+        if self.commit_new_paths:
+            if self._guards_dirty_baseline():
+                unstaged, staged, untracked, _ = self._baseline_deviations()
+            else:
+                unstaged, staged, untracked = self._current_changes()
+            total += sum(
+                (self.root / path).resolve() not in self.target_snapshots
+                and matches_commit_new_paths(path, self.commit_new_paths)
+                for path in set(unstaged + staged + untracked)
+            )
         return total
 
     def verify(self) -> list[str]:
@@ -742,9 +760,9 @@ class WorkspaceGuard:
         if changed_snapshots or new_protected:
             paths = [*changed_snapshots, *new_protected]
             violations.append(f"protected ignored files changed: {', '.join(paths)}")
-        allow_untracked = self.spec.allow_untracked
-        if untracked and not allow_untracked:
-            violations.append(f"new non-ignored files are unsupported: {', '.join(untracked)}")
+        unsupported = self._unsupported_untracked(untracked)
+        if unsupported:
+            violations.append(f"new non-ignored files are unsupported: {', '.join(unsupported)}")
         if violations:
             self.rollback()
             raise WorkspaceSafetyError("; ".join(violations))
@@ -752,7 +770,7 @@ class WorkspaceGuard:
             dict.fromkeys(
                 [
                     *tracked_changes,
-                    *(untracked if allow_untracked else []),
+                    *untracked,
                 ]
             )
         )

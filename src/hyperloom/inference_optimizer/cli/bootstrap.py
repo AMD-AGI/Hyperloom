@@ -23,8 +23,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.phases.machine_state import bank_phase_segment
 from hyperloom.orchestrator.state.shared_state import SharedState
-from .backends import _build_robustness_options
-from .parser import (
+from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
     DEFAULT_CONC,
@@ -32,6 +31,7 @@ from .parser import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
+from .backends import _build_robustness_options
 from ..session.paths import _SESSION_SKELETON
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
@@ -60,6 +60,33 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
+    """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
+
+    The resolution reads ``HYPERLOOM_PERF_METRIC`` and ``HYPERLOOM_PERF_NOISE_PCT``. Deriving it again later -- in a
+    resumed process, a re-baseline subprocess, or the breakdown export CLOSE drives from a subprocess that often did
+    not inherit them -- can name an axis the session never graded on. This is the same reasoning that put
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
+        GRADED_OUTPUT,
+        intvty_serving_grading_enabled,
+        parse_intvty_noise_pct,
+    )
+
+    from .. import framework_registry
+
+    on_intvty = intvty_serving_grading_enabled(
+        scriptable=framework_registry.is_scriptable(framework),
+        benchmark_mode=benchmark_mode,
+    )
+    return {
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        "noise_pct": parse_intvty_noise_pct(),
+    }
 
 
 def agentx_state_is_stale(state: Any) -> str:
@@ -234,7 +261,7 @@ def _seed_shared_state(
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
-    _ref_args, _ref_envs, _ref_model, _ref_source = _resolve_reference_recipe(args)
+    _ref_args, _ref_envs, _ref_model, _ref_source, _ref_controls = _resolve_reference_recipe(args)
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
@@ -279,6 +306,7 @@ def _seed_shared_state(
         cumulative_gain_validated=0.0,
         reference_server_args=_ref_args,
         reference_envs=_ref_envs,
+        reference_launch_controls=_ref_controls,
         reference_model=_ref_model,
         reference_source=_ref_source,
         # Operator launch shape; the process env carries it for one process only, so a resume re-exports it from here
@@ -322,6 +350,7 @@ def _seed_shared_state(
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
@@ -408,7 +437,8 @@ def _print_final_summary(
 
 def _bank_previous_leg_phase_segment(state: SharedState) -> None:
     """Bank the phase time the stopped leg spent but never recorded."""
-    stop_unix = min(to_unix(state.stop_ts, 0.0) or 0.0, time.time())
+    boundary = state.leg_ended_ts or state.stop_ts
+    stop_unix = min(to_unix(boundary, 0.0) or 0.0, time.time())
     if stop_unix <= 0.0:
         return
     bank_phase_segment(state, until_unix=stop_unix)
@@ -438,6 +468,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.resumed_ts = now_iso()
     state.stop_reason = ""
     state.stop_ts = ""
+    state.leg_ended_ts = ""
     state.closing_phase = False
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
@@ -590,11 +621,11 @@ def _read_failure_summary(session_dir: Path) -> dict | None:
 
 def _resolve_reference_recipe(
     args: argparse.Namespace,
-) -> tuple[str, dict[str, str], str, str]:
+) -> tuple[str, dict[str, str], str, str, dict[str, Any]]:
     """Resolve the reference launch recipe for a fresh launch."""
     source = (getattr(args, "reference_script", None) or "").strip()
     if not source:
-        return ("", {}, "", "")
+        return ("", {}, "", "", {})
 
     framework = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
     from ..reference_script import parse_reference_script
@@ -605,7 +636,8 @@ def _resolve_reference_recipe(
         print(f"ERROR: --reference-script {source!r} could not be parsed: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
-    if not recipe.server_args and not recipe.envs:
+    controls = getattr(recipe, "launch_controls", {})
+    if not recipe.server_args and not recipe.envs and not controls:
         print(
             f"ERROR: --reference-script {source!r} lifted no server flags and no env exports",
             file=sys.stderr,
@@ -613,7 +645,7 @@ def _resolve_reference_recipe(
         raise SystemExit(2)
 
     print(f"Reference script: {source} ({len(recipe.server_args.split())} arg tokens, {len(recipe.envs)} env(s))")
-    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source)
+    return (recipe.server_args, dict(recipe.envs), recipe.model or "", source, dict(controls))
 
 
 def _resolve_session_dir_for_summary(state: SharedState) -> Path | None:

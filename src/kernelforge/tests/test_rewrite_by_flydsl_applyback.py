@@ -291,6 +291,7 @@ def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
             commit_ref="refs/forge-rewrite/applyback/softmax-abcdef123456",
             source_ms=2.0,
             flydsl_best_ms=1.0,
+            speedup=2.0,
             reference_snr_db=45.0,
             patch=f"framework patch {index}\n",
             changed_files=["softmax.py"],
@@ -541,7 +542,8 @@ class _StoppedBackend:
         self._end_reason = end_reason
         self.runtime = type("_Runtime", (), {"model": "fake-model"})()
 
-    async def run(self, _run_spec):
+    async def run(self, _run_spec, usage=None):
+        del usage
         from kernelforge.agent_backends.base import AgentRunResult
 
         return AgentRunResult(end_reason=self._end_reason)

@@ -1,13 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover xDiT latency metrics across registry, roofline, final reports, and state backfill."""
+"""Unit coverage for the scriptable/diffusion (xDiT) latency-domain surfacing:
+
+* ``framework_registry.primary_metric_name`` (which field is the result).
+* the close-out's final recipe carrying e2el into ``outcome.final``.
+* ``SharedState._backfill_scriptable_latency`` deriving e2el from tput.
+"""
 
 from __future__ import annotations
 
 from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.inference_optimizer.breakdown.collectors import roofline as col
-from hyperloom.inference_optimizer.breakdown.collectors import sessions as sess
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_outcome
 
 
 class TestPrimaryMetricName:
@@ -19,98 +23,39 @@ class TestPrimaryMetricName:
         assert fr.primary_metric_name(None) == "throughput_tok_s_per_gpu"
 
 
-class TestNormalizeRooflineSnapshotLatencySiblings:
-    def test_preserves_latency_and_ceiling_fields(self):
-        snap = col._normalize_roofline_snapshot(
-            {
-                "snapshot_id": 2,
-                "ts": "t",
-                "e2e_mean_ms": 910.0,
-                "roofline_ideal_ms": 360.4,
-                "roofline_bound_kind": "compute",
-            }
+class TestFinalRecipeCarriesLatency:
+    """The close-out's recipe is what ``outcome.final`` reports the latency from.
+
+    A scriptable session's result *is* its latency, and a run that never
+    validated its whole stack has no validation row to read it off -- so the
+    recipe the close-out settled is the only author-time record of it.
+    """
+
+    def _final(self, current_best: dict) -> dict:
+        """``outcome.final`` for a session whose close settled ``current_best``."""
+        outcome = collect_v6_outcome(
+            session={"stop_reason": "target_reached"},
+            close={
+                "final_recipe": {
+                    "throughput": current_best.get("tput"),
+                    "ttft_mean_ms": current_best.get("ttft_mean_ms"),
+                    "e2el_mean_ms": current_best.get("e2el_mean_ms"),
+                    "action_path": [str(current_best.get("action") or "")],
+                    "extra_server_args": "",
+                    "extra_envs": {},
+                }
+            },
+            state={},
+            timeline=[],
         )
-        assert snap["e2e_mean_ms"] == 910.0
-        assert snap["roofline_ideal_ms"] == 360.4
-        assert snap["roofline_bound_kind"] == "compute"
+        return outcome["final"]
 
-    def test_missing_latency_fields_are_none(self):
-        snap = col._normalize_roofline_snapshot({"snapshot_id": 1, "ts": "t"})
-        assert snap["e2e_mean_ms"] is None
-        assert snap["roofline_ideal_ms"] is None
-        assert snap["roofline_bound_kind"] == "unknown"
+    def test_scriptable_final_surfaces_the_derived_e2el(self):
+        """``save`` derives the latency; the close-out records what it wrote.
 
-
-class TestCollectRooflineProgressLatencyCeiling:
-    def _state(self, snap: dict) -> dict:
-        return {
-            "framework": "xdit",
-            "baseline_tput": 0.168919,
-            "cumulative_gain_validated": 550.5,
-            "optimization_stack": [
-                {"ts": "2026-01-01T00:00:00", "tput": 1.098901, "variant_name": "v", "action": "explore"}
-            ],
-            "roofline_snapshots": [snap],
-        }
-
-    def test_latency_ceiling_surfaced_when_no_tok_s_ceiling(self, tmp_path):
-        snap = {
-            "snapshot_id": 2,
-            "ts": "2026-01-01T00:10:00",
-            "theoretical_peak_tok_per_sec": 0.0,
-            "e2e_mean_ms": 910.0,
-            "roofline_ideal_ms": 360.4,
-        }
-        out = col.collect_roofline_progress(tmp_path, self._state(snap), {}, [])
-        assert out["ceiling_available"] is False  # tok/s side stays off
-        assert out["ceiling_kind"] == "latency"
-        assert out["latency_ceiling_available"] is True
-        assert out["latency_ceiling_ms"] == 360.4
-        assert out["achieved_latency_ms"] == 910.0
-        assert out["current_best_pct_of_latency_ceiling"] == round(360.4 / 910.0 * 100.0, 4)
-
-    def test_throughput_ceiling_takes_precedence(self, tmp_path):
-        snap = {
-            "snapshot_id": 1,
-            "ts": "2026-01-01T00:10:00",
-            "theoretical_peak_tok_per_sec": 2000.0,
-        }
-        st = self._state(snap)
-        st["framework"] = "sglang"
-        out = col.collect_roofline_progress(tmp_path, st, {}, [])
-        assert out["ceiling_kind"] == "throughput"
-        assert out["ceiling_available"] is True
-        assert out["latency_ceiling_available"] is False
-        assert out["latency_ceiling_ms"] is None
-
-    def test_no_ceiling_when_latency_partial(self, tmp_path):
-        # Only e2e present (ideal floor missing) -> no latency ceiling.
-        snap = {
-            "snapshot_id": 2,
-            "ts": "2026-01-01T00:10:00",
-            "theoretical_peak_tok_per_sec": 0.0,
-            "e2e_mean_ms": 910.0,
-            "roofline_ideal_ms": 0.0,
-        }
-        out = col.collect_roofline_progress(tmp_path, self._state(snap), {}, [])
-        assert out["ceiling_kind"] == "none"
-        assert out["latency_ceiling_available"] is False
-
-
-class TestCollectFinalEmitsLatency:
-    """``collect_final`` is the single producer of the final section."""
-
-    def _state(self, framework: str, current_best: dict) -> dict:
-        return {
-            "framework": framework,
-            "current_best": current_best,
-            "optimization_stack": [{"action": current_best.get("action", "explore")}],
-            "cumulative_gain_validated": 0.0,
-            "cumulative_gain_validated_ts": "",
-        }
-
-    def test_scriptable_final_surfaces_the_derived_e2el(self, tmp_path):
-        """``save`` derives the latency; the collector surfaces what it wrote."""
+        ``_backfill_scriptable_latency`` runs before ``state.json`` is written,
+        so ``current_best`` already carries ``e2el_mean_ms`` at the close.
+        """
         from hyperloom.orchestrator.state.shared_state import SharedState
 
         st = SharedState(session_id="s", model_name="m", model_path="/m")
@@ -118,32 +63,16 @@ class TestCollectFinalEmitsLatency:
         st.current_best = {"action": "explore", "tput": 1.098901}
         st._backfill_scriptable_latency()
 
-        final = sess.collect_final(
-            tmp_path,
-            self._state("xdit", st.current_best),
-            [],
-        )
-        assert final["throughput_unit"] == "img/s"
-        assert final["primary_metric"] == "e2el_mean_ms"
         # 1000 / 1.098901 ~= 910.0
-        assert final["e2el_mean_ms"] == round(1000.0 / 1.098901, 4)
+        assert self._final(st.current_best)["e2el_mean_ms"] == round(1000.0 / 1.098901, 4)
 
-    def test_scriptable_final_prefers_measured_e2el(self, tmp_path):
-        final = sess.collect_final(
-            tmp_path,
-            self._state("xdit", {"action": "explore", "tput": 1.098901, "e2el_mean_ms": 980.0}),
-            [],
-        )
+    def test_scriptable_final_prefers_measured_e2el(self):
+        final = self._final({"action": "explore", "tput": 1.098901, "e2el_mean_ms": 980.0})
         assert final["e2el_mean_ms"] == 980.0
 
-    def test_serving_final_has_no_derived_e2el(self, tmp_path):
-        final = sess.collect_final(
-            tmp_path,
-            self._state("sglang", {"action": "grid", "tput": 123.4}),
-            [],
-        )
-        assert final["throughput_unit"] == "tok/s"
-        assert final["primary_metric"] == "throughput_tok_s_per_gpu"
+    def test_serving_final_has_no_derived_e2el(self):
+        final = self._final({"action": "grid", "tput": 123.4})
+        assert final["throughput_tok_s_per_gpu"] == 123.4
         assert final["e2el_mean_ms"] is None
 
 

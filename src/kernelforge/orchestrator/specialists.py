@@ -489,10 +489,10 @@ class SpecialistAgent:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
+                        role=f"specialist {self.definition.role_id}",
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=self.timeout_sec,
-                        reasoning_effort="max",
                         tool_policy=AgentToolPolicy(
                             read=True,
                             search=True,

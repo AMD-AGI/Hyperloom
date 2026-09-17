@@ -29,6 +29,7 @@ from kernelforge.rewrite_by_flydsl import driver_contract, protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.durable_io import atomic_write_bytes
+from kernelforge.tracker import UsageAccumulator
 
 
 DRIVER_PREPARATION_FAILED = "driver_preparation_failed"
@@ -74,6 +75,10 @@ class DriverPreflight:
     @property
     def reference_case_ids(self) -> tuple[str, ...]:
         return self.reference.case_ids if self.reference is not None else ()
+
+    @property
+    def source_case_ms(self) -> dict[str, float]:
+        return dict(self.reference.case_ms) if self.reference is not None else {}
 
 
 @dataclass
@@ -315,12 +320,14 @@ async def _run_agent(
     prompt: str,
     timeout_sec: int,
     progress_log: list[str],
+    usage: UsageAccumulator | None = None,
 ) -> str:
     runtime = with_writable_sandbox(config.agent_runtime())
     backend = create_registered_backend(runtime)
     run_spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
         user_prompt=prompt,
+        role="flydsl driver preparation",
         cwd=str(stage),
         writable=True,
         timeout_sec=timeout_sec,
@@ -342,7 +349,7 @@ async def _run_agent(
         progress_log=progress_log,
     )
     result = await asyncio.wait_for(
-        backend.run(run_spec),
+        backend.run(run_spec, usage=usage),
         timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
@@ -500,6 +507,7 @@ async def prepare_rewrite_driver(
     invocation_spec_file: str = "",
     initial_preflight: DriverPreflight | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    usage: UsageAccumulator | None = None,
 ) -> DriverPreparationResult:
     """Author or repair one driver without exposing the caller's tree to writes."""
 
@@ -594,6 +602,7 @@ async def prepare_rewrite_driver(
                         prompt=prompt,
                         timeout_sec=timeout_sec,
                         progress_log=progress_log,
+                        usage=usage,
                     )
                     _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
                 except asyncio.TimeoutError:

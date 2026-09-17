@@ -74,8 +74,8 @@ _UNDECIDED_PROPOSALS_SQL = """
 #: instant of the write. The guard is in the statement rather than in a read
 #: before it, so a verdict arriving in between wins.
 _TIMEOUT_DENY_SQL = """
-    INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, priority, ts)
-    SELECT ?, ?, ?, 'review_verdict', NULL, ?, 0, ?
+    INSERT INTO events (msg_id, from_agent, to_agent, topic, in_reply_to, payload, ts)
+    SELECT ?, ?, ?, 'review_verdict', NULL, ?, ?
     WHERE NOT EXISTS (
         SELECT 1 FROM events
         WHERE topic = 'review_verdict'
@@ -212,14 +212,21 @@ class Reconciler:
 
     async def _stamp_tick(self, now_unix: float, report: ReconcileReport) -> None:
         """Record that a tick has started, for the process watching from outside."""
+        await self.stamp_progress(now_unix)
+
+    async def stamp_progress(self, now_unix: float) -> None:
+        """Refresh the coordinator progress timestamp."""
         if self._session_dir is None:
             return
-        await asyncio.to_thread(
-            supervisor_store.stamp_tick,
-            self._session_dir,
-            tick=int(getattr(self._shared_state, "tick", 0)),
-            now_unix=now_unix,
-        )
+        try:
+            await asyncio.to_thread(
+                supervisor_store.stamp_tick,
+                self._session_dir,
+                tick=int(getattr(self._shared_state, "tick", 0)),
+                now_unix=now_unix,
+            )
+        except OSError as exc:
+            log.warning("reconcile: progress stamp failed: %s", exc)
 
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
         """Fail every running task whose process is provably gone."""

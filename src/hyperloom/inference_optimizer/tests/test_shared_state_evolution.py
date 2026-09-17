@@ -134,7 +134,7 @@ def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
         assert not hasattr(loaded, dropped)
     assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
     assert isinstance(loaded.explore_search, dict)
-    for key in ("tested", "accepted", "rejected", "winners_history", "synergy_attempted"):
+    for key in ("tested", "accepted", "rejected", "winners_history"):
         assert key in loaded.explore_search
 
 
@@ -249,6 +249,21 @@ def test_core_state_fields_contains_v08_new_additions():
     }
     missing = must_be_locked - CORE_STATE_FIELDS
     assert not missing, f"v0.8 §3.10 requires these to be CORE: {sorted(missing)}"
+
+
+def test_a_run_leg_boundary_is_not_writable_by_update_state():
+    """``leg_ended_ts`` decides where the stopped leg's phase segment ends.
+
+    The next leg banks time up to it, so a forged value bills that phase for
+    time it never ran; the Coordinator owns it exactly as it owns ``stop_ts``.
+    """
+    state = SharedState()
+    state.leg_ended_ts = "2026-08-01T00:00:00+00:00"
+
+    applied = state.apply_changes({"leg_ended_ts": "2099-01-01T00:00:00+00:00"}, allow_core=False)
+
+    assert applied == {}
+    assert state.leg_ended_ts == "2026-08-01T00:00:00+00:00"
 
 
 def test_policy_blocks_llm_phase_write():

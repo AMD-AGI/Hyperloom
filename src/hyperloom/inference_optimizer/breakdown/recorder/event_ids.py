@@ -36,7 +36,13 @@ class EventId(NamedTuple):
 
 
 def _token(value: str, *, label: str) -> str:
-    """Normalize and validate one author-time id segment."""
+    """Normalize and validate one author-time id segment.
+
+    Raises:
+        ValueError: If the segment is empty or holds anything outside
+            ``[a-z0-9_]`` once lowercased -- which includes the separator, so a
+            segment can never split an id it is placed into.
+    """
     token = str(value or "").strip().lower()
     if not _TOKEN.fullmatch(token):
         raise ValueError(f"{label} must match [a-z0-9][a-z0-9_]*, got {value!r}")
@@ -61,7 +67,13 @@ def event_id(phase: str, macro_cycle: int, component: str) -> str:
 
 
 def parse_event_id(value: str) -> EventId:
-    """Split an event id back into its segments."""
+    """Split an event id built by :func:`event_id` back into its segments.
+
+    Raises:
+        ValueError: If ``value`` is not three separator-joined segments, or a
+            segment does not survive the same validation :func:`event_id`
+            applies.
+    """
     parts = str(value or "").split(EVENT_ID_SEPARATOR)
     if len(parts) != EVENT_ID_SEGMENTS:
         raise ValueError(f"event id must have {EVENT_ID_SEGMENTS} segments, got {value!r}")

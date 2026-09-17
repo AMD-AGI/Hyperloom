@@ -536,8 +536,14 @@ class TestE2EValidationFailsOpen:
             _validate_gemm_tuning_e2e=validate,
         )
         # ``record_gemm_tuning`` stores a shallow copy, so the neutralising rewrites on the exception path only reach
-        # state (and result.json) through these two.
-        for name in ("_replace_latest_gemm_tuning_attempt", "_writeback_gemm_result_json"):
+        # state (and result.json) through these two. The timeline pair comes along because the handler always records
+        # the run; with no recorder bound here it returns without writing, which is what this test wants.
+        for name in (
+            "_replace_latest_gemm_tuning_attempt",
+            "_writeback_gemm_result_json",
+            "_record_gemm_tuning_timeline",
+            "_kernel_timeline",
+        ):
             setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
         return phase, recorded
 

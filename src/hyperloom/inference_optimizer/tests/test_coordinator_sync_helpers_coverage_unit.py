@@ -532,6 +532,32 @@ def test_derive_close_stop_reason_default(coord: Coordinator) -> None:
     assert coord._derive_close_stop_reason() == "time_exhausted"
 
 
+# -- phase denial gate -----------------------------------------------------
+def test_phase_denial_for_action(coord: Coordinator) -> None:
+    ss = coord.shared_state
+    ss.phase = "PRELUDE"
+    assert coord._phase_denial_for_action("baseline") is None
+    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
+    # agent asking for one is refused.
+    ss.phase = "ENABLEMENT"
+    denied = coord._phase_denial_for_action("baseline")
+    assert denied is not None and denied.rule == "phase_incompatible"
+    assert coord._phase_denial_for_action("specialist") is None
+    assert coord._phase_denial_for_action("integrate_patch") is None
+    # The gate reserves named actions only; it is not a phase-membership check.
+    assert coord._phase_denial_for_action("explore") is None
+    # An unknown phase reserves nothing, so the gate abstains.
+    ss.phase = ""
+    assert coord._phase_denial_for_action("baseline") is None
+
+
+def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
+    """The revalidation pump prices its own action and never runs the phase gate."""
+    coord.shared_state.phase = "ENABLEMENT"
+    assert coord._time_budget_denial_for_action("baseline") is None
+    assert coord._admission_denial_for_action("baseline") is not None
+
+
 # -- sequence denial gates -------------------------------------------------
 def test_sequence_denial_for_action(coord: Coordinator) -> None:
     ss = coord.shared_state

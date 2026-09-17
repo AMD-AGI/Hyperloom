@@ -83,10 +83,29 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
-#: ``anchor_perf`` value meaning "this round has already degraded to the output
-#: axis". Distinct from ``None``, which means "no explicit anchor supplied" and
-#: resolves the session anchor instead.
-ANCHOR_DEGRADED: Any = object()
+def resolved_grading(state: Any) -> tuple[bool, float | None]:
+    """Whether the interactivity objective applies to *state*, and the noise band it grades under.
+
+    Prefers what the session recorded at seed over re-deriving it. The derivation reads the environment, and every
+    later reader of it is somewhere the environment is not evidence: a resumed process, a re-baseline subprocess, an
+    export driven from CLOSE. Sessions seeded before ``SharedState.grading`` existed carry nothing and only those
+    derive, reporting a null band because the band they actually applied was never recorded.
+    """
+    from hyperloom.common.perf_metric import GRADED_INTVTY, intvty_serving_grading_enabled
+
+    recorded = getattr(state, "grading", None)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    objective = str(recorded.get("objective") or "").strip()
+    if objective:
+        noise_pct = recorded.get("noise_pct")
+        return objective == GRADED_INTVTY, (float(noise_pct) if isinstance(noise_pct, (int, float)) else None)
+    return (
+        intvty_serving_grading_enabled(
+            scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        ),
+        None,
+    )
 
 
 def resolve_graded_comparison(
@@ -102,12 +121,14 @@ def resolve_graded_comparison(
     # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
     # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
     # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade to output throughput together and ``degrade_reason`` says why.
+    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
+    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
+    # throughput.
     #
     # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
     # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round, and ANCHOR_DEGRADED holds a round on the output axis rather than
-    # re-resolving the session anchor the way None does.
+    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
+    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
@@ -118,7 +139,6 @@ def resolve_graded_comparison(
         VERDICT_RECORDED,
         VERDICT_REVERT,
         intvty_of,
-        intvty_serving_grading_enabled,
         output_tput_of,
         passes_intvty_gate,
         passes_tput_guard,
@@ -127,18 +147,10 @@ def resolve_graded_comparison(
         total_tput_of,
     )
 
+    on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
-    if intvty_serving_grading_enabled(
-        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-    ):
-        if anchor_perf is ANCHOR_DEGRADED:
-            # Already on the output axis for this round. Re-resolving the
-            # session anchor here would grade later variants on interactivity
-            # against the round's opening state while they stack on top of a
-            # KEEP that was graded on output.
-            ref_perf, reason = None, "round_degraded"
-        elif anchor_perf is not None:
+    if on_intvty:
+        if anchor_perf is not None:
             ref_perf, reason = anchor_perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
@@ -156,10 +168,10 @@ def resolve_graded_comparison(
                     keep_threshold_pct,
                     threshold,
                 )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf)
+            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
             if gain is not None and gain >= threshold and tput_holds:
                 verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf) and not tput_holds:
+            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
                 verdict = VERDICT_REVERT
             else:
                 verdict = VERDICT_RECORDED
@@ -181,11 +193,17 @@ def resolve_graded_comparison(
         reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
+    if degrade_reason:
+        # The output-axis figures are diagnostic only. A degraded AgentX pair
+        # must not read as a throughput KEEP at the resolver chokepoint.
+        verdict = VERDICT_REVERT
+    else:
+        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT,
+        verdict=verdict,
         degrade_reason=degrade_reason,
     )
 
@@ -300,11 +318,6 @@ _DEFAULT_LAST_FAILURES = 30
 
 # phase_history cap (record_phase_transition).
 _PHASE_HISTORY_CAP = 100
-
-# How many ``skip_to_close`` hints the pre-enablement guard may drop before it
-# stops dropping them. Matches the stall-streak terminal, so a run that keeps
-# asking to close reaches an exit on the same order as one that stalls out.
-MAX_SKIP_TO_CLOSE_SUPPRESSIONS: int = 5
 
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
@@ -472,6 +485,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
+    # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
+    # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
+    # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
+    # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
+    grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by ``_parse_conc_sweep_concs``.
@@ -515,6 +534,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_targeted_build: dict = field(default_factory=dict)
     # Baseline-materialized YAML path; injected downstream as ``config_path`` so variants inherit the contract.
     baseline_config_path: str = ""
+    baseline_benchmark_script: str | None = None
     # Runtime component versions for recipe writes (framework/runtime/ROCm/aiter/image digest); empty values stripped.
     stack_fingerprint_meta: dict = field(default_factory=dict)
     # Extra workload-shape fields from baseline YAML; warm-start/lesson filters, not part of recipe canonical id.
@@ -560,6 +580,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # every baseline.
     reference_server_args: str = ""
     reference_envs: dict[str, str] = field(default_factory=dict)
+    reference_launch_controls: dict[str, Any] = field(default_factory=dict)
     reference_model: str = ""
     reference_source: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
@@ -605,6 +626,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     stop_reason: str = ""
     # When the session first stopped, and therefore its end time for consumers.
     stop_ts: str = ""
+    # When the current run leg ended without ending the session.
+    leg_ended_ts: str = ""
     # When the current run leg began, i.e. the most recent ``--resume``; empty for a session that has only ever run
     # once.
     resumed_ts: str = ""
@@ -649,8 +672,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     policy_denial_history: list[dict[str, Any]] = field(default_factory=list)
     # Per-(action_name, rule) consecutive denial counter.
     policy_denial_streak: dict[str, int] = field(default_factory=dict)
-    # Set when AST flag discovery cannot locate framework source files.
-    discovered_flags_error: str = ""
     # Server EXTRA_SGLANG_ARGS in effect when last_profile_trace was captured; identical args means the same trace.
     last_profile_args: str = ""
     # Per-kernel GPU time breakdown JSON from the most recent profile.
@@ -834,11 +855,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Unix time an inline kernel request (``integrate``, ``run_optimization``, ...) last reported itself running.
     kernel_inline_step_seen_unix: float = 0.0
 
-    # Which macro cycle's kernel nomination pass has run to completion.
-
-    # Search-space expansion ledger surfaced in the Orchestration prompt.
-    discovered_flags: dict[str, Any] = field(default_factory=dict)
-
     # Monotonic Coordinator tick counter; stable anchor for plateau/phase budget math.
     tick: int = 0
     # Percent improvement still needed to reach the objective (0.0 => none/reached); fact for the "Mission progress" line, not a priority.
@@ -851,7 +867,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_ts: str = ""
     # Unix epoch matching ``phase_started_ts`` so the budget judge skips ISO re-parsing.
     phase_started_unix: float = 0.0
-    # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
+    # Append-only log of phase transitions (rows from machine_state.make_history_row). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
     # Durable sum of completed optimisation-phase segments.
     explore_elapsed_accum_s: float | None = 0.0
@@ -882,11 +898,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
     # Recipe KB integration fields — Coordinator-only writers.
     recipe_kb_session_id: str = ""
-    # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output (parsed dict); empty on first session for a (workload, hw) pair.
+    # Snapshot of ``recipe_kb_t0._cascade_warm_start_search`` output, the ``{workload, hw, tier, confidence, recipe}`` envelope where ``recipe`` is the matched row; empty on first session for a (workload, hw) pair. Bookkeeping, not a prompt input — the model-facing view is ``warm_start_context``.
     warm_start_recipe: dict[str, Any] = field(default_factory=dict)
-    # Snapshot of ``pitfalls`` output (negative priors), list of KB point dicts; consumed by the specialist prompt. Resume tolerates older snapshots.
+    # Snapshot of the recipe row's ``pitfalls`` (negative priors), flat ``{description, severity, ...}`` rows as written by ``Recipe.to_dict``; consumed by the specialist prompt. Resume tolerates older snapshots.
     warm_start_pitfalls: list[dict[str, Any]] = field(default_factory=list)
-    # T0 snapshot of ``lessons`` output (positive priors), symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
+    # T0 snapshot of the recipe row's ``lessons`` (positive priors), flat ``{statement, measured_impact, ...}`` rows, symmetric with warm_start_pitfalls; consumed by the specialist prompt. Empty under --degraded-kb or T0 failure.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     # ISO UTC timestamp of the T0 snapshot; empty under --degraded-kb or T0 failure.
     warm_start_ts: str = ""
@@ -1223,7 +1239,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         out.setdefault("tested", {})
         out.setdefault("accepted", [])
         out.setdefault("rejected", [])
-        out.setdefault("discovered_flags", [])
         out.setdefault("domains_round_summary", [])
         out.setdefault("name_index", {})
         out.setdefault("cursor", len(out.get("tested") or {}))
@@ -1272,27 +1287,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
-        # synergy_attempted: normalize executor-side combos, deduped.
-        sa_set: set[tuple[str, ...]] = set()
-
-        def _normalize_combo(c: Any) -> tuple[str, ...] | None:
-            """Normalize a synergy combo to a sorted tuple of flag names."""
-            if isinstance(c, list):
-                items = tuple(sorted(str(x) for x in c if isinstance(x, str)))
-                return items if items else None
-            if isinstance(c, str) and c.strip():
-                parts = tuple(sorted(p for p in c.split("+") if p))
-                return parts if parts else None
-            return None
-
-        for source in (existing.get("synergy_attempted") or [],):
-            if not isinstance(source, list):
-                continue
-            for c in source:
-                norm = _normalize_combo(c)
-                if norm:
-                    sa_set.add(norm)
-        out["synergy_attempted"] = [list(c) for c in sorted(sa_set)]
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -1338,6 +1332,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
                     server_args=str(cb.get("extra_server_args") or ""),
                     envs=dict(cb.get("extra_envs") or {}),
+                    overlay_pythonpath=str(cb.get("final_overlay") or ""),
+                    unset_envs=to_str_list(cb.get("unset_envs")),
+                    remove_args=to_str_list(cb.get("remove_args")),
+                    args_mode=str(cb.get("args_mode") or "append"),
                     model=self.reference_model or os.environ.get("MODEL_PATH"),
                     tp=int(self.tp or 0) or None,
                     max_model_len=int(self.max_model_len or 0) or None,
@@ -1348,7 +1346,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     encoding="utf-8",
                 )
         except Exception:  # noqa: BLE001 — derived artifact, never fatal
-            log.debug("current_setting.sh render failed", exc_info=True)
+            # Never leave a stale launcher or export a subset of the retained
+            # configuration. The complete settings remain in durable state.
+            try:
+                (Path(session_dir) / "current_setting.sh").unlink(missing_ok=True)
+            except OSError:
+                log.warning("Could not remove stale current_setting.sh", exc_info=True)
+            log.warning("current_setting.sh render failed", exc_info=True)
         # Live status mirror: reflect the persisted snapshot into Langfuse for real-time status.
         try:
             from ..trace.langfuse_emitter import record_status as _lf_record_status
@@ -1544,33 +1548,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         self.last_discarded_escalate_hint = hint
         self.last_discarded_escalate_hint_ts = _now_iso()
         return hint
-
-    def enablement_close_guard_active(self) -> bool:
-        """True while a not-yet-enabled run must be protected from premature close.
-
-        While this guard is active a ``skip_to_close`` hint is dropped; a
-        not-yet-enabled run may only terminate via honest paths that do not route
-        through ``skip_to_close`` (``enablement_stalled``,
-        ``prelude_baseline_failed``, the wall-clock/time-exhausted exits, or hard
-        aborts).
-
-        The suppression count bounds the guard. Every input it reads is set by
-        one path and cleared by several, so any missed clear would otherwise make
-        this the sole authority denying a session its last exit.
-
-        Returns:
-            bool: ``True`` in PRELUDE / FRAMEWORK_AGENT while ``baseline_tput``
-            has never gone positive and enablement has not yet succeeded, or
-            while a revalidation window is open, until the bound is spent.
-        """
-        if self.enablement.skip_to_close_suppressions >= MAX_SKIP_TO_CLOSE_SUPPRESSIONS:
-            return False
-        phase = (self.phase or "").strip().upper()
-        return (
-            phase in ("PRELUDE", "FRAMEWORK_AGENT")
-            and float(getattr(self, "baseline_tput", 0.0) or 0.0) <= 0.0
-            and not self.enablement.succeeded
-        ) or self.enablement.validation_pending
 
     # phase machine writer (Coordinator-only, single writer)
     def record_phase_transition(
@@ -1805,16 +1782,65 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         keep_threshold_pct: float = 1.0,
         max_fault_attempts: int = _MAX_INTEGRATE_FAULT_ATTEMPTS,
     ) -> dict[str, Any] | None:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
+        """Forwarding shim — implementation in :mod:`._kernel_decisions`.
+
+        Also the one seam every integrate settlement passes through, so the
+        author-time capture of the gate's verdict is taken here rather than at
+        each of the three callers.
+        """
         from ..kernel import _kernel_decisions as _m
 
-        return _m.record_kernel_integrate_result(
+        entry = _m.record_kernel_integrate_result(
             self,
             result,
             max_attempts=max_attempts,
             keep_threshold_pct=keep_threshold_pct,
             max_fault_attempts=max_fault_attempts,
         )
+        self._record_integrate_verdict_on_timeline(entry)
+        return entry
+
+    def _record_integrate_verdict_on_timeline(self, entry: dict[str, Any] | None) -> None:
+        """Mirror one settled integrate verdict onto the KERNEL timeline.
+
+        Args:
+            entry (dict[str, Any] | None): The attempts entry the settlement
+                produced, or ``None`` when nothing settled.
+        """
+        if not isinstance(entry, dict):
+            return
+        try:
+            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+
+            last = (entry.get("attempts") or [{}])[-1]
+            last = last if isinstance(last, dict) else {}
+            rejected = entry.get("rejected")
+            record_integrate_verdict(
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                integration_id=str(entry.get("integration_id") or ""),
+                kernel_id=str(entry.get("kernel_id") or ""),
+                decision=str(entry.get("last_decision") or ""),
+                status=str(entry.get("last_status") or ""),
+                attempt_count=entry.get("attempt_count"),
+                fault_count=entry.get("fault_count"),
+                gain_pct=entry.get("best_gain_pct"),
+                accuracy_pass=last.get("accuracy_pass"),
+                validation_tier=str(last.get("validation_tier") or ""),
+                patch_path=str(entry.get("patch_path") or ""),
+                target_file=str(entry.get("target_file") or ""),
+                error_class=str(entry.get("last_error_class") or ""),
+                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+                retryable=bool(entry.get("retryable")),
+                settled_at=str(entry.get("updated_at") or ""),
+                extra_server_args=str(entry.get("extra_server_args") or ""),
+                basis=str(entry.get("basis") or ""),
+                alignment_status=str(entry.get("alignment_status") or ""),
+                # Absent means attributable: every writer that cannot pin the
+                # gain on this one kernel says so explicitly.
+                gain_attributed=bool(entry.get("validated", True)),
+            )
+        except Exception:  # noqa: BLE001 — author-time capture must never block record
+            log.debug("integrate verdict capture failed", exc_info=True)
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2003,36 +2029,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             history = history[-max_history:]
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
-        # Author-time breakdown capture: one phase_timeline event per attempt.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        if action == "baseline":
+            try:
+                from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-            capture_result = dict(result)
-            capture_result.setdefault(
-                "workload",
-                {
-                    "framework": str(getattr(self, "framework", "") or ""),
-                    "model_name": str(getattr(self, "model_name", "") or ""),
-                    "gpu_type": str(getattr(self, "gpu_type", "") or ""),
-                    "precision": str(getattr(self, "precision", "") or ""),
-                    "tp": int(getattr(self, "tp", 0) or 0),
-                    "ep": int(getattr(self, "ep", 0) or 0),
-                    "conc": int(getattr(self, "conc", 0) or 0),
-                    "isl": int(getattr(self, "isl", 0) or 0),
-                    "osl": int(getattr(self, "osl", 0) or 0),
-                },
-            )
-            instrument.record_phase_event(
-                getattr(self, "_session_dir", None),
-                action=action,
-                entry=entry,
-                result=capture_result,
-                phase=str(getattr(self, "phase", "") or ""),
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                tick=int(getattr(self, "tick", 0) or 0),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("record_phase_event capture failed", exc_info=True)
+                record_action_decision(
+                    phase=str(getattr(self, "phase", "") or "unphased"),
+                    macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                    task_id=str(entry.get("task_id") or ""),
+                    decision=str(entry.get("decision") or ""),
+                )
+            except Exception:  # noqa: BLE001 — author-time capture must never block record
+                log.debug("baseline decision capture failed", exc_info=True)
         return entry
 
     def record_action_failure(

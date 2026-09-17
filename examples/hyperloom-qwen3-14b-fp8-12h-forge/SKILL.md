@@ -29,8 +29,9 @@ Nothing else has to be installed or configured for this:
   no `FORGE_PATH` to point anywhere.
 - The runtime installer already installs the `claude` CLI that the forge
   backend drives, unconditionally — the backend is chosen per session, later.
-- Forge reuses the LLM credentials setup already wrote. `FORGE_CLAUDE_MODEL`
-  falls back to `CLAUDE_MODEL`, so no separate key or model id is needed.
+- Forge reuses the LLM credentials setup already wrote. It reads
+  `CLAUDE_MODEL` / `CODEX_MODEL`, the same pair every other Hyperloom
+  component reads, so no separate key or model id is needed.
 - `rocprof-compute` profiling deps are installed unconditionally too.
 
 Do **not** set the other `FORGE_*` variables. They are internal tuning knobs
@@ -77,7 +78,7 @@ skip the user-approval step (#1314).
 
 Suggested Docker images:
 
-- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
+- `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
 
@@ -268,7 +269,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    docker mode, set it inside the same `docker exec` that runs `optimize`.
 3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
-4. Run in background with `setsid nohup`.
+4. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —

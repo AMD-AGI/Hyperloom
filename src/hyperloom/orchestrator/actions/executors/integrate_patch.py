@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import functools
 import json
@@ -20,6 +21,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
@@ -52,6 +54,7 @@ from ...bringup import load_boot_observation, observation_summary, verdict_of, w
 from ...delivery import file_digest, load_records
 from ..stop_attribution import stopped_by_the_run_class
 from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
+from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -82,9 +85,9 @@ from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     DEFAULT_VARIANT_TIMEOUT_SEC,
     GridVariant,
+    SessionDirField,
     VariantResult,
     _num_gpus_for_config,
-    _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -376,6 +379,11 @@ def _resolve_setup_commands(
 def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dict[str, Any]:
     """Replay allowlisted enablement setup commands (installs) before boot.
 
+    Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
+    Cancel is checked between commands; a command already in ``subprocess.run``
+    is not killed. Cancelling the await unwinds integrate and does not continue
+    to apply patches.
+
     Runs each allowlisted command non-interactively with a per-command timeout,
     appending combined output to ``<log_dir>/enablement_setup.log``. Commands
     that fail the allowlist are skipped (never executed). A non-zero install is
@@ -405,48 +413,52 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
-    for cmd in commands:
-        if not _is_allowlisted_setup_command(cmd):
-            # Sanitised HERE, not at the reporting sites. This list is copied
-            # verbatim into every result payload that carries
-            # ``setup_commands_skipped``, and a rejected command is LLM-written
-            # text that can hold a bearer token or a credentialed URL. Doing it
-            # at the four call sites protects those four; doing it at the source
-            # protects the fifth as well.
-            safe_cmd = _sanitize_setup_command(cmd)
-            skipped.append(safe_cmd)
-            # Also carried into the round's ``reason`` by
-            # _with_skipped_setup_reason: a warning alone left the caller with an
-            # outcome and no link to the cause, so the same proposal was
-            # re-authored and re-dropped until the budget ran out. The log is a
-            # disk-backed surface too, so it gets the sanitised form as well.
-            log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-            continue
-        log.info("integrate_patch: enablement setup replay: %s", cmd)
-        try:
-            proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
-                cmd,
-                shell=True,
-                cwd=str(cwd),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=_SETUP_CMD_TIMEOUT_SEC,
-            )
+    with cancel_scope_listener():
+        for cmd in commands:
+            if stop_was_asked_for():
+                log.info("integrate_patch: enablement setup replay stopped after cancel")
+                break
+            if not _is_allowlisted_setup_command(cmd):
+                # Sanitised HERE, not at the reporting sites. This list is copied
+                # verbatim into every result payload that carries
+                # ``setup_commands_skipped``, and a rejected command is LLM-written
+                # text that can hold a bearer token or a credentialed URL. Doing it
+                # at the four call sites protects those four; doing it at the source
+                # protects the fifth as well.
+                safe_cmd = _sanitize_setup_command(cmd)
+                skipped.append(safe_cmd)
+                # Also carried into the round's ``reason`` by
+                # _with_skipped_setup_reason: a warning alone left the caller with an
+                # outcome and no link to the cause, so the same proposal was
+                # re-authored and re-dropped until the budget ran out. The log is a
+                # disk-backed surface too, so it gets the sanitised form as well.
+                log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
+                continue
+            log.info("integrate_patch: enablement setup replay: %s", cmd)
             try:
-                with open(log_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
-            except OSError:
-                # Logging is best-effort.
-                pass
-            if proc.returncode == 0:
-                applied.append(cmd)
-            else:
+                proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+                    cmd,
+                    shell=True,
+                    cwd=str(cwd),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=_SETUP_CMD_TIMEOUT_SEC,
+                )
+                try:
+                    with open(log_path, "a", encoding="utf-8") as fh:
+                        fh.write(f"$ {cmd}\n{proc.stdout}\n{proc.stderr}\n(rc={proc.returncode})\n\n")
+                except OSError:
+                    # Logging is best-effort.
+                    pass
+                if proc.returncode == 0:
+                    applied.append(cmd)
+                else:
+                    failed.append(cmd)
+                    log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
+            except (subprocess.TimeoutExpired, OSError) as exc:
                 failed.append(cmd)
-                log.warning("integrate_patch: enablement setup rc=%d for: %s", proc.returncode, cmd)
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            failed.append(cmd)
-            log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
+                log.warning("integrate_patch: enablement setup errored (%s) for: %s", type(exc).__name__, cmd)
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
@@ -495,23 +507,61 @@ def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
     return texts
 
 
-def _sole_patch_root(done_payload: dict[str, Any] | None) -> str | None:
+def _sole_patch_root(
+    done_payload: dict[str, Any] | None,
+    patch_paths: list[Path],
+    *,
+    specialist_workspace: Path,
+) -> str | None:
     """Return the one apply root recorded for every patch, or ``None``.
 
-    A set spanning two trees has no single apply root, so it falls back to
-    resolution rather than silently picking one.
+    Only metadata covering the selected patch set can replace target
+    resolution. Unselected patches cannot supply or contradict its root.
+    Localization patches outside the specialist workspace deliberately use
+    full-set content resolution: the specialist cannot attest their paths.
 
     Args:
         done_payload: The originating specialist's done payload, if any.
+        patch_paths: The complete patch set selected for this integration.
+        specialist_workspace: Workspace used to resolve recorded patch paths.
 
     Returns:
         The sole recorded root, or ``None``.
     """
     raw = (done_payload or {}).get("patch_roots")
-    if not isinstance(raw, dict):
+    if not isinstance(raw, dict) or not patch_paths:
         return None
-    roots = {str(v) for v in raw.values() if str(v).strip()}
-    return roots.pop() if len(roots) == 1 else None
+    try:
+        selected = {patch.resolve() for patch in patch_paths}
+    except (OSError, RuntimeError, ValueError):
+        return None
+    covered: set[Path] = set()
+    roots: set[str] = set()
+    for recorded_patch, root in raw.items():
+        if not isinstance(recorded_patch, str) or not recorded_patch.strip():
+            continue
+        try:
+            resolved = _resolve_patch_paths(
+                specialist_workspace=specialist_workspace,
+                explicit_patches=[recorded_patch],
+                done_payload=None,
+            )
+        except (OSError, RuntimeError, ValueError):
+            return None
+        for patch in resolved:
+            if patch not in selected:
+                continue
+            if not isinstance(root, str) or not root.strip():
+                return None
+            covered.add(patch)
+            try:
+                root_path = Path(root).expanduser()
+                if not root_path.is_absolute():
+                    root_path = specialist_workspace / root_path
+                roots.add(str(root_path.resolve()))
+            except (OSError, RuntimeError, ValueError):
+                return None
+    return roots.pop() if covered == selected and len(roots) == 1 else None
 
 
 def _resolve_framework_root(
@@ -1651,6 +1701,8 @@ def _enforce_critic_gate(
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
@@ -1671,7 +1723,7 @@ class IntegratePatchExecutor:
             keep_threshold_pct (float): Minimum gain to KEEP a patch.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
         """
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
@@ -1969,7 +2021,8 @@ class IntegratePatchExecutor:
 
         No-op when no candidate is present or in multi-node mode.
         Runs a disk preflight, delegates provision+probe to the framework
-        adapter, and on success stores the resolved runtime on
+        adapter (off the event loop; an in-flight pip install is not killed
+        if the await is cancelled), and on success stores the resolved runtime on
         ``ctx._ip_provision_result`` / ``ctx._ip_stack_action`` for the gate to
         activate via the YAML-layer ``runtime_override``. Returns an early-exit
         ``reverted`` dict on any provision failure (no patch side effects yet),
@@ -1987,14 +2040,12 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping runtime provision in multi-node mode")
             return None
 
-        from ...framework.adapters import get_adapter
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.adapters import get_adapter
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
         attempt_dir = (
-            self.session_dir
-            / "enablement"
-            / "stacks"
+            enablement_stacks_dir(self.session_dir)
             / (action.framework or "unknown")
             / (specialist_task_id or "attempt")
         )
@@ -2018,12 +2069,17 @@ class IntegratePatchExecutor:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
-        try:
-            result = adapter.provision(action, attempt_dir)
-            if result.ok and not adapter.probe(result, action):
-                from ...framework.stack_actions import ProvisionResult as _PR
 
-                result = _PR(ok=False, log_path=result.log_path, error="adapter probe failed after provision")
+        def _provision_and_probe():
+            provisioned = adapter.provision(action, attempt_dir)
+            if provisioned.ok and not adapter.probe(provisioned, action):
+                from ...enablement.runtime.stack_actions import ProvisionResult as _PR
+
+                return _PR(ok=False, log_path=provisioned.log_path, error="adapter probe failed after provision")
+            return provisioned
+
+        try:
+            result = await asyncio.to_thread(_provision_and_probe)
         except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
@@ -2102,8 +2158,8 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping localization in multi-node mode")
             return None
 
-        from ...framework.localization import build_localization_diff
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.localization import build_localization_diff
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
 
@@ -2122,7 +2178,8 @@ class IntegratePatchExecutor:
             }
 
         try:
-            diff_text, touched_paths, verdict = build_localization_diff(
+            diff_text, touched_paths, verdict = await asyncio.to_thread(
+                build_localization_diff,
                 action,
                 fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
                 fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
@@ -2197,7 +2254,8 @@ class IntegratePatchExecutor:
         if bool(params.get("enablement")):
             setup_cmds = _resolve_setup_commands(params=params, done_payload=done_payload)
             if setup_cmds:
-                setup_result = _run_setup_commands(
+                setup_result = await asyncio.to_thread(
+                    _run_setup_commands,
                     setup_cmds,
                     cwd=self.session_dir,
                     log_dir=runs_dir(self.session_dir, "integrate_patch", ctx.task.task_id),
@@ -2371,7 +2429,7 @@ class IntegratePatchExecutor:
         framework_root = _resolve_framework_root(
             explicit_framework_root,
             patch_paths=patch_paths,
-            recorded_root=_sole_patch_root(done_payload),
+            recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
@@ -2845,12 +2903,12 @@ class IntegratePatchExecutor:
                 # venv_root is ``<attempt_dir>/venv``; GC the whole attempt dir.
                 self._gc_attempt_dir(Path(root).parent)
 
-        from hyperloom.agents.framework.enablement import runnable_decision
+        from hyperloom.common.failure_signature import runnable_decision
 
         from ...bringup import round_advanced
+        from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
-        boot_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
@@ -2911,16 +2969,12 @@ class IntegratePatchExecutor:
             "after_observation_degraded": after_loaded.degraded,
         }
 
-        # The boot verdict is the ladder observation's, never the benchmark's
-        # throughput, which cannot separate a slow server from a dead one.
-        booted = after_loaded.observation.booted if after_loaded.observation is not None else None
+        # A measurement exists only where the client completed requests, so it
+        # witnesses the serving instead of inferring it from a log marker.
+        served = is_valid_measurement(bench_result)
 
-        runs, run_reason = runnable_decision(
-            booted=booted,
-            correctness_ok=correctness_ok,
-            boot_timed_out=boot_timed_out,
-        )
-        advanced = not runs and not booted and round_advanced(before_loaded.observation, after_loaded.observation)
+        runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)
+        advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
@@ -3046,7 +3100,7 @@ class IntegratePatchExecutor:
         provisional = correctness_ok is None
         reason = f"enablement runnable: {run_reason}"
         if provisional:
-            reason += " (provisional: booted but eval produced no accuracy; correctness not verified)"
+            reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(
             params=params,
             done_payload=done_payload,
@@ -3089,7 +3143,8 @@ class IntegratePatchExecutor:
             kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
         # Editable-refresh the localized closure + snapshot a manifest that
         # survives rearm so the closure is recorded and not re-fetched.
-        manifest = self._finalize_localization_keep(
+        manifest = await asyncio.to_thread(
+            self._finalize_localization_keep,
             ctx,
             framework_root=framework_root,
             specialist_task_id=specialist_task_id,
@@ -3146,6 +3201,8 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Editable-refresh a localized closure and snapshot its manifest.
 
+        Blocking (editable-refresh up to 600s); call via ``asyncio.to_thread``.
+
         Runs the framework adapter's editable-refresh argv against the attempt
         interpreter (best-effort; skipped when there is no attempt runtime or no
         refresh argv), then records a localization manifest via
@@ -3159,7 +3216,7 @@ class IntegratePatchExecutor:
         # Editable-refresh so localized Python changes take effect in the attempt
         # runtime (no-op for plain wheel trees like atom).
         try:
-            from ...framework.adapters import get_adapter
+            from ...enablement.runtime.adapters import get_adapter
 
             venv_py = ""
             if provision_result is not None and getattr(provision_result, "ok", False):
@@ -3258,8 +3315,8 @@ class IntegratePatchExecutor:
         # reference, which is what resolve_anchor_with_drift exists for.
         new_tput = bench_result.get("output_throughput")
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
-        if graded.degrade_reason:
-            log.info("integrate_patch: grading on output throughput (%s)", graded.degrade_reason)
+        if not graded.comparable:
+            log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
         if not graded.graded_on_intvty:
             delta_pct = gain_pct(new_tput, base_tput)
         elif graded.verdict == VERDICT_KEEP:
@@ -3296,7 +3353,7 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
-        gate_pass = delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
+        gate_pass = graded.comparable and delta_pct is not None and delta_pct >= keep_threshold_pct and not acc_block
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3438,7 +3495,9 @@ class IntegratePatchExecutor:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             reasons: list[str] = []
-            if delta_pct is None:
+            if not graded.comparable:
+                reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+            elif delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
                 reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
@@ -3565,7 +3624,7 @@ class IntegratePatchExecutor:
                     ]
                 )
                 rel_paths += inside_root
-                from ...framework.adapters import get_adapter
+                from ...enablement.runtime.adapters import get_adapter
 
                 source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
                     str(framework_root)
@@ -4459,7 +4518,7 @@ class IntegratePatchExecutor:
             r = results[0]
             bench.update(
                 {
-                    "name": r.name,
+                    **r.to_dict(),
                     "status": r.status,
                     "output_throughput": r.output_throughput,
                     # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
