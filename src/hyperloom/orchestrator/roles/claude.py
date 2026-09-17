@@ -774,10 +774,11 @@ class ClaudeBackend:
 
     def _parse_tool_use_block(self, block: Any) -> Intent | None:
         """Validate one ``emit_intent`` tool-use block into an :class:`Intent`."""
-        block_input = getattr(block, "input", None) or {}
-        if not isinstance(block_input, dict):
-            block_input = {}
-        raw_input, decode_error = decode_emit_intent_input(block_input)
+        # Hand the raw block input to the decoder: it accepts a native object,
+        # Claude Code's __unparsedToolInput wrapper, and the JSON-string
+        # envelope that OpenAI-compatible / litellm proxies emit. Coercing a
+        # non-dict to {} here would decode to an empty intent with no error.
+        raw_input, decode_error = decode_emit_intent_input(getattr(block, "input", None) or {})
         if decode_error is not None:
             log.info("claude tool_use decode failed: %s", decode_error)
             if self._active_turn_diagnostic is not None:
