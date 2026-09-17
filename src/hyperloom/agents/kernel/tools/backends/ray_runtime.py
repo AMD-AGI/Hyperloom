@@ -340,17 +340,28 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
         blocks indefinitely with nothing to observe -- no child process, no log, no
         failure. A daemon thread makes that state reportable. The call itself cannot
         be cancelled, so the thread is abandoned rather than joined; it cannot keep
-        the interpreter alive, and the caller has already been told the cluster is
-        unusable.
+        the interpreter alive. What it could do is finish late and leave this
+        process connected after the caller was told the cluster is unusable, so an
+        abandoned runner shuts the session back down on its way out.
         """
         timeout = _ray_init_timeout_sec()
         outcome: dict[str, BaseException] = {}
+        abandoned = threading.Event()
 
         def _runner() -> None:
             try:
                 _connect(address)
             except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
                 outcome["error"] = exc
+                return
+            if abandoned.is_set():
+                # Finished after the caller was told the cluster is unusable.
+                # Leaving the process connected would hand the next attempt a
+                # session nobody asked for -- and this is a long-lived
+                # coordinator, so "the next attempt" is a later leg of the same
+                # run. The connect cannot be cancelled; its effect can be undone.
+                with contextlib.suppress(Exception):
+                    ray.shutdown()
 
         thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
         # The banner suppression is held here, across a join that always returns, so
@@ -360,6 +371,9 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
             thread.start()
             thread.join(timeout)
         if thread.is_alive():
+            # Set before raising, so a connect that lands between the join
+            # returning and this line still sees it and undoes itself.
+            abandoned.set()
             raise TimeoutError(
                 f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
                 "the raylet accepted the connection but never finished registration. "
