@@ -114,14 +114,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Orchestration picked its CLI from the endpoint shape instead of the rule
   every other agentic role had been moved onto.** `cli/backends.py` was outside
   #1472's reach and still asked `is_openai_only()` for the coordinator, so it
-  read neither credential nor installed SDK. Two shapes move now that it falls
+  read neither credential nor installed SDK. One shape moves now that it falls
   through to `preferred_agent_backend()`: both sides configured with only the
   Codex extra installed runs orchestration on Codex rather than on a
-  `ClaudeBackend` that cannot import its SDK, and a Bedrock or Vertex box
-  carrying an OpenAI key runs Claude rather than Codex, because a managed
-  gateway authenticates the Claude CLI and the endpoint shape could not see it.
-  A single-provider launch still pins its own CLI ahead of the shared rule,
-  because by that point the CLI has already rewritten the model ids to match it.
+  `ClaudeBackend` that cannot import its SDK. A single-provider launch still
+  pins its own CLI ahead of the shared rule, because by that point the CLI has
+  already rewritten one model id into the other's, and that is the only launch
+  the ranked path is not consulted for.
 
   **The ranking was written twice.** `preferred_agent_backend` and the Forge
   registry's `select_default_agent_provider` each built the credential-then-SDK
@@ -137,13 +136,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   **The OpenAI-side key names are one tuple.** `openai_agent_credentialed`
   recognised `OPENAI_API_KEY` while `codex_session` authenticates with
   `OPENAI_API_KEY` or `LLM_GATEWAY_KEY`, each keeping its own copy of the list.
-  The predicate now reads the same tuple the session does. No deployment
-  changes hands over it: the shape it would move -- a gateway key with no
-  `OPENAI_API_KEY` and no Anthropic credential -- is refused by
-  `_validate_credentials`, `install.sh` mirrors that refusal, and every env
-  overlay that forwards the gateway key forwards `OPENAI_API_KEY` beside it or
-  strips both. It is the two lists that were the exposure, not a live
-  misroute.
+  The predicate now reads the same tuple the session does. It moves one shape
+  no launch reaches: a gateway key with no `OPENAI_API_KEY` and no Anthropic
+  credential ranks Codex where it ranked Claude, which is the right way round
+  -- `claude_sdk_env_options` synthesizes a CLI key only from
+  `ANTHROPIC_SYNTHESIZABLE_KEY_ENVS`, so that box cannot authenticate Claude at
+  all -- but `_validate_credentials` refuses it and `install.sh` mirrors the
+  refusal, and every env overlay that forwards the gateway key forwards
+  `OPENAI_API_KEY` beside it or strips both. It is the two lists that were the
+  exposure, not a misroute in a running deployment.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
