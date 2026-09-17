@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -112,7 +112,7 @@ def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
         assert status == stack_event.STATUS_SUCCEEDED
 
 
-def test_a_degraded_lift_records_why_the_output_axis_was_used(session_dir, monkeypatch):
+def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
@@ -136,11 +136,8 @@ def test_a_degraded_lift_records_why_the_output_axis_was_used(session_dir, monke
                 "total_throughput": 22000.0,
                 "e2e_norm_intvty_p90": 30.0,
             },
-        ) is True
-
-        row = _rows()[0]
-        assert row["degrade_reason"] == "current_best_axes_missing"
-        assert row["objective"] == GRADED_OUTPUT
+        ) is False
+        assert _rows() == []
 
 
 def test_a_refused_lift_records_nothing(session_dir):

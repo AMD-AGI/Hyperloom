@@ -127,7 +127,9 @@ def resolve_graded_comparison(
     # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
     # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
     # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade to output throughput together and ``degrade_reason`` says why.
+    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
+    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
+    # throughput.
     #
     # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
     # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes

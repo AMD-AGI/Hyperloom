@@ -7,13 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- **SBD V6 degrade findings now surface on the production lift path.** When an
-  AgentX session could not grade on interactivity and fell back to output
-  throughput, ``_lift_to_current_best`` had been refusing the adoption because
-  ``comparable`` was false, so ``record_adoption`` never carried a
-  ``degrade_reason`` and the breakdown could not name mixed-axis ledgers.
-  Degraded winners that beat the output anchor are promoted again and the reason
-  is recorded on the adoption row.
+- **AgentX grading failures no longer fall back to throughput KEEP.** When an
+  AgentX session cannot grade on interactivity because either side is missing
+  the axis pair, explore and ``_lift_to_current_best`` fail closed instead of
+  promoting on the diagnostic output figure. ``degrade_reason`` still travels
+  on timeline rows so the breakdown can name why a variant did not KEEP.
 
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The

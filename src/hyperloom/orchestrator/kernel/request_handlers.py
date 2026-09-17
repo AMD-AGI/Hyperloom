@@ -6559,7 +6559,7 @@ async def integrate_handler(
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     graded = performance.graded
     if graded.degrade_reason:
-        log.info("integrate_handler: grading on output throughput (%s)", graded.degrade_reason)
+        log.info("integrate_handler: grading unavailable (%s)", graded.degrade_reason)
     gain_pct = performance.gain_pct
     stack_incremental_gain_pct = performance.stack_incremental_gain_pct
     stack_positive_keep = performance.stack_positive_keep

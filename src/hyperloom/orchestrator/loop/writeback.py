@@ -3133,12 +3133,17 @@ class WritebackCollaborator:
         cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
         if not prebaseline_enablement:
             graded = resolve_graded_comparison(self.shared_state, cand_source)
-            if graded.degrade_reason:
+            if not graded.comparable:
+                # AgentX sessions fail closed when the interactivity axis could
+                # not apply. The output figure on a degraded pair is diagnostic
+                # only; promoting on it would record a throughput KEEP the
+                # session never asked for.
                 log.info(
-                    "current_best: %s winner graded on output throughput (%s)",
+                    "current_best held: %s winner not comparable (%s)",
                     task_kind,
                     graded.degrade_reason,
                 )
+                return False
             if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP:
                 log.info(
                     "current_best held: %s winner %s intvty %.1f->%.1f tput %.1f->%.1f",

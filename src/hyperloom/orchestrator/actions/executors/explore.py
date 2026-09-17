@@ -36,7 +36,6 @@ from ...state.failure_evidence import (
     tail_excerpt,
 )
 from ...state.shared_state import (
-    ANCHOR_DEGRADED,
     first_positive_tput,
     framework_is_scriptable,
     resolve_anchor_with_drift,
@@ -878,8 +877,10 @@ class ExploreExecutor:
         grade_on_intvty, _ = resolved_grading(ss)
         running_base_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_intvty else (None, "")
         if grade_on_intvty and running_base_perf is None:
-            log.info("explore: grading this round on output throughput (%s)", _anchor_reason)
-            running_base_perf = ANCHOR_DEGRADED
+            # AgentX grading needs both axes on the round anchor. Without them
+            # every variant fails closed below; output figures are diagnostic
+            # only and must not become throughput KEEPs.
+            log.info("explore: AgentX grading unavailable for this round (%s)", _anchor_reason)
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin script / profiler-on falls back to a cold
         # decision round instead of one that re-attaches to the warmup's server).
@@ -1258,12 +1259,6 @@ class ExploreExecutor:
                         anchor_tput=running_base_tput,
                     )
                     _graded_on_intvty = graded.graded_on_intvty
-                    if graded.degrade_reason:
-                        log.info(
-                            "explore: variant %r graded on output throughput (%s)",
-                            gv.name,
-                            graded.degrade_reason,
-                        )
                     axes = (
                         f"intvty {graded.reference:.1f}->{graded.candidate:.1f} "
                         f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
@@ -1280,6 +1275,18 @@ class ExploreExecutor:
                     if r.status != "succeeded":
                         gain = None
                         reason = (r.error or "")[-1200:] or "no_measurement"
+                    elif graded.degrade_reason:
+                        # Same fail-closed rule as ``_lift_to_current_best``: an
+                        # AgentX session that could not grade on interactivity
+                        # does not KEEP on output throughput instead.
+                        gain = None
+                        outcome = "FAILED"
+                        reason = graded.degrade_reason
+                        log.info(
+                            "explore: variant %r not comparable (%s)",
+                            gv.name,
+                            graded.degrade_reason,
+                        )
                     elif graded.verdict == VERDICT_REVERT:
                         gain = None
                         outcome = "REVERT"
@@ -1299,8 +1306,14 @@ class ExploreExecutor:
                         # all, which is why no row is appended then.
                         decision_gates.append(
                             {
-                                "gate": "graded_axes" if _graded_on_intvty else "keep_threshold",
-                                "passed": graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED),
+                                "gate": "graded_axes"
+                                if (_graded_on_intvty or graded.degrade_reason)
+                                else "keep_threshold",
+                                "passed": (
+                                    False
+                                    if graded.degrade_reason
+                                    else graded.verdict not in (VERDICT_REVERT, VERDICT_RECORDED)
+                                ),
                                 # The anchor is the reference; the floor the
                                 # candidate has to clear belongs to the gate, as
                                 # the tolerance does for accuracy.
@@ -1503,19 +1516,9 @@ class ExploreExecutor:
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
                         if grade_on_intvty:
-                            # The KEEP's own axes become the next variant's
-                            # anchor. A KEEP that could not supply them holds
-                            # the round on the output axis, rather than letting
-                            # the session anchor grade later variants on
-                            # interactivity while they stack on top of it.
+                            # Only a comparable intvty KEEP advances the round
+                            # anchor. Degraded measurements never reach here.
                             running_base_perf = perf_snapshot_from_mapping(variant_meas)
-                            if running_base_perf is None:
-                                log.info(
-                                    "explore: KEEP %r had no graded axes; grading the rest of "
-                                    "this round on output throughput",
-                                    gv.name,
-                                )
-                                running_base_perf = ANCHOR_DEGRADED
 
                         winners.append(keep_entry)
                         winners_history_update.append(
