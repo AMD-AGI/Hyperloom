@@ -21,6 +21,7 @@ When this guide and tooling disagree, **tooling wins** — update the guide if y
 2. **Automate what you can** — run `pre-commit` locally; let CI enforce the rest.
 3. **No secrets in the tree** — credentials belong in environment variables or secret stores.
 4. **License hygiene** — every file must satisfy [REUSE](https://reuse.software/) (see below).
+5. **Shape is reviewable** — maintainability, readability, extensibility, and reliability are review criteria, not afterthoughts; see [Size and complexity](#size-and-complexity).
 
 ## Python
 
@@ -51,6 +52,26 @@ ruff format --check .   # or `ruff format .` to apply
 **Do not** add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
 
 **Future rules** (`B`, `I`, `UP`, `SIM`, `RUF`) are commented in `pyproject.toml` and will be enabled once the backlog is zero. New code should already follow import sorting and common bugbear patterns even before those rules are turned on.
+
+### Size and complexity
+
+Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right.
+
+| Unit | Trigger | Where the number comes from |
+|------|---------|-----------------------------|
+| Function length | ~60 lines | Just above the tree's 90th percentile (55 lines); past this a function is usually two |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
+| Module length | ~800 lines | Roughly the tree's 90th percentile (914 lines) |
+
+Measure rather than argue:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+```
+
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three (618 functions over CC 10, 801 over 60 lines, 92 modules over 800 lines, measured Sept 2026). **Do not grow it**, and prefer leaving a file you touched smaller than you found it. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+
+Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
 
 ### Module structure
 
@@ -115,6 +136,8 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 **E2E markers** (skipped in CI by default):
 
 - `critic_agent_e2e`, `robustness_agent_e2e`, `targeted_build_e2e`
+
+**What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with unit tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Cover those flows **end to end** (see the `*_e2e` markers above), and unit-test an internal helper when it carries real logic of its own.
 
 **Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Add unit tests for logic you introduce; do not chase coverage on omitted paths.
 

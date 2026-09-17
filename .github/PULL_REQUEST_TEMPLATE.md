@@ -1,6 +1,7 @@
 - Description: what and why
 - Linked issue(s): close/fix refs
-- Tests: added/updated? commands run?
+- Tests: added/updated? commands run? (exported behaviour pinned by UT; business flow covered e2e)
+- Size/complexity triggers crossed (function >60 lines, CC >10, module >800 lines): split, or why the shape is right:
 - `CHANGELOG.md` entry under `[Unreleased]`: yes/no (if no, why the change is unobservable):
 - Breaking changes: yes/no (details if yes)
 - PR addresses single concern: yes/no (details if no):
