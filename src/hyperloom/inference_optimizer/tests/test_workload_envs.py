@@ -725,3 +725,50 @@ def test_agentx_kb_blocked_matches_agentx_active(monkeypatch):
 
 
 # Scriptable baseline sampling cost (measurement contract values)
+
+
+# ---- naming the client's tokenizer, only when HF cannot ----------------------
+
+
+def _write_model(tmp_path, model_type):
+    import json
+
+    d = tmp_path / "m"
+    d.mkdir(exist_ok=True)
+    (d / "config.json").write_text(json.dumps({"model_type": model_type}), encoding="utf-8")
+    return str(d)
+
+
+def test_a_model_type_transformers_cannot_map_names_its_tokenizer(tmp_path):
+    """DeepSeek-V4 is the live case: HF raises KeyError before the first request."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "deepseek_v4")) == "deepseek_v4"
+
+
+def test_a_model_type_transformers_knows_names_nothing(tmp_path):
+    """The rule is model-agnostic: a resolvable model leaves the client argv alone."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "llama")) == ""
+
+
+def test_an_unreadable_model_names_nothing(tmp_path):
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(str(tmp_path / "absent")) == ""
+    assert _client_tokenizer_mode("") == ""
+
+
+def test_an_unknown_model_type_is_not_assumed_to_be_a_tokenizer_mode(tmp_path):
+    """A tokenizer mode is a loader backend, not a model type.
+
+    kimi_k25 is equally unknown to transformers, but the client implements no
+    loader for it -- naming it would make the client reject the flag and fail
+    exactly the way the unnamed tokenizer did. Those models are served by the
+    trust-remote-code path instead.
+    """
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "kimi_k25")) == ""
+    assert _client_tokenizer_mode(_write_model(tmp_path, "some_future_model")) == ""

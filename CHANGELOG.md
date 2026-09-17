@@ -5,6 +5,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **An enablement session now ships an ordered replay recipe, and a verdict on
+  whether it can be replayed at all.** The session's durable state said what was
+  kept and nothing about how to reproduce it: an operator holding a KEEP had a
+  list of patches, no order to apply them in, no record of which tree each was
+  written against, and no way to tell a complete stack from one whose evidence
+  was never captured.
+
+  `recipe_steps` projects the state onto an ordered array — setup, build, patch —
+  each step naming the root it applies to, the targets its own diff declares and
+  the identity of what each install consumed. `replay_sufficiency` judges that
+  array and reports `sufficient` or `insufficient` against a closed vocabulary of
+  reasons, each naming what it blocks: replay, assertion validation, or both. A
+  patch whose targets nobody recorded, a build nothing replayed, a root with no
+  base commit and a credential the recipe cannot supply are all refusals, not
+  assumptions. Both appear in `session_breakdown.json` under `enablement.recipe`,
+  and the session package now carries the KEEP's source overlay the steps
+  reference, so a `sufficient` recipe does not ship with its own evidence
+  missing.
+
+  The KEEP records what the two need: each root's identity and base commit taken
+  before the round's first mutation, byte-exact snapshots of every declared
+  target, the environment closure and installed versions read through the
+  interpreter the accepted bench launched, and an append-only ledger of the setup
+  commands as they ran. Credentials are classified and sanitised on emission.
+
+- **`ray.init`'s connect is bounded.** It had no timeout at all, so an
+  unreachable head node hung the leg until the session clock ran out instead of
+  failing it.
+
 ### Fixed
 
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
