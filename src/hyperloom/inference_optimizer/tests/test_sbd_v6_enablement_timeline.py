@@ -681,6 +681,34 @@ def test_the_tri_state_scans_survive_into_the_recorded_recipe(_bound_session, ob
     assert recipe["build_extensions_not_carried"] == expected
 
 
+def test_a_build_linked_only_through_a_kept_round_survives_the_projection(_bound_session):
+    """``last_specialist_task_id`` is one-shot; the kept rounds outlive it.
+
+    ``select_linked_build`` falls back to ``kept_rounds`` for exactly the case
+    where the marker has already been consumed -- which is the normal case by
+    the time a build is linked. The projection's field list omitted
+    ``kept_rounds``, so the fallback existed at runtime and could never fire in
+    the recorded recipe: a build reachable only that way vanished from it.
+    """
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.last_specialist_task_id = ""  # consumed, as it is when a build lands
+    rnd.kept_rounds = [{"task_id": "spec-1", "patches": ["/p/1.patch"]}]
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None
+    assert "kept_rounds" in recipe, sorted(recipe)
+    assert [r.get("task_id") for r in recipe["kept_rounds"]] == ["spec-1"]
+
+
 def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
     _capture_overlay(_bound_session)
     _boot_trigger()

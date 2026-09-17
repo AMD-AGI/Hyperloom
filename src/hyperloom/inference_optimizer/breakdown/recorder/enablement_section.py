@@ -50,6 +50,13 @@ _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "installed_versions_at_keep",
     "kept_artifacts",
     "kept_patches",
+    # ``select_linked_build`` falls back from ``last_specialist_task_id`` to the
+    # kept rounds, precisely because that marker is one-shot and is normally
+    # already consumed by the time a build is linked. Omitted here, the fallback
+    # exists at runtime and can never fire in the recorded recipe: a build
+    # reachable only through a round's durable identity disappears from the
+    # projection, which is the case the fallback was added for.
+    "kept_rounds",
     "kept_stack_action",
     "last_specialist_task_id",
     "launch_argv_refused",
@@ -352,6 +359,13 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
     kept_patches_raw = _eg(state, "kept_patches")
     if isinstance(kept_patches_raw, list) and kept_patches_raw:
         out["kept_patches"] = [_rel(Path(str(p)), session_dir) or str(p) for p in kept_patches_raw]
+    # Exported beside the patches, not only fed to the projection: a build linked
+    # through a round's durable identity is reachable only from here once the
+    # one-shot ``last_specialist_task_id`` has been consumed, which is the normal
+    # state by the time a build lands.
+    kept_rounds_raw = _eg(state, "kept_rounds")
+    if isinstance(kept_rounds_raw, list) and kept_rounds_raw:
+        out["kept_rounds"] = [dict(r) for r in kept_rounds_raw if isinstance(r, dict)]
     kept_artifacts_raw = _eg(state, "kept_artifacts")
     framework_root = str(_eg(state, "framework_root", "") or "")
     if isinstance(kept_artifacts_raw, list) and kept_artifacts_raw:
