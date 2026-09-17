@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     make_kernel_recorder,
     record_integrate_verdict,
     record_trace_analyze_request,
+    reject_geak_attempts,
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -656,6 +657,65 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
     }
     assert attempts["kernels"][1]["skip_reason"] == "non_reusable_kernel"
     assert attempts["kernels"][1]["backend_result"] is None
+
+
+@pytest.mark.parametrize(
+    "kernel_id",
+    [
+        "aiter:paged_attention_ragged (pa_ragged / paged_attention_ll4mi_QKV_mfma16)",
+        "https://example.org/kernels/7",
+        "backend:kernel%3Avariant",
+    ],
+)
+def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejection(tmp_path, kernel_id):
+    recorder = _geak_recorder(macro_cycle=0)
+    journey = {
+        "discovery_runs": [{"source": "trace:1", "status": "success"}],
+        "kernels": [{"kernel_id": kernel_id, "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 4.0}}],
+    }
+    recorder.record_geak_attempts(journey)
+    recorder.record_geak_claim({}, specs=[{"kind": "env", "short_name": kernel_id, "e2e_delta_pct": 4.0}])
+    _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
+    record_integrate_verdict(
+        macro_cycle=0,
+        integration_id=f"geak:{kernel_id}",
+        kernel_id=kernel_id,
+        decision="KEEP",
+        gain_pct=4.0,
+    )
+    recorder.finish(verdict="validated", tput_after=950.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert ext["geak"]["attempts"]["discovery_runs"][0]["source"] == "trace:1"
+    assert ext["geak"]["attempts"]["kernels"][0]["kernel_id"] == kernel_id
+    assert ext["geak"]["claim"]["env_selections"][0]["selection"] == kernel_id
+    assert ext["geak"]["claim"]["env_selections"][0]["outcome"] == "adopted"
+    assert ext["geak"]["rebench"]["attempts"][0]["attempt_id"] == "geak:rebench:0"
+    assert kernel_event_parts()["kernel_integrate"][0]["integration_id"] == f"geak:{kernel_id}"
+
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.record_geak_attempts(journey)
+    attempts = _kernel_events(tmp_path)[0]["ext"]["geak"]["attempts"]["kernels"]
+    assert len(attempts) == 1
+    assert attempts[0]["kernel_id"] == kernel_id
+    assert attempts[0]["e2e"]["decision"] == "REVERT"
+    assert attempts[0]["e2e"]["rejection_reason"] == "no_promote"
+
+
+def test_name_only_discovered_kernels_keep_distinct_rank_fallback_ids():
+    recorder = _forge_recorder()
+    recorder.record_discovered_kernels(
+        {"roofline_snapshot_id": 4, "hot_kernels_top15": [{"name": "kernel_a"}, {"name": "kernel_b"}]}
+    )
+    rows = kernel_event_parts()["kernel_discovered"]
+    assert [row["name"] for row in rows] == ["kernel_a", "kernel_b"]
+    assert [row["rank"] for row in rows] == [0, 1]
 
 
 def test_an_attempt_carries_what_made_the_kernel_worth_trying(tmp_path):

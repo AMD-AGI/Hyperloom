@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import NamedTuple
 
@@ -90,7 +92,7 @@ def parse_event_id(value: str) -> EventId:
 
 
 def fragment_key(event: str, row_type: str, *natural_ids: str) -> str:
-    """Build the fragment key for one row of an event."""
+    """Build a stable key without interpreting data-derived ids as segments."""
     parse_event_id(event)
     if not row_type and not natural_ids:
         return event
@@ -99,10 +101,11 @@ def fragment_key(event: str, row_type: str, *natural_ids: str) -> str:
         token = str(natural_id if natural_id is not None else "").strip()
         if not token:
             raise ValueError(f"natural id at position {index} must be non-empty for row_type {row_type!r}")
-        if EVENT_ID_SEPARATOR in token:
-            raise ValueError(
-                f"natural id at position {index} must not contain {EVENT_ID_SEPARATOR!r} "
-                f"for row_type {row_type!r}, got {token!r}"
-            )
         segments.append(token)
+    if any(EVENT_ID_SEPARATOR in token for token in segments[2:]):
+        encoded = json.dumps(segments[2:], ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        digest = hashlib.sha256(encoded).hexdigest()
+        # An empty segment reserves a namespace no legacy valid key can occupy.
+        # Hash the tuple so its boundaries survive without renaming existing keys.
+        return EVENT_ID_SEPARATOR.join([*segments[:2], "", "sha256", digest])
     return EVENT_ID_SEPARATOR.join(segments)

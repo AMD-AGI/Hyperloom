@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Session Breakdown retains rows whose external identifiers contain colons.**
+  GEAK kernel names, selections and integration identifiers now keep their
+  attempt and verdict records instead of being dropped by the fragment-key
+  validator. Opaque identifier tuples use distinct stable keys while existing
+  valid keys keep their spelling, preserving resumed updates and event filtering.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
