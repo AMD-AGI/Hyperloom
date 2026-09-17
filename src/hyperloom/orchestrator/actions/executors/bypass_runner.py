@@ -697,9 +697,9 @@ def _frozen_constraints(python_exe: str) -> list[str]:
 def _ensure_tinybenchmarks(python_exe: str) -> None:
     """Install the ``tinyBenchmarks`` estimator under *python_exe*, best-effort.
 
-    lm-eval imports it lazily from inside the ``tiny*`` aggregation functions, so a missing install would otherwise
-    surface only after the whole generation pass has already been paid for. Upstream ships no PyPI distribution, so
-    the install is from source: git first, then the archive, because the sandbox may not ship a git binary.
+    lm-eval's ``tiny*`` aggregation module imports it at top level and is loaded while the task YAML is constructed,
+    so a missing install aborts the accuracy pass outright. Upstream ships no PyPI distribution, so the install is
+    from source: git first, then the archive, because the sandbox may not ship a git binary.
 
     Its own requirements are declared unpinned (``numpy``, ``scipy``, ``requests``), so the install is constrained:
     on an image without scipy, resolving it is what would otherwise drag numpy along with it.

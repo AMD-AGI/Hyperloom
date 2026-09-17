@@ -27,8 +27,9 @@ ACCURACY_METRIC_KEYS: tuple[str, ...] = (
 )
 
 # lm-eval's ``tinyBenchmarks`` tasks (tinyGSM8k, tinyMMLU, ...) score a ~100-item IRT-calibrated anchor set and then
-# estimate the full-benchmark number from it. The estimator lives in a separate package that lm_eval imports lazily
-# inside its aggregation function, so a missing install surfaces only after the whole generation pass has run.
+# estimate the full-benchmark number from it. The estimator lives in a separate package that lm_eval's aggregation
+# module imports at top level, and that module is loaded while the task YAML is constructed, so a missing install
+# aborts the run before a single request is issued rather than producing a degraded score.
 TINYBENCHMARKS_MODULE = "tinyBenchmarks"
 
 # Upstream publishes no PyPI distribution (``pip install tinyBenchmarks`` 404s), so the only install is from source.

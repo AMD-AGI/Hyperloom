@@ -155,9 +155,10 @@ including its sparse `tinyBenchmarks` set (`tinyGSM8k`, `tinyMMLU`, ...). Those
 tasks score a ~100-item IRT-calibrated anchor set and then *estimate* the
 full-benchmark number from it, so they cut eval wall-clock by roughly an order
 of magnitude. Their estimator ships in a separate `tinyBenchmarks` package that
-lm-eval imports lazily from inside the aggregation function; Hyperloom installs
-it automatically, but only when the resolved task list names a `tiny*` task, so
-a default run takes on no extra dependency.
+lm-eval imports while it constructs the task, so without it the accuracy pass
+aborts before it issues a request. Hyperloom installs it automatically, but only
+when the resolved task list names a `tiny*` task, so a default run takes on no
+extra dependency.
 
 Two things to know before switching:
 

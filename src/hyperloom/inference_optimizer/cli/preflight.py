@@ -1207,8 +1207,8 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
 def _install_pinned_tinybenchmarks(python_exe: str, pip_extra: list[str]) -> None:
     """Install the pinned ``tinyBenchmarks`` estimator, falling back to the source archive.
 
-    lm-eval's ``tiny*`` tasks import it from inside their aggregation function, so without it the accuracy pass fails
-    only after the whole generation run has been paid for. Upstream publishes no PyPI distribution, hence the same
+    lm-eval's ``tiny*`` aggregation module imports it at top level and is loaded while the task YAML is constructed,
+    so without it the accuracy pass aborts outright. Upstream publishes no PyPI distribution, hence the same
     git-then-archive shape as the pinned lm_eval install.
     """
     constraints = _frozen_constraints(python_exe)
