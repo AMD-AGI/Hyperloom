@@ -884,7 +884,12 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
 
     state = {
         "enablement": {
+            # Every field that has leaked so far, populated at once. Each earlier
+            # fixture left one of them empty, which is how the next surface kept
+            # going unnoticed.
+            "framework_root": "/srv/vllm",
             "kept_patches": ["/authoring/ws/a.patch"],
+            "patch_roots": {"/authoring/ws/a.patch": "/srv/vllm"},
             "kept_rounds": [
                 {
                     "task_id": "s1",
@@ -892,6 +897,10 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
                     "artifacts": [{"source": "/authoring/ws/_C.so", "target": "/srv/vllm/_C.so"}],
                 }
             ],
+            "kept_artifacts": [
+                {"target": "/srv/vllm/_C.so", "rel_target": "_C.so", "kind": "ext", "root": "/srv/vllm"}
+            ],
+            "roots": [{"id": "r1", "path": "/srv/vllm", "kind": "framework_checkout"}],
         },
         "enablement_mode": "all",
     }
@@ -899,6 +908,14 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
 
     blob = _json.dumps(collected)
     assert "/authoring/ws" not in blob, blob
+    # ``framework_root`` stays: it is the recipe's declared subject, and the
+    # setting script exports it. What may not carry a host path is a field with
+    # no use for one -- the step's resolved root and the artifact's install
+    # target, both of which the rules reach through ``root_id`` instead.
+    steps = collected["recipe_steps"]
+    assert all("root" not in st for st in steps if st.get("kind") == "patch"), steps
+    assert all("target" not in a for a in collected["kept_artifacts"]), collected["kept_artifacts"]
     # The linkage itself must survive: normalizing must not mean discarding.
     assert "a.patch" in blob and "_C.so" in blob
+    assert "r1" in blob, "the portable root identifier must remain"
 

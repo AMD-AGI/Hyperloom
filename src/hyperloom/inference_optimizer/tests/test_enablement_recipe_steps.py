@@ -279,7 +279,10 @@ def test_recipe_steps_artifact_selection_includes_advanced_round():
         },
         [],
     )
-    assert [a["target"] for a in out["kept_artifacts"]] == ["/fr/srt/a.py"]
+    # The portable pair, not the install path: nothing reads ``target`` and it
+    # names a directory on the machine that produced the recipe.
+    assert [a["rel_target"] for a in out["kept_artifacts"]] == ["srt/a.py"]
+    assert all("target" not in a for a in out["kept_artifacts"])
 
 
 def test_recipe_steps_artifact_selection_excludes_superseded_target():

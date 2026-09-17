@@ -26,6 +26,9 @@ from ..session_package import deliverable
 
 log = logging.getLogger(__name__)
 
+#: ``recipe.steps`` kind for a patch, matched without importing the recipe package.
+PATCH_KIND_NAME = "patch"
+
 # --------------------------------------------------------------------------
 
 _ENABLEMENT_LOG_EXCERPT_CHARS = 2000
@@ -219,12 +222,7 @@ def _collect_recipe(
         # every lookup miss and the whole recipe reports ``patch_targets_unknown``
         # -- a portability fix that silently costs the steps their targets. The
         # published value is the only part a consumer reads.
-        out["recipe_steps"] = [
-            {**st, "path": _portable_patch_ref(str(st.get("path") or ""), session_dir)}
-            if st.get("kind") == "patch" and st.get("path")
-            else st
-            for st in steps
-        ]
+        out["recipe_steps"] = [_portable_step(st, session_dir) for st in steps]
     accepted_config = project_accepted_config(enablement.get("accepted_config"))
     if accepted_config:
         archived = str(_eg(state, "accepted_config_path", "") or "")
@@ -371,6 +369,24 @@ def _portable_patch_ref(raw: str, session_dir: Path) -> str:
     return Path(rel).name if Path(rel).is_absolute() else rel
 
 
+
+def _portable_step(step: dict[str, Any], session_dir: Path) -> dict[str, Any]:
+    """A recipe step with its host paths reduced to what a consumer can act on.
+
+    ``root`` is the tree a patch was resolved against, and it is absolute by
+    construction. Nothing reads it -- the rules join on ``root_id``, and
+    ``project_roots`` drops the same path for the same reason -- so shipping it
+    only tells the consumer about a directory layout that is not theirs.
+    """
+    if step.get("kind") != PATCH_KIND_NAME:
+        return step
+    out = dict(step)
+    if out.get("path"):
+        out["path"] = _portable_patch_ref(str(out["path"]), session_dir)
+    out.pop("root", None)
+    return out
+
+
 def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session_dir: Path) -> None:
     """Emit what the lane landed: patches, artifacts, stack action and setup."""
     from hyperloom.orchestrator.enablement.recipe.steps import root_ids_by_path
@@ -428,7 +444,10 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
         root_ids = root_ids_by_path({"roots": _eg(state, "roots")})
         out["kept_artifacts"] = [
             {
-                "target": str(a.get("target") or ""),
+                # ``rel_target`` and ``root_id`` are the portable pair, and the
+                # only two the rules read. ``target`` is an install path on this
+                # machine: shipped verbatim it named a directory the consumer
+                # does not have, for a field nothing consults.
                 "rel_target": str(a.get("rel_target") or ""),
                 "kind": str(a.get("kind") or ""),
                 "root_id": root_ids.get(str(a.get("root") or "") or framework_root) or None,
