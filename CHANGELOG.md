@@ -62,6 +62,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   single-shot Anthropic transport, Codex through `achat_completion` -- and is
   skipped entirely when neither side is credentialed.
 
+- **A kernel spelled two ways held two half-filled KB histories.** A forge-loop
+  record is addressed by the operator as the campaign declared it, and the
+  campaign declares the entry point as the source it read spells it -- which is
+  both ways across one tree: `KdaPackedDecodeKernel` in the header that declares
+  the kernel, `kda_packed_decode_kernel` in the module that binds it. Operator
+  normalization lowercased without splitting camel case, so those two spellings
+  produced `kdapackeddecodekernel` and `kda_packed_decode`: different pages, and
+  the second addresses one nothing ever wrote to. The read is exact, so the miss
+  surfaced as `no_prior_record`, indistinguishable from an operator nobody has
+  ever ported. Measured: a validated 1.44x port stayed on disk, still applying
+  cleanly, while the campaign that should have started from it re-derived the
+  kernel from scratch. The task contract makes this the common case rather than
+  a rare one -- it asks for the camel-cased, namespace-qualified spelling
+  (`aiter::fusedAddRmsNorm`) so upstream pull-request search has term boundaries
+  to split on -- and every kernel whose Python binding is snake-cased has both
+  spellings in reach. Normalization now splits camel-case boundaries before
+  lowercasing, so either spelling addresses one page. An acronym run stays one
+  word: `FusedMoE` normalizes to `fused_moe` and `QKV` to `qkv`, rather than
+  splitting on every case change and inventing a difference between spellings of
+  one kernel instead of removing one. A capital that follows a whole word is a
+  word of its own, so `ChunkFwdKernelO` is `chunk_fwd_kernel_o`; only a fragment
+  of at most two letters absorbs one, which is what an acronym looks like once
+  the boundaries have cut it. Across the 359 snake-cased kernel names in the
+  store's records and in this tree, both camel spellings of 330 agree with the
+  snake spelling; the 29 that do not are names with a digit beside a letter,
+  where `mxfp4_moe_2stage` and `Mxfp4Moe2Stage` disagree on whether `2stage` is
+  one word and no rule recovers which without re-addressing the pages the other
+  spelling wrote. Names already written as words are
+  untouched, and no stored page is rewritten: what changes is the page a later
+  campaign addresses. Read-only scan of the 144 forge-loop pages (106 distinct
+  names) puts two of those names elsewhere. `kdapackeddecodekernel` joins
+  `kda_packed_decode`, which is the fork this entry reports and costs nothing to
+  close -- the two pages carry the same implementation signature, the same
+  symbol, the same sources and the same 1.4439x champion. `topkgatingsoftmax`
+  becomes `topk_gating_softmax`, which nothing holds yet, so that one page's
+  history stops being read if the next campaign again names it from the
+  `topkGatingSoftmax` the source declares. The remaining 104 are unchanged, and
+  no two stored pages can collide, every stored name being lowercase already and
+  so its own normal form.
+
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
   model that scored badly the same way -- a non-zero exit -- so the eval-rooted

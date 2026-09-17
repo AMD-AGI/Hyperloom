@@ -23,6 +23,25 @@ _OWNER_ALIASES = {
 _STABLE_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _ITANIUM_MANGLED_RE = re.compile(r"^_Z\d")
 
+#: One run of letters and digits, the unit camel-case boundaries are found in.
+#: Whatever separates two runs -- ``_``, ``.``, ``-``, ``::`` -- is a boundary
+#: the author already wrote, and is left exactly as it is.
+_WORD_RE = re.compile(r"[A-Za-z0-9]+")
+
+#: ``HTTPServer`` -> ``HTTP|Server``: the tail of a capitalized run starts the
+#: next word when a lowercase letter follows it. Applied before
+#: :data:`_LOWER_UPPER_BOUNDARY` so the run is cut once, at its real end.
+_ACRONYM_BOUNDARY = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+
+#: ``fusedAdd`` -> ``fused|Add``, the ordinary camel-case boundary.
+_LOWER_UPPER_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+#: Longest piece a trailing capital is absorbed back into. ``Mo`` + ``E`` is an
+#: acronym the boundaries cut in half; ``Kernel`` + ``O`` is a word followed by
+#: another word. Two letters is what separates them across the kernel names in
+#: the store and in this tree.
+_ACRONYM_FRAGMENT_MAX = 2
+
 
 def canonical_owner_framework(value: str) -> str:
     """Canonicalize source-owner names shared by page and path identity."""
@@ -48,12 +67,46 @@ def _strip_balanced_template_arguments(value: str) -> str:
     return "".join(out) if depth == 0 else value
 
 
+def _split_camel_case(value: str) -> str:
+    """Underscore-delimit camel-case boundaries inside each word of ``value``.
+
+    A one-character piece is given back to the word it was cut from only when
+    that word is itself a fragment of at most two letters, which is what an
+    acronym written with a lowercase letter inside looks like once cut:
+    ``MoE`` -> ``Mo|E`` -> ``MoE``, so ``FusedMoE`` reaches the same page as
+    ``fused_moe``. After a whole word the capital is a word of its own and
+    keeps its boundary -- ``ChunkFwdKernelO`` is ``chunk_fwd_kernel_o``, the
+    spelling the source that declares it uses. Only boundaries found here are
+    undone, never a single letter the author underscored themselves.
+    """
+
+    def split_word(match: re.Match[str]) -> str:
+        pieces = _LOWER_UPPER_BOUNDARY.sub("_", _ACRONYM_BOUNDARY.sub("_", match.group())).split("_")
+        merged: list[str] = []
+        for piece in pieces:
+            if merged and len(piece) == 1 and len(merged[-1]) <= _ACRONYM_FRAGMENT_MAX:
+                merged[-1] += piece
+            else:
+                merged.append(piece)
+        return "_".join(merged)
+
+    return _WORD_RE.sub(split_word, value)
+
+
 def normalize_operator_name(value: str) -> str:
-    """Return the stable logical operator component used by kernel page keys."""
+    """Return the stable logical operator component used by kernel page keys.
+
+    Case and word separators are not part of what a name means, and a kernel is
+    spelled both ways across a source tree -- declared ``KdaPackedDecodeKernel``
+    in a header and ``kda_packed_decode_kernel`` in the module that binds it.
+    Both spellings have to land on one page, or the same kernel accumulates two
+    half-filled histories and each campaign starts from the emptier one.
+    """
     name = str(value or "").strip()
     if "::" in name:
         name = name.rsplit("::", 1)[-1]
     name = _strip_balanced_template_arguments(name)
+    name = _split_camel_case(name)
     name = name.lower().replace(".", "_")
     name = re.sub(r"[^a-z0-9_]+", "_", name).strip("_")
     name = re.sub(r"_+", "_", name)

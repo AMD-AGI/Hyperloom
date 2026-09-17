@@ -14,6 +14,73 @@ def test_operator_name_is_logical_and_backend_prefix_independent():
     assert normalize_operator_name("backend::Fused.MoE-Kernel") == "fused_moe"
 
 
+def test_the_same_kernel_spelled_either_way_is_one_operator():
+    # The reported split: a header declares KdaPackedDecodeKernel, the module binding it
+    # defines kda_packed_decode_kernel, and each spelling addressed a page the other never
+    # wrote to -- so the second campaign re-derived a port the first had already validated.
+    assert normalize_operator_name("KdaPackedDecodeKernel") == "kda_packed_decode"
+    assert normalize_operator_name("kda_packed_decode_kernel") == "kda_packed_decode"
+    assert normalize_operator_name("kda_packed_decode") == "kda_packed_decode"
+
+
+def test_namespaced_camel_case_matches_its_snake_case_spelling():
+    # The task contract asks for this spelling, so upstream pull-request search has term
+    # boundaries to split on. It may not cost the operator its page to supply one.
+    assert normalize_operator_name("aiter::fusedAddRmsNorm") == normalize_operator_name("fused_add_rms_norm")
+    assert normalize_operator_name("SiluAndMul") == normalize_operator_name("silu_and_mul")
+
+
+def test_an_acronym_run_is_one_word():
+    # Splitting on every case change would cut MoE into mo_e and QKV into q_k_v, inventing
+    # a difference between spellings of one kernel instead of removing one.
+    assert normalize_operator_name("FusedMoE") == "fused_moe"
+    assert normalize_operator_name("KVCache") == "kv_cache"
+    assert normalize_operator_name("paged_attention_ll4mi_QKV_mfma16_kernel") == "paged_attention_ll4mi_qkv_mfma16"
+    assert normalize_operator_name("HGEMV_WFPerRow") == "hgemv_wf_per_row"
+
+
+def test_a_capital_after_a_whole_word_is_its_own_word():
+    # The counterpart to the acronym rule. Absorbing every trailing capital to keep MoE
+    # whole also welded the dimension letters these kernels end in onto the word before
+    # them, which disagreed with the snake spelling the same source declares: measured
+    # across the store's symbols and this tree, 82 of 769 kernel names.
+    assert normalize_operator_name("ChunkFwdKernelO") == normalize_operator_name("chunk_fwd_kernel_o")
+    assert normalize_operator_name("IndexerKQuantAndCache") == normalize_operator_name("indexer_k_quant_and_cache")
+    assert normalize_operator_name("AllreduceMhcPostLargeMKernel") == "allreduce_mhc_post_large_m"
+
+
+def test_a_digit_run_keeps_whatever_boundary_the_spelling_gave_it():
+    """Known gap, pinned so a change in it cannot pass unnoticed.
+
+    Whether ``2stage`` is one word or two is not recoverable from the spelling:
+    ``mxfp4_moe_2stage`` says one, ``Mxfp4Moe2Stage`` says two, and a rule that
+    picked either would re-address the pages the other spelling wrote. The store
+    holds 8 such names, all spelled as words already, so the ambiguity costs a
+    page only if some later campaign supplies the camel spelling of one.
+    """
+    assert normalize_operator_name("mxfp4_moe_2stage") == "mxfp4_moe_2stage"
+    assert normalize_operator_name("Mxfp4Moe2stage") == "mxfp4_moe2stage"
+    assert normalize_operator_name("gemm_a8w8_blockscale") == "gemm_a8w8_blockscale"
+
+
+def test_names_already_written_as_words_are_left_alone():
+    # Every page in the store is addressed by one of these; re-spelling them would strand
+    # the histories they hold.
+    for name in (
+        "unified_attention_with_output",
+        "gemm_a8w8_blockscale_bpreshuffle",
+        "mxfp4_moe_2stage_t16",
+        "custom_all_reduce_tp8",
+        "rocm_unquantized_gemm",
+    ):
+        assert normalize_operator_name(name) == name
+
+
+def test_distinct_operators_sharing_a_prefix_stay_distinct():
+    assert normalize_operator_name("MoeFlydslStage1") != normalize_operator_name("MoeFlydslStage2")
+    assert normalize_operator_name("rmsNorm") != normalize_operator_name("addRmsNorm")
+
+
 def test_operator_name_strips_balanced_nested_template_arguments():
     raw = "backend::paged_attention<half, layout<16, 8>>_kernel"
     assert normalize_operator_name(raw) == "paged_attention"
