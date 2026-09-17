@@ -1930,6 +1930,7 @@ class KernelPhase(PhaseHandler):
         """Build the ``geak_e2e`` stack entry, carrying only kernels proven to have run."""
         proven = overlay_loaded is True
         return {
+            "backend": "geak",
             "accepted_kernels": (result.get("accepted_kernels") or []) if proven else [],
             "accepted_heads": (result.get("accepted_heads") or []) if proven else [],
             "report_path": result.get("report_path"),
