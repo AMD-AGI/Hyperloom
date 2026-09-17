@@ -1040,6 +1040,20 @@ def compute_roofline_breakdown_from_state(
 ) -> RooflineBreakdown:
     """Primary decode ceiling + T_mem/T_cmp side projections."""
     runtime = resolve_runtime_workload(state, arm=arm)
+    # MAIDAS Excel projection override (opt-in via --maidas-projection-path).
+    # When a matching row exists, use MAIDAS's predicted ceiling instead of the
+    # built-in estimate. Fail-soft: any miss falls through to the native path.
+    maidas_path = str(getattr(state, "maidas_projection_path", "") or "")
+    if maidas_path:
+        try:
+            from .maidas_excel_ceiling import maidas_breakdown_from_excel
+
+            maidas_bd = maidas_breakdown_from_excel(maidas_path, runtime)
+            if maidas_bd is not None and maidas_bd.peak_tok_per_sec > 0:
+                return maidas_bd
+        except Exception:  # noqa: BLE001 - never let the file break a run
+            log.warning("MAIDAS ceiling lookup failed for %s; using native "
+                        "ceiling", maidas_path, exc_info=True)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
         return _compute_diffusion_breakdown_from_state(state, runtime)

@@ -263,6 +263,7 @@ def _seed_shared_state(
         tp=_int_arg("tp", DEFAULT_TP),
         ep=_int_arg("ep", DEFAULT_EP),
         precision=(str(getattr(args, "precision", None) or DEFAULT_PRECISION).strip()),
+        maidas_projection_path=str(getattr(args, "maidas_projection_path", "") or ""),
         framework_version=_resolve_framework_version(args),
         conc=_int_arg("conc", DEFAULT_CONC),
         isl=_int_arg("isl", DEFAULT_ISL),
