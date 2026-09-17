@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- GEAK handoffs now materialize verified accepted Python source trees, including
+  earlier edits and deleted modules, instead of relying on sparse snapshots to
+  override installed packages. Missing source evidence, unversioned files under
+  import roots, unsupported runtime changes and readers without the
+  source-materialization protocol stop before GEAK launches. Handoffs without
+  source changes retain their existing behavior.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and

@@ -3641,7 +3641,11 @@ class IntegratePatchExecutor:
                     rel_paths=rel_paths,
                     dest_dir=dest,
                     provenance="integrate_patch",
-                    extra={"specialist_task_id": specialist_task_id},
+                    extra={
+                        "specialist_task_id": specialist_task_id,
+                        "commit_semantics": "accepted",
+                        "artifacts_outside_root": source_artifacts_outside_root,
+                    },
                     declared_ops=declared_ops,
                     import_root=source_import_root_val,
                 )
