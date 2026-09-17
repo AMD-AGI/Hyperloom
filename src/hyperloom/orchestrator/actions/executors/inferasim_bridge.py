@@ -705,6 +705,13 @@ def _build_argv(spec: ServingSpec, workload: str, anchor: AnchorChoice | None = 
         "--gpu-arch",
         gpu_arch,
     ]
+    # Name the engine so InferaSim refuses a cross-engine anchor on its own,
+    # rather than leaving ``select_anchor`` as the only thing standing between
+    # a vLLM measurement and an SGLang candidate. Simulate mode is analytical
+    # and returns the same number whichever engine is named, so this only ever
+    # gates calibration -- which is what ``--load-benchmark`` below asks for.
+    if spec.framework:
+        argv += ["--serving-engine", spec.framework]
     if hbm_gb:
         argv += ["--hbm-capacity-gb", str(hbm_gb)]
 

@@ -449,6 +449,23 @@ def test_recipe_names_the_serving_engine():
     assert len({r["engine"] for r in recipes}) == len(engines)
 
 
+def test_argv_names_the_serving_engine():
+    """Tell InferaSim the engine too, so it can refuse a cross-engine anchor.
+
+    Nothing in the analytical model reads it, so the projected number does not
+    move; it decides which measured anchor calibration may read.
+    """
+    for fw in ("vllm", "sglang", "atom"):
+        argv = ib._build_argv(ib.ServingSpec(framework=fw, model_path="m"), "w.yaml")
+        assert argv[argv.index("--serving-engine") + 1] == fw
+
+
+def test_argv_omits_the_engine_when_unknown():
+    """An unnamed framework leaves the axis unset rather than emitting a blank."""
+    argv = ib._build_argv(ib.ServingSpec(framework="", model_path="m"), "w.yaml")
+    assert "--serving-engine" not in argv
+
+
 def test_select_anchor_rejects_insane_anchor(tmp_path, monkeypatch):
     """A corrupt curve is worse than no anchor: fall back to pure analysis.
 
