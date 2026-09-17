@@ -1323,7 +1323,9 @@ def _engine_death_log(tmp_path, *, downstream_errors: int = 4000):
         "(APIServer pid=1) ERROR [serving.py:448] vllm.v1.engine.exceptions.EngineDeadError: "
         "EngineCore encountered an issue."
     ]
-    lines += ['(APIServer pid=1) INFO:     127.0.0.1:5 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error'] * downstream_errors
+    lines += [
+        '(APIServer pid=1) INFO:     127.0.0.1:5 - "POST /v1/completions HTTP/1.1" 500 Internal Server Error'
+    ] * downstream_errors
     log.write_text("\n".join(lines), encoding="utf-8")
     return log
 
@@ -1391,8 +1393,7 @@ def test_a_bootstrap_wrapper_keeps_the_root_cause_above_it(tmp_path):
         "\n".join(
             [
                 "(VllmWorker pid=3) INFO starting engine",
-                "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. "
-                "Tried to allocate 2.00 GiB",
+                "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
                 "(EngineCore pid=2) ERROR RuntimeError: Engine core initialization failed. "
                 "See root cause above. Failed core proc(s): {}",
             ]
@@ -1453,8 +1454,7 @@ def test_a_legacy_marker_that_contains_a_fatal_one_keeps_legacy_handling(tmp_pat
         log.write_text(
             "\n".join(
                 [
-                    "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. "
-                    "Tried to allocate 2.00 GiB",
+                    "(VllmWorker pid=3) ERROR torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB",
                     f"(APIServer pid=1) ERROR {legacy}: the engine is gone",
                 ]
             ),

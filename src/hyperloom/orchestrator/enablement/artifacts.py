@@ -179,7 +179,9 @@ def _top_level_of(path: str) -> str:
     parts = [p for p in path.split("/") if p not in ("", ".")]
     # git's ``a/``, ``b/``, and the ``a2/``/``b3/`` forms it writes when one diff
     # spans several trees, name no directory.
-    while parts and len(parts[0]) <= 2 and parts[0][0] in "ab" and parts[0][1:].isdigit() or parts[:1] in (["a"], ["b"]):
+    while (
+        parts and len(parts[0]) <= 2 and parts[0][0] in "ab" and parts[0][1:].isdigit() or parts[:1] in (["a"], ["b"])
+    ):
         parts.pop(0)
     return parts[0] if len(parts) > 1 else ""
 

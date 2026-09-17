@@ -32,7 +32,6 @@ _ENABLEMENT_LOG_EXCERPT_CHARS = 2000
 _ABSENT = object()
 
 
-
 _RECIPE_STATE_FIELDS: tuple[str, ...] = (
     "active_runtime",
     "accepted_config",
@@ -142,7 +141,6 @@ def _runtime_summary(runtime: dict[str, Any], *, promoted: bool) -> dict[str, An
         "installed_versions": {str(k): str(v) for k, v in versions.items()} if isinstance(versions, dict) else {},
         "promoted": bool(promoted),
     }
-
 
 
 def _closure_status(decision: dict[str, Any], enablement: dict[str, Any]) -> str:
@@ -354,14 +352,12 @@ def _collect_round_identity(out: dict[str, Any], state: dict[str, Any]) -> None:
         out["launch_log_excerpt"] = launch_log[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
 
 
-
 def _portable_patch_ref(raw: str, session_dir: Path) -> str:
     """A patch reference that names no directory on the authoring host."""
     rel = _rel(Path(raw), session_dir)
     if not rel:
         return Path(raw).name
     return Path(rel).name if Path(rel).is_absolute() else rel
-
 
 
 def _portable_step(step: dict[str, Any], session_dir: Path) -> dict[str, Any]:

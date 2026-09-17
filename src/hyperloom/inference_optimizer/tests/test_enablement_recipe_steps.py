@@ -585,6 +585,7 @@ def test_a_session_predating_the_lever_scan_names_neither():
     assert "lever_has_no_reader" not in codes
     assert "levers_unverified" not in codes
 
+
 def test_the_serve_line_hands_the_shell_one_argument_per_token():
     """The script is run by a shell, and the args were stored as a command line.
 

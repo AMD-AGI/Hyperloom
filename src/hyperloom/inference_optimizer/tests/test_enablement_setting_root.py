@@ -115,9 +115,7 @@ def test_two_trees_inside_one_patch_leave_the_recorded_root_alone(tmp_path: Path
 
 def test_a_creation_patch_is_read_from_its_new_side(tmp_path: Path):
     """A new file's old side is /dev/null; reading it records nothing useful."""
-    dest, rounds = _raw_patch(
-        tmp_path, "--- /dev/null\n+++ b/vllm/new_kernel.py\n@@ -0,0 +1 @@\n+x\n"
-    )
+    dest, rounds = _raw_patch(tmp_path, "--- /dev/null\n+++ b/vllm/new_kernel.py\n@@ -0,0 +1 @@\n+x\n")
     site = tmp_path / "site-packages"
     (site / "vllm").mkdir(parents=True)
     (site / "aiter").mkdir(parents=True)
@@ -129,12 +127,8 @@ def test_a_creation_alongside_an_ordinary_patch_still_agrees(tmp_path: Path):
     """Both name the same tree, so the pair must not read as a disagreement."""
     dest = tmp_path / "reports" / "enablement" / "patches"
     dest.mkdir(parents=True)
-    (dest / "001_p.patch").write_text(
-        "--- /dev/null\n+++ b/vllm/new_kernel.py\n@@ -0,0 +1 @@\n+x\n", encoding="utf-8"
-    )
-    (dest / "002_p.patch").write_text(
-        "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8"
-    )
+    (dest / "001_p.patch").write_text("--- /dev/null\n+++ b/vllm/new_kernel.py\n@@ -0,0 +1 @@\n+x\n", encoding="utf-8")
+    (dest / "002_p.patch").write_text("--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
     site = tmp_path / "site-packages"
     (site / "vllm").mkdir(parents=True)
     (site / "aiter").mkdir(parents=True)
@@ -235,9 +229,7 @@ def test_a_rename_only_patch_still_names_its_tree(tmp_path: Path):
         "rename from aiter/old.py\nrename to aiter/new.py\n",
         encoding="utf-8",
     )
-    (dest / "002_p.patch").write_text(
-        "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8"
-    )
+    (dest / "002_p.patch").write_text("--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
     site = tmp_path / "site-packages"
     (site / "vllm").mkdir(parents=True)
     (site / "aiter").mkdir(parents=True)
@@ -251,9 +243,7 @@ def test_a_patch_that_names_no_tree_at_all_keeps_the_recorded_root(tmp_path: Pat
     dest = tmp_path / "reports" / "enablement" / "patches"
     dest.mkdir(parents=True)
     (dest / "001_p.patch").write_text("GIT binary patch\nliteral 0\n", encoding="utf-8")
-    (dest / "002_p.patch").write_text(
-        "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8"
-    )
+    (dest / "002_p.patch").write_text("--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
     site = tmp_path / "site-packages"
     (site / "vllm").mkdir(parents=True)
     (site / "aiter").mkdir(parents=True)

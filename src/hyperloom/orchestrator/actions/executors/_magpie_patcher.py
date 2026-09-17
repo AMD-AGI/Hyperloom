@@ -127,10 +127,7 @@ _LOCAL_CLIENT_PATCHED_BLOCK = (
 _CLIENT_TOKENIZER_MODE_SENTINEL = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
 #: Marks a script carrying the generic vLLM local-client shape this patch targets.
 _CLIENT_TOKENIZER_PATH_MARKER = '--result-dir "$WORKSPACE_DIR/"'
-_CLIENT_TOKENIZER_LEGACY_BLOCK = (
-    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
-    "        --trust-remote-code || exit $?\n"
-)
+_CLIENT_TOKENIZER_LEGACY_BLOCK = '        "${SERVER_MONITOR_ARGS[@]}" \\\n        --trust-remote-code || exit $?\n'
 # ``${VAR:+...}`` leaves the line empty when unset, so an unpatched workload is byte-for-byte
 # unchanged in behaviour. A tokenizer mode is a bare identifier, so the unquoted expansion is safe.
 # No comment line inside the continuation: after a trailing backslash a ``#`` is an argument, not a
@@ -479,6 +476,7 @@ def _client_scripts(magpie_dir: Path | str | None, inferencex_dir: Path | str | 
         for script in sorted(scripts_dir.glob("*.sh")):
             if script.name != "benchmark_lib.sh":
                 yield script
+
 
 def _apply_eval_concurrency_fixes(
     magpie_dir: Path | str | None,
@@ -969,8 +967,7 @@ def _apply_client_tokenizer_mode_patch_atomic(src: Path) -> bool:
         return True
     if _CLIENT_TOKENIZER_LEGACY_BLOCK not in original:
         log.warning(
-            "_magpie_patcher: generic vLLM client block not found in %s; "
-            "tokenizer-mode patch could not be applied",
+            "_magpie_patcher: generic vLLM client block not found in %s; tokenizer-mode patch could not be applied",
             src,
         )
         return False

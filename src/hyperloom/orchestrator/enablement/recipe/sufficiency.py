@@ -619,11 +619,7 @@ def _lever_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
         return [_reason("levers_unverified", "levers_without_readers")]
     if not isinstance(unread, (list, tuple)):
         return []
-    return [
-        _reason("lever_has_no_reader", name.strip())
-        for name in unread
-        if isinstance(name, str) and name.strip()
-    ]
+    return [_reason("lever_has_no_reader", name.strip()) for name in unread if isinstance(name, str) and name.strip()]
 
 
 def _closure_reasons(section: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -751,6 +747,7 @@ def _delivery_reasons(
         if (path, digest) not in packaged:
             reasons.append(_reason(code, scope))
     return reasons
+
 
 def evaluate_replay_sufficiency(
     enablement: Mapping[str, Any],

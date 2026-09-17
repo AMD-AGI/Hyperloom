@@ -894,6 +894,7 @@ async def test_a_recorded_failed_attempt_still_reaches_the_rearm_path(coord):
 
     assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
 
+
 @pytest.mark.asyncio
 async def test_an_id_alone_does_not_make_a_row_a_routing_sentinel(coord):
     """The reader names what it is looking for instead of what it will not find.
@@ -921,4 +922,3 @@ async def test_routing_a_build_with_nothing_to_say_still_marks_it_routed(coord):
 
     record = Coordinator._build_routing_record(coord, task_id)
     assert record is not None and record.get("routed") is True
-

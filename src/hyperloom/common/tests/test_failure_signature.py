@@ -398,8 +398,7 @@ def test_a_hip_launch_resource_error_is_the_kernel_budget_not_a_missing_kernel()
     from hyperloom.common.failure_signature import HIP_KERNEL_MISSING, KERNEL_RESOURCE_LIMIT
 
     sig = classify_failure(
-        "hipErrorLaunchOutOfResources: out of resource: shared memory, "
-        "Required: 98304, Hardware limit: 65536"
+        "hipErrorLaunchOutOfResources: out of resource: shared memory, Required: 98304, Hardware limit: 65536"
     )
 
     assert sig.kind == KERNEL_RESOURCE_LIMIT
@@ -593,4 +592,3 @@ def test_a_launch_that_names_its_own_resource_still_classifies(text):
     from hyperloom.common.failure_signature import KERNEL_RESOURCE_LIMIT
 
     assert classify_failure(text).kind == KERNEL_RESOURCE_LIMIT
-

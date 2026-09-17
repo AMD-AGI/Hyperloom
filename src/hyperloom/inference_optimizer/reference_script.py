@@ -380,7 +380,6 @@ def _apply_patch_func(framework_root_vcs: str) -> str:
     return _APPLY_PATCH_NO_GIT if framework_root_vcs == VCS_NONE else _APPLY_PATCH_GIT
 
 
-
 def _shell_ready_server_args(server_args: Any) -> str:
     """Return ``server_args`` with every token quoted for the shell that will run it.
 

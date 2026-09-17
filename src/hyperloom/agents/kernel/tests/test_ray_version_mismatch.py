@@ -53,7 +53,6 @@ def _make_fake_ray(init_side_effects):
     return fake
 
 
-
 @pytest.fixture(autouse=True)
 def _clear_stale_connect_flag():
     """``_STALE_CONNECT_POSSIBLE`` is process-wide by design, so tests must isolate it.

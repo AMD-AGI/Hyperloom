@@ -77,7 +77,6 @@ _ROOT_RELATIVE_CHANNEL_FILES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
-
 #: Env vars whose value is a switch, not a location: a set-but-disabling value
 #: says the channel is OFF. ``GIT_TERMINAL_PROMPT=0`` is the standard way to
 #: forbid interactive credentials, and ``PIP_KEYRING_PROVIDER=disabled`` is one
@@ -344,7 +343,6 @@ def sanitize_command_text(cmd: str, *, clip: int = 0) -> str:
 
 def _clip(text: str, clip: int) -> str:
     return text if clip <= 0 or len(text) <= clip else text[:clip] + "..."
-
 
 
 def _holds_a_credential(path: Path) -> bool:
