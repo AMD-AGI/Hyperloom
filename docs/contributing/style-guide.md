@@ -122,7 +122,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; style/convention messages are intentionally out of scope.
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by a gate.
 
 ### Tests (pytest)
 
@@ -139,7 +139,7 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with unit tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Cover those flows **end to end** (see the `*_e2e` markers above), and unit-test an internal helper when it carries real logic of its own.
 
-**Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Add unit tests for logic you introduce; do not chase coverage on omitted paths.
+**Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Cover the logic you introduce as described under *What to test*; do not chase coverage on omitted paths, and do not pad internal plumbing with per-function tests to move the number.
 
 **Naming:** `test_<behavior>.py`, functions `test_<scenario>`, classes `Test<Component>`.
 

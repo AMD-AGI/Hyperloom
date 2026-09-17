@@ -49,7 +49,7 @@ doc is the authority on where that boundary lives.
 
 - **One concern per change.** A PR fixes one issue or adds one capability. If you must
   bundle, say why in the description. Don't ride unrelated refactors in on a fix.
-- **Size budget.** Prefer reviewable diffs. A large diff is a signal to split, not to push
+- **Diff budget.** Prefer reviewable diffs. A large diff is a signal to split, not to push
   harder. Cleanup in an unrelated file is a separate PR.
 - **Size is a design signal.** A function that keeps growing, a branch tree you have to
   scroll, a module that collects everything — that is the design telling you a boundary is

@@ -18,9 +18,11 @@ Advisory review. Flag only what static gates can't.
   `--errors-only`), so review is the only place it surfaces. Name the seam to split on,
   not just the line count — and treat an existing long function the change merely edits as
   out of scope.
-- **Cohesion and coupling**: a module that has acquired a second job, a dependency pointing
-  back up the layers, a new import cycle, or a caller reaching around the layer that owns a
-  thing to touch what is behind it.
+- **Cohesion and coupling**: a module that has acquired a second job, a responsibility
+  moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,
+  or a caller reaching around the layer that owns a thing. A diff that bypasses an
+  established pipeline or reintroduces a retired construct belongs here too — the
+  architecture doc named in `AGENTS.md` is the authority on where a boundary lives.
 - **Failure-hiding error handling**: a `try`/fallback that swallows an error and returns
   a default or `None`, so the caller can't tell success from silent failure. This includes
   a new broad `except Exception` that hides the failure rather than catching a specific,
@@ -61,6 +63,3 @@ Advisory review. Flag only what static gates can't.
   but skip style/taste nits a linter would catch.
 - **Prefer deletion and reuse.** When you see a leaner form — reuse an existing helper,
   drop a redundant layer, fold a flag away — propose it directly.
-- **Architectural correctness.** Does the change respect the system's boundaries and
-  control flow? Flag a diff that bypasses an established pipeline, reaches around the owning layer,
-  moves a responsibility to the wrong module, or reintroduces a retired/forbidden construct.
