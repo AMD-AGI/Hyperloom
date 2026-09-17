@@ -581,3 +581,39 @@ def test_a_session_predating_the_lever_scan_names_neither():
 
     assert "lever_has_no_reader" not in codes
     assert "levers_unverified" not in codes
+
+def test_the_serve_line_hands_the_shell_one_argument_per_token():
+    """The script is run by a shell, and the args were stored as a command line.
+
+    ``--compilation-config {"a":8,"b":"NONE"}`` interpolated raw is brace-expanded
+    and quote-stripped into three words: the flag, a value that is no longer JSON,
+    and a stray operand. That is how the one setting keeping the server from
+    segfaulting failed to reach it, with the script looking right in the file.
+
+    Asserted on the rendered script, not on the quoting helper: the defect was a
+    call site that did not use it.
+    """
+    import shlex as _shlex
+
+    from hyperloom.inference_optimizer.reference_script import render_reference_script
+
+    script = render_reference_script(
+        framework="vllm",
+        server_args='--kv-cache-dtype fp8 --compilation-config {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}',
+        model="/m",
+    )
+    serve = [ln for ln in script.splitlines() if ln.startswith("vllm serve")]
+    assert serve, script
+    # What the shell running this script would actually hand the server.
+    argv = _shlex.split(serve[0])
+    assert argv[-2:] == [
+        "--compilation-config",
+        '{"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}',
+    ], argv
+
+
+def test_an_empty_server_arg_string_renders_nothing():
+    from hyperloom.inference_optimizer.reference_script import _shell_ready_server_args
+
+    assert _shell_ready_server_args("") == ""
+    assert _shell_ready_server_args(None) == ""
