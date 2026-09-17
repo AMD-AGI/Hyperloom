@@ -533,24 +533,6 @@ def _bucket_of(backends: dict[str, Any], name: str, available: bool) -> dict[str
 _RECONCILIATION_NOISE_PP = 0.01
 
 
-def _degraded_adoptions(ledger: dict[str, Any]) -> dict[str, int]:
-    """Count the ledger's adoptions per reason their comparison fell off the configured axis.
-
-    Args:
-        ledger (dict[str, Any]): The stack event's ``ext``.
-
-    Returns:
-        dict[str, int]: Adoption count per ``degrade_reason``, empty when every adoption graded on the axis the
-            session asked for.
-    """
-    counts: dict[str, int] = {}
-    for row in _dict_rows(_mapping(ledger.get("adoptions")).get("rows")):
-        reason = str(row.get("degrade_reason") or "").strip()
-        if reason:
-            counts[reason] = counts.get(reason, 0) + 1
-    return counts
-
-
 def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     """Name what the ledger's own figures say is wrong with it.
 
@@ -586,16 +568,8 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
             "either an adoption is missing from the ledger or its recorded throughputs disagree "
             "with the end-to-end measurement"
         )
-    degraded = _degraded_adoptions(ledger)
-    if degraded:
-        # A session configured for the interactivity axis still grades an individual adoption on output whenever
-        # either side of that comparison cannot supply the axis pair, and its contribution then sits in the same
-        # sum as the axis-graded ones. Naming the count is what keeps the total from reading as single-axis.
-        reasons = ", ".join(sorted(degraded))
-        notes.append(
-            f"{sum(degraded.values())} adoption(s) were graded on the output axis rather than the axis the "
-            f"session was configured for ({reasons}); their contributions are not on the same axis as the rest"
-        )
+    # No note for an off-objective adoption: a comparison that cannot supply the configured axis pair fails instead
+    # of settling for another axis, so every row in this sum is on the axis ``graded_on`` names by construction.
     validations = _mapping(ledger.get("validations"))
     if not _optional_int(validations.get("count")):
         notes.append("no whole-stack validation was measured, so the ledger has nothing to reconcile against")

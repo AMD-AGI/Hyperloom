@@ -169,11 +169,13 @@ class V6GradingTputGuard(TypedDict, total=False):
 class V6Grading(TypedDict, total=False):
     """The axis this session was configured to grade on.
 
-    The session-level setting and only that. What the run actually decided a
-    given promotion on is ``outcome.validation.graded_on``, read off the
-    promotion itself: a session configured for interactivity still grades an
-    individual comparison on output whenever either side of it cannot supply
-    the axis pair. Neither field resolves the other.
+    The session-level setting and only that. What a promotion was actually
+    decided on is ``outcome.validation.graded_on``, read off the promotion
+    itself. On a session that promoted anything the two agree, because a
+    comparison that cannot supply the configured axis pair fails rather than
+    settling for another axis -- no promotion is ever graded off-objective.
+    Neither field resolves the other even so: a session can be configured for
+    an axis and promote nothing on it.
     """
 
     benchmark_mode: str

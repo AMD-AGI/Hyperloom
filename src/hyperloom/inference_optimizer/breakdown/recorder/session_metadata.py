@@ -205,10 +205,11 @@ def _grading(state: Any) -> dict[str, Any]:
     in this document carries the distinction, because every throughput field in it is the output axis by
     construction and ``benchmark_mode`` never reaches the breakdown at all.
 
-    This is the session-level setting and only that. What the run actually decided a given promotion on is a
-    different fact, recorded on the promotion itself and published as ``outcome.validation.graded_on``: a session
-    configured for interactivity still grades an individual comparison on output whenever either side of it cannot
-    supply the axis pair. Resolving one of the two from the other would put a label on a figure it does not describe.
+    This is the session-level setting and only that. What a promotion was actually decided on is a different fact,
+    recorded on the promotion itself and published as ``outcome.validation.graded_on``. On a session that promoted
+    anything the two agree, because a comparison that cannot supply the configured axis pair fails rather than
+    settling for another axis. Resolving one of the two from the other would still put a label on a figure it does
+    not describe: a session can be configured for an axis and promote nothing on it.
 
     Read from the live state rather than resolved here, which is why this reaches the export with no environment read
     anywhere on the path: ``SharedState.grading`` was resolved once at seed, where the run could still see its own

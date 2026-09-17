@@ -202,7 +202,7 @@ def test_metadata_grading_is_not_resolved_from_what_a_promotion_graded_on():
 # ---------------------------------------------------------------------------
 
 
-def _adopt(index: int, *, objective: str = GRADED_OUTPUT, degrade_reason: str = "") -> None:
+def _adopt(index: int, *, objective: str = GRADED_OUTPUT) -> None:
     """Record one adoption the way the lift does."""
     stack_event.record_adoption(
         stack_index=index,
@@ -211,7 +211,6 @@ def _adopt(index: int, *, objective: str = GRADED_OUTPUT, degrade_reason: str = 
         throughput_after=110.0 + index * 10.0,
         baseline_tput=100.0,
         objective=objective,
-        degrade_reason=degrade_reason,
     )
 
 
@@ -306,21 +305,11 @@ def test_a_session_with_no_ledger_publishes_no_axis(tmp_path):
     assert all(value is None for value in outcome["validation"]["perf"].values())
 
 
-def test_the_notes_name_adoptions_that_fell_off_the_configured_axis(tmp_path):
-    # Their contributions sit in the same sum as the axis-graded ones, so the total is not single-axis and
-    # the reader has to be told.
-    _adopt(0, objective=GRADED_INTVTY)
-    _adopt(1, objective=GRADED_OUTPUT, degrade_reason="candidate_axes_missing")
-    _adopt(2, objective=GRADED_OUTPUT, degrade_reason="candidate_axes_missing")
-
-    joined = " | ".join(_outcome(tmp_path)["validation"]["notes"])
-    assert "2 adoption(s) were graded on the output axis" in joined
-    assert "candidate_axes_missing" in joined
-
-
-def test_a_fully_graded_ledger_reports_no_degrade_finding(tmp_path):
-    # The whole and the parts agree here, so an empty list is the meaningful assertion: no finding at all,
-    # rather than a degrade finding drowned out by a reconciliation complaint.
+def test_a_fully_graded_ledger_reports_no_finding(tmp_path):
+    # The whole and the parts agree here, so an empty list is the meaningful assertion. There is no
+    # off-axis-adoption finding to look for: a comparison that cannot supply the configured axis pair is
+    # refused at the lift rather than adopted on output, which
+    # ``test_a_degraded_agentx_lift_is_refused`` pins, so every row in this sum is on ``graded_on``.
     _adopt(0, objective=GRADED_INTVTY)
     stack_event.record_validation(
         stack_len=1,

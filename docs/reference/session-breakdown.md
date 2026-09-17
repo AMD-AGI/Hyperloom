@@ -182,12 +182,14 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What the run actually decided a given
-promotion on is `outcome.validation.graded_on`, read off the promotion itself:
-a session configured for interactivity still grades an individual comparison
-on output whenever either side of it cannot supply the axis pair. Neither field
-resolves the other. `tput_guard.noise_pct` is null on a session that predates
-the band being recorded.
+This is the session-level *setting*. What a promotion was actually decided on
+is `outcome.validation.graded_on`, read off the promotion itself. On a session
+that promoted anything the two agree, because a comparison that cannot supply
+the configured axis pair fails rather than settling for another axis — nothing
+is ever promoted off-objective. Neither field resolves the other even so: a
+session can be configured for an axis and promote nothing on it.
+`tput_guard.noise_pct` is null on a session that predates the band being
+recorded.
 
 `metadata.versions` — the schema version, the Hyperloom revision, the framework
 and its version, and a `tools` map carrying `{tool, root_dir, commit, version}`
@@ -266,8 +268,9 @@ the `baseline` and `final` blocks documented above, and the `validation`
 block that reconciles the optimization stack's parts against its total. That
 reconciliation is single-axis and `validation.graded_on` names the axis: an
 attributed figure on one axis against an unattributed figure on another makes
-the gap meaningless. `validation.notes` reports any adoption that fell off
-that axis, because its contribution sits in the same sum as the rest.
+the gap meaningless. Every adoption in that sum is on the named axis by
+construction — a comparison that could not supply the configured axis pair
+failed instead of being graded on another one.
 
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its
