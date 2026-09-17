@@ -85,11 +85,42 @@ def test_benchmark_timeouts_have_one_finite_positive_policy():
     assert sk.resolve_benchmark_timeouts({"INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC": "42.5"}) == (600.0, 42.5)
 
 
+@pytest.mark.parametrize("log_location", ["missing", "primary", "nested"])
+def test_reused_server_with_buffered_client_needs_current_ready_evidence(tmp_path, log_location):
+    """Original Magpie captures client output until completion; old ready logs cannot arm silence."""
+    watched = tmp_path / "server.log"
+    if log_location != "missing":
+        old_log = watched if log_location == "primary" else tmp_path / "benchmark_old" / "server.log"
+        old_log.parent.mkdir(parents=True, exist_ok=True)
+        old_log.write_text("Application startup complete\n", encoding="utf-8")
+    client = "import time\nfor _ in range(8):\n print('progress', flush=True); time.sleep(.15)\n"
+    wrapper = (
+        "import subprocess,sys\n"
+        "result = subprocess.run([sys.executable, '-u', '-c', sys.argv[1]], "
+        "capture_output=True, text=True, timeout=5)\n"
+        "sys.stdout.write(result.stdout)\n"
+        "raise SystemExit(result.returncode)\n"
+    )
+    cp = run_with_session_kill(
+        [sys.executable, "-c", wrapper, client],
+        server_log_path=str(watched),
+        server_already_ready=True,
+        silence_timeout_sec=0.4,
+        timeout=8,
+    )
+    assert cp.returncode == 0
+    assert cp.stdout.splitlines() == ["progress"] * 8
+
+
 @pytest.mark.parametrize("stream", [1, 2])
 def test_ready_server_quiet_log_active_partial_pipe_survives(tmp_path, stream):
-    script = f"import os,time\nfor _ in range(8):\n os.write({stream}, b'.'); time.sleep(.15)\n"
+    script = (
+        "import os,pathlib,sys,time\n"
+        "pathlib.Path(sys.argv[1]).write_text('Application startup complete\\n')\n"
+        f"for _ in range(8):\n os.write({stream}, b'.'); time.sleep(.15)\n"
+    )
     cp = run_with_session_kill(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", script, str(tmp_path / "server.log")],
         server_log_path=str(tmp_path / "server.log"),
         server_already_ready=True,
         silence_timeout_sec=0.5,
@@ -108,11 +139,12 @@ def test_benchmark_launch_forces_python_unbuffered():
     assert cp.stdout.strip() == "1"
 
 
+@pytest.mark.parametrize("reused", [False, True])
 @pytest.mark.parametrize(
     "ready,log,noise,expected",
     [(True, True, False, 600), (True, True, True, 7800), (False, True, False, 7800), (True, False, False, 7800)],
 )
-def test_watchdog_clock_boundaries(monkeypatch, tmp_path, ready, log, noise, expected):
+def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, noise, expected):
     from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
 
     now = [0.0]
@@ -130,7 +162,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, ready, log, noise, exp
             raise subprocess.TimeoutExpired(self.args, timeout)
 
     monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(False, False, False, noise, False))
+    monkeypatch.setattr(sk, "_scan_logs_increment", lambda *args: sk._LogScan(ready, False, False, noise, False))
     error = sk._ServerStalledDetected if expected == 600 else subprocess.TimeoutExpired
     with pytest.raises(error):
         sk._communicate_with_watchdog(
@@ -138,10 +170,55 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, ready, log, noise, exp
             hard_timeout=7800,
             silence_timeout_sec=600,
             server_log_path=str(tmp_path / "server.log") if log else None,
-            server_already_ready=ready,
+            server_already_ready=reused,
         )
     assert now[0] == expected
     assert 599.0 in waited
+
+
+@pytest.mark.parametrize("gate", ["hard", "session", "cancel"])
+def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_path, gate):
+    from unittest.mock import Mock
+
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    now = [0.0]
+    scope = CancelScope()
+    recorder = Mock()
+
+    class Proc:
+        args = ["reused-server-client"]
+
+        def poll(self):
+            return None
+
+        def communicate(self, timeout=None):
+            now[0] += timeout
+            if gate == "cancel" and now[0] >= 4:
+                scope.cancel(reason="test")
+            raise subprocess.TimeoutExpired(self.args, timeout)
+
+    monkeypatch.setattr(sk.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(sk, "STOP_GATE_POLL_SECONDS", 1)
+    error = {
+        "hard": subprocess.TimeoutExpired,
+        "session": sk._SessionDeadlineExceeded,
+        "cancel": sk._OrchestratorCancelled,
+    }
+    with pytest.raises(error[gate]):
+        sk._communicate_with_watchdog(
+            Proc(),
+            hard_timeout=10,
+            silence_timeout_sec=1,
+            server_log_path=str(tmp_path / "server.log"),
+            server_already_ready=True,
+            session_deadline_sec=3 if gate == "session" else None,
+            cancel_scope=scope,
+            kv_recorder=recorder,
+        )
+    assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
+    recorder.note_phase.assert_called_once_with("measured", 0)
+    recorder.close.assert_called_once_with(aborted=True)
 
 
 def test_exited_process_wins_over_expired_gates(monkeypatch):
@@ -194,8 +271,13 @@ def test_previous_nested_server_cannot_keep_new_round_alive(tmp_path):
     stop = threading.Event()
     writer = _appends_until_stopped(old_log, "old worker output\n", stop)
     try:
+        script = (
+            "import pathlib,sys,time\n"
+            "pathlib.Path(sys.argv[1]).write_text('Application startup complete\\n')\n"
+            "time.sleep(20)\n"
+        )
         cp = run_with_session_kill(
-            [sys.executable, "-c", "import time; time.sleep(20)"],
+            [sys.executable, "-c", script, str(tmp_path / "server.log")],
             timeout=5,
             server_log_path=str(tmp_path / "server.log"),
             server_already_ready=True,

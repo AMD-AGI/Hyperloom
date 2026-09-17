@@ -9,8 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
   supervision and resume, and task/lease age expiry. Each actual benchmark spawn
   uses a 7800-second hard deadline (including boot and accuracy), plus a
-  600-second output-silence limit only after real server readiness; both are
-  finite positive settings. Output cannot extend the hard deadline. Session
+  600-second output-silence limit only after a ready marker is observed in this
+  round's logs; both are finite positive settings. A warm-reuse hint alone does
+  not arm silence, avoiding false kills when original Magpie buffers client
+  output and the reused server writes its previous round's log. Reuse rounds
+  without a current ready marker remain bounded by the hard deadline, session
+  budget, and cancellation. Output cannot extend the hard deadline. Session
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
 

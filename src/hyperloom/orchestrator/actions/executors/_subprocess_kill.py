@@ -910,12 +910,12 @@ def _communicate_with_watchdog(
         except OSError:
             continue
         identities[path] = (stat.st_dev, stat.st_ino)
-    ready_at = start if server_log_path and server_already_ready else None
-    last_activity_at = ready_at
+    ready_at: float | None = None
+    last_activity_at: float | None = None
     completed = False
     if kv_recorder is not None and server_already_ready:
         kv_recorder.note_phase("measured", start)
-    if ready_at is not None:
+    if server_log_path and server_already_ready:
         stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
