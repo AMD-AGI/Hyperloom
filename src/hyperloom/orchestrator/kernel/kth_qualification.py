@@ -267,7 +267,9 @@ class KthQualificationProvider:
         )
         if attestation["subject_digest"] != expected_digest:
             return "KTH subject digest mismatch"
-        if not isinstance(coverage, dict) or coverage.get("complete") is not True:
+        if not isinstance(coverage, dict):
+            return "KTH coverage evidence is malformed"
+        if verdict == "Eligible for performance evaluation" and coverage.get("complete") is not True:
             return "KTH mandatory evidence is incomplete"
         if not isinstance(attestation["findings"], list) or not attestation["findings"]:
             return "KTH findings are missing"

@@ -8,6 +8,16 @@ PYTHONPATH=src python examples/kth_qualification_gate/run_demo.py \
   --kth-root ../kernel-trust-harness
 ```
 
+Live gfx942 path (tw051 or another allocated MI300X node). Uses the host-owned
+fused-add residual plan (`host/gfx942-rmsnorm-fused-add-v1`) and does **not**
+rerun AITER #4888:
+
+```bash
+PYTHONPATH=src python examples/kth_qualification_gate/run_demo.py \
+  --kth-root ../kernel-trust-harness \
+  --gpu --host tw051 --out EMPTY_DIRECTORY
+```
+
 The command creates and preserves a temporary Git repository, Controller
 publication bundles, digest-bound KTH requests and attestations, subprocess
 logs, integration results, `timeline.json`, and `terminal_timeline.txt`. Pass
@@ -24,8 +34,10 @@ Expected story:
 5. KTH returns `Eligible for performance evaluation`; only then does the
    fixture performance validator run, and Hyperloom records `KEEP`.
 
-The demo requires the KTH `integration/hyperloom-provider` branch. Its fixture
-plan is disabled by default and is enabled only inside this demo process.
+The demo requires the KTH `integration/hyperloom-provider` branch. CPU fixture
+plans are disabled by default and are enabled only inside the CPU demo
+process. The gfx942 plan is a host-owned registry entry and requires a visible
+MI300X plus the pinned `vllm/vllm-openai-rocm:v0.27.1` image.
 
 ## Architecture
 

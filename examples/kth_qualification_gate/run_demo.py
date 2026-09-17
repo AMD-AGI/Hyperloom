@@ -12,6 +12,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +25,12 @@ from hyperloom.orchestrator.kernel.controller_patch_integration import (
 from hyperloom.orchestrator.kernel.kth_qualification import KthQualificationProvider
 from hyperloom.orchestrator.state.shared_state import SharedState
 
-PLAN_ID = "fixture/cpu-rne-correction-v1"
-KERNEL_PATH = "kernels/quantize.py"
+CPU_PLAN_ID = "fixture/cpu-rne-correction-v1"
+CPU_KERNEL_PATH = "kernels/quantize.py"
+GPU_PLAN_ID = "host/gfx942-rmsnorm-fused-add-v1"
+GPU_KERNEL_PATH = "kernels/rmsnorm_fused_add.py"
+FORBIDDEN_HOSTS = {"tw042", "tw045"}
+DEFAULT_GPU_IMAGE = "vllm/vllm-openai-rocm:v0.27.1"
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "kth-hyperloom-demo",
     "GIT_AUTHOR_EMAIL": "demo@local",
@@ -45,11 +51,11 @@ def _git(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _make_patch(repo: Path, content: str) -> str:
-    path = repo / KERNEL_PATH
+def _make_patch(repo: Path, kernel_path: str, content: str) -> str:
+    path = repo / kernel_path
     original = path.read_text(encoding="utf-8")
     path.write_text(content, encoding="utf-8")
-    patch = _git(repo, "diff", "--binary", "--", KERNEL_PATH)
+    patch = _git(repo, "diff", "--binary", "--", kernel_path)
     path.write_text(original, encoding="utf-8")
     return patch + "\n"
 
@@ -62,13 +68,17 @@ def _publish(
     ordinal: str,
     content: str,
     evidence: str,
+    plan_id: str,
+    kernel_path: str,
+    gpu: str,
+    backend: str,
 ) -> None:
-    kernel_name = f"{ordinal}-quant-rne"
-    operator_id = f"kernel:forge-loop:{kernel_name}:standalone:demo:python-fixture:fixture-cpu"
+    kernel_name = f"{ordinal}-fused-add" if plan_id.startswith("host/") else f"{ordinal}-quant-rne"
+    operator_id = f"kernel:forge-loop:{kernel_name}:standalone:demo:{backend}:{gpu}"
     patch_dir = patches_root / operator_directory_name(operator_id)
     patch_dir.mkdir(parents=True)
     (patch_dir / "change.patch").write_text(
-        _make_patch(repo, content),
+        _make_patch(repo, kernel_path, content),
         encoding="utf-8",
     )
     (patch_dir / "report.md").write_text(
@@ -77,7 +87,7 @@ def _publish(
                 f"# Candidate {ordinal}",
                 "",
                 "- micro_validated: true",
-                "- tolerance evidence: fixture-labelled",
+                "- tolerance evidence: ordinary allclose / 1-ULP envelope",
                 f"- claim: {evidence}",
                 "",
             )
@@ -92,17 +102,17 @@ def _publish(
             "kernel_name": kernel_name,
             "framework": "standalone",
             "framework_version": "demo",
-            "backend": "python-fixture",
-            "gpu": "fixture-cpu",
+            "backend": backend,
+            "gpu": gpu,
         },
         "base_commit": base_commit,
         "best_commit": "b" * 40,
         "repo_root": str(repo),
-        "kernel_path": KERNEL_PATH,
+        "kernel_path": kernel_path,
         "operator_name": kernel_name,
         "micro_validated": True,
-        "manifest": {"changed_files": [KERNEL_PATH]},
-        "kth_qualification": {"plan_id": PLAN_ID},
+        "manifest": {"changed_files": [kernel_path]},
+        "kth_qualification": {"plan_id": plan_id},
     }
     (patch_dir / "publication.json").write_text(
         json.dumps(publication, indent=2) + "\n",
@@ -110,7 +120,7 @@ def _publish(
     )
 
 
-def _kth_wrapper(root: Path, output: Path) -> tuple[Path, str]:
+def _cpu_wrapper(root: Path, output: Path) -> tuple[Path, str]:
     kth_sha = _git(root, "rev-parse", "HEAD")
     wrapper = output / "kth-qualify"
     wrapper.write_text(
@@ -123,12 +133,79 @@ def _kth_wrapper(root: Path, output: Path) -> tuple[Path, str]:
     return wrapper, kth_sha
 
 
-def _timeline(summary: dict[str, Any], performance_calls: int) -> list[dict[str, Any]]:
+def _gpu_wrapper(
+    root: Path,
+    output: Path,
+    *,
+    host: str,
+    image: str,
+    device: str,
+) -> tuple[Path, str]:
+    kth_sha = _git(root, "rev-parse", "HEAD")
+    wrapper = output / "kth-qualify"
+    wrapper.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import shutil, subprocess, sys, uuid
+            from pathlib import Path
+            args = sys.argv[1:]
+            request = Path(args[args.index("--request") + 1]).resolve()
+            out = Path(args[args.index("--out") + 1]).resolve()
+            kth_root = Path({str(root)!r})
+            work = kth_root / "artifacts" / "demo_gpu_live" / request.parent.name
+            work.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(request, work / "request.json")
+            name = "kth_hl_demo_" + uuid.uuid4().hex[:10]
+            remote = (
+                "docker run --rm --name " + name + " --entrypoint python "
+                "--device=/dev/kfd --device=/dev/dri --group-add video --group-add render "
+                "--ipc=host --cap-add SYS_PTRACE --security-opt seccomp=unconfined "
+                "-e HIP_VISIBLE_DEVICES={device} -e PYTHONPATH=/kth/src "
+                "-e KTH_SHA={kth_sha} "
+                "-v " + str(kth_root) + ":/kth -v " + str(work) + ":/work {image} "
+                "-m kth.provider_cli --request /work/request.json --out /work/attestation.json"
+            )
+            proc = subprocess.run(
+                [
+                    "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
+                    "-o", "StrictHostKeyChecking=accept-new", {host!r}, remote,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            sys.stdout.write(proc.stdout)
+            sys.stderr.write(proc.stderr)
+            attestation = work / "attestation.json"
+            if attestation.is_file():
+                shutil.copy2(attestation, out)
+            raise SystemExit(proc.returncode)
+            """
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    return wrapper, kth_sha
+
+
+def _timeline(
+    summary: dict[str, Any],
+    performance_calls: int,
+    *,
+    gpu: bool,
+) -> list[dict[str, Any]]:
+    drift = "fused-add truncation on gfx942" if gpu else "round-up drift"
+    correction = "torch RNE residual_out on gfx942" if gpu else "round-to-nearest-even correction"
+    keep = (
+        "kernel-level gfx942 timing evaluated; KEEP committed"
+        if gpu
+        else "fixture performance evaluated; KEEP committed"
+    )
     events: list[dict[str, Any]] = [
         {
             "step": 1,
             "event": "micro_validation",
-            "outcome": "both candidates published with fixture tolerance evidence",
+            "outcome": "both candidates published with tolerance evidence",
         }
     ]
     for result in summary["results"]:
@@ -137,7 +214,7 @@ def _timeline(summary: dict[str, Any], performance_calls: int) -> list[dict[str,
                 {
                     "step": 2,
                     "event": "kth_qualification",
-                    "candidate": "round-up drift",
+                    "candidate": drift,
                     "outcome": "Blocked",
                     "detector": result["kth_primary_detector"],
                     "performance_reached": result["performance_reached"],
@@ -156,7 +233,7 @@ def _timeline(summary: dict[str, Any], performance_calls: int) -> list[dict[str,
                 {
                     "step": 4,
                     "event": "kth_qualification",
-                    "candidate": "round-to-nearest-even correction",
+                    "candidate": correction,
                     "outcome": result["kth_verdict"],
                     "performance_reached": result["performance_reached"],
                 }
@@ -165,7 +242,7 @@ def _timeline(summary: dict[str, Any], performance_calls: int) -> list[dict[str,
                 {
                     "step": 5,
                     "event": "hyperloom_action",
-                    "outcome": "fixture performance evaluated; KEEP committed",
+                    "outcome": keep,
                 }
             )
     events.append(
@@ -199,16 +276,126 @@ def _write_terminal_svg(path: Path, events: list[dict[str, Any]]) -> None:
     )
 
 
-async def _run(kth_root: Path, output: Path) -> dict[str, Any]:
+def _ssh(host: str, remote: str, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=8",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            host,
+            remote,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _preflight_gpu(host: str, image: str) -> None:
+    if host in FORBIDDEN_HOSTS:
+        raise SystemExit(f"refusing GPU demo host {host}: campaign forbids it")
+    probe = _ssh(host, "hostname; rocminfo | awk '/Name:/{print $2}' | grep gfx || true")
+    if probe.returncode != 0:
+        raise SystemExit(f"cannot reach {host}: {probe.stderr or probe.stdout}")
+    if "gfx942" not in probe.stdout:
+        raise SystemExit(f"{host} does not expose gfx942:\n{probe.stdout}")
+    images = _ssh(host, f"docker image inspect {image} --format '{{{{.Id}}}}'")
+    if images.returncode != 0:
+        raise SystemExit(f"{image} is not present on {host}: {images.stderr}")
+    print(f"GPU preflight: {host} gfx942, image {image}", file=sys.stderr)
+    print("Not rerunning AITER #4888; this path uses fused-add residual_out only.", file=sys.stderr)
+
+
+def _gpu_kernel_timing(host: str, image: str, device: str, kth_root: Path) -> dict[str, Any]:
+    script = kth_root / "artifacts" / "demo_gpu_live" / "time_fused_add.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        textwrap.dedent(
+            """\
+            import time
+            import torch
+            from kth.v2.rounding import fp32_to_bf16_rne
+            x = torch.randn(256, 4096, device="cuda", dtype=torch.bfloat16)
+            residual = torch.randn_like(x)
+            for _ in range(3):
+                fp32_to_bf16_rne(x.float() + residual.float())
+            torch.cuda.synchronize()
+            started = time.perf_counter()
+            steps = 20
+            for _ in range(steps):
+                fp32_to_bf16_rne(x.float() + residual.float())
+            torch.cuda.synchronize()
+            props = torch.cuda.get_device_properties(0)
+            print(
+                round((time.perf_counter() - started) / steps * 1000, 3),
+                (torch.cuda.get_device_name(0) or "MI300X").replace(" ", "_"),
+                getattr(props, "gcnArchName", "") or "gfx942",
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    name = "kth_hl_perf_" + uuid.uuid4().hex[:10]
+    remote = (
+        f"docker run --rm --name {name} --entrypoint python "
+        "--device=/dev/kfd --device=/dev/dri --group-add video --group-add render "
+        "--ipc=host "
+        f"-e HIP_VISIBLE_DEVICES={device} -e PYTHONPATH=/kth/src "
+        f"-v {kth_root}:/kth {image} /kth/artifacts/demo_gpu_live/time_fused_add.py"
+    )
+    proc = _ssh(host, remote, timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError(f"gfx942 timing failed: {proc.stderr or proc.stdout}")
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(f"gfx942 timing produced no output: {proc.stderr}")
+    parts = lines[-1].split()
+    if len(parts) < 3:
+        raise RuntimeError(f"gfx942 timing parse failed: {lines[-1]!r} stderr={proc.stderr!r}")
+    return {
+        "mean_ms": float(parts[0]),
+        "device_name": parts[1].replace("_", " "),
+        "arch": parts[2],
+        "label": "kernel-level gfx942 residual_out timing; not a serving benchmark",
+    }
+
+
+async def _run(
+    kth_root: Path,
+    output: Path,
+    *,
+    gpu: bool,
+    host: str,
+    image: str,
+    device: str,
+) -> dict[str, Any]:
+    plan_id = GPU_PLAN_ID if gpu else CPU_PLAN_ID
+    kernel_path = GPU_KERNEL_PATH if gpu else CPU_KERNEL_PATH
+    gpu_id = "mi300x-gfx942" if gpu else "fixture-cpu"
+    backend = "aiter-rocm" if gpu else "python-fixture"
+    baseline = 'CAST = "baseline"\n' if gpu else 'ROUND_MODE = "baseline"\n'
+    drift = 'CAST = "truncate"\n' if gpu else 'ROUND_MODE = "ceil"\n'
+    corrected = 'CAST = "rne"\n' if gpu else 'ROUND_MODE = "rne"\n'
+    if gpu:
+        os.environ.pop("KTH_ALLOW_FIXTURE_PLANS", None)
+        _preflight_gpu(host, image)
+    else:
+        os.environ["KTH_ALLOW_FIXTURE_PLANS"] = "1"
+
     repo = output / "candidate_repo"
     session = output / "session"
     patches = output / "publication_artifacts"
     repo.mkdir(parents=True)
     session.mkdir()
     _git(repo, "init")
-    kernel = repo / KERNEL_PATH
+    kernel = repo / kernel_path
     kernel.parent.mkdir()
-    kernel.write_text('ROUND_MODE = "baseline"\n', encoding="utf-8")
+    kernel.write_text(baseline, encoding="utf-8")
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "demo baseline")
     base_commit = _git(repo, "rev-parse", "HEAD")
@@ -218,20 +405,32 @@ async def _run(kth_root: Path, output: Path) -> dict[str, Any]:
         repo,
         base_commit,
         ordinal="01-drift",
-        content='ROUND_MODE = "ceil"\n',
-        evidence="aggregate tolerance check passed, but rounding direction drifted",
+        content=drift,
+        evidence="ordinary allclose passed, but residual_out rounding drifted"
+        if gpu
+        else "aggregate tolerance check passed, but rounding direction drifted",
+        plan_id=plan_id,
+        kernel_path=kernel_path,
+        gpu=gpu_id,
+        backend=backend,
     )
     _publish(
         patches,
         repo,
         base_commit,
         ordinal="02-corrected",
-        content='ROUND_MODE = "rne"\n',
-        evidence="round-to-nearest-even restored",
+        content=corrected,
+        evidence="round-to-nearest-even residual_out restored",
+        plan_id=plan_id,
+        kernel_path=kernel_path,
+        gpu=gpu_id,
+        backend=backend,
     )
 
-    wrapper, kth_sha = _kth_wrapper(kth_root, output)
-    os.environ["KTH_ALLOW_FIXTURE_PLANS"] = "1"
+    if gpu:
+        wrapper, kth_sha = _gpu_wrapper(kth_root, output, host=host, image=image, device=device)
+    else:
+        wrapper, kth_sha = _cpu_wrapper(kth_root, output)
     state = SharedState(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
@@ -239,16 +438,20 @@ async def _run(kth_root: Path, output: Path) -> dict[str, Any]:
     )
     state.save(session)
     performance_calls = 0
+    expected_kernel = corrected
 
     async def fixture_performance(_publication) -> dict[str, Any]:
         nonlocal performance_calls
         performance_calls += 1
-        assert kernel.read_text(encoding="utf-8") == 'ROUND_MODE = "rne"\n'
+        assert kernel.read_text(encoding="utf-8") == expected_kernel
+        evidence: dict[str, Any] = {"performance_evidence": "fixture-labelled"}
+        if gpu:
+            evidence = _gpu_kernel_timing(host, image, device, kth_root)
         return {
             "decision": "KEEP",
             "new_tput": 107.0,
             "gain_pct": 7.0,
-            "performance_evidence": "fixture-labelled",
+            **evidence,
         }
 
     integration = await integrate_controller_patches(
@@ -259,14 +462,20 @@ async def _run(kth_root: Path, output: Path) -> dict[str, Any]:
         kth_provider=KthQualificationProvider(
             executable=str(wrapper),
             expected_kth_sha=kth_sha,
+            timeout_s=1800.0 if gpu else 300.0,
         ),
     )
     summary = integration.to_dict()
-    timeline = _timeline(summary, performance_calls)
+    timeline = _timeline(summary, performance_calls, gpu=gpu)
     result = {
         "demo_schema_version": "1.0.0",
-        "fixture_performance": True,
+        "fixture_performance": not gpu,
+        "live_gfx942": gpu,
+        "gpu_host": host if gpu else None,
+        "gpu_image": image if gpu else None,
+        "issue_4888_rerun": False,
         "kth_sha": kth_sha,
+        "plan_id": plan_id,
         "base_commit": base_commit,
         "final_commit": _git(repo, "rev-parse", "HEAD"),
         "final_kernel": kernel.read_text(encoding="utf-8").strip(),
@@ -297,6 +506,14 @@ def main() -> int:
         help="KTH checkout containing the integration/hyperloom-provider branch",
     )
     parser.add_argument("--out", type=Path)
+    parser.add_argument(
+        "--gpu",
+        action="store_true",
+        help="Qualify live on gfx942 via SSH/docker. Does not rerun AITER #4888.",
+    )
+    parser.add_argument("--host", default="tw051", help="Allocated gfx942 node")
+    parser.add_argument("--image", default=DEFAULT_GPU_IMAGE)
+    parser.add_argument("--device", default="0", help="HIP_VISIBLE_DEVICES inside the container")
     args = parser.parse_args()
     kth_root = args.kth_root.expanduser().resolve()
     if not (kth_root / "src" / "kth" / "provider_cli.py").is_file():
@@ -306,7 +523,16 @@ def main() -> int:
         parser.error(f"output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
     try:
-        result = asyncio.run(_run(kth_root, output))
+        result = asyncio.run(
+            _run(
+                kth_root,
+                output,
+                gpu=args.gpu,
+                host=args.host,
+                image=args.image,
+                device=args.device,
+            )
+        )
     except Exception:
         print(f"Demo failed; artifacts preserved at {output}", file=sys.stderr)
         raise

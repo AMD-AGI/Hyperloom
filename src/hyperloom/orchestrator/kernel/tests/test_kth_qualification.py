@@ -151,6 +151,25 @@ def test_provider_maps_completed_outcomes_and_persists_artifacts(
     assert (artifact_dir / "repair_feedback.json").is_file()
 
 
+def test_blocked_attestation_may_omit_unobserved_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publication = _publication(tmp_path)
+
+    def mutate(attestation):
+        attestation["mandatory_oracle_coverage"]["complete"] = False
+        attestation["mandatory_oracle_coverage"]["missing_oracles"] = ["PROVENANCE"]
+
+    monkeypatch.setattr(subprocess, "run", _subprocess_result("Blocked", mutate=mutate))
+    result = KthQualificationProvider().qualify(
+        publication,
+        artifacts_root=tmp_path / "session" / "kth_qualification",
+    )
+    assert result.status == "kth_blocked"
+    assert result.performance_reached is False
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     [
