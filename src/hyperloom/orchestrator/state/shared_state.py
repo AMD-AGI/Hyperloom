@@ -83,12 +83,6 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
-#: ``anchor_perf`` value meaning "this round has already degraded to the output
-#: axis". Distinct from ``None``, which means "no explicit anchor supplied" and
-#: resolves the session anchor instead.
-ANCHOR_DEGRADED: Any = object()
-
-
 def resolved_grading(state: Any) -> tuple[bool, float | None]:
     """Whether the interactivity objective applies to *state*, and the noise band it grades under.
 
@@ -133,9 +127,8 @@ def resolve_graded_comparison(
     #
     # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
     # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round, and ANCHOR_DEGRADED holds a round on the output axis rather than
-    # re-resolving the session anchor the way None does. The objective and the band come from ``resolved_grading``,
-    # so both are the ones the session was seeded with rather than whatever the calling process's environment holds.
+    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
+    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
@@ -157,13 +150,7 @@ def resolve_graded_comparison(
     on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
     if on_intvty:
-        if anchor_perf is ANCHOR_DEGRADED:
-            # Already on the output axis for this round. Re-resolving the
-            # session anchor here would grade later variants on interactivity
-            # against the round's opening state while they stack on top of a
-            # KEEP that was graded on output.
-            ref_perf, reason = None, "round_degraded"
-        elif anchor_perf is not None:
+        if anchor_perf is not None:
             ref_perf, reason = anchor_perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
@@ -206,11 +193,17 @@ def resolve_graded_comparison(
         reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
+    if degrade_reason:
+        # The output-axis figures are diagnostic only. A degraded AgentX pair
+        # must not read as a throughput KEEP at the resolver chokepoint.
+        verdict = VERDICT_REVERT
+    else:
+        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT,
+        verdict=verdict,
         degrade_reason=degrade_reason,
     )
 

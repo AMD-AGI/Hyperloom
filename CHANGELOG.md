@@ -9,9 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
-  the axis pair, explore and ``_lift_to_current_best`` fail closed instead of
-  promoting on the diagnostic output figure. ``degrade_reason`` still travels
-  on timeline rows so the breakdown can name why a variant did not KEEP.
+  the axis pair, explore, ``_lift_to_current_best``, and
+  ``resolve_graded_comparison`` fail closed instead of promoting on the
+  diagnostic output figure. The removed ``ANCHOR_DEGRADED`` round-local output
+  fallback is part of the same rule. ``degrade_reason`` still travels on
+  timeline rows so the breakdown can name why a variant did not KEEP.
 
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The
