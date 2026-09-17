@@ -893,3 +893,32 @@ async def test_a_recorded_failed_attempt_still_reaches_the_rearm_path(coord):
     await Coordinator._maybe_route_build_outcomes(coord)
 
     assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
+
+@pytest.mark.asyncio
+async def test_an_id_alone_does_not_make_a_row_a_routing_sentinel(coord):
+    """The reader names what it is looking for instead of what it will not find.
+
+    ``BuildResult.to_state`` writes no ``task_id`` today, so an attempt row
+    cannot answer the routing lookup by accident. That is an invariant of a
+    serializer two packages away: if it ever gained one, every completed build
+    would read as already routed and no launch probe would ever be enqueued.
+    The row here is exactly that hypothetical -- an attempt row carrying the
+    id -- and it must not be mistaken for a routing record.
+    """
+    task_id = await _recorded_build(coord, gap_id="gs")
+    manifest = list(coord.shared_state.enablement.build_manifest or [])
+    manifest.append({"task_id": task_id, "ok": True, "attempt_root": "/tmp/x"})
+    coord.shared_state.enablement.build_manifest = manifest
+
+    assert Coordinator._build_routing_record(coord, task_id) is None
+
+
+@pytest.mark.asyncio
+async def test_routing_a_build_with_nothing_to_say_still_marks_it_routed(coord):
+    """The merge path used to take only the caller's fields, and it had none."""
+    task_id = await _recorded_build(coord, gap_id="gt")
+    Coordinator._note_build_routed(coord, task_id)
+
+    record = Coordinator._build_routing_record(coord, task_id)
+    assert record is not None and record.get("routed") is True
+
