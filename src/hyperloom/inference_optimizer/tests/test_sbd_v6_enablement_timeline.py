@@ -658,6 +658,43 @@ def _capture_overlay(session_dir):
     (captured / "a.py").write_text("# captured\n", encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    "observed, expected",
+    [
+        (None, None),
+        ([], []),
+        (["_C.abi3.so"], ["_C.abi3.so"]),
+    ],
+)
+def test_the_tri_state_scans_survive_into_the_recorded_recipe(_bound_session, observed, expected):
+    """The verdict is kept beside the evidence it was reached over, or it is hearsay.
+
+    ``build_extensions_not_carried`` and ``levers_without_readers`` decide two
+    of the sufficiency reasons, and all three readings mean different things:
+    ``None`` that the scan could not be made, ``[]`` that it came back clean, a
+    list what it found. They were computed, judged, and then dropped before the
+    event was recorded -- so a consumer reading those reasons could not see what
+    they were decided over, and could not re-derive the verdict it was asked to
+    trust.
+    """
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.build_extensions_not_carried = observed
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None
+    assert "build_extensions_not_carried" in recipe, sorted(recipe)
+    assert recipe["build_extensions_not_carried"] == expected
+
+
 def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
     _capture_overlay(_bound_session)
     _boot_trigger()
