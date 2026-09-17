@@ -162,7 +162,14 @@ def _patch_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
             {
                 "kind": PATCH_KIND,
                 "path": path,
-                "root": framework_root,
+                # The root this patch was resolved against, not the framework root
+                # the round settled on. They differ exactly when the stack spans
+                # trees, which is when a replay most needs to be told apart: a
+                # consumer reading ``root`` would otherwise apply the patch to the
+                # final framework tree while ``root_id`` named the one it was
+                # written against, and the two would contradict each other in the
+                # same step.
+                "root": root,
                 "root_id": roots_by_path.get(root) or None,
                 "targets": (
                     {str(rel): str(op) for rel, op in declared.items()} if isinstance(declared, Mapping) else None
