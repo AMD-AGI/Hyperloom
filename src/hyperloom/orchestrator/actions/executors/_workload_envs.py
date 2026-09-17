@@ -27,8 +27,9 @@ import os
 import re
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, NamedTuple
 
 import yaml
 
@@ -55,6 +56,7 @@ from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
 from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
+from ._benchmark_interpreter import _resolve_probe_python
 from ._grid_server_args import (
     compact_json_server_args,
     dedup_vllm_server_args,
@@ -117,6 +119,64 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # was attempted and did not apply. Distinct from "never attempted": patching can
 # be disabled for an image that already ships the patch.
 _TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
+
+# Installed ATOM (docker) TraceLens knobs. One subprocess; cached for the process.
+_ATOM_CAPS_PROBE = (
+    "import argparse\n"
+    "from atom.model_engine.arg_utils import EngineArgs\n"
+    "from atom.utils import envs\n"
+    "p = argparse.ArgumentParser(); EngineArgs.add_cli_args(p)\n"
+    "h = p.format_help()\n"
+    'print(int("--mark-trace" in h))\n'
+    'print(int(hasattr(envs, "ATOM_ENABLE_DETAILED_ANNOTATION")))\n'
+    'print(int(hasattr(envs, "ATOM_PROFILER_MORE")))\n'
+)
+
+
+class _AtomTracelensCaps(NamedTuple):
+    """Installed-atom support for TraceLens profile knobs."""
+
+    mark_trace: bool
+    detailed_annotation: bool
+    profiler_more: bool
+
+
+_ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
+
+
+@cache
+def _atom_tracelens_caps() -> _AtomTracelensCaps:
+    """Probe the installed atom for ``--mark-trace`` and annotation envs.
+
+    Fail-soft: import / help / parse errors return all-false so an older ATOM
+    argparse never sees ``--mark-trace``. Cached after the first call.
+    """
+    try:
+        proc = subprocess.run(
+            [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning(
+            "atom TraceLens caps probe failed (%s); omitting --mark-trace / annotation envs",
+            exc,
+        )
+        return _ATOM_CAPS_NONE
+    lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    if proc.returncode != 0 or len(lines) < 3 or any(ln not in {"0", "1"} for ln in lines[:3]):
+        log.warning(
+            "atom TraceLens caps probe unavailable (exit=%s); omitting --mark-trace / annotation envs",
+            proc.returncode,
+        )
+        return _ATOM_CAPS_NONE
+    return _AtomTracelensCaps(
+        mark_trace=lines[0] == "1",
+        detailed_annotation=lines[1] == "1",
+        profiler_more=lines[2] == "1",
+    )
+
 
 # Quality-reference env names, in resolution order. Every scriptable workload
 # needs this gate, so the contract is the framework-neutral ``HYPERLOOM_`` pair.
@@ -1384,6 +1444,7 @@ def materialize_config_with_envs(
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
     profile_num_prompts: int | None = None
+    atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
     # this function can restore exactly the profiler flags that some later step
     # dropped, without re-stating the ones that survived. See that block for why a
@@ -1495,9 +1556,10 @@ def materialize_config_with_envs(
                     fw or "<unset>",
                 )
         if is_atom:
-            # atom's profile window lives only in Magpie's atom_mi*x.sh
-            # (ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS); defer to Magpie.
-            profile_num_prompts = None
+            # ATOM has no delay/max-iteration window; extra prompts only grow
+            # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
+            profile_num_prompts = conc_val
+            atom_caps = _atom_tracelens_caps()
         elif "vllm" in fw:
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_flags = [
@@ -2009,6 +2071,18 @@ def materialize_config_with_envs(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if atom_caps is not None:
+        # After extra_envs / replace_args / remove_args so TraceLens knobs
+        # survive the same last-wins path as vLLM profiler bounds. Must land
+        # before seal_server_argv — that function is the last write.
+        if atom_caps.detailed_annotation:
+            envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
+        if atom_caps.profiler_more:
+            envs["ATOM_PROFILER_MORE"] = "1"
+        if atom_caps.mark_trace:
+            extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
+            if "--mark-trace" not in extra:
+                envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,

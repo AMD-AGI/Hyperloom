@@ -1744,6 +1744,8 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     assert "--profiler-config" not in extra, f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
     # --trust-remote-code from the baseline YAML must survive untouched.
     assert "--trust-remote-code" in extra, f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
+    # baseline YAML is not a profile materialize; do not inject ATOM TraceLens knobs.
+    assert "--mark-trace" not in extra
 
 
 def test_default_profile_config_tracks_framework(monkeypatch):
