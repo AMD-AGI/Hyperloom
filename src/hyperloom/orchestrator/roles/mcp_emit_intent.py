@@ -146,8 +146,37 @@ _UNPARSED_TOOL_INPUT_KEY = "__unparsedToolInput"
 _EMIT_INTENT_TOP_LEVEL_KEYS = {"intent_type", "payload", _UNPARSED_TOOL_INPUT_KEY}
 
 
-def decode_emit_intent_input(raw_input: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    """Decode a parser fallback and report why decoding failed."""
+def decode_emit_intent_input(raw_input: Any) -> tuple[dict[str, Any], str | None]:
+    """Decode a parser fallback and report why decoding failed.
+
+    Accepts the three shapes ``emit_intent`` tool input arrives in:
+
+    1. a native object (direct Anthropic API);
+    2. Claude Code's ``__unparsedToolInput.raw`` wrapper;
+    3. a JSON *string* envelope, as emitted by OpenAI-compatible / litellm
+       style proxies, optionally with ``payload`` itself stringified.
+
+    Shape 3 previously could not reach this function: the caller replaced any
+    non-dict input with ``{}``, which decoded "successfully" to an empty
+    intent, so the orchestrator stalled with no error.
+    """
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except (TypeError, ValueError):
+            return {}, "emit_intent tool input string is not valid JSON"
+        if not isinstance(raw_input, dict):
+            return {}, "emit_intent tool input string did not decode to a JSON object"
+    if not isinstance(raw_input, dict):
+        return {}, f"emit_intent tool input must be an object, got {type(raw_input).__name__}"
+    payload = raw_input.get("payload")
+    if isinstance(payload, str):
+        try:
+            decoded_payload = json.loads(payload)
+        except (TypeError, ValueError):
+            decoded_payload = None
+        if isinstance(decoded_payload, dict):
+            raw_input = {**raw_input, "payload": decoded_payload}
     if "intent_type" in raw_input or _UNPARSED_TOOL_INPUT_KEY not in raw_input:
         return raw_input, None
     wrapped = raw_input.get(_UNPARSED_TOOL_INPUT_KEY)
