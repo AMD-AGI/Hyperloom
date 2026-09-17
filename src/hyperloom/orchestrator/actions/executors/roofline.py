@@ -597,7 +597,7 @@ class RooflineExecutor:
                 recorder.finish_failed(phase=phase, message=error)
             return _failed(phase, error, sub_result=sub_result)
 
-        def _fail_capture(
+        async def _fail_capture(
             *,
             category: str,
             marker: str,
@@ -634,7 +634,7 @@ class RooflineExecutor:
                     },
                     "marker_hits": _marker_hit_context(sources, marker),
                     "sources": {k: v[-_CAPTURE_DIAGNOSIS_SOURCE_BYTES:] for k, v in sources.items() if v},
-                    "trace_dir": _trace_dir_inventory(profile_result),
+                    "trace_dir": await asyncio.to_thread(_trace_dir_inventory, profile_result),
                 },
             )
             message = (
@@ -650,7 +650,7 @@ class RooflineExecutor:
         next_profile_reason = PROFILE_ATTEMPT_INITIAL
         profile_reason = PROFILE_ATTEMPT_INITIAL
 
-        def _note_profile_run(
+        async def _note_profile_run(
             *,
             status: str,
             result: dict[str, Any] | None,
@@ -671,7 +671,9 @@ class RooflineExecutor:
                     failure=failure,
                     # Probed here rather than only on the failure paths: the run this is meant to catch is the
                     # one that reports success.
-                    server_liveness=_server_liveness_probe(session_dir, _self_task_id),
+                    server_liveness=await asyncio.to_thread(
+                        _server_liveness_probe, session_dir, _self_task_id
+                    ),
                     # Drained per attempt, so every attempt carries which patchers ran and what they returned --
                     # including the attempts that raised, where no result dict exists to carry it. Resolved by
                     # attribute because ``profile_executor`` is a module-level name that alternate wirings and
@@ -719,7 +721,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=None,
                     failure={"phase": last_phase, "error_class": type(exc).__name__, "message": last_error},
@@ -732,7 +734,7 @@ class RooflineExecutor:
                     ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(last_error)
                 )
                 if _cg_category:
-                    return _fail_capture(
+                    return await _fail_capture(
                         category=_cg_category,
                         marker=_cg_marker,
                         attempt=attempt,
@@ -753,7 +755,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=None,
                     failure={"phase": last_phase, "error_class": "bad_return", "message": last_error},
@@ -778,7 +780,7 @@ class RooflineExecutor:
                         trace_path,
                     )
                     successful_profile_params = dict(profile_ctx.task.params or {})
-                    _recovered_run = _note_profile_run(status="recovered", result=profile_result)
+                    _recovered_run = await _note_profile_run(status="recovered", result=profile_result)
                     if recorder is not None:
                         recorder.adopt_profile_run(
                             run_index=_recovered_run,
@@ -797,7 +799,7 @@ class RooflineExecutor:
                     # Recorded before returning: this branch used to leave the attempt out of ``runs`` entirely,
                     # so the one class of failure nobody can retry their way out of was also the one the event
                     # could not describe.
-                    _note_profile_run(
+                    await _note_profile_run(
                         status="failed",
                         result=profile_result,
                         failure={
@@ -813,7 +815,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     last_error,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=profile_result,
                     failure={
@@ -834,7 +836,7 @@ class RooflineExecutor:
                     ("", "") if disable_cuda_graph else _classify_cuda_graph_capture_failure(*_cg_sources.values())
                 )
                 if _cg_category:
-                    return _fail_capture(
+                    return await _fail_capture(
                         category=_cg_category,
                         marker=_cg_marker,
                         attempt=attempt,
@@ -858,7 +860,7 @@ class RooflineExecutor:
                     attempt,
                     _PROFILE_MAX_ATTEMPTS,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=profile_result,
                     failure={"phase": last_phase, "error_class": "no_trace", "message": last_error},
@@ -880,7 +882,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     trace_path,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=profile_result,
                     failure={"phase": last_phase, "error_class": "capture_only", "message": last_error},
@@ -901,7 +903,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                     trace_path,
                 )
-                _note_profile_run(
+                await _note_profile_run(
                     status="failed",
                     result=profile_result,
                     failure={"phase": last_phase, "error_class": "zero_ops", "message": last_error},
@@ -916,7 +918,7 @@ class RooflineExecutor:
                     _PROFILE_MAX_ATTEMPTS,
                 )
             successful_profile_params = dict(profile_ctx.task.params or {})
-            _succeeded_run = _note_profile_run(status="succeeded", result=profile_result)
+            _succeeded_run = await _note_profile_run(status="succeeded", result=profile_result)
             if recorder is not None:
                 recorder.adopt_profile_run(
                     run_index=_succeeded_run,
@@ -1283,7 +1285,7 @@ class RooflineExecutor:
                 except Exception as exc:
                     # Recorded here rather than left to the fail-soft handler below: that one only narrates the
                     # outcome, and an attempt the event never rows is an attempt ``attempt_count`` does not count.
-                    _note_profile_run(
+                    await _note_profile_run(
                         status="failed",
                         result=None,
                         failure={
@@ -1294,7 +1296,7 @@ class RooflineExecutor:
                     )
                     raise
                 cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
-                cb_profile_run = _note_profile_run(
+                cb_profile_run = await _note_profile_run(
                     status="succeeded" if cb_trace else "failed",
                     result=cb_profile if isinstance(cb_profile, dict) else None,
                     failure=(
