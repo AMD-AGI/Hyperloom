@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import shlex
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
