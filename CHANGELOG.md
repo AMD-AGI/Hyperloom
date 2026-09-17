@@ -83,6 +83,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A KernelForge Controller KEEP now reaches the stack ledger in every
+  benchmark mode, not only under AgentX.** `_run_kernel_rewrite_controller`
+  handed `integrate_controller_patches` the session-owned writeback only when
+  `agentx_active` held; every other mode fell back to a module-local recorder
+  that wrote `optimization_stack`, `current_best` and
+  `cumulative_gain_validated` directly. That writer bypassed
+  `_lift_to_current_best`, which is the only caller of
+  `stack_event.record_adoption`, so a controller KEEP in synthetic mode landed
+  in `state.json` and never produced an adoption row — `session_breakdown` sat
+  behind the state it was meant to describe.
+
+  This is visible in the document: for a non-AgentX run the kernel bucket and
+  its `by_backend.forge` split go from empty to populated, and
+  `validated_total_gain_pct` / `at_head` now account for controller KEEPs. The
+  KEEP result carries `backend: forge` / `engine: kernel_rewrite_controller`, so
+  the adoption is attributed rather than folded into `unattributed`. The local
+  recorder and the `record_keep is None` branch that selected it are gone and
+  `record_keep` is now required, so a caller cannot silently reacquire the
+  no-ledger path.
+
 - **A measured Controller patch was dropped because the patch kept before it
   had moved its context.** Lanes run in parallel from one pinned base commit,
   so two lanes touching the same file each ship a diff written against that

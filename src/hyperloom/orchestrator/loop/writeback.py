@@ -950,6 +950,8 @@ class WritebackCollaborator:
                 "target_file": result.get("target_file"),
                 "gain_pct": result.get("gain_pct"),
                 "stack_kernel_ids": [str(k) for k in (result.get("stack_kernel_ids") or []) if str(k)],
+                "backend": result.get("backend"),
+                "engine": result.get("engine"),
                 # Provenance for a fusion sibling; readers key the stack row on
                 # ``action == "fusion"`` above, this just records the producer.
                 **({"backend": "forge", "engine": "forge_fusion"} if is_fusion else {}),
