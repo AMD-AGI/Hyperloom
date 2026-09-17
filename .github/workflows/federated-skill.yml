@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-name: Catalog skill
+name: Federated skill
 
 # Validates the skill amd/skills imports from this repo against the rules its
 # catalog enforces.
@@ -23,7 +23,7 @@ permissions:
 
 # Cancel superseded runs for the same ref.
 concurrency:
-  group: catalog-skill-${{ github.ref }}
+  group: federated-skill-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -46,5 +46,5 @@ jobs:
 
       - name: Check the federated skill
         run: |
-          pytest scripts/tests/test_catalog_skill_contract.py \
+          pytest scripts/tests/test_federated_skill_contract.py \
             -p no:cacheprovider -v
