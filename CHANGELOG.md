@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Docker skills: do not launch optimize with `docker exec -d`.** Detached
+  `docker exec` discards stdout and stderr, so an optimizer that dies on
+  startup looks like a backgrounding failure. Demo and optimizer skills now
+  require one attached `docker exec … bash -lc` that runs the existing
+  `setsid nohup` + run-log + `--launch-info-file` recipe.
+
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The
   `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
