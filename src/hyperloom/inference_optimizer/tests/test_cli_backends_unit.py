@@ -29,6 +29,14 @@ def _clear_provider_env(monkeypatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
+def _set_dual_protocol_gateway(monkeypatch) -> None:
+    """One gateway (e.g. DeepSeek) serving both protocols, each side with its own URL and key."""
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
+
+
 @pytest.fixture(autouse=True)
 def _stub_backends(monkeypatch):
     """Replace heavy backend classes with lightweight stubs (no SDK / network)."""
@@ -226,10 +234,7 @@ def test_build_backends_rejects_unknown_critic_protocol(monkeypatch) -> None:
 def test_build_backends_dual_protocol_gateway_uses_standard_critic_agent(monkeypatch) -> None:
     """A dual-protocol gateway (e.g. DeepSeek) is just \"both sides configured\"."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-deepseek-key")
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com/v1")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-deepseek-key")
+    _set_dual_protocol_gateway(monkeypatch)
     b = _build(
         critic_choice="agent",
         critic_agent_root=Path("/tmp/critic"),
@@ -264,21 +269,21 @@ def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) ->
     assert "kernel_agent" not in b
 
 
-def test_build_backends_gateway_key_alone_still_reaches_codex(monkeypatch) -> None:
-    """The Codex session authenticates with LLM_GATEWAY_KEY, so the coordinator must be allowed to use it."""
+def test_build_backends_dual_config_keeps_claude_for_orchestration(monkeypatch) -> None:
+    """Both sides authenticate and both SDKs import, so the tie goes to Claude."""
     _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
-    monkeypatch.setenv("LLM_GATEWAY_KEY", "ak-gateway-key")
-
-    assert _build()["orchestration"][0] == "codex"
-
-
-def test_build_backends_keeps_claude_for_an_endpoint_with_no_credential(monkeypatch) -> None:
-    """Codex refuses to start without a key, so a bare base URL is no reason to hand it the coordinator."""
-    _clear_provider_env(monkeypatch)
-    monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example.com/v1")
+    _set_dual_protocol_gateway(monkeypatch)
 
     assert _build()["orchestration"][0] == "claude"
+
+
+def test_build_backends_dual_config_drops_claude_when_its_sdk_is_absent(monkeypatch) -> None:
+    """Same credentials, so only the importable SDK separates them -- and a ClaudeBackend that cannot import is not an answer."""
+    _clear_provider_env(monkeypatch)
+    _set_dual_protocol_gateway(monkeypatch)
+    monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: False)
+
+    assert _build()["orchestration"][0] == "codex"
 
 
 def test_build_backends_invalid_robustness_choice() -> None:

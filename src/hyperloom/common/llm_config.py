@@ -65,7 +65,9 @@ ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
-# The same for the OpenAI side: the names a Codex session authenticates with, highest precedence first.
+# The same for the OpenAI side: the names a Codex session authenticates with there, highest precedence first. The
+# Anthropic-side keys resolve_openai_client_config() also falls back to are not listed, because a box carrying one of
+# those is credentialed on the Anthropic side and ranks there.
 OPENAI_AGENT_KEY_ENV_ORDER: tuple[str, ...] = (
     "OPENAI_API_KEY",
     "LLM_GATEWAY_KEY",
@@ -171,12 +173,12 @@ def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
 def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side can authenticate an agent CLI run.
 
-    Asks for every name :mod:`hyperloom.common.codex_session` authenticates
-    with, so a gateway deployment carrying only ``LLM_GATEWAY_KEY`` is not
-    ranked uncredentialed and handed to Claude, which such a box cannot
-    authenticate either. A bare ``OPENAI_BASE_URL`` with none of them set is an
-    endpoint hint, not a credential, and treating the URL alone as configured
-    is what sends an unauthenticated Codex run.
+    Asks for every OpenAI-side name :mod:`hyperloom.common.codex_session`
+    authenticates with, so a gateway deployment carrying only
+    ``LLM_GATEWAY_KEY`` is not ranked uncredentialed and handed to Claude,
+    which such a box cannot authenticate either. A bare ``OPENAI_BASE_URL``
+    with none of them set is an endpoint hint, not a credential, and treating
+    the URL alone as configured is what sends an unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
     return bool(_first_set_value(OPENAI_AGENT_KEY_ENV_ORDER, source))

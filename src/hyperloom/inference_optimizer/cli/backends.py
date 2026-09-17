@@ -97,8 +97,9 @@ def _build_backends(
     # _preflight() derives OPENAI_BASE_URL from ANTHROPIC_BASE_URL.
     provider_anthropic_only = codex_follows_claude or llm_config.is_anthropic_only()
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
-    # second reading of the endpoint shape. Both operator intents still win ahead of it: an Anthropic-only launch pins
-    # Claude, and CLAUDE_FOLLOWS_CODEX is set only once --claude-model has already been rewritten to the Codex model.
+    # second reading of the endpoint shape. Both flags mean the caller has already rewritten one model id into the
+    # other's, which drops the backend that would be handed the foreign id out of the running; only a launch that
+    # rewrote neither has two candidates left to rank.
     orchestration_on_codex = (not codex_follows_claude) and (
         os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1"
         or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
