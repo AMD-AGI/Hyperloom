@@ -302,9 +302,7 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
             continue
         name = token.split("=", 1)[0]
         takes_value = (
-            "=" not in token
-            and index + 1 < len(inherited_tokens)
-            and not inherited_tokens[index + 1].startswith("-")
+            "=" not in token and index + 1 < len(inherited_tokens) and not inherited_tokens[index + 1].startswith("-")
         )
         if name not in round_names:
             # shlex stripped the quoting when it parsed; restore a spelling that
@@ -3925,9 +3923,7 @@ class IntegratePatchExecutor:
                 merged.update({str(k): v for k, v in block.items()})
         envs = merged
         prefix = f"{framework.strip().upper()}_"
-        names = sorted(
-            {str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)}
-        )
+        names = sorted({str(k).strip() for k in (envs or {}) if str(k).strip().startswith(prefix)})
         if not names:
             return []
         if not framework_root.is_dir():
@@ -4036,8 +4032,7 @@ class IntegratePatchExecutor:
             package_roots = [
                 d
                 for d in (
-                    prefix / framework_root.name
-                    for prefix in IntegratePatchExecutor._build_output_trees(attempt_root)
+                    prefix / framework_root.name for prefix in IntegratePatchExecutor._build_output_trees(attempt_root)
                 )
                 if d.is_dir()
             ]
@@ -4046,9 +4041,7 @@ class IntegratePatchExecutor:
                 # the candidate worktrees have been cleaned up. Either way this
                 # scanned nothing, which is not the same as finding nothing.
                 return None
-            built_files = sorted(
-                (package, built) for package in package_roots for built in package.rglob("*.so")
-            )
+            built_files = sorted((package, built) for package in package_roots for built in package.rglob("*.so"))
         except OSError:
             return None
         for package, built in built_files:

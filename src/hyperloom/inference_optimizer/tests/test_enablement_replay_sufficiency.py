@@ -2206,9 +2206,20 @@ def _persisted(result_value, *, present=True):
     enablement = SimpleNamespace(
         build_extensions_not_carried=[],
         launch_argv_refused=False,
-        **{name: {} for name in ("accepted_stack_targets", "patch_targets", "launch_evidence",
-                                 "environment_closure", "installed_versions_at_keep",
-                                 "roots", "patch_roots", "base_sha", "source_snapshots")},
+        **{
+            name: {}
+            for name in (
+                "accepted_stack_targets",
+                "patch_targets",
+                "launch_evidence",
+                "environment_closure",
+                "installed_versions_at_keep",
+                "roots",
+                "patch_roots",
+                "base_sha",
+                "source_snapshots",
+            )
+        },
     )
     res = {"enablement_build_extensions_not_carried": result_value} if present else {}
     _stack_keep_recipe_records(SimpleNamespace(enablement=enablement), res)

@@ -230,7 +230,11 @@ class ProvisionResult:
         # no longer tell from an unpinned one. ``to_state`` writes both.
         raw_packages = d.get("resolved_packages")
         packages = (
-            {str(k): {str(vk): str(vv) for vk, vv in v.items()} for k, v in raw_packages.items() if isinstance(v, Mapping)}
+            {
+                str(k): {str(vk): str(vv) for vk, vv in v.items()}
+                for k, v in raw_packages.items()
+                if isinstance(v, Mapping)
+            }
             if isinstance(raw_packages, Mapping)
             else {}
         )

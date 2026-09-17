@@ -459,8 +459,12 @@ def test_the_graded_override_decides_what_the_probe_observes(tmp_path: Path):
     never imported.
     """
     override = {"pythonpath_prefixes": [_installed_dist(tmp_path, "overlaid", "3.1")]}
-    closure, assertions = probe_environment_closure(sys.executable, env=keep_probe_env(override), packages=("overlaid",))
-    bare_closure, bare_assertions = probe_environment_closure(sys.executable, env=keep_probe_env(None), packages=("overlaid",))
+    closure, assertions = probe_environment_closure(
+        sys.executable, env=keep_probe_env(override), packages=("overlaid",)
+    )
+    bare_closure, bare_assertions = probe_environment_closure(
+        sys.executable, env=keep_probe_env(None), packages=("overlaid",)
+    )
     assert closure["distributions"]["overlaid"] == "3.1" and assertions == {"overlaid": "3.1"}
     assert "overlaid" not in bare_closure["distributions"] and bare_assertions == {}
 
@@ -568,7 +572,9 @@ def test_an_override_naming_no_interpreter_observes_under_the_backend(
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
         _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"demo": "1.0"})))
@@ -592,7 +598,9 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
 
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
         _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""})))
@@ -637,7 +645,9 @@ def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Pat
         "resolve_benchmark_interpreter",
         lambda: pytest.fail("the benchmark backend's interpreter must not be the fallback off bypass"),
     )
-    monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable)
+    monkeypatch.setattr(
+        _benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: sys.executable
+    )
     executor = IntegratePatchExecutor(session_dir=tmp_path / "session")
     ctx = SimpleNamespace(
         _ip_shared_state=SimpleNamespace(enablement=SimpleNamespace(build_manifest=_build_manifest({"pytest": ""})))
@@ -721,9 +731,7 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
     monkeypatch.setenv("FRAMEWORK", "sglang")  # outranked by the config's own framework
     monkeypatch.delenv("VLLM_VENV_ROOT", raising=False)
     monkeypatch.delenv("MAGPIE_PYTHON", raising=False)
-    monkeypatch.setattr(
-        _benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python"
-    )
+    monkeypatch.setattr(_benchmark_interpreter, "_resolve_magpie_python", lambda _env=None: "/opt/venv/bin/python")
 
     seen: dict[str, Any] = {}
     real_probe = _benchmark_interpreter._resolve_probe_python
@@ -974,7 +982,10 @@ def test_the_probe_environment_carries_the_prefixes_and_the_runtime_env(tmp_path
 
 def test_an_interpreter_the_probe_cannot_run_observes_nothing(tmp_path: Path):
     """Fail closed on the invocation too, not only on an unresolved interpreter."""
-    assert probe_environment_closure(str(tmp_path / "absent-python"), env=keep_probe_env(None), packages=("demo",)) == ({}, {})
+    assert probe_environment_closure(str(tmp_path / "absent-python"), env=keep_probe_env(None), packages=("demo",)) == (
+        {},
+        {},
+    )
     silent = tmp_path / "silent-python"
     silent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     silent.chmod(0o755)
@@ -2383,9 +2394,7 @@ def test_the_round_being_captured_links_before_it_is_kept(tmp_path: Path):
     )
 
     without = IntegratePatchExecutor._build_extensions_not_carried(enablement, root)
-    withit = IntegratePatchExecutor._build_extensions_not_carried(
-        enablement, root, specialist_task_id=PROBE_TASK
-    )
+    withit = IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK)
 
     assert without == [], "the pre-fix shape: nothing links, nothing is reported"
     assert withit == ["_moe_C.abi3.so"], "told which round it is capturing, the gap is named"
@@ -2405,9 +2414,9 @@ def test_the_current_round_is_not_double_counted(tmp_path: Path):
         kept_rounds=[{"task_id": PROBE_TASK}],
     )
 
-    assert IntegratePatchExecutor._build_extensions_not_carried(
-        enablement, root, specialist_task_id=PROBE_TASK
-    ) == ["_moe_C.abi3.so"]
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) == [
+        "_moe_C.abi3.so"
+    ]
 
 
 def _linked(attempt: Path) -> SimpleNamespace:
@@ -2450,12 +2459,7 @@ def test_a_linked_build_whose_root_is_gone_reports_unverified(tmp_path: Path):
     # build; only the directory itself is gone.
     enablement = _linked(tmp_path / "builds" / "bA")
 
-    assert (
-        IntegratePatchExecutor._build_extensions_not_carried(
-            enablement, root, specialist_task_id=PROBE_TASK
-        )
-        is None
-    )
+    assert IntegratePatchExecutor._build_extensions_not_carried(enablement, root, specialist_task_id=PROBE_TASK) is None
 
 
 def test_an_extension_in_a_subpackage_is_judged_at_its_own_path(tmp_path: Path):
@@ -2541,9 +2545,7 @@ def test_a_named_output_tree_that_is_gone_is_unverified(tmp_path: Path):
     root.mkdir(parents=True)
 
     assert (
-        IntegratePatchExecutor._build_extensions_not_carried(
-            _linked(attempt), root, specialist_task_id=PROBE_TASK
-        )
+        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
         is None
     )
 
@@ -2557,9 +2559,7 @@ def test_an_empty_fallback_is_unverified(tmp_path: Path):
     root.mkdir(parents=True)
 
     assert (
-        IntegratePatchExecutor._build_extensions_not_carried(
-            _linked(attempt), root, specialist_task_id=PROBE_TASK
-        )
+        IntegratePatchExecutor._build_extensions_not_carried(_linked(attempt), root, specialist_task_id=PROBE_TASK)
         is None
     )
 
@@ -2619,12 +2619,16 @@ def test_an_extensionless_or_unanticipated_reader_counts(tmp_path: Path):
     root.mkdir(parents=True)
     (root / "Dockerfile").write_text("ENV VLLM_HL_DOCKER=1", encoding="utf-8")
     (root / "Makefile").write_text("\tEXPORT=$(VLLM_HL_MAKE)", encoding="utf-8")
-    (root / "kernel.S").write_text(".ascii \"VLLM_HL_ASM\"", encoding="utf-8")
+    (root / "kernel.S").write_text('.ascii "VLLM_HL_ASM"', encoding="utf-8")
     (root / "shim.rs").write_text('std::env::var("VLLM_HL_RUST")', encoding="utf-8")
     (root / "prebuilt.so").write_bytes(b"\x7fELF...VLLM_HL_NATIVE\x00...")
     state = _lever_state(
-        VLLM_HL_DOCKER="1", VLLM_HL_MAKE="1", VLLM_HL_ASM="1",
-        VLLM_HL_RUST="1", VLLM_HL_NATIVE="1", VLLM_HL_NOBODY="1",
+        VLLM_HL_DOCKER="1",
+        VLLM_HL_MAKE="1",
+        VLLM_HL_ASM="1",
+        VLLM_HL_RUST="1",
+        VLLM_HL_NATIVE="1",
+        VLLM_HL_NOBODY="1",
     )
 
     assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm") == ["VLLM_HL_NOBODY"]
@@ -2676,9 +2680,7 @@ def test_a_lever_this_keep_introduced_is_scanned(tmp_path: Path):
     effective = {"extra_envs": {"VLLM_HL_NEW": "2"}}
 
     without = IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm")
-    withit = IntegratePatchExecutor._levers_without_readers(
-        state, root, framework="vllm", effective_config=effective
-    )
+    withit = IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=effective)
 
     assert without == [], "the pre-fix shape: this round's lever is invisible"
     assert withit == ["VLLM_HL_NEW"]
@@ -2702,9 +2704,9 @@ def test_a_malformed_effective_config_is_ignored(tmp_path: Path):
     state = _lever_state(VLLM_HL_OLD="1")
 
     for junk in (None, 7, "x", {"extra_envs": 5}):
-        assert IntegratePatchExecutor._levers_without_readers(
-            state, root, framework="vllm", effective_config=junk
-        ) == ["VLLM_HL_OLD"], junk
+        assert IntegratePatchExecutor._levers_without_readers(state, root, framework="vllm", effective_config=junk) == [
+            "VLLM_HL_OLD"
+        ], junk
 
 
 def test_a_switch_set_to_off_is_not_a_credential_channel(tmp_path):

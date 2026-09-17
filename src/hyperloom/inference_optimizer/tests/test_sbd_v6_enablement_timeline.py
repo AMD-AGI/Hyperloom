@@ -729,8 +729,7 @@ def test_the_kept_rounds_carry_no_paths_from_the_authoring_host(_bound_session):
         {
             "task_id": "spec-1",
             "patches": ["/authoring/ws/enablement/spec-1/001.patch"],
-            "artifacts": [{"source": "/authoring/ws/build/_C.so", "target": "/srv/vllm/_C.so",
-                           "rel_target": "_C.so"}],
+            "artifacts": [{"source": "/authoring/ws/build/_C.so", "target": "/srv/vllm/_C.so", "rel_target": "_C.so"}],
         }
     ]
     enablement_event.finish(
@@ -842,6 +841,7 @@ def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, mo
     # Nothing of the oversized payload survives to be read as partial evidence.
     assert set(recipe) == {"replay_sufficiency"}
 
+
 def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_session):
     """Two fields describing one patch may not disagree about what it is called.
 
@@ -866,6 +866,7 @@ def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_se
 
     assert collected["kept_patches"] == ["a.patch"]
     assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
+
 
 def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
     """One assertion over the whole recorded recipe, not one per field.
@@ -918,4 +919,3 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
     # The linkage itself must survive: normalizing must not mean discarding.
     assert "a.patch" in blob and "_C.so" in blob
     assert "r1" in blob, "the portable root identifier must remain"
-

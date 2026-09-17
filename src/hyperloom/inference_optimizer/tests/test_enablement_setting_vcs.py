@@ -25,9 +25,7 @@ def test_the_vcs_kind_follows_the_corrected_root(tmp_path: Path, monkeypatch):
     session = tmp_path / "sess"
     round_dir = art.enablement_round_dir(session, "r1") / "patches"
     round_dir.mkdir(parents=True)
-    (round_dir / "p.patch").write_text(
-        "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8"
-    )
+    (round_dir / "p.patch").write_text("--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-x\n+y\n", encoding="utf-8")
 
     seen: dict[str, object] = {}
 
