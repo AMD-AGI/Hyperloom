@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.eval_tasks import ACCURACY_METRIC_KEYS
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
@@ -479,7 +480,7 @@ def parse_eval_results(
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRIC_KEYS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):

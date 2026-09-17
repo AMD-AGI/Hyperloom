@@ -133,6 +133,7 @@ that degraded path.
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_FRAMEWORK`<br>`_ACCURACY` | On | Same gate for a framework source patch authored by a specialist. Same disable spellings. |
+| `MAGPIE_EVAL_TASKS` | `gsm8k` | Which lm-eval task the accuracy gate scores (`lm_eval --tasks`, comma-separated). Every accuracy number in the run — the baseline anchor, the enablement floor, every candidate verdict — comes from this one task, so changing it changes what the whole gate means; see the caveat below. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
 
 The tolerance is deliberately **not** an env knob: `ACCURACY_THRESHOLD` in
@@ -146,6 +147,29 @@ errors away from the baseline, so single-run noise does not trip it. Capping the
 eval with a small `MAGPIE_EVAL_LIMIT` shrinks that margin sharply and can make
 the gate noise-sensitive — prefer the full task set whenever a gate decision
 depends on the result.
+
+#### Choosing a different task
+
+`MAGPIE_EVAL_TASKS` accepts any task name the pinned lm-eval harness knows,
+including its sparse `tinyBenchmarks` set (`tinyGSM8k`, `tinyMMLU`, ...). Those
+tasks score a ~100-item IRT-calibrated anchor set and then *estimate* the
+full-benchmark number from it, so they cut eval wall-clock by roughly an order
+of magnitude. Their estimator ships in a separate `tinyBenchmarks` package that
+lm-eval imports lazily from inside the aggregation function; Hyperloom installs
+it automatically, but only when the resolved task list names a `tiny*` task, so
+a default run takes on no extra dependency.
+
+Two things to know before switching:
+
+- The estimate carries a small **absolute** bias against the full-benchmark
+  score. That bias is the same on both sides of a before/after comparison, so
+  it cancels in the `ACCURACY_THRESHOLD` delta — but it does *not* cancel in
+  `DEFAULT_ENABLEMENT_ACCURACY_FLOOR`, the absolute `0.5` floor the baseline and
+  the enablement KEEP gate both apply. A model genuinely sitting just above that
+  floor can be failed by the estimate alone.
+- Published accuracy numbers come from the same eval as the gate; there is no
+  separate delivery pass. A run gated on `tinyGSM8k` reports a tinyGSM8k
+  estimate, not a full GSM8K score.
 
 ### Eval generation bounds
 

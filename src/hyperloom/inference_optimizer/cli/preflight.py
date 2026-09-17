@@ -21,6 +21,13 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common import provenance
+from hyperloom.common.eval_tasks import (
+    DEFAULT_EVAL_TASKS,
+    TINYBENCHMARKS_MODULE,
+    TINYBENCHMARKS_PINNED_REF,
+    TINYBENCHMARKS_PINNED_SPECS,
+    eval_tasks_need_tinybenchmarks,
+)
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -1119,8 +1126,16 @@ _RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 _LM_EVAL_DEPS = ("lm_eval", "tenacity")
 
 
-def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
-    """Report which accuracy-gate modules ``python_exe`` cannot import."""
+def _eval_deps_for_tasks() -> tuple[str, ...]:
+    """The accuracy-gate modules this launch's ``MAGPIE_EVAL_TASKS`` actually needs."""
+    tasks = os.environ.get("MAGPIE_EVAL_TASKS", "").strip() or DEFAULT_EVAL_TASKS
+    if eval_tasks_need_tinybenchmarks(tasks):
+        return (*_LM_EVAL_DEPS, TINYBENCHMARKS_MODULE)
+    return _LM_EVAL_DEPS
+
+
+def _probe_missing_lm_eval_deps(python_exe: str, deps: tuple[str, ...] = _LM_EVAL_DEPS) -> list[str] | None:
+    """Report which of *deps* ``python_exe`` cannot import."""
     try:
         # A missing or non-executable interpreter raises instead of returning a code, and preflight must not die on
         # it: absence stays unproven, which the caller reports without touching anything.
@@ -1128,7 +1143,7 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
         if liveness.returncode != 0:
             return None
         missing: list[str] = []
-        for module in _LM_EVAL_DEPS:
+        for module in deps:
             probe = subprocess.run([python_exe, "-c", f"import {module}"], capture_output=True)
             if probe.returncode != 0:
                 missing.append(module)
@@ -1190,6 +1205,25 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
+def _install_pinned_tinybenchmarks(python_exe: str, pip_extra: list[str]) -> None:
+    """Install the pinned ``tinyBenchmarks`` estimator, falling back to the source archive.
+
+    lm-eval's ``tiny*`` tasks import it from inside their aggregation function, so without it the accuracy pass fails
+    only after the whole generation run has been paid for. Upstream publishes no PyPI distribution, hence the same
+    git-then-archive shape as the pinned lm_eval install.
+    """
+    constraints = _frozen_constraints(python_exe)
+    for i, (source, spec) in enumerate(TINYBENCHMARKS_PINNED_SPECS):
+        is_last = i == len(TINYBENCHMARKS_PINNED_SPECS) - 1
+        proc = subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, *pip_extra, spec],
+            check=is_last,
+        )
+        if proc.returncode == 0:
+            return
+        print(f"Preflight: WARNING — pinned tinyBenchmarks via {source} failed; falling back")
+
+
 def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     """Effective ``--no-eval`` for this launch, flag or persisted."""
     if bool(getattr(args, "no_eval", False)):
@@ -1239,7 +1273,7 @@ def _ensure_lm_eval_dep(
             "interpreter": python_exe,
             "message": f"RUN_EVAL={run_eval}",
         }
-    missing = _probe_missing_lm_eval_deps(python_exe)
+    missing = _probe_missing_lm_eval_deps(python_exe, _eval_deps_for_tasks())
     if missing is None:
         # Absence is unproven, so installing would be a guess that could replace an lm_eval the image ships.
         print("Preflight: WARNING — cannot run the lm_eval probe; leaving the interpreter untouched")
@@ -1258,10 +1292,16 @@ def _ensure_lm_eval_dep(
             "target": "lm_eval[api]",
             "interpreter": python_exe,
         }
+    # tinyBenchmarks is not on PyPI, so it never travels as a plain pip target and is never pulled in by lm_eval[api].
+    needs_tinybenchmarks = TINYBENCHMARKS_MODULE in missing
     if "lm_eval" in missing:
         print(f"Preflight: installing lm_eval[api]@{_LM_EVAL_PINNED_REF[:12]} (accuracy gate) ...")
         _install_pinned_lm_eval(python_exe, pip_extra)
         print("Preflight: lm_eval[api] installed OK")
+        if needs_tinybenchmarks:
+            print(f"Preflight: installing tinyBenchmarks@{TINYBENCHMARKS_PINNED_REF[:12]} (tiny* eval task) ...")
+            _install_pinned_tinybenchmarks(python_exe, pip_extra)
+            print("Preflight: tinyBenchmarks installed OK")
         return {
             "status": "applied",
             "skip_reason": None,
@@ -1270,29 +1310,34 @@ def _ensure_lm_eval_dep(
             "detail": {"installed": list(missing)},
         }
     # The image already ships lm_eval.
-    targets = missing
-    print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
-    subprocess.run(
-        [
-            python_exe,
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--no-cache-dir",
-            *_frozen_constraints(python_exe),
-            *pip_extra,
-            *targets,
-        ],
-        check=True,
-    )
-    print(f"Preflight: {' '.join(targets)} installed OK")
+    targets = [name for name in missing if name != TINYBENCHMARKS_MODULE]
+    if targets:
+        print(f"Preflight: installing {' '.join(targets)} (accuracy gate; missing: {' '.join(missing)}) ...")
+        subprocess.run(
+            [
+                python_exe,
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--no-cache-dir",
+                *_frozen_constraints(python_exe),
+                *pip_extra,
+                *targets,
+            ],
+            check=True,
+        )
+        print(f"Preflight: {' '.join(targets)} installed OK")
+    if needs_tinybenchmarks:
+        print(f"Preflight: installing tinyBenchmarks@{TINYBENCHMARKS_PINNED_REF[:12]} (tiny* eval task) ...")
+        _install_pinned_tinybenchmarks(python_exe, pip_extra)
+        print("Preflight: tinyBenchmarks installed OK")
     return {
         "status": "applied",
         "skip_reason": None,
         "target": "lm_eval[api]",
         "interpreter": python_exe,
-        "detail": {"installed": list(targets)},
+        "detail": {"installed": list(missing)},
     }
 
 
