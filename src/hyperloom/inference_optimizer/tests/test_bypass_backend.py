@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.common import eval_tasks
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
 from hyperloom.orchestrator.actions.executors import bypass_engine
 from hyperloom.orchestrator.actions.executors import bypass_report
@@ -1965,3 +1966,105 @@ def test_ensure_eval_deps_installs_when_missing(monkeypatch):
     assert install[0] == "/opt/venv/bin/python"
     assert install[1:4] == ["-m", "pip", "install"]
     assert "lm_eval" in install
+
+
+_FAKE_VERSIONS = {"torch": "2.6.0", "numpy": "1.26.4", "scipy": "1.13.1"}
+
+
+def _is_import_probe(cmd: list[str]) -> bool:
+    return cmd[1:2] == ["-c"] and cmd[2].startswith("import ") and "importlib.metadata" not in cmd[2]
+
+
+def _is_install(cmd: list[str]) -> bool:
+    return cmd[1:4] == ["-m", "pip", "install"]
+
+
+def _fake_eval_dep_run(monkeypatch, missing, *, failing_specs=()):
+    """Drive ``_ensure_eval_deps``: modules in *missing* fail to import, installs succeed unless listed."""
+    calls: list[list[str]] = []
+    absent = set(missing)
+
+    def fake_run(cmd, capture_output=False, check=False, **kwargs):
+        cmd = list(cmd)
+        calls.append(cmd)
+        rc, out = 0, ""
+        if cmd[1:2] == ["-c"] and "importlib.metadata" in cmd[2]:
+            name = cmd[2].rsplit("'", 2)[-2]
+            out = f"{_FAKE_VERSIONS[name]}\n" if name in _FAKE_VERSIONS else ""
+            rc = 0 if out else 1
+        elif _is_import_probe(cmd):
+            rc = 1 if cmd[2].removeprefix("import ") in absent else 0
+        elif cmd[-1] in failing_specs:
+            rc = 1
+        else:
+            # An install resolves only the package it names, so a fallback spec still has work to do.
+            absent.discard("lm_eval" if cmd[-1] == "lm_eval" else "tinyBenchmarks")
+
+        class _P:
+            returncode = rc
+            stdout = out
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return calls
+
+
+def _constraint_pins(install_cmd: list[str]) -> list[str]:
+    """Read back the constraints file a pip invocation was handed."""
+    assert "-c" in install_cmd, f"install ran unconstrained: {install_cmd}"
+    return Path(install_cmd[install_cmd.index("-c") + 1]).read_text(encoding="utf-8").split()
+
+
+def test_ensure_eval_deps_ignores_tinybenchmarks_for_the_default_task(monkeypatch):
+    """A plain gsm8k run must not take on the estimator dependency."""
+    calls = _fake_eval_dep_run(monkeypatch, {"lm_eval", "tinyBenchmarks"})
+
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python")
+
+    assert [c[2] for c in calls if _is_import_probe(c)] == ["import lm_eval"]
+
+
+def test_ensure_eval_deps_installs_tinybenchmarks_for_a_tiny_task(monkeypatch):
+    """``tiny*`` tasks aggregate through tinyBenchmarks, which is not on PyPI -> pinned source install."""
+    calls = _fake_eval_dep_run(monkeypatch, {"tinyBenchmarks"})
+
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python", "tinyGSM8k")
+
+    installs = [c for c in calls if _is_install(c)]
+    assert len(installs) == 1
+    spec = installs[0][-1]
+    assert spec == eval_tasks.TINYBENCHMARKS_PINNED_SPECS[0][1]
+    assert "git+https://" in spec  # git first; the archive is the no-git fallback
+
+
+def test_tinybenchmarks_install_cannot_move_the_serving_interpreters_numpy(monkeypatch):
+    """Its requirements are declared unpinned, and this runs against the interpreter serving the benchmark."""
+    calls = _fake_eval_dep_run(monkeypatch, {"tinyBenchmarks"})
+
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python", "tinyGSM8k")
+
+    pins = _constraint_pins([c for c in calls if _is_install(c)][0])
+    assert "numpy==1.26.4" in pins
+    assert "scipy==1.13.1" in pins  # resolving a missing scipy is what would drag numpy along
+    assert "torch==2.6.0" in pins
+
+
+def test_ensure_eval_deps_falls_back_to_the_tinybenchmarks_archive(monkeypatch):
+    """No git binary in the sandbox -> the source archive spec is tried next."""
+    git_spec, archive_spec = (s for _kind, s in eval_tasks.TINYBENCHMARKS_PINNED_SPECS)
+    calls = _fake_eval_dep_run(monkeypatch, {"lm_eval", "tinyBenchmarks"}, failing_specs={git_spec})
+
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python", "tinyGSM8k")
+
+    assert [c[-1] for c in calls if _is_install(c)] == ["lm_eval", git_spec, archive_spec]
+
+
+def test_ensure_eval_deps_skips_a_present_tinybenchmarks(monkeypatch):
+    """Already importable -> probe only, no pip."""
+    calls = _fake_eval_dep_run(monkeypatch, set())
+
+    bypass_runner._ensure_eval_deps("/opt/venv/bin/python", "gsm8k,tinyGSM8k")
+
+    assert [c[2] for c in calls if _is_import_probe(c)] == ["import lm_eval", "import tinyBenchmarks"]
+    assert not [c for c in calls if _is_install(c)]

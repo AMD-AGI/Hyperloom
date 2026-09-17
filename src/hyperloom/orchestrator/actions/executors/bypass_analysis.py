@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.eval_tasks import ACCURACY_METRIC_KEYS
+
 # sglang: "Decode batch. ... gen throughput (token/s): 1234.5" vllm: "Avg generation throughput: 1234.5 tokens/s"
 _THROUGHPUT_PATTERNS = (
     re.compile(r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
@@ -100,16 +102,10 @@ def summarize_eval(workspace: Path) -> dict[str, Any] | None:
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, dict):
         return None
-    metric_keys = (
-        "exact_match,strict-match",
-        "exact_match,flexible-extract",
-        "exact_match,none",
-        "acc,none",
-    )
     for task_name, metrics in results.items():
         if not isinstance(metrics, dict):
             continue
-        for key in metric_keys:
+        for key in ACCURACY_METRIC_KEYS:
             value = metrics.get(key)
             if isinstance(value, (int, float)):
                 return {

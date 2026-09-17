@@ -91,6 +91,8 @@ def _patch(monkeypatch, runner):
 def _multi_node(monkeypatch):
     """The ensure is multi-node only; single-node coverage sets this explicitly."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    # The task set decides whether tinyBenchmarks is a dependency at all; default coverage runs on plain gsm8k.
+    monkeypatch.delenv("MAGPIE_EVAL_TASKS", raising=False)
 
 
 def test_lm_eval_installed_when_missing_and_eval_enabled(monkeypatch):
@@ -302,3 +304,63 @@ def test_lm_eval_install_failure_aborts_preflight(monkeypatch):
 
     with pytest.raises(subprocess.CalledProcessError):
         preflight._ensure_lm_eval_dep("py", [])
+
+
+# --- tinyBenchmarks: only pulled in when MAGPIE_EVAL_TASKS names a tiny task ---
+def test_tinybenchmarks_is_not_probed_for_the_default_task(monkeypatch):
+    """A gsm8k run must not take on the estimator dependency."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    runner = _patch(monkeypatch, _FakeRun([]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert runner.probed_modules == ["lm_eval", "tenacity"]
+
+
+def test_tinybenchmarks_installed_from_source_for_a_tiny_task(monkeypatch):
+    """Upstream publishes no PyPI distribution, so the estimator can only come from the pinned source."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "tinyGSM8k")
+    runner = _patch(monkeypatch, _FakeRun(["tinyBenchmarks"]))  # the image ships lm_eval and tenacity
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert runner.probed_modules == ["lm_eval", "tenacity", "tinyBenchmarks"]
+    # Never a bare `pip install tinyBenchmarks`: that 404s on PyPI.
+    assert [i[-1] for i in runner.installs] == [preflight.TINYBENCHMARKS_PINNED_SPECS[0][1]]
+
+
+def test_tinybenchmarks_falls_back_to_archive_without_git(monkeypatch):
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "tinyGSM8k")
+    git_spec, archive_spec = (s for _, s in preflight.TINYBENCHMARKS_PINNED_SPECS)
+    runner = _patch(monkeypatch, _FakeRun(["tinyBenchmarks"], failing_specs=[git_spec]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert [i[-1] for i in runner.installs] == [git_spec, archive_spec]
+
+
+def test_tinybenchmarks_installed_alongside_a_missing_lm_eval(monkeypatch):
+    """lm_eval[api] does not pull the estimator in, so the tiny path needs both installs."""
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "tinyGSM8k")
+    runner = _patch(monkeypatch, _FakeRun(["lm_eval", "tenacity", "tinyBenchmarks"]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert [i[-1] for i in runner.installs] == [
+        preflight._LM_EVAL_PINNED_SPECS[0][1],
+        preflight.TINYBENCHMARKS_PINNED_SPECS[0][1],
+    ]
+
+
+def test_present_tinybenchmarks_is_not_reinstalled(monkeypatch):
+    monkeypatch.delenv("RUN_EVAL", raising=False)
+    monkeypatch.setenv("MAGPIE_EVAL_TASKS", "gsm8k,tinyGSM8k")
+    runner = _patch(monkeypatch, _FakeRun([]))
+
+    preflight._ensure_lm_eval_dep("py", [])
+
+    assert runner.probed_modules == ["lm_eval", "tenacity", "tinyBenchmarks"]
+    assert runner.installs == []

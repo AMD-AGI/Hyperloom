@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env_safety import build_benchmark_env
+from hyperloom.common.eval_tasks import (
+    DEFAULT_EVAL_TASKS,
+    EVAL_INSTALL_FROZEN_DEPS,
+    TINYBENCHMARKS_MODULE,
+    TINYBENCHMARKS_PINNED_SPECS,
+    eval_tasks_need_tinybenchmarks,
+)
 
 from . import bypass_analysis
 from . import bypass_engine
@@ -655,15 +663,72 @@ def _run_scriptable_benchmark(
     return 0 if success else (rc or 1)
 
 
-def _ensure_eval_deps(python_exe: str) -> None:
-    """Ensure ``lm_eval`` is importable by ``python_exe`` before an accuracy pass."""
-    probe = subprocess.run([python_exe, "-c", "import lm_eval"], capture_output=True)
-    if probe.returncode == 0:
+def _module_importable(python_exe: str, module: str) -> bool:
+    """Report whether *module* imports cleanly under *python_exe*."""
+    probe = subprocess.run([python_exe, "-c", f"import {module}"], capture_output=True)
+    return probe.returncode == 0
+
+
+def _frozen_constraints(python_exe: str) -> list[str]:
+    """Pin the packages this install must not move, as ``pip -c`` arguments.
+
+    This install runs against the interpreter that is serving the benchmark, so a resolver free to move torch or numpy
+    under it would break the run it is meant to score.
+    """
+    pins: list[str] = []
+    for name in EVAL_INSTALL_FROZEN_DEPS:
+        probe = subprocess.run(
+            [python_exe, "-c", f"import importlib.metadata as m; print(m.version({name!r}))"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        version = probe.stdout.strip()
+        if probe.returncode == 0 and version:
+            pins.append(f"{name}=={version}")
+    if not pins:
+        return []
+    handle, path = tempfile.mkstemp(prefix="hyperloom_pip_constraints_", suffix=".txt")
+    with os.fdopen(handle, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(pins) + "\n")
+    return ["-c", path]
+
+
+def _ensure_tinybenchmarks(python_exe: str) -> None:
+    """Install the ``tinyBenchmarks`` estimator under *python_exe*, best-effort.
+
+    lm-eval's ``tiny*`` aggregation module imports it at top level and is loaded while the task YAML is constructed,
+    so a missing install aborts the accuracy pass outright. Upstream ships no PyPI distribution, so the install is
+    from source: git first, then the archive, because the sandbox may not ship a git binary.
+
+    Its own requirements are declared unpinned (``numpy``, ``scipy``, ``requests``), so the install is constrained:
+    on an image without scipy, resolving it is what would otherwise drag numpy along with it.
+    """
+    if _module_importable(python_exe, TINYBENCHMARKS_MODULE):
         return
-    subprocess.run(
-        [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", "lm_eval"],
-        check=False,
-    )
+    constraints = _frozen_constraints(python_exe)
+    for _kind, spec in TINYBENCHMARKS_PINNED_SPECS:
+        subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *constraints, spec],
+            check=False,
+        )
+        if _module_importable(python_exe, TINYBENCHMARKS_MODULE):
+            return
+
+
+def _ensure_eval_deps(python_exe: str, tasks: str = DEFAULT_EVAL_TASKS) -> None:
+    """Ensure the accuracy pass's imports resolve under *python_exe* before it runs.
+
+    ``lm_eval`` always; ``tinyBenchmarks`` only when *tasks* actually selects a ``tiny*`` task, so a plain gsm8k run
+    takes on no new dependency.
+    """
+    if not _module_importable(python_exe, "lm_eval"):
+        subprocess.run(
+            [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", "lm_eval"],
+            check=False,
+        )
+    if eval_tasks_need_tinybenchmarks(tasks):
+        _ensure_tinybenchmarks(python_exe)
 
 
 def _run_client_and_eval(
@@ -703,15 +768,19 @@ def _run_client_and_eval(
     )
     rc = _run_subprocess(client_cmd, timeout_s, workspace, "client")
     if rc == 0 and _run_eval_enabled(bench_envs):
-        _ensure_eval_deps(sys.executable)
+        # Resolved before the dep check so it can tell whether this task set needs the tinyBenchmarks estimator.
+        tasks = (
+            str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
+            or DEFAULT_EVAL_TASKS
+        )
+        _ensure_eval_deps(sys.executable, tasks)
         eval_cmd = bypass_engine.build_eval_command(
             python_exe=sys.executable,
             model=model,
             base_url=base_url,
             conc=conc,
             out_dir=str(workspace / "lm_eval"),
-            tasks=str(bench_envs.get("MAGPIE_EVAL_TASKS") or os.environ.get("MAGPIE_EVAL_TASKS", "")).strip()
-            or "gsm8k",
+            tasks=tasks,
             limit=(str(bench_envs.get("MAGPIE_EVAL_LIMIT") or os.environ.get("MAGPIE_EVAL_LIMIT", "")).strip() or None),
         )
         eval_rc = _run_subprocess(eval_cmd, timeout_s, workspace, "eval")

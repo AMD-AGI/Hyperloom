@@ -11,6 +11,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable
 
+from hyperloom.common.eval_tasks import DEFAULT_EVAL_TASKS
+
 # Frameworks whose server this engine can launch. xdit/scriptable and remote (BENCHMARK_BASE_URL) flows are handled
 # elsewhere / deferred.
 SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
@@ -186,7 +188,7 @@ def build_eval_command(
     base_url: str,
     conc: int,
     out_dir: str,
-    tasks: str = "gsm8k",
+    tasks: str = DEFAULT_EVAL_TASKS,
     batch_size: str = "auto",
     limit: str | None = None,
 ) -> list[str]:
