@@ -1514,13 +1514,17 @@ def materialize_config_with_envs(
         # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
         tracelens_patch_ok = False
         patch_attempted = _tracelens_patch_enabled() and not is_atom
+        # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
+        # "never tried because the image already carries it", and those two call for different reactions when a
+        # trace later turns up without annotations.
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
         if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
+            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if tracelens_patch_ok else "unavailable"
             if not tracelens_patch_ok:
-                envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
                 envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
                 log.warning(
                     "TraceLens runtime patch unavailable for framework=%s; "
