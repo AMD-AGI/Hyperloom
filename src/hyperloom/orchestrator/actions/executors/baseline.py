@@ -1047,8 +1047,11 @@ def _revert_warm_patch_state(
 
 #: The per-tree fields that leave this module. ``use_nogit`` stays behind: it
 #: describes how the apply ran, and the restore reads the channel off whether
-#: backups are present.
-_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups")
+#: backups are present. ``mutated`` says whether this round wrote to the tree at
+#: all, which absent restore artifacts alone cannot: a no-op apply and an apply
+#: whose artifacts were lost both record none, and only the first is safe to
+#: leave standing.
+_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups", "mutated")
 
 
 def _warm_tree_records(
@@ -1148,6 +1151,7 @@ def _apply_warm_patches(
             "use_nogit": not git_tree or not pre_sha,
             "snapshot_manifest": None,
             "nogit_backups": [],
+            "mutated": False,
         }
     tree_order = [root for root in tree_order if root in trees]
     if not tree_order:
@@ -1360,7 +1364,9 @@ def _apply_warm_patches(
                 if not ok:
                     raise RuntimeError(err or "nogit patch apply failed")
                 nogit_backups.extend(backups)
-                method = "applied_nogit"
+                # A real apply backs up every file it writes, so an empty set is the
+                # applier reporting an overlay the tree already carried.
+                method = "applied_nogit" if backups else "already_present"
             else:
                 checked = subprocess.run(
                     ["git", "apply", "--check", str(patch_path)],
@@ -1443,6 +1449,8 @@ def _apply_warm_patches(
                 break
             continue
 
+        if method in ("applied", "applied_3way", "applied_nogit"):
+            tree["mutated"] = True
         item = {
             "patch_file": patch_file,
             "idx": str(idx),
