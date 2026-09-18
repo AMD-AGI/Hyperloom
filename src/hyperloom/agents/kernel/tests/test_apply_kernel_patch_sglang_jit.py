@@ -18,6 +18,7 @@ _APPLY_TOOL_PATH = Path(__file__).resolve().parent.parent / "tools" / "apply_ker
 _SGLANG_ROOT = "/sgl-workspace/sglang"
 _KDA_CUH = f"{_SGLANG_ROOT}/python/sglang/kernels/jit/csrc/attention/kda_packed_decode.cuh"
 _KDA_WRAPPER = f"{_SGLANG_ROOT}/python/sglang/kernels/ops/attention/kda_packed_decode.py"
+_AOT_CU = f"{_SGLANG_ROOT}/python/sglang/kernels/aot/csrc/elementwise/dsv4_norm_rope.cu"
 _EDITABLE_REINSTALL = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
 
 
@@ -80,6 +81,29 @@ def test_kda_patch_set_drives_no_editable_reinstall(akp):
 
     assert [strategy["rebuild_mode"] for strategy in strategies] == ["content_addressed_jit"]
     assert all(strategy["rebuild_command"] == [] for strategy in strategies)
+
+
+@pytest.mark.parametrize("jit_first", (True, False))
+def test_jit_and_aot_sources_keep_separate_strategies(akp, jit_first):
+    """One root now yields two rebuild modes, so dedup must not drop either."""
+    paths = [Path(_KDA_CUH), Path(_AOT_CU)]
+    if not jit_first:
+        paths.reverse()
+
+    strategies = akp._multi_root_strategies(paths)
+
+    assert {strategy["rebuild_mode"] for strategy in strategies} == {"content_addressed_jit", "command"}
+    assert [strategy["rebuild_command"] for strategy in strategies if strategy["rebuild_command"]] == [
+        _EDITABLE_REINSTALL
+    ]
+
+
+def test_same_root_and_mode_still_rebuilds_once(akp):
+    other_aot = Path(_SGLANG_ROOT) / "python/sglang/kernels/aot/csrc/attention/decode.cu"
+
+    strategies = akp._multi_root_strategies([Path(_AOT_CU), other_aot])
+
+    assert [strategy["rebuild_command"] for strategy in strategies] == [_EDITABLE_REINSTALL]
 
 
 def test_sglang_jit_rebuild_defers_to_runtime(akp, tmp_path, monkeypatch):

@@ -2157,15 +2157,21 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     primary target alone would skip compilation for companion compiled files, so
     derive ``compiled``/rebuild from the **whole** edited set.
 
+    One root can yield several rebuild modes -- SGLang's ``kernels/jit``
+    sources defer to the runtime while its ``kernels/aot/csrc`` sources still
+    need the editable install -- so the identity of a rebuild is the root
+    *and* the mode. Deduplicating on the root alone would keep whichever file
+    the patch happened to list first and silently skip the other's rebuild.
+
     Args:
         live_paths (Iterable[Path]): The live target paths the patch writes.
 
     Returns:
-        list[dict[str, Any]]: One strategy dict per distinct root that needs a
-            rebuild (compiled roots only), each as returned by
-            :func:`_detect_strategy`.
+        list[dict[str, Any]]: One strategy dict per distinct root and rebuild
+            mode that needs a rebuild (compiled roots only), each as returned
+            by :func:`_detect_strategy`.
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
         try:
@@ -2174,7 +2180,7 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
             continue
         if not strat["compiled"]:
             continue
-        key = strat["root"] or str(p.parent)
+        key = (strat["root"] or str(p.parent), strat["rebuild_mode"])
         if key in seen:
             continue
         seen.add(key)
