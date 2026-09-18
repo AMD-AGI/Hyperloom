@@ -510,6 +510,48 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
 }
 
 
+async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path) -> None:
+    """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.
+
+    sglang starts against whatever ``get_config_file`` resolves each ``AITER_CONFIG_*`` to,
+    and a kernel the compiled module never registered raises from inside graph capture. The
+    classifier downstream names that ``aiter_jit_registry_mismatch`` but cannot undo it, so
+    the round is simply lost -- and PRELUDE's first measurement and every FRAMEWORK variant
+    boot through here. The GEMM integrate lane already runs this check before its own boots.
+
+    It is not conditioned on the round carrying a tuned CSV: a variable the round leaves
+    unset is exactly the case where aiter merges the model overlays, which is where the
+    kernel that fails the boot comes from.
+
+    Args:
+        extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
+            branch of aiter's resolution each table takes.
+        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+    """
+    csv_envs = {
+        str(key): str(value)
+        for key, value in (extra_envs or {}).items()
+        if str(key).startswith("AITER_CONFIG_") and str(value).strip()
+    }
+    from ._aiter_jit import prepare_serving_so_for_csvs
+
+    try:
+        outcome = await asyncio.to_thread(
+            prepare_serving_so_for_csvs,
+            csv_envs,
+            backup_dir=output_dir / "aiter_jit_backup",
+        )
+    except OSError as exc:
+        # A jit directory this cannot read is not a reason to lose the measurement.
+        log.warning("baseline_executor: aiter serving .so preflight failed: %s", exc)
+        return
+    if isinstance(outcome, dict) and outcome.get("action") == "invalidate":
+        log.info(
+            "baseline_executor: the CSVs this boot loads outran the serving .so; dropped %d module(s) for rebuild",
+            len(outcome.get("removed") or []),
+        )
+
+
 def _config_framework(config_path: Path | str) -> str:
     """Framework name from a materialized benchmark YAML (``""`` when unreadable)."""
     try:
@@ -2534,6 +2576,7 @@ class BaselineExecutor:
         )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
+        await _prepare_aiter_serving_so(base_extra_envs, output_dir)
         try:
             config_path = materialize_config_with_envs(
                 config_path,

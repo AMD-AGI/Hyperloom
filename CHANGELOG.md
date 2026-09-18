@@ -20,6 +20,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A shipped aiter tuned CSV naming a kernel this host never compiled failed
+  every boot of the session.** aiter resolves its tuned tables two ways: a
+  pinned `AITER_CONFIG_*` env is taken as the exact `:`-joined list, and an
+  unset one falls back to the shipped default plus every `model_configs`
+  overlay whose name matches. A round that tunes one operator sets only that
+  operator's variable, so the others take the unset branch and pull in overlays
+  cut on another host -- tables whose `kernelName`s are absent from this
+  machine's compiled `module_*.so`. Serving then aborted at load with a
+  registry mismatch, and because the table is shipped rather than produced by
+  the run, every retry hit the same wall: the whole session failed at boot with
+  nothing to roll back. The CSV set a boot will actually load is now resolved
+  by aiter's own two-branch rule and checked against the compiled modules
+  before the config is materialized; an uncovered module is unlinked so the
+  next boot rebuilds it. On integrate, a registry mismatch also drops the
+  modules the error names, not only the ones the round's environment mapped.
+  Framework-agnostic; it is the aiter install that is repaired, not the server.
 - **An author whose transport died took the whole fusion lane with it.** A lane
   costs hours and an authoring call costs minutes, but a provider that never
   delivered an answer -- a stream stalled mid-response, a connection reset --
