@@ -178,6 +178,32 @@ def test_server_command_sglang():
     assert cmd[-2:] == ["--foo", "1"]
 
 
+def test_the_backend_trace_dir_wins_over_the_preflight_placeholder():
+    """EXTRA_VLLM_ARGS carries a trace dir only so the argv preflight accepts the bounds beside it.
+
+    ProfilerConfig refuses ``profiler=torch`` without a ``torch_profiler_dir``, so the probed
+    fragment has to name one; it is a placeholder, and the launcher's own value has to win vLLM's
+    last-wins merge or the trace lands where this backend's discovery never looks.
+    """
+    cmd = bypass_engine.build_server_command(
+        framework="vllm",
+        model="/m",
+        tp=1,
+        port=8888,
+        max_model_len=None,
+        extra_args=[
+            "--profiler-config.profiler",
+            "torch",
+            "--profiler-config.torch_profiler_dir",
+            "/round-dir",
+        ],
+        profile_dir="/ws/torch_trace",
+    )
+
+    dirs = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--profiler-config.torch_profiler_dir"]
+    assert dirs[-1] == "/ws/torch_trace"
+
+
 def test_sglang_atom_server_command_honors_python_exe():
     """sglang/atom launch under the provided interpreter (not a PATH python3)."""
     sglang = bypass_engine.build_server_command(
