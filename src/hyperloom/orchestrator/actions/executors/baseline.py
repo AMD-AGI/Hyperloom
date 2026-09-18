@@ -4200,7 +4200,19 @@ class BaselineExecutor:
 
         # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         eval_scriptable = framework_registry.is_scriptable(eval_framework)
-        if run_eval_disabled and not eval_scriptable:
+        # AgentX runs no lm-eval by design: _workload_envs pins RUN_EVAL=false on
+        # that branch and grades correctness on the replay's request error rate
+        # instead. Skipping the parse on RUN_EVAL alone drops that substitute
+        # signal too, so accuracy stays None, the 0.5 enablement floor reads that
+        # as a failure, and a clean baseline (441/441 requests, zero errors) is
+        # never promoted -- leaving baseline_tput at 0.0 for the whole session.
+        from hyperloom.common.perf_metric import is_agentx_mode
+
+        _benchmark_mode = str(
+            getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
+        )
+        _agentx_grades_on_error_rate = is_agentx_mode(_benchmark_mode)
+        if run_eval_disabled and not eval_scriptable and not _agentx_grades_on_error_rate:
             # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
@@ -4215,9 +4227,7 @@ class BaselineExecutor:
             eval_data = parse_eval_results(
                 eval_search_root,
                 framework=eval_framework,
-                benchmark_mode=str(
-                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
-                ),
+                benchmark_mode=_benchmark_mode,
             )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]

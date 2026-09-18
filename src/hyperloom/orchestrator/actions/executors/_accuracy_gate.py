@@ -358,7 +358,40 @@ def parse_agentx_error_rate(workspace: Path | str) -> float | None:
         log.warning("accuracy_gate: unreadable %s: %s", latest, exc)
         return None
     rate = data.get("request_error_rate")
-    return float(rate) if isinstance(rate, (int, float)) else None
+    if isinstance(rate, (int, float)):
+        return float(rate)
+    # An agentic recipe writes the nested InferenceX schema, where
+    # ``request_error_rate`` is present but null -- the counts it graded its own
+    # submission on live in ``request_accounting`` instead. Without deriving the
+    # rate from those, a clean run reports "no rate", the AgentX branch scores
+    # that 0.0, and the 0.5 enablement floor then refuses to promote a baseline
+    # that had 441/441 requests and zero errors.
+    #
+    # Still fails closed: a rate is derived only from a positive profiled count
+    # with a non-negative numeric error count; every other shape stays None.
+    accounting = data.get("request_accounting")
+    if isinstance(accounting, dict):
+        profiled = accounting.get("records_profiled")
+        errored = accounting.get("records_error_dropped")
+        if (
+            isinstance(profiled, (int, float))
+            and not isinstance(profiled, bool)
+            and profiled > 0
+            and isinstance(errored, (int, float))
+            and not isinstance(errored, bool)
+            and errored >= 0
+        ):
+            derived = float(errored) / float(profiled) * 100.0
+            log.info(
+                "accuracy_gate: derived agentx request_error_rate=%.4f%% from "
+                "request_accounting (%s errors / %s profiled) in %s",
+                derived,
+                errored,
+                profiled,
+                latest,
+            )
+            return derived
+    return None
 
 
 def quality_gate_passed(
