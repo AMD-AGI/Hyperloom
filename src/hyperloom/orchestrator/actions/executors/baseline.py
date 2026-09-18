@@ -3759,6 +3759,16 @@ class BaselineExecutor:
         if refusal is not None:
             return refusal
 
+        if self.benchmark_watchdog and not (server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()):
+            from ._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+            lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
+            if lock_sweep.get("deleted"):
+                log.warning(
+                    "baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch",
+                    lock_sweep["deleted"],
+                )
+
         try:
             if serving_lease is not None:
                 # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
