@@ -198,18 +198,21 @@ def test_specialist_close_can_confirm_on_same_actor_after_unconfirmed_stop(monke
     lease._actor = actor
     lease._start_ref = start_ref = object()
 
-    assert lease.close() is False
+    first_close = lease.close()
+    assert first_close is False
     assert lease._actor is actor
     assert lease._start_ref is start_ref
     assert killed == []
     assert len(stops) == 1
 
-    assert lease.close() is True
+    confirmed_close = lease.close()
+    assert confirmed_close is True
     assert lease._actor is None
     assert lease._start_ref is None
     assert killed == [actor]
     assert len(stops) == 2
-    assert lease.close() is True
+    repeated_close = lease.close()
+    assert repeated_close is True
     assert len(stops) == 2
 
 
