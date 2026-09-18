@@ -24,7 +24,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -159,7 +158,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 

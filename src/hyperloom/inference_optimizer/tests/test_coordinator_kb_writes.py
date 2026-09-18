@@ -36,7 +36,6 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
     backends = {
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
-        "robustness": MockBackend(idle),
     }
     kb = RecipeKB(local=LocalRecipeStore(root=tmp_path / "kb"))
     coord = Coordinator(

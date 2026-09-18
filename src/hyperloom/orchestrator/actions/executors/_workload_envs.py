@@ -413,47 +413,9 @@ def apply_agentx_switch(
         return
     envs = bench.setdefault("envs", {})
     bench["benchmark_script"] = "aiperf_client.sh"
-    # The Magpie benchmark config's flat wall-clock cap (``benchmark.timeout_seconds``,
-    # e.g. 7200s from baseline_vllm.yaml) is one deadline over server boot + warmup +
-    # the measurement window + result export. AgentX runs at the model's native
-    # context (``max_model_len`` lifted from the synthetic 6144 to e.g. 1M), so boot +
-    # warmup alone can consume ~45 min before the window even opens; the flat cap then
-    # SIGKILLs the benchmark before aiperf writes ``inferencex_result.json`` -- a 0-tput
-    # baseline that fails the session. Raise the inner cap to the same AgentX budget the
-    # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
-    # layers stay consistent. AgentX-only: this function returned early above when AgentX
-    # is off, so the default (synthetic) cap is untouched. The import is function-local
-    # so standalone workload materialization uses the same timeout derivation.
-    #
-    # max(), never assignment: this is the ONLY place in the AgentX path that
-    # writes an existing cap, and a bare assignment LOWERS every config that
-    # already declares more than the AgentX derivation. profile_sglang.yaml
-    # declares 14400s ("Qwen-32B TP=1 profile with steady-state window can take
-    # ~3 h") against a default derivation of 10800s, so an AgentX profile round
-    # there was being cut from four hours to three -- the same mid-round kill this
-    # module exists to prevent, introduced by the fix for it. A declared cap is a
-    # measured statement about that config; the derivation is a floor under it,
-    # not a replacement for it.
-    from ._agentx_timeouts import (
-        agentx_baseline_timeout_sec,
-        agentx_warmup_grace_sec,
-    )
+    from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
-    _derived = agentx_baseline_timeout_sec(_agentx_env)
-    try:
-        _declared = int(bench.get("timeout_seconds") or 0)
-    except (TypeError, ValueError):
-        _declared = 0
-    if _declared > _derived:
-        log.info(
-            "AgentX: keeping the config's declared benchmark timeout %ds (> the AgentX "
-            "derivation %ds). The derivation is a floor, never a ceiling -- lowering a "
-            "cap the config measured for itself is how a round gets killed mid-window.",
-            _declared,
-            _derived,
-        )
-    bench["timeout_seconds"] = max(_declared, _derived)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -465,31 +427,15 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
-    # ...but AGENTX_WARMUP_GRACE_PERIOD must not be forwarded raw. It is read by
-    # TWO layers that have to agree: this process derives the subprocess cap from
-    # it (scaled by CONC, because warmup is per-lane requests x CONC lanes), while
-    # aiperf_client.sh hands it to aiperf as --warmup-grace-period, which is what
-    # actually cuts the warmup off. The loop above copies the operator's raw
-    # value, so the client was bounded at the UNSCALED number while the cap
-    # budgeted the scaled one.
-    #
-    # Measured on a Kimi-K3 conc=32 round: cap 14400s of warmup vs client bound
-    # 3600s. Warmup would have been cut at 106 of 354 requests -- not a crash, a
-    # round that reports a prefix-reuse figure measured before the cache had
-    # anything in it. Export the derived value so both layers see one number.
-    #
-    # AgentX-only by construction: this function returned early when AgentX is
-    # off, and AGENTX_* has no meaning on the synthetic path.
+    # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
-    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
+    if bench.get("timeout_seconds") is not None:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
-            "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
-            "(operator value %s). The client's --warmup-grace-period and this "
-            "process's subprocess cap are derived from the same number, so a "
-            "raw forward here would bound the warmup below what the cap pays for.",
+            "AgentX: exporting the CONC-scaled warmup grace %ds to the client (operator value %s).",
             _grace,
             _raw_grace or "unset",
         )

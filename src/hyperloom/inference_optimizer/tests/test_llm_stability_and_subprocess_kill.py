@@ -5,10 +5,14 @@
 
 from __future__ import annotations
 
+import io
 import os
 import signal
 import subprocess
+import sys
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,7 +23,7 @@ from hyperloom.orchestrator.roles._llm_stability_env import (
 from hyperloom.orchestrator.kernel.request_handlers import _run_subprocess, _tool_label
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
-from .conftest import chatty_child, suppression_window_s
+from .conftest import chatty_child
 
 
 def test_apply_llm_stability_env_sets_defaults():
@@ -49,14 +53,14 @@ def test_apply_llm_stability_env_custom_timeout():
 
 async def test_run_subprocess_returns_output_normally():
     rc, stdout, stderr = await _run_subprocess(
-        ["python3", "-c", "print('hello-stdout')"],
+        [sys.executable, "-c", "print('hello-stdout')"],
         timeout_sec=30,
     )
     assert rc == 0
     assert "hello-stdout" in stdout
 
 
-_ECHO_UNBUFFERED = ["python3", "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"]
+_ECHO_UNBUFFERED = [sys.executable, "-c", "import os; print(os.environ['PYTHONUNBUFFERED'])"]
 
 
 async def test_run_subprocess_unbuffers_its_child(monkeypatch):
@@ -75,7 +79,7 @@ async def test_run_subprocess_leaves_an_operator_chosen_buffering_alone(monkeypa
     assert stdout.strip() == "0"
 
 
-async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
+async def test_run_subprocess_reports_activity_for_its_child_output(monkeypatch):
     """The heartbeat above it reports only when this tally moves."""
     from hyperloom.orchestrator.actions.executors import _subprocess_kill
 
@@ -97,12 +101,68 @@ async def test_run_subprocess_counts_the_lines_its_child_emits(monkeypatch):
             counted.append(calls)
 
     monkeypatch.setattr(_subprocess_kill, "run_with_session_kill", _spy)
-    await _run_subprocess(
-        ["python3", "-c", "print('a')\nprint('b')"],
+    rc, stdout, _stderr = await _run_subprocess(
+        [sys.executable, "-c", "print('a')\nprint('b')"],
         timeout_sec=30,
     )
 
-    assert counted == [2]
+    assert rc == 0
+    assert stdout.splitlines() == ["a", "b"]
+    assert len(counted) == 1
+    assert counted[0] > 0
+
+
+@pytest.mark.parametrize("stream_name", ["stdout", "stderr"])
+@pytest.mark.parametrize("text", [True, False], ids=["text", "bytes"])
+def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, stream_name, text):
+    """A partial UTF-8 codepoint counts as activity without blocking the visible prefix."""
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import _StreamCapture
+
+    mirrored = threading.Event()
+    activity = threading.Event()
+    sink_base = io.StringIO if text else io.BytesIO
+
+    class Sink(sink_base):
+        def write(self, data):
+            written = super().write(data)
+            mirrored.set()
+            return written
+
+    sink = Sink()
+    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink))
+    descriptor = 1 if stream_name == "stdout" else 2
+    script = (
+        f"import os,sys; os.write({descriptor}, b'A\\xe2'); "
+        "sys.stdin.buffer.read(1); "
+        f"os.write({descriptor}, b'\\x82\\xacB')"
+    )
+    with subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as proc:
+        capture = _StreamCapture(proc, text=text, on_output=activity.set)
+        capture.start()
+        try:
+            assert activity.wait(5), "partial bytes never registered as output activity"
+            assert mirrored.wait(5), "output without a newline was not mirrored before EOF"
+            assert proc.poll() is None, "the child must still be waiting for the parent"
+            assert capture.last_activity_at is not None
+            assert sink.getvalue() == ("A" if text else b"A\xe2")
+            proc.stdin.write(b"x")
+            proc.stdin.flush()
+            assert proc.wait(timeout=5) == 0
+            stdout, stderr = capture.finish()
+            expected = "A€B" if text else b"A\xe2\x82\xacB"
+            assert (stdout if stream_name == "stdout" else stderr) == expected
+            assert (stderr if stream_name == "stdout" else stdout) == ("" if text else b"")
+            assert sink.getvalue() == expected
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            capture.finish()
 
 
 async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, progress_cadence):
@@ -119,10 +179,13 @@ async def test_a_kernel_tool_keeps_reporting_while_its_child_works(monkeypatch, 
     )
 
     with progress_scope(progress_cadence.sink()):
-        rc, _stdout, _stderr = await _run_subprocess(["python3", "-c", "pass"], timeout_sec=30)
+        rc, _stdout, _stderr = await _run_subprocess([sys.executable, "-c", "pass"], timeout_sec=30)
 
     assert rc == 0
-    assert progress_cadence.widest_silence() < suppression_window_s()
+    running = [note for note in progress_cadence.notes if note["status"] == "running"]
+    assert len(running) >= 3
+    assert all(note["output_lines"] > 0 for note in running)
+    assert progress_cadence.widest_silence() <= 150.0
 
 
 def test_a_tool_is_named_after_the_script_it_runs():
@@ -146,7 +209,7 @@ async def test_run_subprocess_kills_grandchild_on_timeout(tmp_path):
 
     with pytest.raises(Exception) as excinfo:
         await _run_subprocess(
-            ["python3", "-c", script, str(pidfile)],
+            [sys.executable, "-c", script, str(pidfile)],
             timeout_sec=2,
         )
     # A hard timeout surfaces as TimeoutExpired.

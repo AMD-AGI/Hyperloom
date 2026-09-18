@@ -12,7 +12,7 @@ The packet may contain:
 - Patch list and keep/revert decisions.
 - Accuracy gate result.
 - Sweep result.
-- Robustness findings or RCA summaries.
+- Observed failures and session diagnostic logs.
 - Existing KB snippets or conflict notes.
 - Model family, model name, GPU, framework, and environment metadata.
 
@@ -27,7 +27,7 @@ Create a KB draft only for lessons that are reusable across future runs:
 - A pitfall that caused a revert, crash, or misleading benchmark.
 - A benchmark methodology lesson.
 - A framework, kernel, communication, or architecture constraint.
-- A recovery pattern confirmed by Robustness or RCA.
+- A recovery pattern confirmed by recorded session evidence.
 - A target/framework comparison backed by measured evidence.
 
 Reject candidates that are:
