@@ -34,6 +34,7 @@ from hyperloom.common.llm_config import (
     has_anthropic_credential,
     provider_model_defaults,
 )
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
 from hyperloom.common.pr_monitor_urls import kb_store_url
@@ -1527,18 +1528,12 @@ def _emit_preflight_diagnostics(
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight."""
-    from hyperloom.orchestrator.actions.executors.baseline import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-        BASELINE_DEFAULT_TIMEOUT_SEC,
-        _probe_aiter_jit_cache,
-    )
+    from hyperloom.orchestrator.actions.executors._aiter_jit import probe_aiter_jit_cache as _probe_aiter_jit_cache
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
     from ..session.paths import asset_root
 
     probe = _probe_aiter_jit_cache()
-    cold_cap = os.environ.get(
-        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-        str(BASELINE_COLD_START_TIMEOUT_SEC),
-    )
+    silence_timeout, hard_timeout = resolve_benchmark_timeouts()
     if probe["probe_status"] == "found":
         kind = "COLD" if probe["is_cold"] else "WARM"
         cache_line = f"{probe['kernel_count']} .so / {probe['size_mb']} MB ({kind}) at {probe['path']}"
@@ -1556,8 +1551,8 @@ def _emit_preflight_diagnostics(
     print(f"  magpie_python       = {magpie_python}")
     print(f"  INFERENCEX_PATH     = {os.environ.get('INFERENCEX_PATH', '<unset>')}")
     print(f"  aiter jit cache     = {cache_line}")
-    print(f"  cold_start_timeout  = {cold_cap}s")
-    print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    print(f"  benchmark_timeout   = {hard_timeout}s")
+    print(f"  benchmark_silence   = {silence_timeout}s")
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
@@ -1601,8 +1596,8 @@ def _emit_preflight_diagnostics(
             "inferencex_path": os.environ.get("INFERENCEX_PATH") or None,
             "aiter_jit_cache": dict(probe),
             "recipe_kb_queue": queue_status,
-            "cold_start_timeout_sec": int(cold_cap) if str(cold_cap).isdigit() else cold_cap,
-            "warm_timeout_sec": BASELINE_DEFAULT_TIMEOUT_SEC,
+            "benchmark_timeout_sec": hard_timeout,
+            "benchmark_silence_timeout_sec": silence_timeout,
             "anthropic_base_url": anthropic_base_url,
         },
     }
@@ -2382,6 +2377,18 @@ def _preflight(
         raise exc
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
+    # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
+    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
+    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    inferencex_network_fs = is_network_fs(inferencex_path)
+    if inferencex_network_fs:
+        print(
+            f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
+            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
+            f"HYPERLOOM_CACHE_DIR on local disk.",
+            file=sys.stderr,
+        )
     _record_install_step(
         install_event,
         step_id="clone_inferencex",
@@ -2394,6 +2401,7 @@ def _preflight(
             "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
             "dest": inferencex_path,
             "writable": os.access(inferencex_path, os.W_OK),
+            "network_fs": inferencex_network_fs,
             "exit_code": 0,
         },
     )

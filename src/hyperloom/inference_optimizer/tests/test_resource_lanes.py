@@ -47,9 +47,8 @@ def locks(conn):
     return ResourceLockManager(SqliteLeaseBackend(conn))
 
 
-def test_schema_version_is_v5():
-    """v4 dropped ``tasks.allowed_tools``; v5 adds the bring-up round store."""
-    assert SCHEMA_VERSION == 5
+def test_schema_version_records_owner_provenance():
+    assert SCHEMA_VERSION == 6
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -430,8 +429,8 @@ async def test_release_only_drops_own_holder_row(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_reap_expired_keys_on_holder_id(conn, locks):
-    """``reap_expired`` deletes only the expired ``(lane, holder_id)`` row, not the whole lane."""
+async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
+    """Old timestamps cannot release an owner whose completion is unknown."""
     set_lane_capacity(conn.raw, "research_lane", 2)
     # Insert one expired and one live holder directly to bypass acquire_many's reap pass.
     conn.raw.execute(
@@ -465,25 +464,27 @@ async def test_reap_expired_keys_on_holder_id(conn, locks):
         ),
     )
     conn.raw.commit()
-    reaped = await locks.reap_expired()
-    assert any(r["holder_id"] == "dead" for r in reaped)
     holders = await locks.lane_holders()
-    assert holders.get("research_lane") == 1
-    cur = conn.raw.execute(
-        "SELECT holder_id FROM leases WHERE lane=?",
-        ("research_lane",),
+    assert holders.get("research_lane") == 2
+    assert (
+        await locks.try_acquire_many(
+            ["research_lane"], holder_id="next", task_id="next", action="specialist", ttl_sec=60
+        )
+        is None
     )
-    surviving = [r["holder_id"] for r in cur.fetchall()]
-    assert surviving == ["live"]
+    assert not hasattr(locks, "reap_expired")
 
 
 @pytest.mark.asyncio
-async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
-    """A not-yet-expired lease whose holder PID is dead is reaped immediately."""
+@pytest.mark.parametrize("expires", ["2020-01-01T00:00:00+00:00", "2099-12-31T23:59:59+00:00"])
+async def test_reap_dead_holders_releases_crashed_pid(conn, locks, monkeypatch, expires):
+    """Confirmed-dead owners are scanned independently of their recorded TTL."""
     import os
 
     dead_pid = 2_147_483_646
     assert dead_pid != os.getpid()
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: pid != dead_pid))
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
     set_lane_capacity(conn.raw, "benchmark_lane", 1)
     # Long-lived (not expired) lease held by a dead PID.
     conn.raw.execute(
@@ -497,7 +498,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
             "explore",
             dead_pid,
             "2026-01-01T00:00:00+00:00",
-            "2099-12-31T23:59:59+00:00",
+            expires,
             "2026-01-01T00:00:00+00:00",
         ),
     )
@@ -517,6 +518,7 @@ async def test_reap_dead_holders_releases_crashed_pid(conn, locks):
             "2026-01-01T00:00:00+00:00",
         ),
     )
+    conn.raw.execute("UPDATE leases SET owner_scope='test-node'")
     conn.raw.commit()
     reaped = await locks.reap_dead_holders()
     assert any(r["holder_id"] == "zombie" for r in reaped)
@@ -733,6 +735,103 @@ async def test_gpu_research_lane_is_strictly_serial(locks):
             ttl_sec=60,
         )
     await locks.release(first)
+
+
+@pytest.mark.asyncio
+async def test_live_old_owner_keeps_conflicting_lanes_until_release(conn, locks):
+    lease = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1
+    )
+    assert await locks.reap_dead_holders() == []
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
+        )
+        is None
+    )
+    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+    await locks.release(lease)
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="next", action="baseline", ttl_sec=60
+        )
+        is not None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ray", [False, True])
+async def test_old_gpu_owner_keeps_capacity_until_release(conn, ray):
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+
+    async def acquire(holder):
+        if ray:
+            return await pool.try_acquire_ray_observation(holder_id=holder, task_id=holder, pending_limit=1)
+        return await pool.try_acquire(count=1, holder_id=holder, task_id=holder)
+
+    lease = await acquire("old")
+    await conn.execute("UPDATE gpu_leases SET expires_at='2020-01-01T00:00:00+00:00'")
+    assert await acquire("next") is None
+    assert not hasattr(pool, "reap_expired")
+    await pool.release(lease)
+    assert await acquire("next") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["", "another-node"])
+async def test_unknown_owner_scope_is_not_probed(conn, locks, monkeypatch, scope):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    lease = await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
+    await conn.execute("UPDATE leases SET owner_scope=?, pid=12345", (scope,))
+    monkeypatch.setattr(locks.backend, "_pid_alive", lambda pid: pytest.fail("foreign PID must not be probed"))
+    assert await locks.reap_dead_holders() == []
+    assert await locks.lane_holders() == {"research_lane": 1}
+    await locks.release(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe_error", [PermissionError, OSError])
+async def test_uncertain_pid_probe_retains_lane(conn, locks, monkeypatch, probe_error):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    await locks.acquire_many(["research_lane"], holder_id="old", task_id="old", action="specialist", ttl_sec=-1)
+
+    def probe(pid, signal):
+        raise probe_error()
+
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.os.kill", probe)
+    assert await locks.reap_dead_holders() == []
+
+
+@pytest.mark.asyncio
+async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, locks, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.bus.resource_lock.local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: False))
+    await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="specialist", task_id="specialist", action="specialist", ttl_sec=-1
+    )
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    await pool.try_acquire(count=1, holder_id="specialist", task_id="specialist")
+    assert await locks.reap_dead_holders() == []
+    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+
+
+def test_legacy_db_gains_unknown_owner_scope(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    with sqlite3.connect(path) as raw:
+        raw.execute(
+            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, action TEXT, pid INTEGER, "
+            "acquired_at TEXT, expires_at TEXT, heartbeat_at TEXT, PRIMARY KEY (lane, holder_id))"
+        )
+        raw.execute("INSERT INTO leases VALUES ('research_lane','old','old','specialist',123,'old','old','old')")
+    db = SqliteConnection(path)
+    try:
+        ensure_schema(db.raw)
+        row = db.raw.execute("SELECT owner_scope FROM leases").fetchone()
+        assert row["owner_scope"] == ""
+    finally:
+        db.close()
 
 
 def test_gpu_research_lane_seeded_capacity_one():

@@ -42,7 +42,6 @@ class _BareState:
     conc_sweep_enabled: bool = True
     conc_sweep_concs: list[int] = field(default_factory=lambda: [1, 2, 4])
     conc_sweep_total_budget_sec: int = 60
-    conc_sweep_variant_timeout_sec: int = 30
     save_count: int = 0
     stop_reason: str = ""
     usable_sec: float | None = None
@@ -233,7 +232,7 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
         return {"status": revert_status}
 
     class _FakeBaselineExecutor:
-        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+        default_timeout_sec = baseline_mod.resolve_benchmark_timeouts()[1]
 
         def __init__(self, *, session_dir):
             self.session_dir = session_dir
@@ -435,7 +434,9 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
                 "NEEDS_REVIEW",
                 "output_throughput",
                 (output - 110.0) / 110.0 * 100.0,
-                "KEEP" if direction == "up" else "REVERT",
+                # A degraded pair never carries a KEEP verdict, whichever way
+                # the output figure moved: it is a diagnostic, not a decision.
+                "REVERT",
                 id=f"missing-{side}-{axis}-output-{direction}",
             )
             for side in ("candidate", "reference")
@@ -1156,7 +1157,6 @@ async def test_phase_transition_into_sweep_enqueues_conc_sweep_e2e(tmp_path: Pat
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1207,7 +1207,6 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1479,7 +1478,7 @@ async def test_integrate_handler_revert_partial_becomes_failed(
     )
 
     class _FakeBaseline:
-        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+        default_timeout_sec = baseline_mod.resolve_benchmark_timeouts()[1]
 
         def __init__(self, *, session_dir, shared_state=None):
             self.session_dir = session_dir

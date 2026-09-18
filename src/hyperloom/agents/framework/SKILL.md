@@ -72,7 +72,7 @@ diagnose, 1 serve-flag/config wire-up, 2 in-tree source patch, 3 attempt-scoped
 runtime, 4 source localization, 5 off-loop compiled build. A supported-but-un-wired
 model needs only the cheap top rungs; a genuinely-new architecture climbs higher.
 The canonical rendered text is `build_enablement_ladder_book` in
-`hyperloom.agents.framework.enablement_ops` (injected into the enablement
+`hyperloom.orchestrator.enablement.mandate` (injected into the enablement
 authoring specialist's prompt); see also `docs/conceptual/optimization-loop.md`
 ("Enablement escalation ladder").
 

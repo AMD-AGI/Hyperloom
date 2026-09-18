@@ -499,56 +499,6 @@ class TestVendorPlaybookDeployBlocked:
         assert result["decision"] == "NEEDS_REVIEW"
 
 
-class TestIntegrateRebaselineTimeout:
-    def test_explicit_budget_wins(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {
-                    "config_path": str(config),
-                    "budget_minutes": 15,
-                },
-                default_timeout_sec=7800,
-            )
-            == 900
-        )
-
-    def test_benchmark_contract_replaces_legacy_cap(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 7200\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {"config_path": str(config)},
-                default_timeout_sec=7800,
-            )
-            == 7200
-        )
-
-    def test_shorter_benchmark_contract_is_preserved(self, tmp_path):
-        config = tmp_path / "config.yaml"
-        config.write_text("benchmark:\n  timeout_seconds: 2400\n")
-
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {"config_path": str(config)},
-                default_timeout_sec=7800,
-            )
-            == 2400
-        )
-
-    def test_executor_default_is_preserved(self):
-        assert (
-            krh._integrate_rebaseline_timeout_sec(
-                {},
-                default_timeout_sec=7800,
-            )
-            == 7800
-        )
-
-
 class TestIntegrateHandlerHonoursStateDefault:
     @pytest.mark.asyncio
     async def test_missing_base_tput_in_payload_still_runs_when_state_has_one(
@@ -593,7 +543,7 @@ class TestIntegrateHandlerHonoursStateDefault:
         from hyperloom.orchestrator.actions.executors import baseline as baseline_mod
 
         class FakeBaselineExecutor:
-            default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+            default_timeout_sec = 7800
 
             def __init__(self, *, session_dir, shared_state):
                 self.session_dir = session_dir
@@ -651,7 +601,7 @@ async def test_control_only_integrate_measures_without_resolving_historical_patc
     monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
-        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+        default_timeout_sec = 7800
 
         def __init__(self, *, session_dir, shared_state):
             self.session_dir = session_dir
@@ -707,7 +657,7 @@ async def test_bare_kernel_id_with_inherited_controls_still_resolves_and_applies
     monkeypatch.setattr(krh, "_resolve_integrate_payload", resolve)
 
     class FakeBaselineExecutor:
-        default_timeout_sec = baseline_mod.BASELINE_DEFAULT_TIMEOUT_SEC
+        default_timeout_sec = 7800
 
         def __init__(self, *, session_dir, shared_state):
             self.session_dir = session_dir

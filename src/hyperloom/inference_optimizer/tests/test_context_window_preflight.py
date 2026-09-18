@@ -175,16 +175,6 @@ def test_preflight_persists_stop_reason_under_strict_env(tmp_path, monkeypatch):
     assert final["stop_reason"] == "model_context_window_too_small"
 
 
-def test_monitor_offline_vocab_includes_context_window():
-    """The robustness monitor's offline STOP_REASON_VOCAB fallback must list the preflight stop_reason so it's treated as terminal."""
-    from hyperloom import inference_optimizer
-
-    package_root = Path(inference_optimizer.__file__).resolve().parent
-    monitor = package_root / "tools" / "robustness_monitor.sh.example"
-    text = monitor.read_text(encoding="utf-8")
-    assert "model_context_window_too_small" in text
-
-
 def test_preflight_reason_suggests_lowering_headroom(tmp_path, monkeypatch):
     """The fail-fast advice must tell operators to LOWER the headroom env (which shrinks `required`), not raise it."""
     monkeypatch.delenv(cli_model_gate._CONTEXT_HEADROOM_ENV, raising=False)

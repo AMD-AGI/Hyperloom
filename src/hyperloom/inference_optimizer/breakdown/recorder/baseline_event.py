@@ -15,6 +15,7 @@ from .event_fields import (
     as_list as _as_list,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
+    graded_axes as _graded_axes,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
@@ -217,6 +218,10 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         # Separate because TPOT alone can be computed from the other two, and
         # a computed figure must not be read as a measured one.
         "tpot_source": str(result.get("tpot_source") or ""),
+        # The graded axes this round measured. Recorded here rather than read off ``state.baseline_perf`` at export
+        # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline
+        # is a second answer to the same question.
+        "perf": _graded_axes(result),
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),

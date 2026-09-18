@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.bringup.argv_preflight import ARGV_INVALID
 from hyperloom.orchestrator.bringup.env_preflight import ENV_FAULT
-from hyperloom.orchestrator.supervisor.watch import DIED_STOP_REASON, WEDGED_STOP_REASON
+
+# Historical reports retain these terminal reasons after the producer is retired.
+DIED_STOP_REASON = "supervisor_coordinator_died"
+WEDGED_STOP_REASON = "supervisor_tick_stalled"
+SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
 
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(

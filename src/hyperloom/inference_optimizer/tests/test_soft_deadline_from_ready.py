@@ -11,15 +11,12 @@ import time
 import pytest
 
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-    OVERTIME_KILL_RETURNCODE,
+    DETOKENIZER_STALL_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     run_with_session_kill,
     server_ready_unix,
 )
-
-# Long stall grace so the detok-stall watchdog never interferes here.
-_LONG_STALL_GRACE = 3600.0
 
 
 def test_from_ready_excludes_pre_ready_phase(tmp_path):
@@ -39,9 +36,8 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=30,
-        soft_deadline_sec=2.0,
+        silence_timeout_sec=2.0,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=_LONG_STALL_GRACE,
     )
     elapsed = time.monotonic() - start
     # Post-ready (~1s) < 2.0s deadline -> not killed despite ~4s wall-clock.
@@ -50,7 +46,7 @@ def test_from_ready_excludes_pre_ready_phase(tmp_path):
 
 
 def test_from_ready_fires_after_ready(tmp_path):
-    """Post-ready overrun IS killed: once ready, exceeding the deadline in the client phase reaps the tree with the overtime sentinel."""
+    """Post-ready overrun IS killed: once ready, exceeding the deadline in the client phase reaps the tree with the silence sentinel."""
     log_path = tmp_path / "server.log"
     # Ready immediately, then a post-ready run that overruns the deadline.
     script = (
@@ -64,53 +60,22 @@ def test_from_ready_fires_after_ready(tmp_path):
     cp = run_with_session_kill(
         [sys.executable, "-c", script, str(log_path)],
         timeout=60,
-        soft_deadline_sec=1.0,
+        silence_timeout_sec=1.0,
         server_log_path=str(log_path),
-        detok_stall_grace_sec=_LONG_STALL_GRACE,
     )
     elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
+    assert cp.returncode == DETOKENIZER_STALL_RETURNCODE
     # Killed shortly after ready, not at 30s.
-    assert elapsed < 15.0, f"from-ready soft deadline took {elapsed:.2f}s"
+    assert elapsed < 15.0, f"from-ready silence deadline took {elapsed:.2f}s"
 
 
-def test_opt_out_reverts_to_from_spawn(tmp_path, monkeypatch):
-    """With INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY=0 the legacy from-spawn clock applies even with a server.log: pre-ready time counts and trips."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "0")
-    log_path = tmp_path / "server.log"
-    # Long pre-ready phase; from-spawn overruns the 1s deadline.
-    script = (
-        "import sys, time\n"
-        "f = open(sys.argv[1], 'w')\n"
-        "f.write('INFO loading weights\\n'); f.flush()\n"
-        "time.sleep(30)\n"
-        "f.write('Application startup complete\\n'); f.flush()\n"
-        "raise SystemExit(0)\n"
-    )
-    start = time.monotonic()
+def test_scriptable_silence_is_disarmed():
     cp = run_with_session_kill(
-        [sys.executable, "-c", script, str(log_path)],
-        timeout=60,
-        soft_deadline_sec=1.0,
-        server_log_path=str(log_path),
-        detok_stall_grace_sec=_LONG_STALL_GRACE,
+        [sys.executable, "-c", "import time; time.sleep(.3)"],
+        timeout=5,
+        silence_timeout_sec=0.1,
     )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 15.0, f"from-spawn opt-out took {elapsed:.2f}s"
-
-
-def test_no_server_log_uses_from_spawn(tmp_path):
-    """Without a server.log the soft deadline is the legacy from-spawn clock."""
-    start = time.monotonic()
-    cp = run_with_session_kill(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        timeout=60,
-        soft_deadline_sec=1.0,
-    )
-    elapsed = time.monotonic() - start
-    assert cp.returncode == OVERTIME_KILL_RETURNCODE
-    assert elapsed < 15.0, f"from-spawn (no server.log) took {elapsed:.2f}s"
+    assert cp.returncode == 0
 
 
 class TestARoundIsPricedByItsTwoParts:
@@ -133,7 +98,6 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=_LONG_STALL_GRACE,
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -170,7 +134,6 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=_LONG_STALL_GRACE,
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -202,7 +165,6 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=0.0,
             session_deadline_sec=time.monotonic() + 30.0,
         )
         assert cp.returncode == 0
@@ -227,7 +189,6 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=_LONG_STALL_GRACE,
         )
         runtime_sec = time.time() - started_unix
         assert cp.returncode == 0
@@ -261,7 +222,6 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             timeout=30,
             server_log_path=str(log_path),
-            detok_stall_grace_sec=_LONG_STALL_GRACE,
         )
         assert server_ready_unix(str(log_path)) is None
         assert (

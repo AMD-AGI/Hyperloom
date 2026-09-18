@@ -36,7 +36,7 @@ is allowed to change.
 A session is a closed loop: **input → optimize → validate → learn**.
 
 ```text
-PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
+PRELUDE → ENABLEMENT → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE
 ```
 
 After Sweep, the coordinator either closes or starts another cycle when budget
@@ -47,7 +47,8 @@ framework layer from the established baseline, rather than starting over.
 | Phase | What it does |
 |-------|----------------|
 | **Prelude** | Measures a stock baseline (the anchor for every later comparison), optionally replays the closest recipe from the knowledge base, then profiles and builds a roofline so later phases know where the headroom is. |
-| **Framework optimization** | First makes the model run (enablement, from serving flags up through targeted rebuilds). Then searches serving flags, precision, attention, batching, and ranked upstream diffs. |
+| **Enablement** | Makes the model run at all (serving flags through targeted rebuilds), graded on runnability and accuracy. Only entered when a baseline fails; skipped on healthy runs. |
+| **Framework optimization** | Searches serving flags, precision, attention, batching, and ranked upstream diffs. |
 | **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/KernelForge) — then re-measures every accepted change end to end. Only one backend runs per phase. |
 | **Sweep** | Re-measures the accumulated stack across concurrency and sequence-length operating points. Skips itself when the validated gain has not moved. |
 | **Close** | Records why the run stopped, writes the recipe knowledge base, final report, and machine-readable session artifacts. |
@@ -63,15 +64,14 @@ contracts, enablement ladder, and phase allowlists.
 
 ### Multi-agent harness
 
-Four roles run a session. Orchestration stays alive as one conversation so the
-plan is never rebuilt from a cold prompt. The other three are spun up when
-needed and discarded:
+The Coordinator runs Orchestration and Critic turns and dispatches specialists
+when needed. Each turn is grounded in persisted session state rather than an
+automatic supervision or recovery loop:
 
 | Role | When it runs | How it keeps the run on-goal |
 |------|----------------|------------------------------|
 | **Orchestration** | Every tick | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
 | **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
-| **Robustness** | Stall, crash, or circular search | Circuit breaker: forces recovery instead of another lap |
 | **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
 
 Risky source edits go through an isolated worktree, a unified-diff gate, a

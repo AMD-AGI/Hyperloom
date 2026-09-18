@@ -29,6 +29,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
+        "ENABLEMENT",
         "FRAMEWORK_AGENT",
         "KERNEL_AGENT",
         "SWEEP",
@@ -40,12 +41,17 @@ def test_phase_names_are_monotonic():
 
 
 def test_allowed_actions_disjoint_phases():
-    # recover is in every phase; kernel_agent-owned actions only in KERNEL (Inv-2.1).
+    # Kernel-agent-owned actions only run in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        assert "recover" in allowed
+        assert "recover" not in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    # ENABLEMENT carries baseline so the Coordinator's revalidation survives the
+    # phase sweep, but reserves it so no agent can propose one.
+    assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["ENABLEMENT"]
+    assert "baseline" not in phase_state.allowed_actions_for("ENABLEMENT")
+    assert "baseline" in phase_state.allowed_actions_for("PRELUDE")
     # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL entry from a lane budget, so they
     # are proposable in no phase at all.
     assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
@@ -622,7 +628,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -637,7 +642,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -704,3 +708,52 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         assert c.shared_state.phase_history == first_history
     finally:
         await c.stop()
+
+
+# ENABLEMENT phase predicate tests
+
+
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+    """A state the enablement entry and exit branches read."""
+    return SimpleNamespace(
+        phase=phase,
+        stop_reason="",
+        closing_phase=False,
+        baseline_tput=tput,
+        baseline_failure_streak=streak,
+        enablement=SimpleNamespace(validation_pending=validation_pending),
+    )
+
+
+def test_prelude_enters_enablement_on_a_baseline_failure_streak():
+    """A failed baseline routes PRELUDE to ENABLEMENT when the lane is admitted."""
+    state = _enablement_state("PRELUDE")
+    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert phase == phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_entered"
+
+
+def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
+    """An unadmitted lane leaves PRELUDE waiting for a baseline rather than entering the phase."""
+    state = _enablement_state("PRELUDE")
+    assert phase_state.compute_next_phase(state, enablement_enabled=False) is None
+
+
+def test_enablement_exits_once_the_baseline_lands_and_work_drains():
+    """All three conjuncts satisfied is the only way out through the normal exit."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert phase != phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_done"
+
+
+def test_enablement_holds_while_work_is_in_flight():
+    """A build outliving its round must not let a later phase reopen validation."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
+
+
+def test_enablement_holds_while_revalidation_is_pending():
+    """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
