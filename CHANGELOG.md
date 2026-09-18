@@ -49,6 +49,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   repository still has before it is read as this task's result. An archive that
   cannot be made says so, since the dispatch refusal that follows is otherwise
   undiagnosable.
+- **A campaign killed mid-search lost a fusion it had already published.**
+  `run_campaign` publishes each winning iteration to the shadow repo's
+  `forge_experiments/best/` and points `forge_loop_<stem>.json` at it, but the
+  exported patch and the aggregate manifest only land once the campaign
+  returns. A wrapper timeout while it was still iterating therefore reported
+  REVERT with `patch: null` even though correctness had passed. Measured: a
+  session lost a 5.011x fusion of qkvgate split + QK norm + RoPE with its
+  experiment still running when the 5400s timeout fired. Salvage now falls back
+  to the per-campaign artifacts, and each salvaged row carries the env flag its
+  fused path is gated behind -- read back from the driver the campaign wrote,
+  since the patch does not carry it and without it the re-baseline server boots
+  un-gated, measures the eager path and rejects the win one stage later. A
+  campaign whose flag cannot be read is not salvaged at all, rather than queued
+  to fail that way. Artifacts a previous run left in the same output directory
+  are swept before the run starts, so they cannot be salvaged as its own.
 - **A KB recipe carrying code overlays could not be replayed into a framework
   installed from a wheel.** A Recipe whose patch timeline is non-empty replays
   as required, and that path refused any tree without a git HEAD -- which a

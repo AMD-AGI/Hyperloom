@@ -363,6 +363,59 @@ def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch,
     assert result["decision"] == "REVERT"
 
 
+def test_main_timeout_does_not_salvage_a_stale_campaign_patch(tmp_path, monkeypatch, capsys):
+    """The output dir is keyed on the task, so the previous run's per-campaign work is still there.
+
+    The stale sweep predates the per-campaign fallback and only names the aggregate
+    artifacts, so a run that times out before writing anything of its own reports the last
+    run's keeper as its result.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_stale.patch").write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_stale.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=9.99)), encoding="utf-8"
+    )
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert rc == 124
+    assert result["kept"] is False, "a stale campaign patch is not this run's result"
+    assert result["decision"] == "REVERT"
+
+
+def test_main_timeout_does_not_salvage_a_stale_published_best(tmp_path, monkeypatch, capsys):
+    """A loop result left pointing at the shadow repo's published best is stale the same way."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _published_best_manifest(tmp_path / "shadow", speedup=9.99, patch_body="diff --git a/s.py b/s.py\n")
+    loop = _campaign_loop_result(total_speedup=9.99)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_stale.json").write_text(json.dumps(loop), encoding="utf-8")
+    input_json = tmp_path / "input.json"
+    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
+
+    def fake_run(cmd, timeout):
+        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+
+    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+
+    rc = forge_fusion.main(["--input-json", str(input_json)])
+
+    result = _sentinel_payload(capsys.readouterr().out)
+    assert rc == 124
+    assert result["kept"] is False, "a stale published best is not this run's result"
+    assert result["decision"] == "REVERT"
+
+
 def test_run_with_tree_timeout_captures_output():
     cp = forge_fusion._run_with_tree_timeout(
         [
@@ -1419,3 +1472,262 @@ def test_build_cmd_omits_the_recipe_ceiling_when_none_was_derived(tmp_path):
     assert "--max-recipes" not in cmd
     # The rest of the brief still travels, so the omission is not a broken build.
     assert cmd[cmd.index("--framework") + 1] == "sglang"
+
+
+def test_a_salvaged_row_carries_the_flag_its_fused_path_is_gated_behind(tmp_path):
+    """Without it integrate boots the re-baseline server un-gated and REVERTs a real win.
+
+    ``NominatedPatch.env_flag`` -> ``fusion_env_flags`` -> ``extra_envs`` is the only way the
+    flag reaches the re-baseline, and the exported patch does not carry it. ``run_campaign``
+    renders it into ``driver_<stem>.py`` beside the loop result, which is where a killed run
+    still has it.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch").write_text(
+        "diff --git a/qk.py b/qk.py\n", encoding="utf-8"
+    )
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.011)), encoding="utf-8"
+    )
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope", "SGLANG_FUSED_QKVGATE")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert [p.env_flag for p in parse_outcome(result).patches] == ["SGLANG_FUSED_QKVGATE"]
+    # There is no checkpoint and no aggregate on this path, so the top-level flags start empty
+    # and the strongest row is the only thing that can fill them.
+    assert result["env_flags"] == {"SGLANG_FUSED_QKVGATE": "1"}
+
+
+def test_a_campaign_whose_flag_cannot_be_read_is_not_salvaged(tmp_path):
+    """Queuing it un-gated loses the same win one stage later, after ~25 min of integrate."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch").write_text(
+        "diff --git a/qk.py b/qk.py\n", encoding="utf-8"
+    )
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.011)), encoding="utf-8"
+    )
+    # No driver_<stem>.py beside it.
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
+
+
+def _campaign_driver(output_dir, stem: str, env_flag: str = "SGLANG_FUSED_QKVGATE") -> None:
+    """What ``run_campaign`` writes beside the loop result, rendered by ``driver_shim``.
+
+    It is the only artifact a killed run leaves that still names the flag the fused path is
+    gated behind, and without that flag the salvaged patch is re-baselined un-gated.
+    """
+    flags = tuple(f for f in env_flag.split() if f)
+    (output_dir / f"driver_{stem}.py").write_text(
+        f"HARNESS = '/w/harness.py'\nENV_FLAGS = {flags!r}\nCASE_ID = {stem!r}\n",
+        encoding="utf-8",
+    )
+
+
+def _campaign_loop_result(*, total_speedup: float, improved: bool = True) -> dict:
+    """What ``kernelforge.cli`` writes to ``forge_loop_<stem>.json`` per campaign."""
+    return {
+        "baseline_ms": 0.0741,
+        "pristine_baseline_ms": 0.0741,
+        "best_ms": 0.0741 / total_speedup,
+        "mean_case_speedup": total_speedup,
+        "total_speedup": total_speedup,
+        "aggregate_regression": False,
+        "improved": improved,
+        "total_improved": improved,
+        "best_commit": "b3999b41eb67",
+        "remote_publication": {"status": "published", "state": "published"},
+    }
+
+
+def test_salvage_recovers_campaign_artifacts_when_the_run_dies_before_the_manifest(tmp_path):
+    """A kill between the campaigns and the manifest still has per-recipe results on disk.
+
+    ``export_artifacts`` writes ``fusion_<pattern_id>.patch`` as each recipe is kept and
+    ``run_campaign`` writes ``forge_loop_<stem>.json`` beside it, but the aggregate
+    ``fusion_manifest.json`` only lands once every campaign has returned. A wrapper killed
+    in between leaves proven, already-published work that the aggregate-only lookup cannot
+    see, and the lane reports REVERT.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    strong = output_dir / "fusion_llm_qkgate_split_qknorm_rope.patch"
+    strong.write_text("diff --git a/qk.py b/qk.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_qkgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=11.99)), encoding="utf-8"
+    )
+    _campaign_driver(output_dir, "llm_qkgate_split_qknorm_rope", "SGLANG_FUSED_QKGATE")
+    weak = output_dir / "fusion_llm_qk_gemma_norm_rope_gate.patch"
+    weak.write_text("diff --git a/gate.py b/gate.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_qk_gemma_norm_rope_gate.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.53)), encoding="utf-8"
+    )
+    _campaign_driver(output_dir, "llm_qk_gemma_norm_rope_gate", "SGLANG_FUSED_GEMMA_GATE")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert result is not None, "campaign artifacts on disk must not be thrown away"
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["requires_e2e_validation"] is True
+    # The strongest campaign fills the singular slots the older consumers read.
+    assert result["patch"] == str(strong)
+    assert result["kernel_speedup"] == 11.99
+    # Both keepers travel, so integrate queues the pair rather than one of them.
+    outcome = parse_outcome(result)
+    assert outcome.schema_error == ""
+    assert sorted(p.patch_path for p in outcome.patches) == sorted([str(strong), str(weak)])
+
+
+def test_salvage_ignores_campaigns_that_did_not_improve(tmp_path):
+    """A campaign patch is only worth e2e time when its own loop result says it won."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_slower.patch").write_text("diff --git a/s.py b/s.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_slower.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=0.92, improved=False)), encoding="utf-8"
+    )
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
+
+
+def test_salvage_prefers_the_manifest_over_campaign_artifacts(tmp_path):
+    """When the run got far enough to write a manifest, that stays the source of truth."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    stale = output_dir / "fusion_llm_stale.patch"
+    stale.write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
+    (output_dir / "forge_loop_llm_stale.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=9.0)), encoding="utf-8"
+    )
+    final = output_dir / "fusion_0.patch"
+    final.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    (output_dir / "fusion.patch").write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+    patches = [
+        {
+            "kernel_name": "fuse_a",
+            "patch_path": str(final),
+            "target_file": "/fw/a.py",
+            "kernel_repo": "/venv/site-packages",
+            "micro_speedup": 1.4,
+            "kind": "fusion",
+        }
+    ]
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_multi_patch_manifest(output_dir, patches=patches)), encoding="utf-8"
+    )
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert [p.patch_path for p in parse_outcome(result).patches] == [str(final)]
+
+
+def _published_best_manifest(repo_root, *, speedup, patch_body):
+    """Publish an iteration the way ``run_campaign`` does, and return its manifest path."""
+    best = repo_root / "forge_experiments" / "best"
+    (best / "iter_001").mkdir(parents=True)
+    (best / "iter_001" / "forge.patch").write_text(patch_body, encoding="utf-8")
+    manifest = best / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "artifact_dir": "best/iter_001",
+                "patch_path": "best/iter_001/forge.patch",
+                "changed_files": ["python/sglang/srt/models/qwen3_next.py"],
+                "commit_hash": "14b9048b4a48",
+                "correctness_passed": True,
+                "speedup": speedup,
+                "total_speedup": speedup,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
+def test_salvage_reads_the_published_best_when_the_campaign_never_returned(tmp_path):
+    """A campaign killed mid-search never runs ``on_keep``, so no patch reaches the workspace.
+
+    ``run_campaign`` publishes each winning iteration to the shadow repo's
+    ``forge_experiments/best/`` and points ``forge_loop_<stem>.json`` at that manifest, but
+    ``fusion_<pattern_id>.patch`` is only exported once the campaign returns and the loop
+    gates the keeper. A wrapper that times out while the campaign is still iterating leaves
+    a proven, already-published win with nothing in the workspace pointing at a patch file.
+    Session 20260916T050331Z-94ee8477 lost a 5.011x fusion of qkvgate split + QK norm + RoPE
+    this way, its experiment still ``running`` when the 5400s wrapper timeout fired.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    repo_root = tmp_path / "sgl-workspace" / "sglang"
+    manifest = _published_best_manifest(
+        repo_root,
+        speedup=5.011,
+        patch_body="diff --git a/python/sglang/srt/models/qwen3_next.py b/python/sglang/srt/models/qwen3_next.py\n",
+    )
+    loop = _campaign_loop_result(total_speedup=5.011)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert result is not None, "a published best must not be thrown away for lack of an exported patch"
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["requires_e2e_validation"] is True
+    assert result["kernel_speedup"] == 5.011
+    assert result["kernel_repo"] == str(repo_root)
+    outcome = parse_outcome(result)
+    assert outcome.schema_error == ""
+    assert [p.patch_path for p in outcome.patches] == [
+        str(repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch")
+    ]
+    assert [p.target_file for p in outcome.patches] == ["python/sglang/srt/models/qwen3_next.py"]
+
+
+def test_salvage_prefers_the_exported_patch_over_the_published_best(tmp_path):
+    """Once ``on_keep`` has exported the recipe's own patch, that is what integrate applies."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    exported = output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch"
+    exported.write_text("diff --git a/qk.py b/qk.py\n", encoding="utf-8")
+    repo_root = tmp_path / "shadow"
+    manifest = _published_best_manifest(repo_root, speedup=5.011, patch_body="diff --git a/other.py b/other.py\n")
+    loop = _campaign_loop_result(total_speedup=5.011)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert [p.patch_path for p in parse_outcome(result).patches] == [str(exported)]
+
+
+def test_salvage_ignores_a_published_best_whose_loop_did_not_improve(tmp_path):
+    """Publication alone is not a win; the loop result still decides."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _published_best_manifest(tmp_path / "shadow", speedup=0.9, patch_body="diff --git a/s.py b/s.py\n")
+    loop = _campaign_loop_result(total_speedup=0.9, improved=False)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_slower.json").write_text(json.dumps(loop), encoding="utf-8")
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
+
+
+def test_salvage_ignores_a_published_best_whose_patch_is_gone(tmp_path):
+    """A manifest pointing at a patch the shadow repo no longer has is not salvageable."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    repo_root = tmp_path / "shadow"
+    manifest = _published_best_manifest(repo_root, speedup=5.011, patch_body="diff --git a/q.py b/q.py\n")
+    (repo_root / "forge_experiments" / "best" / "iter_001" / "forge.patch").unlink()
+    loop = _campaign_loop_result(total_speedup=5.011)
+    loop["best_manifest"] = str(manifest)
+    (output_dir / "forge_loop_llm_gone.json").write_text(json.dumps(loop), encoding="utf-8")
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
