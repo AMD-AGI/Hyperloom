@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass, replace
@@ -38,10 +39,71 @@ class KthQualificationResult:
     artifacts_dir: str = ""
     repair_feedback: dict[str, Any] | None = None
     performance_reached: bool = False
+    envelope_digest: str = ""
+    plan_id: str = ""
 
     @property
     def eligible(self) -> bool:
         return self.status == "eligible"
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_candidate_envelope(
+    publication: ControllerPatchPublication,
+    patch_bytes: bytes,
+    *,
+    pre_change_tree: str = "",
+    post_change_tree: str = "",
+) -> dict[str, Any]:
+    """Thin Hyperloom→KTH evidence envelope. No detector or verdict fields."""
+    patch_digest = "sha256:" + hashlib.sha256(patch_bytes).hexdigest()
+    return {
+        "schema_version": "1.0.0",
+        "candidate_id": publication.operator_id,
+        "attempt_id": publication.best_commit or publication.base_commit,
+        "base_repository": str(publication.repo_root),
+        "base_commit": publication.base_commit,
+        "patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
+        "patch_digest": patch_digest,
+        "changed_paths": list(publication.changed_files),
+        "changed_symbols": [],
+        "artifact": {
+            "pre_patch_module_digest": pre_change_tree,
+            "module_digest": post_change_tree or patch_digest,
+            "loaded_implementation_identity": post_change_tree or patch_digest,
+            "producer": "runtime_observation",
+            "trust_level": "hypothesized",
+            "provenance": "applied_worktree",
+        },
+        "environment": {
+            "producer": "hyperloom_context",
+            "trust_level": "hypothesized",
+            "provenance": "session",
+        },
+        "hyperloom_context": {
+            "operator_id": publication.operator_id,
+            "workload": publication.operator_name,
+            "producer": "hyperloom_context",
+            "trust_level": "hypothesized",
+            "provenance": "controller_publication",
+        },
+        "geak_harness": {
+            "harness_id": "geak-compatible",
+            "producer": "geak_harness",
+            "trust_level": "hypothesized",
+            "provenance": "publication_manifest",
+        },
+        "field_provenance": {
+            "hyperloom_context": {
+                "producer": "hyperloom_context",
+                "trust_level": "hypothesized",
+                "provenance": "controller_publication",
+            }
+        },
+    }
 
 
 @dataclass(frozen=True)
@@ -49,6 +111,22 @@ class KthQualificationProvider:
     executable: str = "kth-qualify"
     timeout_s: float = 300.0
     expected_kth_sha: str | None = None
+    enable: bool = False
+    adaptive: bool = False
+
+    @classmethod
+    def from_env(cls) -> KthQualificationProvider:
+        return cls(
+            executable=os.environ.get("HYPERLOOM_KTH_QUALIFY_EXECUTABLE", "kth-qualify"),
+            timeout_s=float(os.environ.get("HYPERLOOM_KTH_TIMEOUT_S", "300")),
+            expected_kth_sha=os.environ.get("HYPERLOOM_KTH_EXPECTED_SHA") or None,
+            enable=_truthy(os.environ.get("HYPERLOOM_KTH_ENABLE")),
+            adaptive=_truthy(os.environ.get("HYPERLOOM_KTH_ADAPTIVE"))
+            or _truthy(os.environ.get("HYPERLOOM_KTH_ENABLE")),
+        )
+
+    def enabled(self) -> bool:
+        return self.enable or self.adaptive
 
     def qualify(
         self,
@@ -63,18 +141,30 @@ class KthQualificationProvider:
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         request_path = artifacts_dir / "request.json"
         attestation_path = artifacts_dir / "attestation.json"
-        request = {
-            "schema_version": "1.0.0",
-            "request_id": request_id,
-            "plan_id": publication.kth_plan_id,
-            "candidate": {
-                "candidate_id": publication.operator_id,
-                "base_commit": publication.base_commit,
-                "kernel_path": publication.kernel_path,
-                "patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
-            },
-        }
+        envelope = build_candidate_envelope(publication, patch_bytes)
+        envelope_digest = hashlib.sha256(
+            json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if self.adaptive:
+            request = {
+                "schema_version": "2.0.0",
+                "request_id": request_id,
+                "envelope": envelope,
+            }
+        else:
+            request = {
+                "schema_version": "1.0.0",
+                "request_id": request_id,
+                "plan_id": publication.kth_plan_id,
+                "candidate": {
+                    "candidate_id": publication.operator_id,
+                    "base_commit": publication.base_commit,
+                    "kernel_path": publication.kernel_path,
+                    "patch_base64": base64.b64encode(patch_bytes).decode("ascii"),
+                },
+            }
         atomic_write_json(request_path, request, trailing_newline=True)
+        atomic_write_json(artifacts_dir / "envelope.json", envelope, trailing_newline=True)
         command = [
             self.executable,
             "--request",
@@ -98,6 +188,8 @@ class KthQualificationProvider:
                     reason=f"KTH executable not found: {self.executable}",
                     request_id=request_id,
                     artifacts_dir=str(artifacts_dir),
+                    envelope_digest="sha256:" + envelope_digest,
+                    plan_id=str(publication.kth_plan_id or ""),
                 )
             )
         except subprocess.TimeoutExpired as error:
@@ -111,6 +203,8 @@ class KthQualificationProvider:
                     reason=f"KTH timed out after {self.timeout_s:g}s",
                     request_id=request_id,
                     artifacts_dir=str(artifacts_dir),
+                    envelope_digest="sha256:" + envelope_digest,
+                    plan_id=str(publication.kth_plan_id or ""),
                 )
             )
 
@@ -123,6 +217,8 @@ class KthQualificationProvider:
                     reason=f"KTH infrastructure exit {process.returncode}",
                     request_id=request_id,
                     artifacts_dir=str(artifacts_dir),
+                    envelope_digest="sha256:" + envelope_digest,
+                    plan_id=str(publication.kth_plan_id or ""),
                 )
             )
         try:
@@ -134,6 +230,8 @@ class KthQualificationProvider:
                     reason=f"KTH attestation is missing or malformed: {error}",
                     request_id=request_id,
                     artifacts_dir=str(artifacts_dir),
+                    envelope_digest="sha256:" + envelope_digest,
+                    plan_id=str(publication.kth_plan_id or ""),
                 )
             )
         invalid = self._validate_attestation(
@@ -153,6 +251,8 @@ class KthQualificationProvider:
                     primary_detector=str(attestation.get("primary_detector") or ""),
                     artifacts_dir=str(artifacts_dir),
                     repair_feedback=_mapping(attestation.get("repair_feedback")),
+                    envelope_digest="sha256:" + envelope_digest,
+                    plan_id=str(publication.kth_plan_id or ""),
                 )
             )
         verdict = str(attestation["verdict"])
@@ -162,8 +262,12 @@ class KthQualificationProvider:
             "Inconclusive": "kth_inconclusive",
         }[verdict]
         feedback = _mapping(attestation.get("repair_feedback"))
-        primary = str(attestation.get("primary_detector") or "")
-        reason = _feedback_reason(feedback, primary, verdict)
+        primary = str(
+            attestation.get("primary_detector")
+            or ((attestation.get("evidence_plan") or {}).get("selected") or [{}])[0].get("check_id")
+            or ""
+        )
+        reason = _feedback_reason(feedback, primary, verdict) or str(attestation.get("reason") or verdict)
         return self._persist(
             KthQualificationResult(
                 status=status,
@@ -174,6 +278,12 @@ class KthQualificationProvider:
                 primary_detector=primary,
                 artifacts_dir=str(artifacts_dir),
                 repair_feedback=feedback,
+                envelope_digest="sha256:" + envelope_digest,
+                plan_id=str(
+                    publication.kth_plan_id
+                    or (attestation.get("evidence_plan") or {}).get("plan_id")
+                    or ""
+                ),
             )
         )
 
@@ -206,6 +316,14 @@ class KthQualificationProvider:
     ) -> str:
         if not isinstance(attestation, dict):
             return "KTH attestation must be a JSON object"
+        schema = str(attestation.get("schema_version") or "")
+        request_schema = str(request.get("schema_version") or "")
+        if schema != request_schema:
+            return "KTH attestation schema version is unsupported"
+        if schema == "2.0.0":
+            return self._validate_adaptive_attestation(
+                attestation, request=request, process_exit=process_exit
+            )
         required = {
             "schema_version",
             "request_id",
@@ -226,7 +344,7 @@ class KthQualificationProvider:
         missing = sorted(required - set(attestation))
         if missing:
             return f"KTH attestation missing required fields: {missing}"
-        if attestation["schema_version"] != "1.0.0":
+        if schema != "1.0.0":
             return "KTH attestation schema version is unsupported"
         if attestation["request_id"] != request["request_id"]:
             return "KTH attestation request identity is stale"
@@ -277,6 +395,61 @@ class KthQualificationProvider:
             return "KTH unexplored-region evidence is malformed"
         return ""
 
+    def _validate_adaptive_attestation(
+        self,
+        attestation: dict[str, Any],
+        *,
+        request: dict[str, Any],
+        process_exit: int,
+    ) -> str:
+        required = {
+            "schema_version",
+            "request_id",
+            "subject_digest",
+            "verdict",
+            "autospec",
+            "resolved_spec",
+            "evidence_plan",
+        }
+        missing = sorted(required - set(attestation))
+        if missing:
+            return f"KTH attestation missing required fields: {missing}"
+        if attestation["request_id"] != request["request_id"]:
+            return "KTH attestation request identity is stale"
+        verdict = str(attestation["verdict"])
+        if verdict not in _VERDICT_EXIT or _VERDICT_EXIT[verdict] != process_exit:
+            return "KTH verdict and subprocess exit do not match"
+        digest = str(attestation.get("subject_digest") or "")
+        if not digest.startswith("sha256:") or len(digest) < 15:
+            return "KTH subject digest mismatch"
+        revision = str(attestation.get("kth_revision") or "")
+        if revision and not _KTH_SHA.fullmatch(revision) and revision != "unknown":
+            return "KTH attestation has no full harness revision"
+        if self.expected_kth_sha and revision and revision != "unknown" and revision != self.expected_kth_sha:
+            return "KTH harness revision does not match the configured revision"
+        envelope = request.get("envelope")
+        if not isinstance(envelope, dict):
+            return "KTH adaptive request is missing an envelope"
+        if "verdict" in envelope or "detector_ids" in envelope or "thresholds" in envelope:
+            return "KTH envelope contains forbidden host-selection fields"
+        resolved = attestation.get("resolved_spec")
+        plan = attestation.get("evidence_plan")
+        autospec = attestation.get("autospec")
+        if not isinstance(resolved, dict) or not isinstance(plan, dict) or not isinstance(autospec, dict):
+            return "KTH adaptive attestation identity is malformed"
+        if verdict == "Eligible for performance evaluation":
+            if attestation.get("autospec_uncertainty") is True:
+                return "KTH mandatory evidence is incomplete"
+            if resolved.get("trust_class") != "fully_verified":
+                return "KTH mandatory evidence is incomplete"
+            uncovered = plan.get("uncovered")
+            if isinstance(uncovered, list) and uncovered:
+                return "KTH mandatory evidence is incomplete"
+        findings = attestation.get("findings")
+        if findings is not None and not isinstance(findings, list):
+            return "KTH findings are missing"
+        return ""
+
 
 def _mapping(value: Any) -> dict[str, Any] | None:
     return dict(value) if isinstance(value, dict) else None
@@ -322,4 +495,5 @@ __all__ = [
     "KthQualificationProvider",
     "KthQualificationResult",
     "KthStatus",
+    "build_candidate_envelope",
 ]

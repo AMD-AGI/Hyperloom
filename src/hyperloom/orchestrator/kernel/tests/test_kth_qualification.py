@@ -253,3 +253,186 @@ def test_missing_executable_and_timeout_fail_closed(tmp_path: Path, monkeypatch:
     )
     assert timeout_result.status == "needs_review"
     assert "timed out" in timeout_result.reason
+
+
+def test_from_env_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_KTH_ENABLE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_KTH_ADAPTIVE", raising=False)
+    provider = KthQualificationProvider.from_env()
+    assert provider.enabled() is False
+    assert provider.adaptive is False
+
+
+def test_from_env_enable_turns_on_adaptive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_KTH_ENABLE", "1")
+    provider = KthQualificationProvider.from_env()
+    assert provider.enabled() is True
+    assert provider.adaptive is True
+
+
+def test_envelope_omits_forbidden_selection_fields(tmp_path: Path) -> None:
+    from hyperloom.orchestrator.kernel.kth_qualification import build_candidate_envelope
+
+    publication = _publication(tmp_path)
+    envelope = build_candidate_envelope(publication, publication.patch_path.read_bytes())
+    blob = json.dumps(envelope)
+    assert "verdict" not in envelope
+    assert "detector_ids" not in envelope
+    assert "thresholds" not in envelope
+    assert "command" not in blob
+    assert envelope["schema_version"] == "1.0.0"
+    assert envelope["candidate_id"] == publication.operator_id
+
+
+def _adaptive_attestation(request: dict, verdict: str) -> dict:
+    return {
+        "schema_version": "2.0.0",
+        "request_id": request["request_id"],
+        "subject_digest": "sha256:" + "ab" * 32,
+        "kth_revision": "c" * 40,
+        "envelope_digest": "sha256:" + "de" * 32,
+        "autospec": {
+            "version": "1.0.0",
+            "digest": "sha256:" + "11" * 32,
+            "spec_trust_class": "fully_verified"
+            if verdict == "Eligible for performance evaluation"
+            else "partial_inferred",
+            "unresolved": [],
+            "conflicts": [],
+        },
+        "resolved_spec": {
+            "name": "elementwise_binary",
+            "version": "1.0",
+            "source": "reviewed",
+            "trust_class": "fully_verified"
+            if verdict == "Eligible for performance evaluation"
+            else "partial_inferred",
+            "digest": "sha256:" + "22" * 32,
+            "decisions": [],
+        },
+        "evidence_plan": {
+            "plan_id": "adaptive/demo",
+            "digest": "sha256:" + "33" * 32,
+            "selected": [{"oracle_id": "generic.schema.v1", "check_id": "SCHEMA", "reason": "generic"}],
+            "excluded": [{"oracle_id": "collective.topology.v1", "check_id": "CONCURRENCY", "reason": "irrelevant"}],
+            "required_unavailable": [],
+            "covered": ["contract.schema"],
+            "uncovered": [],
+            "cost_estimate": 3,
+            "actual_cost": 0.1,
+        },
+        "verdict": verdict,
+        "reason": "test",
+        "findings": [{"check_id": "SCHEMA", "status": "consistent"}],
+        "autospec_uncertainty": verdict != "Eligible for performance evaluation",
+        "duration_s": 0.1,
+    }
+
+
+def _adaptive_subprocess(verdict: str, *, mutate=None):
+    code = {
+        "Eligible for performance evaluation": 0,
+        "Blocked": 2,
+        "Inconclusive": 3,
+    }[verdict]
+
+    def run(command, **_kwargs):
+        request_path = Path(command[command.index("--request") + 1])
+        out_path = Path(command[command.index("--out") + 1])
+        request = json.loads(request_path.read_text())
+        assert request["schema_version"] == "2.0.0"
+        assert "envelope" in request
+        attestation = _adaptive_attestation(request, verdict)
+        if mutate:
+            mutate(attestation)
+        out_path.write_text(json.dumps(attestation))
+        return subprocess.CompletedProcess(command, code, stdout="adaptive", stderr="")
+
+    return run
+
+
+def test_adaptive_blocked_never_maps_to_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publication = _publication(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _adaptive_subprocess("Blocked"))
+    result = KthQualificationProvider(adaptive=True).qualify(
+        publication, artifacts_root=tmp_path / "session" / "kth_qualification"
+    )
+    assert result.status == "kth_blocked"
+    assert result.eligible is False
+    request = json.loads(Path(result.artifacts_dir).joinpath("request.json").read_text())
+    assert request["schema_version"] == "2.0.0"
+    assert (Path(result.artifacts_dir) / "envelope.json").is_file()
+
+
+def test_adaptive_inconclusive_never_maps_to_eligible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publication = _publication(tmp_path)
+    monkeypatch.setattr(subprocess, "run", _adaptive_subprocess("Inconclusive"))
+    result = KthQualificationProvider(adaptive=True).qualify(
+        publication, artifacts_root=tmp_path / "session" / "kth_qualification"
+    )
+    assert result.status == "kth_inconclusive"
+    assert result.eligible is False
+
+
+def test_adaptive_uncertain_eligible_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publication = _publication(tmp_path)
+
+    def mutate(attestation):
+        attestation["autospec_uncertainty"] = True
+        attestation["resolved_spec"]["trust_class"] = "partial_inferred"
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _adaptive_subprocess("Eligible for performance evaluation", mutate=mutate),
+    )
+    result = KthQualificationProvider(adaptive=True).qualify(
+        publication, artifacts_root=tmp_path / "session" / "kth_qualification"
+    )
+    assert result.status == "needs_review"
+    assert result.eligible is False
+
+
+def test_replay_attestation_cannot_bind_a_different_request_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publication = _publication(tmp_path)
+    captured: dict[str, str] = {}
+
+    def first_run(command, **_kwargs):
+        request_path = Path(command[command.index("--request") + 1])
+        out_path = Path(command[command.index("--out") + 1])
+        request = json.loads(request_path.read_text())
+        captured["request_id"] = request["request_id"]
+        captured["digest"] = hashlib.sha256(publication.patch_path.read_bytes()).hexdigest()
+        attestation = _adaptive_attestation(request, "Blocked")
+        out_path.write_text(json.dumps(attestation))
+        return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", first_run)
+    first = KthQualificationProvider(adaptive=True).qualify(
+        publication, artifacts_root=tmp_path / "first"
+    )
+    replay = json.loads(Path(first.artifacts_dir).joinpath("attestation.json").read_text())
+
+    def replay_on_stale(command, **_kwargs):
+        out_path = Path(command[command.index("--out") + 1])
+        stale = dict(replay)
+        stale["request_id"] = "stale-other-artifact"
+        out_path.write_text(json.dumps(stale))
+        return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", replay_on_stale)
+    second = KthQualificationProvider(adaptive=True).qualify(
+        publication, artifacts_root=tmp_path / "second"
+    )
+    assert second.status == "needs_review"
+    assert "stale" in second.reason
+    assert first.subject_digest == replay["subject_digest"]
+

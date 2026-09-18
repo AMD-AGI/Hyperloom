@@ -73,6 +73,8 @@
 #   cp "$REPO_ROOT/src/hyperloom/inference_optimizer/launcher/robustness_monitor.sh.example" \
 #      "$RUN_DIR/robustness_monitor.sh"
 #   chmod +x "$RUN_DIR/robustness_monitor.sh"
+#   # when CLAW_SESSION_ID is set and the bash tool offers run_in_background,
+#   # launch with it instead of setsid nohup
 #   setsid nohup bash "$RUN_DIR/robustness_monitor.sh" \
 #     > "$RUN_DIR/robustness_monitor_$(date +%Y%m%d_%H%M%S).log" \
 #     2>&1 < /dev/null &

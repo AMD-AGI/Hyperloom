@@ -107,7 +107,11 @@ than Hyperloom's. Hyperloom writes it a Markdown handoff (`workload.md`,
 `serving-context.md`, `trace-evidence.md`), runs
 `python -m kernelforge.cli kernel-rewrite-controller` as a bounded subprocess,
 and integrates whatever patches it publishes through
-`integrate_controller_patches`. Communication operators ride this path like any
+`integrate_controller_patches`. After the patch is applied, an optional KTH
+provider (`KthQualificationProvider.from_env()`) may qualify the exact artifact
+before KEEP. The gate is off unless `HYPERLOOM_KTH_ENABLE` is set; see
+[Optional Kernel Trust Harness qualification](../how-to/kth-qualification.md).
+Communication operators ride this path like any
 other operator; a task declares its rank count and the controller passes
 `--nproc-per-node` down to forge-loop.
 
