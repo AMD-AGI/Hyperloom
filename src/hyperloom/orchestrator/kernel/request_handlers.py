@@ -5735,12 +5735,24 @@ def _workspace_log_sizes(workspace: Path) -> dict[str, int]:
     return sizes
 
 
-def _workspace_has_compiled_registry_error(
+def _compiled_registry_error_text(
     workspace: Path,
     *,
     after_sizes: dict[str, int] | None = None,
-) -> bool:
-    """True when an integrate workspace log shows a compiled-registry miss."""
+) -> str:
+    """Return the integrate log excerpt that shows a compiled-registry miss.
+
+    The excerpt names the kernel aiter could not find, which is the only thing that
+    identifies the module at fault when the round's env does not.
+
+    Args:
+        workspace: The integrate run's workspace.
+        after_sizes: Per-log byte offsets to read from, so a retry does not re-read
+            the failure that armed it.
+
+    Returns:
+        The matching log text, empty when no log shows a mismatch.
+    """
     from ..actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
 
     for name in _INTEGRATE_LOG_NAMES:
@@ -5765,8 +5777,17 @@ def _workspace_has_compiled_registry_error(
         except OSError:
             continue
         if is_aiter_jit_registry_mismatch(text):
-            return True
-    return False
+            return text
+    return ""
+
+
+def _workspace_has_compiled_registry_error(
+    workspace: Path,
+    *,
+    after_sizes: dict[str, int] | None = None,
+) -> bool:
+    """True when an integrate workspace log shows a compiled-registry miss."""
+    return bool(_compiled_registry_error_text(workspace, after_sizes=after_sizes))
 
 
 def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
@@ -5802,13 +5823,28 @@ async def _run_integrate_rebaseline_with_lock_retry(
     if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
         envs = _integrate_extra_envs(ctx)
         log_sizes = _workspace_log_sizes(workspace)
+        # The env does not always reach the module at fault: a round that pins one
+        # table leaves every other AITER_CONFIG_* unset, and each of those resolves to
+        # the shipped default plus its matching model_configs overlays, and
+        # AITER_CONFIG_FMOE maps to no serving module at all. Read the module out of
+        # the kernel the error named, or the drop unlinks nothing and the retry
+        # repeats the failure.
+        from ..actions.executors._aiter_jit import registry_mismatch_modules
+
+        named_modules = registry_mismatch_modules(
+            str(result.get("error") or ""),
+            _compiled_registry_error_text(workspace),
+        )
         cleanup = drop_serving_so_for_envs(
             envs,
             backup_dir=workspace / "aiter_jit_backup",
+            also_modules=named_modules,
         )
         log.warning(
-            "integrate_handler: classified %s as aiter_jit_registry_mismatch; retrying once after so drop",
+            "integrate_handler: classified %s as aiter_jit_registry_mismatch; "
+            "retrying once after so drop (env modules + %s from the error)",
             reason,
+            list(named_modules) or "none",
         )
         retry_result = await executor(ctx)
         if not isinstance(retry_result, dict):
