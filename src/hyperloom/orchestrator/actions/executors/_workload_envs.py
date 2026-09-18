@@ -1513,7 +1513,13 @@ def materialize_config_with_envs(
         # try to patch, fall back to the safe set on failure. Default-on
         # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
         tracelens_patch_ok = False
-        patch_attempted = _tracelens_patch_enabled() and not is_atom
+        # Function-local import to stay out of the module-level import cycle
+        # (matches _multi_node_server_lifecycle).
+        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
+
+        is_sglang = "sglang" in fw
+        sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
+        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
         # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
         # "never tried because the image already carries it", and those two call for different reactions when a
         # trace later turns up without annotations.
@@ -1612,39 +1618,49 @@ def materialize_config_with_envs(
                             "imprecise.",
                             _model,
                         )
-            # Both capture options are annotation-only and need TraceLens
-            # server-side support to land: without it the trace carries no
-            # ``kernel_shape_profiler`` events (trace-health check 5), so asking
-            # for them pays the capture cost for data nothing downstream reads.
-            # Keyed on the degraded *reason* rather than ``tracelens_patch_ok``:
-            # a patch that was never attempted (HYPERLOOM_ENABLE_PATCH=0) can
-            # still be baked into the image, and must keep the annotations.
-            _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
-            if _patch_degraded:
-                _shape_disc = False
-            extra_body["shape_discovery"] = _shape_disc
-            if _patch_degraded:
-                extra_body["detailed_annotations"] = False
-            else:
+            if sglang_sitecustomize:
+                # No-patch path: shapes come from the tool via PYTHONPATH, not a
+                # request-body flag or CUDA-graph arg (unpatched SGLang rejects both).
+                extra_body.pop("shape_discovery", None)
                 extra_body.setdefault("detailed_annotations", True)
-            # NOTE: this write happens before the per-task ``extra_envs`` merge, so
-            # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
-            # start_step/num_steps the way ``args_mode="replace"`` used to drop
-            # vLLM's --profiler-config bounds. The vLLM side is re-asserted at the
-            # end of this function; SGLang is NOT, because deciding whether a
-            # non-positive num_steps means "unbounded" or "no capture" needs a
-            # SGLang-side answer this layer does not have. Every OOM observed so
-            # far was vLLM.
-            envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-            if tracelens_patch_ok and _shape_disc:
-                # TraceLens-patched SGLang exposes
-                # --enable-shape-discovery-for-cuda-graph-profile; unpatched
-                # SGLang errors on it.
-                existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
-                if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
-                    envs["EXTRA_SGLANG_ARGS"] = (
-                        f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
-                    ).strip()
+                _tool_dir = kernel_shape_tool_dir()
+                if _shape_disc and _tool_dir is not None:
+                    _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
+                    envs["PYTHONPATH"] = f"{_tool_dir}{os.pathsep}{_existing_pp}" if _existing_pp else str(_tool_dir)
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
+                else:
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
+                    if _shape_disc and _tool_dir is None:
+                        log.warning(
+                            "SGLang shape mode=sitecustomize but kernel_shape_tool "
+                            "not found under TRACELENS_ROOT; shapes will be absent "
+                            "(set TRACELENS_ROOT to an NFS path visible to the server).",
+                        )
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+            else:
+                # Legacy patched path: capture options need the git-apply patch to
+                # land. Keyed on the degraded reason, not tracelens_patch_ok, since a
+                # patch may be baked into the image without being attempted here.
+                _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+                if _patch_degraded:
+                    _shape_disc = False
+                extra_body["shape_discovery"] = _shape_disc
+                if _patch_degraded:
+                    extra_body["detailed_annotations"] = False
+                else:
+                    extra_body.setdefault("detailed_annotations", True)
+                # Written before the per-task extra_envs merge, so an extra_envs
+                # PROFILE_EXTRA_BODY can still drop start_step/num_steps. Not
+                # re-asserted for SGLang (unlike vLLM): "unbounded" vs "no capture"
+                # for non-positive num_steps needs a SGLang-side answer.
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+                if tracelens_patch_ok and _shape_disc:
+                    # Patched SGLang exposes this arg; unpatched errors on it.
+                    existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
+                    if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
+                        envs["EXTRA_SGLANG_ARGS"] = (
+                            f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
+                        ).strip()
 
     if not _is_scriptable_profile:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
