@@ -190,7 +190,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             name=fields["name"],
             extra_server_args=fields["extra_args"],
             extra_envs=fields["extra_envs"],
-            note=str(raw.get("note") or raw.get("provenance") or ""),
+            note=str(raw.get("note") or raw.get("reason") or raw.get("rationale") or raw.get("provenance") or ""),
             remove_args=fields["remove_args"],
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
@@ -1667,6 +1667,9 @@ class ExploreExecutor:
                         "name": str(te.get("name") or ""),
                         "extra_server_args": str(te.get("extra_server_args") or ""),
                         "extra_envs": dict(te.get("extra_envs") or {}),
+                        "remove_args": list(te.get("remove_args") or []),
+                        "unset_envs": list(te.get("unset_envs") or []),
+                        "args_mode": str(te.get("args_mode") or "append"),
                         "note": str(te.get("note") or ""),
                     },
                     # The verdicts and the stack behind them, as the round

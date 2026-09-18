@@ -400,6 +400,7 @@ class FrameworkEventRecorder:
             "source_ref",
             "repo",
             "title",
+            "reasoning",
             "verdict",
             "route",
         ):
@@ -606,13 +607,19 @@ class FrameworkEventRecorder:
             "route",
             "patch_source",
             "patch_path",
+            "reasoning",
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
         for name in ("adopted", "attribution_eligible"):
             if name in fields:
                 row[name] = None if fields.get(name) is None else bool(fields.get(name))
-        for name in ("accepted_kernels", "target_files", "patches_applied"):
+        for name in (
+            "accepted_kernels",
+            "target_files",
+            "patches_applied",
+            "patches_reverted",
+        ):
             if name in fields:
                 row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
         if "ts" not in fields:

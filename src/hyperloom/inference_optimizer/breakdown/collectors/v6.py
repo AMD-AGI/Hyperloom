@@ -135,6 +135,8 @@ def collect_v6_metadata(
         "framework_version": str(workload.get("framework_version") or ""),
         "gpu_type": str(workload.get("gpu_type") or ""),
         "tp": workload.get("tp"),
+        "ep": state.get("ep"),
+        "compute_partition": dict(state.get("compute_partition") or {}),
         "conc": workload.get("conc"),
         "isl": workload.get("isl"),
         "osl": workload.get("osl"),

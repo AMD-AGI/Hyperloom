@@ -67,6 +67,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Framework Experiences now retain a sanitized materialized baseline
+  configuration as well as its fingerprint.** Record EVAL can reconstruct the
+  measured-against args/env tuning stack instead of treating every otherwise
+  complete Experience as non-replayable. Credential-shaped args, environment
+  names, or values fail the soft publication gate, and unordered map/remove
+  metadata is canonicalized so equivalent baselines do not fragment Repeat
+  Groups. Config Experiences now retain remove/unset/replace controls, source
+  attempts retain their measured-against stack and patch material, and
+  `ep`/compute-partition/max-model-length identity prevents unlike hardware or
+  launch shapes from being grouped together. Materialized config tasks retain
+  their proposal id, while local source exploration records its rationale
+  before dispatch, so measured attempts do not lose decision-time reasoning.
+
 - **breaking: the SBD V6 concurrency-sweep comparison rows are named for the
   axis they carry rather than for throughput.** `baseline_throughput` →
   `baseline_value` and `optimized_throughput` → `optimized_value` in each

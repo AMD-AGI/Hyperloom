@@ -1152,6 +1152,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
                     "name": "v_keep",
                     "extra_args": "--keep-flag",
                     "extra_envs": {},
+                    "remove_args": ["--old-flag"],
+                    "unset_envs": ["OLD_ENV"],
+                    "args_mode": "replace",
                     "provenance": "llm_direct",
                 }
             ],
@@ -1177,6 +1180,9 @@ async def test_per_variant_rows_carry_the_verdicts_and_the_stack(
     # than reported as having passed.
     assert [g["gate"] for g in row["gates"]] == ["keep_threshold"]
     assert row["validation_basis"] == "keep_verdict_unscored"
+    assert row["variant"]["remove_args"] == ["--old-flag"]
+    assert row["variant"]["unset_envs"] == ["OLD_ENV"]
+    assert row["variant"]["args_mode"] == "replace"
     # The stack it launched on: the anchor plus a base config still empty,
     # since nothing has KEPT before it.
     assert row["measured_against"]["throughput"] == 800.0
@@ -2563,6 +2569,25 @@ def test_grid_variants_from_payload_carries_removal_controls():
     assert variant.unset_envs == ["SGLANG_ENABLE_FOO"]
     assert variant.args_mode == "replace"
     assert variant.extra_server_args == "--max-num-seqs 256"
+
+
+def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
+    from hyperloom.orchestrator.actions.executors.explore import (
+        _grid_variants_from_payload,
+    )
+
+    variant = _grid_variants_from_payload(
+        [
+            {
+                "name": "chunked",
+                "extra_args": "--max-num-batched-tokens 8192",
+                "reason": "A larger chunk should reduce scheduler dispatch overhead.",
+                "provenance": "specialist:scheduler",
+            }
+        ]
+    )[0]
+
+    assert variant.note == "A larger chunk should reduce scheduler dispatch overhead."
 
 
 def test_on_disk_stderr_tail_reads_benchmark_stderr_log(tmp_path):

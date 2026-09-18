@@ -349,6 +349,11 @@ def _record_config_attempts(
             continue
         metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
         variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
+        gates = [gate for gate in (row.get("gates") or []) if isinstance(gate, dict)]
+        accuracy_gate = next(
+            (gate for gate in gates if str(gate.get("gate") or "") == "accuracy"),
+            None,
+        )
         fingerprint = str(row.get("fingerprint") or "")
         # The fingerprint identifies the variant within the round and the round
         # within the task, so the three together identify the attempt.
@@ -365,6 +370,7 @@ def _record_config_attempts(
                 provenance=str(row.get("provenance") or ""),
                 outcome=outcome,
                 reason=str(row.get("reason") or ""),
+                reasoning=str(variant.get("note") or ""),
                 stage=str(row.get("stage") or ""),
                 fingerprint=fingerprint,
                 # The fingerprint is the join key; the name is what a reader
@@ -382,11 +388,24 @@ def _record_config_attempts(
                 config_delta={
                     "extra_server_args": variant.get("extra_server_args"),
                     "extra_envs": variant.get("extra_envs"),
+                    "remove_args": variant.get("remove_args"),
+                    "unset_envs": variant.get("unset_envs"),
+                    "args_mode": variant.get("args_mode"),
                 },
                 failure={
                     "error_class": str(row.get("error_class") or ""),
                     "error_excerpt": str(row.get("error_excerpt") or ""),
                 },
+                accuracy=(
+                    {
+                        "required": True,
+                        "passed": accuracy_gate.get("passed"),
+                        "value": accuracy_gate.get("observed"),
+                        "reference": accuracy_gate.get("threshold"),
+                    }
+                    if accuracy_gate is not None
+                    else {}
+                ),
                 artifacts={
                     "workspace": str(row.get("workspace") or ""),
                     "server_log_path": str(row.get("server_log_path") or ""),
@@ -406,8 +425,8 @@ def _record_config_attempts(
                     outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
                 ),
             )
-            for gate in row.get("gates") or []:
-                if not isinstance(gate, dict) or not str(gate.get("gate") or ""):
+            for gate in gates:
+                if not str(gate.get("gate") or ""):
                     continue
                 recorder.record_attempt_gate(
                     attempt_id,

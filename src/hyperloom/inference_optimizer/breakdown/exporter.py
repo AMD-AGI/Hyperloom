@@ -301,6 +301,16 @@ def write_breakdown_json(
             tmp_path.unlink()
         raise
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
+    try:
+        from ..experience_v1 import publish_framework_experiences
+
+        publish_framework_experiences(sd, breakdown)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError):
+        log.warning(
+            "Framework Experience publication failed for %s; breakdown remains authoritative",
+            sd,
+            exc_info=True,
+        )
     return target
 
 

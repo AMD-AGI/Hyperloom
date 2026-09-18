@@ -73,6 +73,7 @@ def test_orchestration_proposal_needs_no_run(_bound_session):
         arm=ARM_CONFIG,
         producer=PRODUCER_ORCHESTRATION,
         lever_kind="llm_direct",
+        reasoning="Test a scheduler configuration suggested by the orchestration agent.",
     )
     recorder.settle_proposal("p-llm-1", disposition=DISPOSITION_ATTEMPTED)
     recorder.finish(exit_reason="both_arms_plateaued")
@@ -81,6 +82,7 @@ def test_orchestration_proposal_needs_no_run(_bound_session):
     assert ext["runs"] == []
     proposal = ext["proposals"][0]
     assert proposal["producer"] == PRODUCER_ORCHESTRATION
+    assert proposal["reasoning"].startswith("Test a scheduler configuration")
     # Absent rather than empty: there is no run to point at.
     assert "run_ref" not in proposal
 
@@ -334,6 +336,7 @@ def test_attempt_pins_the_pair_it_was_judged_on(_bound_session):
         decision="KEEP",
         adopted=True,
         attribution_eligible=True,
+        reasoning="Increase the setting to reduce dispatch overhead.",
         measured_against={"throughput": 100.0, "extra_server_args": "--foo 1"},
         measurement={"before_tput": 100.0, "after_tput": 110.0, "gain_pct": 10.0},
         config_delta={"extra_server_args": "--foo 2"},
@@ -355,6 +358,7 @@ def test_attempt_pins_the_pair_it_was_judged_on(_bound_session):
     assert attempts["a-1"]["config_delta"]["extra_server_args"] == "--foo 2"
     assert attempts["a-2"]["measurement"]["before_tput"] == 110.0
     assert attempts["a-1"]["adopted"] is True
+    assert attempts["a-1"]["reasoning"] == "Increase the setting to reduce dispatch overhead."
     assert attempts["a-2"]["adopted"] is False
 
 

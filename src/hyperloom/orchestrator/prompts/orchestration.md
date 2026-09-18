@@ -244,6 +244,11 @@ on one benchmark lane at roughly 13 minutes each, and a grid the round cannot
 finish is truncated from the end. Top up from the idea-generation moves only
 after the queue holds nothing else worth running.
 
+Every newly authored grid variant must carry a concise `note` stating the
+mechanism being tested and why its knobs should affect the current bottleneck.
+The note is preserved with the measured attempt; a provenance label such as
+`llm_direct` is not a substitute for reasoning.
+
 **GPU specialists** hold the same cards as the serving stack and acquire
 `gpu_research_lane` (mutually exclusive with benchmark/profile/serving
 lanes). Use them opportunistically in the idle research window — while

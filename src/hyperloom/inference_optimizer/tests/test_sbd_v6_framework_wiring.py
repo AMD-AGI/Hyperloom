@@ -190,7 +190,13 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
         task=task,
         done_payload={
             "proposal_set": [
-                {"pr_url": "https://x/pr/1", "title": "live one", "repo": "vllm", "verdict": "worth_a_bench"},
+                {
+                    "pr_url": "https://x/pr/1",
+                    "title": "live one",
+                    "repo": "vllm",
+                    "verdict": "worth_a_bench",
+                    "reasoning": "The patch removes work from the profiled attention path.",
+                },
                 {"pr_url": "https://x/pr/2", "title": "landed", "repo": "vllm", "verdict": "already_present"},
                 {"pr_url": "https://x/pr/3", "title": "n/a", "repo": "vllm", "verdict": "not_applicable"},
             ]
@@ -211,6 +217,7 @@ def test_discovery_round_records_its_run_and_both_outcomes(session_dir: Path):
     live = by_id["https://x/pr/1"]
     assert live["producer"] == "specialist"
     assert live["run_ref"] == "t-disc-1"
+    assert live["reasoning"].startswith("The patch removes work")
     assert live.get("terminal") in (None, {})
     assert [step["step"] for step in live["lifecycle"]] == ["proposed"]
     for dropped, why in (("https://x/pr/2", "already_present"), ("https://x/pr/3", "not_applicable")):
@@ -303,7 +310,28 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "fingerprint": "fp1",
                 "provenance": "llm_direct",
                 "metrics": {"base_tput": 100.0, "tput": 112.0, "gain_pct": 12.0, "runtime_sec": 300.0},
-                "variant": {"extra_server_args": "--foo 2", "extra_envs": {"BAR": "1"}},
+                "variant": {
+                    "extra_server_args": "--foo 2",
+                    "extra_envs": {"BAR": "1"},
+                    "remove_args": ["--old-flag"],
+                    "unset_envs": ["OLD_ENV"],
+                    "args_mode": "replace",
+                    "note": "Increase the scheduler batch to reduce dispatch overhead.",
+                },
+                "gates": [
+                    {
+                        "gate": "keep_threshold",
+                        "passed": True,
+                        "observed": 12.0,
+                        "threshold": 3.0,
+                    },
+                    {
+                        "gate": "accuracy",
+                        "passed": True,
+                        "observed": 0.83,
+                        "threshold": 0.80,
+                    },
+                ],
             },
             {
                 "variant_name": "v-killed",
@@ -331,6 +359,16 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert keep["adopted"] is True
     assert keep["attribution_eligible"] is True
     assert keep["config_delta"]["extra_server_args"] == "--foo 2"
+    assert keep["config_delta"]["remove_args"] == ["--old-flag"]
+    assert keep["config_delta"]["unset_envs"] == ["OLD_ENV"]
+    assert keep["config_delta"]["args_mode"] == "replace"
+    assert keep["accuracy"] == {
+        "required": True,
+        "reference": 0.8,
+        "value": 0.83,
+        "passed": True,
+    }
+    assert keep["reasoning"] == "Increase the scheduler batch to reduce dispatch overhead."
 
     killed = attempts["fp2"]
     assert killed["outcome"] == "KILLED_OVERTIME"
@@ -349,6 +387,9 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
 
     from types import SimpleNamespace
 
+    patch = session_dir / "artifacts" / "source.patch"
+    patch.parent.mkdir()
+    patch.write_text("diff --git a/vllm/attention.py b/vllm/attention.py\n+optimized = True\n")
     task = SimpleNamespace(
         task_id="t-int-1",
         kind="integrate_patch",
@@ -358,6 +399,12 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "framework_agent_candidate_id": "https://x/pr/1",
             "audit_step": "author_via_specialist",
             "lever_kind": "upstream_pr",
+            "reasoning": "Profiling shows redundant attention setup on every request.",
+            "base_extra_args": "--already-kept 1",
+            "base_extra_envs": {"SGLANG_TUNE": "1"},
+            "base_remove_args": ["--old-flag"],
+            "base_unset_envs": ["OLD_ENV"],
+            "base_args_mode": "append",
         },
     )
     coord._record_framework_agent_authored_outcome(
@@ -367,9 +414,12 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
             "base_tput": 100.0,
             "output_throughput": 108.0,
             "delta_pct": 8.0,
+            "keep_threshold_pct": 3.0,
             "accuracy_pass": True,
             "accuracy_value": 0.83,
             "accuracy_reference": 0.80,
+            "source_realized_patch": str(patch),
+            "patches_applied": [str(patch)],
             "target_files": ["vllm/attention.py"],
             "reason": "above the floor",
         },
@@ -388,15 +438,60 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         "estimated_output_throughput": None,
     }
     assert attempt["accuracy"]["passed"] is True
+    assert attempt["outcome"] == "KEEP"
+    assert attempt["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert attempt["patch_path"] == str(patch)
+    assert attempt["patches_applied"] == [str(patch)]
+    assert attempt["measured_against"] == {
+        "throughput": 100.0,
+        "accuracy": None,
+        "extra_server_args": "--already-kept 1",
+        "extra_envs": {"SGLANG_TUNE": "1"},
+        "remove_args": ["--old-flag"],
+        "unset_envs": ["OLD_ENV"],
+        "args_mode": "append",
+    }
     assert attempt["adopted"] is True
     assert attempt["attribution_eligible"] is True
     assert attempt["target_files"] == ["vllm/attention.py"]
-    assert [gate["gate"] for gate in attempt["gates"]] == ["accuracy"]
+    assert [gate["gate"] for gate in attempt["gates"]] == [
+        "keep_threshold",
+        "accuracy",
+    ]
 
     proposal = ext["proposals"][0]
     assert proposal["attempt_refs"] == ["t-int-1"]
     assert ("attempted", "t-auth-1") in [(s["step"], s["run_ref"]) for s in proposal["lifecycle"]]
     assert proposal["terminal"]["disposition"] == "attempted"
+
+    from hyperloom.inference_optimizer import experience_v1
+
+    projected, skipped = experience_v1._project_all(
+        session_dir,
+        {
+            "metadata": {
+                "session": {"session_id": "source-run"},
+                "task_config": {
+                    "model_name": "qwen3-8b",
+                    "gpu_type": "mi355x",
+                    "framework_name": "sglang",
+                    "framework_version": "0.5.18",
+                    "precision": "bf16",
+                    "architecture": {
+                        "model_type": "qwen3",
+                        "model_class": "Qwen3ForCausalLM",
+                    },
+                },
+                "grading": {"benchmark_mode": "synthetic"},
+            },
+            "timeline": _events(session_dir),
+        },
+    )
+    assert skipped == []
+    assert projected[0].change_family == "source_patch"
+    assert projected[0].resource_refs == ("artifacts/source.patch",)
+    assert "optimized = True" in projected[0].change_content
+    assert projected[0].baseline_configuration["extra_server_args"] == "--already-kept 1"
 
 
 def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
@@ -410,7 +505,11 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
         task=SimpleNamespace(
             task_id="t-int-2",
             kind="integrate_patch",
-            params={"framework_agent_authoring": True, "framework_agent_candidate_id": "cand-2"},
+            params={
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "cand-2",
+                "gap_symptom": "Profile evidence suggests repeated scheduler setup.",
+            },
         ),
         result={"status": "reverted", "base_tput": 100.0, "output_throughput": 99.0, "delta_pct": -1.0},
     )
@@ -421,6 +520,38 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
     assert attempt["blocked_by"] is None
     assert attempt["accuracy"]["passed"] is None
     assert attempt["accuracy"]["required"] is None
+    assert attempt["reasoning"] == "Profile evidence suggests repeated scheduler setup."
+
+
+def test_local_explore_records_proposal_reasoning_before_dispatch(
+    session_dir: Path,
+) -> None:
+    import asyncio
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.shared_state.framework = "sglang"
+    coord._open_framework_timeline()
+
+    task_id = asyncio.run(
+        coord.phase_framework._enqueue_framework_agent_local_explore_specialist(
+            {
+                "kind": "local_explore",
+                "candidate_id": "local_explore:0",
+                "title": "Investigate repeated scheduler setup.",
+                "framework": "sglang",
+                "gap_description": ("Profile evidence shows scheduler setup repeats on every request."),
+                "gap_canonical_id": "gap.framework.local_explore.0",
+            },
+            reason="no_new_candidates",
+        )
+    )
+    coord._close_framework_timeline(exit_reason="optimize_budget_cap")
+
+    assert task_id
+    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
+    assert proposal["proposal_id"] == "local_explore:0"
+    assert proposal["reasoning"] == ("Profile evidence shows scheduler setup repeats on every request.")
 
 
 def _propose_grid(coord: Coordinator, grid: list[dict[str, Any]]) -> str:
@@ -777,14 +908,16 @@ def test_review_subjects_resolve_a_candidate_to_its_own_row():
 
 def test_measured_variants_settle_their_grid(session_dir: Path):
     import asyncio
-    from types import SimpleNamespace
 
     coord = _coordinator(session_dir)
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
 
     msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
-    task = SimpleNamespace(task_id="t-exp-9", kind="explore", params={"proposal_msg_id": msg_id})
+    pending = coord.state.pending_proposals[msg_id]
+    asyncio.run(coord._materialize_approved_proposal(pending))
+    task = next(task for task in asyncio.run(coord.tasks.queued()) if task.kind == "explore")
+    assert task.params["proposal_msg_id"] == msg_id
     asyncio.run(
         coord._fact_write_hook(
             task=task,
@@ -810,7 +943,11 @@ def test_measured_variants_settle_their_grid(session_dir: Path):
     proposal = ext["proposals"][0]
     assert proposal["terminal"]["disposition"] == "attempted"
     assert proposal["attempt_refs"] == [ext["attempts"][0]["attempt_id"]]
-    assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "attempted"]
+    assert [step["step"] for step in proposal["lifecycle"]] == [
+        "proposed",
+        "routed",
+        "attempted",
+    ]
 
 
 def test_a_measured_variant_keeps_the_name_a_reader_knows_it_by(session_dir: Path):

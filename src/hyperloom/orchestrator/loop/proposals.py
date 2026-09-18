@@ -499,6 +499,11 @@ class ProposalsCollaborator:
             await self._materialize_framework_agent_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})
+        if pending.action_name == "explore":
+            # The SBD attempt must join back to the exact proposal whose grid
+            # produced it; task materialization is the only boundary that sees
+            # both identities.
+            params["proposal_msg_id"] = pending.proposal_msg_id
         # Carry the proposer's predicted gain onto the task for predicted-vs-realized calibration.
         if pending.predicted_gain_pct:
             params.setdefault(
