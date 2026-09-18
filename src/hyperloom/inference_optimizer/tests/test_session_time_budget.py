@@ -476,7 +476,17 @@ class TestPreDispatchBackstop:
         row = await coord.tasks.get(task.task_id)
         assert row.state == "cancelled"
         assert [(step["from"], step["to"]) for step in row.history] == [("queued", "cancelled")]
-        assert row.history[-1]["evidence"] == {"reason": "unsupported_action"}
+        assert row.history[-1]["evidence"] == {
+            "reason": "unsupported_action",
+            "cleanup_confirmed": True,
+            "outcome": {
+                "task_id": task.task_id,
+                "state": "cancelled",
+                "result": {"status": "cancelled", "error_class": "unsupported_action"},
+                "error": "recover is no longer supported",
+                "error_class": "unsupported_action",
+            },
+        }
         assert not await coord.locks.lane_holders()
         assert not coord.dispatcher._inflight_actions
         failures = list(getattr(coord.shared_state, "last_action_failures", []) or [])
