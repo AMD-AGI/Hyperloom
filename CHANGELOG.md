@@ -37,6 +37,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   existing 13-column rows still parse, and an absent value keeps expert
   parallelism at 1.
 
+- **A cancelled job's container kept its GPUs and broke the next job on that
+  node.** `docker run --rm` cleans up when its client exits normally, but a
+  `scancel` or NODE_FAIL kills the client and leaves the container running, so
+  `--rm` never fires and the weights stay resident. The next job then failed in
+  whichever way its framework noticed first: sglang sat in
+  `wait_for_amd_gpu_clean` for the full fifteen minutes because that gate maxes
+  VRAM% over every GPU on the box, while vLLM was refused outright with
+  `Free memory on device cuda:N ... is less than desired GPU memory
+  utilization`. Observed on two nodes at once, where a container from a job
+  cancelled three hours earlier still held ~168 GiB on each of GPU 0-3 --
+  exactly where the next tp=4 server wanted to land, because the container gets
+  no ROCR mask and every framework starts from GPU 0. The launcher now reclaims
+  those containers first, deciding ownership by liveness rather than by name or
+  image: `docker run` carries `-e CLAW_SESSION_ID=`, so a container whose
+  session id has no live client is ours and orphaned, and a co-tenant job that
+  still has its client is left alone. `docker run` also gains `--init`, without
+  which the container's pid 1 becomes an unreapable zombie once the client is
+  killed and even the daemon refuses to remove it (`PID <n> is zombie and can
+  not be killed. Use the --init option ...`); the reclaim keeps a cgroup-level
+  SIGKILL fallback for containers already in that state. `--name
+  hl-<key>-<jobid>` makes a running container traceable back to its job.
+
 - **A vLLM profile round had its profiler bounds dropped before launch.** The
   argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
   `--profiler-config.profiler torch` and a trace directory of its own

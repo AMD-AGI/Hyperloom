@@ -81,6 +81,83 @@ INCONTAINER="$USER_DATA_PATH/_incontainer.sh"
 cp "$CONF_DIR/_incontainer.sh.in" "$INCONTAINER"
 chmod +x "$INCONTAINER"
 
+# --- preflight: reclaim GPUs from orphaned hyperloom containers -------------
+# A cancelled or NODE_FAIL'd job kills the host-side `docker run --rm` client but
+# leaves its container running, still holding GPU memory. The next job on that
+# node then either trips benchmark_lib.sh's wait_for_amd_gpu_clean (it maxes
+# VRAM% over every GPU on the box and hard-fails after 15min) or is refused by
+# vLLM's startup free-memory check. Observed on two nodes at once: a GLM sglang
+# container from a job cancelled three hours earlier still held ~168 GiB on each
+# of GPU 0-3, which is exactly where the next job's tp=4 server wanted to land.
+#
+# A container counts as ours-and-orphaned only when its CLAW_SESSION_ID has no
+# live `docker run` client, so a co-tenant job on the same node is never touched.
+#
+# Every branch below is spelled as `if`, not `cmd && ...`: this file runs under
+# `set -e`, where a failing AND-list aborts the job.
+hl_vram_max() {
+  rocm-smi --showmemuse 2>/dev/null \
+    | grep -oE 'GPU Memory Allocated \(VRAM%\): [0-9]+' \
+    | awk '{if ($NF > m) m = $NF} END {print m+0}'
+}
+
+hl_kill_container_cgroup() {
+  local full="$1" p
+  for p in $(cat /sys/fs/cgroup/system.slice/docker-"$full".scope/cgroup.procs \
+                 /sys/fs/cgroup/docker/"$full"/cgroup.procs 2>/dev/null); do
+    if ! sudo -n kill -9 "$p" 2>/dev/null; then
+      kill -9 "$p" 2>/dev/null || true
+    fi
+  done
+  return 0
+}
+
+hl_reclaim_orphan_gpus() {
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+  local c full sid img found=0 i vram
+  echo "[hl] preflight: vram%max=$(hl_vram_max) before reclaim"
+  for c in $(docker ps -q 2>/dev/null); do
+    sid="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null \
+           | sed -n 's/^CLAW_SESSION_ID=//p' | head -1)"
+    if [ -z "$sid" ]; then
+      continue
+    fi
+    if [ "$sid" = "${CLAW_SESSION_ID:-}" ]; then
+      continue
+    fi
+    if pgrep -f "docker run.*CLAW_SESSION_ID=$sid" >/dev/null 2>&1; then
+      continue
+    fi
+    full="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null || true)"
+    img="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null || true)"
+    echo "[hl] preflight: orphan container $c session=$sid image=$img -> reclaiming"
+    found=1
+    docker kill "$c" >/dev/null 2>&1 || true
+    # A zombie container init refuses `docker kill`; SIGKILL its cgroup instead.
+    if [ -n "$full" ]; then
+      hl_kill_container_cgroup "$full"
+    fi
+    docker rm -f "$c" >/dev/null 2>&1 || true
+  done
+  if [ "$found" != "1" ]; then
+    echo "[hl] preflight: no orphan containers"
+    return 0
+  fi
+  for i in $(seq 1 18); do
+    vram="$(hl_vram_max)"
+    if [ "${vram:-0}" -le 10 ]; then
+      echo "[hl] preflight: GPUs reclaimed (vram%max=$vram after $((i * 10))s)"
+      return 0
+    fi
+    sleep 10
+  done
+  echo "[hl] preflight: WARNING vram%max=$(hl_vram_max) still high after 180s" >&2
+  return 0
+}
+hl_reclaim_orphan_gpus || true
+
 # --- launch the container --------------------------------------------------
 # Runtime auto-detect: pyxis/enroot or docker.
 # Override with HL_CONTAINER_RUNTIME=pyxis|docker.
@@ -136,7 +213,8 @@ case "$RUNTIME" in
       && CA_MOUNT=(-v "${HL_CA_BUNDLE_HOST}:${HL_CA_BUNDLE_CONTAINER}:ro")
     # --ulimit lifts the container's open-files hard cap so the Ray raylet's fd
     # preflight can raise soft nofile high enough to stay up (issue #433).
-    docker run --rm \
+    docker run --rm --init \
+      --name "hl-${KEY}-${SLURM_JOB_ID:-$$}" \
       --ulimit "nofile=${HL_NOFILE:-1048576}:${HL_NOFILE:-1048576}" \
       --device=/dev/kfd --device=/dev/dri \
       --security-opt seccomp=unconfined --group-add video --ipc=host \
