@@ -36,6 +36,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   next boot rebuilds it. On integrate, a registry mismatch also drops the
   modules the error names, not only the ones the round's environment mapped.
   Framework-agnostic; it is the aiter install that is repaired, not the server.
+- **An author whose transport died took the whole fusion lane with it.** A lane
+  costs hours and an authoring call costs minutes, but a provider that never
+  delivered an answer -- a stream stalled mid-response, a connection reset --
+  ended the lane on the first failure. The classification that tells "the model
+  never answered" apart from "the model answered nothing" already exists in
+  `llm_failure`, so authoring now consults it where the exception is still in
+  hand and retries only the transport, with backoff and against a deadline. A
+  provider safety stop is still never retried, because retrying one is the
+  anti-pattern the session-resume allowlist already refuses; neither is a
+  timeout, which has just spent a full attempt's budget. The deadline defaults
+  to what the configured attempts can legitimately cost, since the generic
+  1800s LLM default is shorter than a single 7200s authoring attempt and would
+  have made the retry unreachable.
+- **A fusion campaign killed before it returned reported REVERT while proven
+  work sat on disk.** `fusion_manifest.json` is the only artifact that points
+  at a keeper, and it was written once every campaign had returned. `on_keep`
+  exports the patch and smokes it the moment a recipe is kept, so a wrapper
+  killed between the last keeper and the aggregate reported `patch: null` even
+  though a sibling had already passed correctness and a serving smoke.
+  Measured: a session lost a 5.011x fusion of qkvgate split + QK norm + RoPE
+  this way, the iteration having published 44 minutes before the timeout fired.
+  The manifest is now published as each keeper is proved, so it is never
+  missing -- only as complete as the run got -- and the existing salvage path
+  reads it unchanged. The end-of-run write still overwrites it with the final
+  loop, compile-pass and error fields before any exit, and a sibling the smoke
+  rejected has its patch unlinked so no reader can find work the run refused.
 - **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
   Missing AIPerf error-rate metrics are derived from profiling request counts;
   zero errors are inferred only with successful requests and an explicitly empty
