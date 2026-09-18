@@ -543,12 +543,14 @@ def salvage_forge_fusion_from_workspace(output_dir: str) -> dict[str, Any] | Non
         if not campaign:
             return None
         strongest = campaign[0]
-        kept = True
         siblings = campaign
         patch = strongest["patch_path"]
         speedup = strongest["micro_speedup"]
         source_file = source_file or strongest["target_file"]
         repo_root = repo_root or strongest["kernel_repo"]
+        # There is no checkpoint and no aggregate on this path, so the top-level flags are
+        # empty too; the strongest row read its own out of the campaign's driver.
+        env_flag = env_flag or strongest["env_flag"]
     flags = [f for f in env_flag.split() if f]
     result: dict[str, Any] = {
         "status": "ok",

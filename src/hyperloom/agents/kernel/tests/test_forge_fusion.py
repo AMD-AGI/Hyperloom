@@ -1495,6 +1495,9 @@ def test_a_salvaged_row_carries_the_flag_its_fused_path_is_gated_behind(tmp_path
     result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
 
     assert [p.env_flag for p in parse_outcome(result).patches] == ["SGLANG_FUSED_QKVGATE"]
+    # There is no checkpoint and no aggregate on this path, so the top-level flags start empty
+    # and the strongest row is the only thing that can fill them.
+    assert result["env_flags"] == {"SGLANG_FUSED_QKVGATE": "1"}
 
 
 def test_a_campaign_whose_flag_cannot_be_read_is_not_salvaged(tmp_path):
