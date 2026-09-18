@@ -1,0 +1,110 @@
+# Canonical Experience declaration for measured Framework attempts.
+schema_version: 1
+
+identity:
+  - name: model
+    description: Model identifier from SBD V6 task configuration.
+    kind: string
+    required: true
+    sensitive: false
+  - name: gpu
+    description: GPU hardware model used for the measured attempt.
+    kind: string
+    required: true
+    sensitive: false
+  - name: framework
+    description: Serving framework name.
+    kind: string
+    required: true
+    sensitive: false
+  - name: model_type
+    description: Model configuration type.
+    kind: string
+    required: true
+    sensitive: false
+  - name: architecture
+    description: Model architecture class.
+    kind: string
+    required: true
+    sensitive: false
+  - name: framework_version
+    description: Serving framework version.
+    kind: version
+    required: true
+    sensitive: false
+  - name: precision
+    description: Numeric precision of the measured workload.
+    kind: string
+    required: true
+    sensitive: false
+  - name: tp
+    description: Tensor-parallel degree.
+    kind: number
+    required: false
+    sensitive: false
+  - name: ep
+    description: Expert-parallel degree when greater than one.
+    kind: number
+    required: false
+    sensitive: false
+  - name: conc
+    description: Request concurrency.
+    kind: number
+    required: false
+    sensitive: false
+  - name: isl
+    description: Input sequence length in tokens.
+    kind: number
+    required: false
+    sensitive: false
+  - name: osl
+    description: Output sequence length in tokens.
+    kind: number
+    required: false
+    sensitive: false
+  - name: max_model_len
+    description: Maximum model context configured for the server.
+    kind: number
+    required: false
+    sensitive: false
+  - name: compute_partition_mode
+    description: GPU compute-partition mode such as SPX or CPX.
+    kind: string
+    required: false
+    sensitive: false
+  - name: partitions
+    description: Compute partitions per GPU when the card is partitioned.
+    kind: number
+    required: false
+    sensitive: false
+
+baseline_identity:
+  - name: baseline_fingerprint
+    description: SHA-256 of the exact measured-against runtime configuration.
+    kind: string
+    required: true
+    sensitive: false
+
+change_identity:
+  - name: change_family
+    description: Framework config variant or source patch.
+    kind: string
+    required: true
+    sensitive: false
+  - name: change_fingerprint
+    description: SHA-256 of exact normalized config content or verified patch bytes.
+    kind: string
+    required: true
+    sensitive: false
+
+objectives:
+  - id: e2e_throughput@v1
+    direction: higher_is_better
+    description: End-to-end output throughput for the declared synthetic workload.
+    unit: token/s
+    failure_value: 0
+
+decisions:
+  - keep
+  - revert
+  - failed

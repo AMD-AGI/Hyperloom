@@ -351,6 +351,29 @@ def _record_source_attempt(
     # stack as of dispatch. Absent on a row that never reached a measurement.
     stack = result.get("measured_against")
     measured_against = {"measured_against": stack} if isinstance(stack, Mapping) and stack else {}
+    normalized_status = {
+        "kept": "KEEP",
+        "reverted": "REVERT",
+        "accuracy_unavailable_reject": "REVERT",
+        "failed": "FAILED",
+    }.get(status, status)
+    candidate = params.get("candidate")
+    candidate_row = candidate if isinstance(candidate, Mapping) else {}
+    reasoning = str(
+        params.get("reasoning")
+        or params.get("rationale")
+        or candidate_row.get("reasoning")
+        or candidate_row.get("rationale")
+        or candidate_row.get("why")
+        or params.get("gap_symptom")
+        or result.get("reasoning")
+        or ""
+    )
+    patches_applied = [str(path) for path in (result.get("patches_applied") or []) if str(path)]
+    patches_reverted = [str(path) for path in (result.get("patches_reverted") or []) if str(path)]
+    patch_path = str(result.get("source_realized_patch") or result.get("patch_path") or "")
+    if not patch_path:
+        patch_path = next(iter(patches_applied or patches_reverted), "")
     recorder.record_attempt(
         task_id,
         arm=ARM_SOURCE,
@@ -358,15 +381,18 @@ def _record_source_attempt(
         proposal_ref=candidate_id,
         candidate_id=candidate_id,
         provenance=str(params.get("lever_kind") or ""),
-        outcome=status,
+        outcome=normalized_status,
         reason=str(result.get("reason") or ""),
+        reasoning=reasoning,
         stage=str(result.get("stage") or ""),
         route=str(params.get("audit_step") or ""),
         patch_source=specialist_task_id,
-        patch_path=str(result.get("patch_path") or ""),
+        patch_path=patch_path,
+        fingerprint=str(result.get("patch_sha256") or result.get("fingerprint") or ""),
         # An attempt can apply several patches, and which ones landed is
         # not recoverable from the single primary path.
-        patches_applied=result.get("patches_applied") or [],
+        patches_applied=patches_applied,
+        patches_reverted=patches_reverted,
         target_files=result.get("target_files") or [],
         source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
         measurement={
@@ -404,6 +430,18 @@ def _record_source_attempt(
         attribution_eligible=(_is_kept(status) and base is not None and result.get("output_throughput") is not None),
         **measured_against,
     )
+    delta_pct = result.get("delta_pct")
+    keep_threshold = result.get("keep_threshold_pct")
+    if keep_threshold is None:
+        keep_threshold = params.get("keep_threshold_pct")
+    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
+        recorder.record_attempt_gate(
+            task_id,
+            "keep_threshold",
+            passed=float(delta_pct) >= float(keep_threshold),
+            observed=delta_pct,
+            threshold=keep_threshold,
+        )
     if accuracy_pass is not None:
         recorder.record_attempt_gate(
             task_id,
@@ -411,6 +449,14 @@ def _record_source_attempt(
             passed=bool(accuracy_pass),
             observed=result.get("accuracy_value"),
             threshold=result.get("accuracy_reference"),
+        )
+    parity = result.get("switch_off_parity")
+    if isinstance(parity, Mapping) and parity.get("ran"):
+        recorder.record_attempt_gate(
+            task_id,
+            "switch_off_parity",
+            passed=bool(parity.get("ok")),
+            reason=str(parity.get("reason") or ""),
         )
     _record_step(
         coord,
@@ -454,6 +500,7 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
             source_ref=str(cand.get("pr_url") or cand.get("head_sha") or ""),
             repo=str(cand.get("repo") or ""),
             title=str(cand.get("title") or ""),
+            reasoning=str(cand.get("reasoning") or cand.get("rationale") or cand.get("why") or ""),
             changed_files=cand.get("changed_files") or [],
             gap_canonical_id=str(cand.get("gap_canonical_id") or ""),
             route=str(cand.get("route") or ""),
@@ -1427,6 +1474,28 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             **self._framework_gpu_params(),
         }
+        recorder = _recorder(self)
+        if recorder is not None:
+            from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+                ARM_SOURCE,
+                PRODUCER_ORCHESTRATION,
+                STEP_PROPOSED,
+            )
+
+            recorder.record_proposal(
+                cand_id,
+                arm=ARM_SOURCE,
+                producer=PRODUCER_ORCHESTRATION,
+                title=str(candidate.get("title") or cand_id),
+                reasoning=str(params["gap_symptom"]),
+                gap_canonical_id=gap_cid,
+                route="author_via_specialist",
+            )
+            recorder.record_proposal_step(
+                cand_id,
+                step=STEP_PROPOSED,
+                reason=reason,
+            )
         await self._warm_specialist_params(params)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
@@ -2510,6 +2579,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "changed_files": entry.get("changed_files") or [],
                 "gap_canonical_id": str(entry.get("gap_canonical_id") or "").strip(),
                 "gap_keywords": entry.get("gap_keywords") or [],
+                "reasoning": str(entry.get("reasoning") or entry.get("rationale") or entry.get("why") or "").strip(),
                 "route": str(entry.get("route") or "author_via_specialist").strip(),
                 "audit": {
                     "verdict": verdict,

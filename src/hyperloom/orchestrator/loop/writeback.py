@@ -520,6 +520,7 @@ def _record_config_attempts(
             provenance=str(row.get("provenance") or ""),
             outcome=outcome,
             reason=str(row.get("reason") or ""),
+            reasoning=str(variant.get("note") or ""),
             stage=str(row.get("stage") or ""),
             fingerprint=fingerprint,
             # The fingerprint is the join key; the name is what a reader
@@ -537,6 +538,9 @@ def _record_config_attempts(
             config_delta={
                 "extra_server_args": variant.get("extra_server_args"),
                 "extra_envs": variant.get("extra_envs"),
+                "remove_args": variant.get("remove_args"),
+                "unset_envs": variant.get("unset_envs"),
+                "args_mode": variant.get("args_mode"),
             },
             accuracy={
                 "required": True if accuracy_gate else None,

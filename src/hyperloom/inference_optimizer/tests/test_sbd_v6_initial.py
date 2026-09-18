@@ -69,6 +69,8 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
         "model_path": "/models/qwen-test",
         "framework": "sglang",
         "gpu_type": "MI300X",
+        "ep": 4,
+        "compute_partition": {"mode": "CPX", "partitions": 8},
         "phase": "CLOSE",
         "start_ts": "2026-08-27T01:00:00+00:00",
         "stop_ts": "2026-08-27T02:00:00+00:00",
@@ -150,6 +152,11 @@ def test_v6_blocks_are_additive_to_the_rest_of_the_document(tmp_path):
     # The optimizer's revision is session identity, not a version block entry.
     assert after["metadata"]["session"]["code_revision"] == "abc1234"
     assert after["metadata"]["task_config"]["launch_env"] == {"TP": "8"}
+    assert after["metadata"]["task_config"]["ep"] == 4
+    assert after["metadata"]["task_config"]["compute_partition"] == {
+        "mode": "CPX",
+        "partitions": 8,
+    }
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
