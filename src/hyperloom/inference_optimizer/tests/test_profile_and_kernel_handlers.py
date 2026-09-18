@@ -73,7 +73,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -1089,6 +1089,133 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
     assert "TraceLens runtime patch unavailable" in caplog.text
+
+
+def test_tracelens_patch_status_separates_fine_from_never_tried(tmp_path, monkeypatch):
+    """Three outcomes, three values: no status used to mean both "patched fine" and "never looked"."""
+    import yaml
+
+    def _status(*, sglang: bool, enable_patch: str | None) -> str:
+        _clear_workload_env(monkeypatch)
+        _mock_patchers(monkeypatch, vllm=False, sglang=sglang)
+        if enable_patch is None:
+            monkeypatch.delenv("HYPERLOOM_ENABLE_PATCH", raising=False)
+        else:
+            monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
+        src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+        out = _materialize_config_with_envs(src, tmp_path)
+        return yaml.safe_load(out.read_text())["benchmark"]["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"]
+
+    assert _status(sglang=True, enable_patch=None) == "ok"
+    assert _status(sglang=False, enable_patch=None) == "unavailable"
+    assert _status(sglang=True, enable_patch="0") == "not_attempted"
+
+
+def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypatch):
+    """A degraded patch makes checks 3 and 5 certain to fail, and the run says so before it starts."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import (
+        CHECK_INSTRUMENTATION_PREFLIGHT,
+        CHECK_SGLANG_SHAPE_PROFILER,
+        CHECK_STEP_ANNOTATIONS,
+        _build_trace_validate,
+        _instrumentation_preflight_row,
+    )
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=False)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    bench = yaml.safe_load(out.read_text())["benchmark"]
+
+    row = _instrumentation_preflight_row(bench)
+
+    assert row["check_id"] == CHECK_INSTRUMENTATION_PREFLIGHT
+    assert row["status"] == "failed"
+    assert row["detail"]["degraded_reason"] == "tracelens_runtime_patch_unavailable"
+    assert row["detail"]["detailed_annotations"] is False
+    assert row["detail"]["shape_discovery"] is False
+    assert row["detail"]["shape_discovery_flag_present"] is False
+    assert row["detail"]["predicts_failure_of"] == [CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER]
+
+    # It has to lead the list: everything after it is a consequence, not an independent finding.
+    validate = _build_trace_validate(
+        {"checks": [{"check_id": "later"}]}, trace_dir=tmp_path, framework="sglang", preflight=row
+    )
+    assert [c["check_id"] for c in validate["checks"]] == [CHECK_INSTRUMENTATION_PREFLIGHT, "later"]
+
+
+def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypatch):
+    """With the patch in place nothing is predicted to fail, so the row claims no consequences."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors.profile import _instrumentation_preflight_row
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+
+    row = _instrumentation_preflight_row(yaml.safe_load(out.read_text())["benchmark"])
+
+    assert row["status"] == "passed"
+    assert row["detail"]["degraded_reason"] == ""
+    assert row["detail"]["shape_discovery"] is True
+    assert row["detail"]["shape_discovery_flag_present"] is True
+    assert row["detail"]["predicts_failure_of"] == []
+
+
+def test_instrumentation_preflight_skips_without_an_envs_block(tmp_path):
+    from hyperloom.orchestrator.actions.executors.profile import _instrumentation_preflight_row
+
+    row = _instrumentation_preflight_row({"framework": "sglang"})
+
+    assert row["status"] == "skipped"
+    assert "benchmark.envs" in row["skip_reason"]
+
+
+def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
+    """The certificate must not become a trace candidate for the directory it describes.
+
+    ``_trace_candidates`` rglobs the trace dir for anything ending in ``_TRACE_EXTS``, and a bare ``.json`` is in
+    that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
+    ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
+    """
+    from hyperloom.agents.kernel.tools._bypass_trace_reader import _trace_candidates, resolve_trace_file
+    from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
+
+    # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
+    single = tmp_path / "single" / "torch_trace"
+    single.mkdir(parents=True)
+    trace = single / "host_1.1700000000.pt.trace.json.gz"
+    trace.write_bytes(b"x" * 4096)
+
+    path = _write_trace_certificate(single, {"padding": "y" * 100_000})
+
+    assert path, "certificate should have been written"
+    assert Path(path).is_file()
+    # Outside the scanned directory, so no recursive glob of it can pick the certificate up.
+    assert Path(path).parent == single.parent
+    assert Path(path) not in _trace_candidates(single)
+    assert resolve_trace_file(single, require_single_rank=True) == trace
+
+    # A degenerate trace smaller than the certificate: the size fallback must still not prefer the certificate.
+    tiny_dir = tmp_path / "tiny" / "torch_trace"
+    tiny_dir.mkdir(parents=True)
+    tiny = tiny_dir / "tiny.trace.json"
+    tiny.write_text(json.dumps({"traceEvents": []}))
+
+    tiny_cert = _write_trace_certificate(tiny_dir, {"padding": "y" * 100_000})
+
+    assert Path(tiny_cert).stat().st_size > tiny.stat().st_size
+    assert _trace_candidates(tiny_dir) == [tiny]
+    assert resolve_trace_file(tiny_dir) == tiny
+
+    # One workspace can certify more than one trace dir; the names must not collide.
+    other = tmp_path / "single" / "capture_traces"
+    other.mkdir()
+    assert _write_trace_certificate(other, {}) != path
 
 
 def test_materialize_profile_sglang_injects_shape_discovery_when_patched(
@@ -2273,7 +2400,10 @@ def _capture_trace_dir(
 
     capture = tmp_path / dirname
     capture.mkdir()
-    events = [{"name": "cpu_op", "cat": "cpu_op"} for _ in range(cpu_ops)]
+    # Shaped like a real Kineto event: ``cpu_op`` is the category and the name is the operator. The old fixture
+    # set both keys, which no capture ever does, and that let the check pass here while matching nothing in
+    # production.
+    events = [{"cat": "cpu_op", "name": "aten::mm"} for _ in range(cpu_ops)]
     for index in range(with_input_dims):
         events[index]["args"] = {"Input Dims": [[1, 2]]}
     if not cpu_ops:

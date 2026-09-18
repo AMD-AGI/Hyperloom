@@ -20,7 +20,6 @@ from hyperloom.orchestrator.roles import codex as codex_module
 from hyperloom.orchestrator.roles.agent_role import (
     _CRITIC_INTENTS,
     _ORCHESTRATION_INTENTS,
-    _ROBUSTNESS_INTENTS,
     default_role_registry,
 )
 from hyperloom.orchestrator.roles.base import LLMCallFailed
@@ -66,7 +65,6 @@ def test_request_is_reachable_from_the_orchestration_schema() -> None:
     [
         ("orchestration", _ORCHESTRATION_INTENTS),
         ("critic", _CRITIC_INTENTS),
-        ("robustness", _ROBUSTNESS_INTENTS),
     ],
 )
 def test_every_role_schema_matches_its_registry_record(role_name: str, expected: frozenset[IntentType]) -> None:

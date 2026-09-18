@@ -953,12 +953,14 @@ class _FakeGpuSpecialistLease:
     def exit_code(self) -> int | None:
         return None if self.alive else 0
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         self.stopped = True
         self.alive = False
+        return True
 
-    def close(self) -> None:
+    def close(self) -> bool:
         self.alive = False
+        return True
 
 
 @pytest.mark.asyncio

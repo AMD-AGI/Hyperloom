@@ -2243,10 +2243,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
         "Going silent past 5 minutes kills your subprocess.",
         "",
-        (
-            f"Hard cap: at most **{inp.max_turns}** LLM turns. Silence past "
-            "the cap = stale (robustness will synthesize an empty done)."
-        ),
+        (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
 
 
@@ -2335,8 +2332,8 @@ def _section_enablement_playbook(inp: SpecialistPromptInputs) -> list[str]:
     Returns:
         list[str]: The enablement-playbook section lines.
     """
-    from hyperloom.agents.framework.enablement import EnablementRequest
-    from hyperloom.agents.framework.enablement_ops import build_mandate
+    from hyperloom.common.failure_signature import EnablementRequest
+    from hyperloom.orchestrator.enablement.mandate import build_mandate
 
     model = str((inp.gap_evidence or {}).get("model") or "").strip()
     req = EnablementRequest(

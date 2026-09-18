@@ -144,7 +144,6 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle),
         "critic": MockBackend(idle),
-        "robustness": MockBackend(idle),
     }
     coord = Coordinator(
         session_dir=tmp_path,

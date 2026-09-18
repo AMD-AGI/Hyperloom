@@ -133,9 +133,12 @@ def _any_live_compiler(
         return None
     try:
         normalized_dirs = [str(path.resolve()) for path in (build_dirs or [])]
-        for proc in psutil.process_iter(["name", "cmdline", "cwd"]):
+        unknown = False
+        for proc in psutil.process_iter(["name", "cmdline", "cwd", "status"]):
             try:
                 info = proc.info
+                if info.get("status") == psutil.STATUS_ZOMBIE:
+                    continue
                 name = (info.get("name") or "").strip()
                 cmdline = info.get("cmdline") or []
                 is_compiler = name in COMPILER_PROCESS_NAMES
@@ -144,6 +147,8 @@ def _any_live_compiler(
                     if first in COMPILER_PROCESS_NAMES:
                         is_compiler = True
                 if not is_compiler:
+                    if info.get("name") is None or info.get("cmdline") is None:
+                        unknown = True
                     continue
                 if not normalized_dirs:
                     return True
@@ -154,12 +159,16 @@ def _any_live_compiler(
                     for build_dir in normalized_dirs
                 ):
                     return True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                if info.get("cwd") is None or info.get("cmdline") is None:
+                    unknown = True
+            except psutil.AccessDenied:
+                unknown = True
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
                 continue
     except Exception as exc:  # noqa: BLE001 — enumeration failed entirely
         log.warning("aiter_jit: compiler-liveness scan failed: %s", exc)
         return None
-    return False
+    return None if unknown else False
 
 
 def _dedupe_existing_dirs(candidates: list[Path], unreadable: list[str] | None = None) -> list[Path]:
@@ -311,24 +320,20 @@ def sweep_stale_aiter_locks_if_dead(
     """Sweep orphaned aiter JIT locks, gated on no live compiler process."""
     resolved_dirs = _resolve_lock_sweep_dirs(aiter_jit_dir)
     alive = _any_live_compiler(resolved_dirs)
-    if alive is True:
+    if alive is not False:
+        if alive is None:
+            log.warning("aiter lock sweep skipped: compiler liveness is unknown")
         return {
             "dir": None,
             "dirs": [],
             "scanned": 0,
             "deleted": 0,
             "skipped_fresh": 0,
-            "errors": 0,
-            "compiler_alive": True,
-            "skipped_live": True,
+            # An unverified sweep must not look like a successfully empty tree.
+            "errors": int(alive is None),
+            "compiler_alive": alive,
+            "skipped_live": alive is True,
         }
-    if alive is None:
-        stats = clean_stale_aiter_locks(
-            aiter_jit_dir,
-            stale_minutes=AITER_LOCK_STALE_MINUTES,
-        )
-        stats["compiler_alive"] = None
-        return stats
     stats = clean_stale_aiter_locks(
         aiter_jit_dir,
         stale_minutes=AITER_LOCK_STALE_MINUTES,

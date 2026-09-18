@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import signal
 from pathlib import Path
@@ -46,7 +47,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
     SqliteLeaseBackend,
 )
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.inference_optimizer.session.session_paths import supervisor_status_path, target_baseline_json
+from hyperloom.inference_optimizer.session.session_paths import target_baseline_json
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 
@@ -66,7 +67,7 @@ def _silent_plan() -> ScriptedPlan:
 
 def _build_backends(scripts: dict[str, ScriptedPlan]) -> dict[str, Backend]:
     backends: dict[str, Backend] = {}
-    for name in ("orchestration", "critic", "robustness"):
+    for name in ("orchestration", "critic"):
         backends[name] = MockBackend(scripts.get(name, _silent_plan()), name=name)
     return backends
 
@@ -75,14 +76,8 @@ def test_signal_stop_reason_comes_from_the_received_signal(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     try:
         c._signals = SimpleNamespace(received={signal.SIGHUP})
-        assert c._signal_stop_reason() == "supervisor_restart_requested"
+        assert c._signal_stop_reason() == "signal"
 
-        status = supervisor_status_path(session_dir)
-        status.parent.mkdir(parents=True, exist_ok=True)
-        status.write_text(
-            json.dumps({"stop_asked": ["supervisor_tick_stalled: stale"]}),
-            encoding="utf-8",
-        )
         c._signals = SimpleNamespace(received={signal.SIGTERM})
         assert c._signal_stop_reason() == "signal"
 
@@ -96,7 +91,7 @@ def test_signal_stop_reason_comes_from_the_received_signal(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_terminal_state_outweighs_a_supervisor_restart_signal(session_dir):
+async def test_sighup_takes_the_same_priority_as_other_stop_signals(session_dir):
     c = Coordinator(session_dir, backends=_build_backends({}))
     c._signals = SimpleNamespace(received={signal.SIGHUP}, close=lambda: frozenset({signal.SIGHUP}))
     c._stop.set()
@@ -120,14 +115,12 @@ async def test_terminal_state_outweighs_a_supervisor_restart_signal(session_dir)
             reason,
             c.shared_state.stop_reason,
             bool(c.shared_state.stop_ts),
-            bool(c.shared_state.leg_ended_ts),
             close_calls,
             finalize_calls,
         ) == (
-            "time_exhausted",
-            "time_exhausted",
+            "signal",
+            "signal",
             True,
-            False,
             1,
             1,
         )
@@ -156,9 +149,8 @@ async def test_the_final_signal_snapshot_makes_a_late_sigterm_terminal(session_d
         assert (
             reason,
             c.shared_state.stop_reason,
-            c.shared_state.leg_ended_ts,
             close_calls,
-        ) == ("signal", "signal", "", 1)
+        ) == ("signal", "signal", 1)
     finally:
         await c.stop()
 
@@ -168,9 +160,11 @@ async def _noop_finalize() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sigterm_follows_the_normal_terminal_path(session_dir):
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_signal, cancelled, monkeypatch):
     c = Coordinator(session_dir, backends=_build_backends({}))
-    c._signals = SimpleNamespace(received={signal.SIGTERM}, close=lambda: frozenset({signal.SIGTERM}))
+    c._signals = SimpleNamespace(received={stop_signal}, close=lambda: frozenset({stop_signal}))
     c._stop.set()
     close_calls = 0
     finalize_calls = 0
@@ -184,18 +178,27 @@ async def test_sigterm_follows_the_normal_terminal_path(session_dir):
         nonlocal finalize_calls
         finalize_calls += 1
 
+    async def _cancel_tick(_now):
+        raise asyncio.CancelledError()
+
+    if cancelled:
+        monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
     c.ensure_close_sequence = _close
     c._recipe_kb_t4_hook = _finalize
     try:
-        reason = await c.run(max_ticks=1, tick_interval_sec=0.0)
+        if cancelled:
+            with pytest.raises(asyncio.CancelledError):
+                await c.run(max_ticks=1, tick_interval_sec=0.0)
+        else:
+            assert await c.run(max_ticks=1, tick_interval_sec=0.0) == "signal"
         assert (
-            reason,
             c.shared_state.stop_reason,
             bool(c.shared_state.stop_ts),
-            c.shared_state.leg_ended_ts,
             close_calls,
             finalize_calls,
-        ) == ("signal", "signal", True, "", 1, 1)
+        ) == ("signal", True, 1, 1)
+        state = json.loads((session_dir / "state.json").read_text(encoding="utf-8"))
+        assert not state.get("leg_ended_ts")
     finally:
         await c.stop()
 
@@ -363,12 +366,12 @@ async def test_coordinator_starts_with_silent_backends(session_dir):
         await c.tick(2)
         # 3 agents × 2 ticks × 1 idle message = 6 send_message events
         msgs = await c.bus.tail(n=20, topic="observation")
-        assert len(msgs) == 6
+        assert len(msgs) == 4
     finally:
         await c.stop()
 
 
-# Backend-error streak (robustness/critic subprocess health)
+# Backend-error streak (critic subprocess health)
 class _AlwaysFailingBackend(Backend):
     """Backend that always raises BackendError."""
 
@@ -425,7 +428,7 @@ def _llm_error_rows(session_dir: Path) -> list[dict]:
 async def test_plain_backend_error_records_no_llm_error_row(session_dir):
     """A deterministic local fault must not be counted as a provider failure."""
     backends = _build_backends({})
-    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
@@ -437,14 +440,14 @@ async def test_plain_backend_error_records_no_llm_error_row(session_dir):
 @pytest.mark.asyncio
 async def test_llm_call_failed_records_one_error_row_per_turn(session_dir):
     backends = _build_backends({})
-    backends["robustness"] = _LLMFailingBackend("robustness")
+    backends["critic"] = _LLMFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
         rows = _llm_error_rows(session_dir)
         assert len(rows) == 2
         row = rows[0]
-        assert row["component"] == "robustness"
+        assert row["component"] == "critic"
         assert row["error_type"] == "LLMCallFailed"
         assert "gateway 400" in row["error_message"]
         assert row["input_tokens"] is None and row["output_tokens"] is None
@@ -546,7 +549,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         "3",
     )
     backends = _build_backends({})
-    backends["robustness"] = _AlwaysFailingBackend("robustness")
+    backends["critic"] = _AlwaysFailingBackend("critic")
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(4)
@@ -554,12 +557,12 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         backend_errors = [
             o
             for o in observations
-            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "robustness"
+            if (o.payload or {}).get("kind") == "backend_error" and (o.payload or {}).get("agent") == "critic"
         ]
         backend_unhealthy = [
             o
             for o in observations
-            if (o.payload or {}).get("kind") == "backend_unhealthy" and (o.payload or {}).get("agent") == "robustness"
+            if (o.payload or {}).get("kind") == "backend_unhealthy" and (o.payload or {}).get("agent") == "critic"
         ]
         assert len(backend_errors) == 4
         assert len(backend_unhealthy) == 1
@@ -567,7 +570,7 @@ async def test_backend_error_streak_fires_backend_unhealthy_once_at_threshold(
         assert promoted["consecutive_errors"] == 3
         assert promoted["threshold"] == 3
         assert promoted["severity"] == "high"
-        assert promoted["agent"] == "robustness"
+        assert promoted["agent"] == "critic"
         assert "subprocess backend has failed" in promoted["hint"]
     finally:
         await c.stop()
@@ -603,23 +606,23 @@ async def test_backend_error_streak_resets_after_successful_turn(
         "2",
     )
     backends = _build_backends({})
-    failing = _AlwaysFailingBackend("robustness")
-    backends["robustness"] = failing
+    failing = _AlwaysFailingBackend("critic")
+    backends["critic"] = failing
     c = Coordinator(session_dir, backends=backends)
     try:
         await c.tick(2)
-        assert c._backend_error_streak["robustness"] == 2
-        assert c._backend_error_alarm_armed["robustness"] is False
+        assert c._backend_error_streak["critic"] == 2
+        assert c._backend_error_alarm_armed["critic"] is False
 
         # Healthy backend → reset.
         backends_silent = _build_backends({})
-        c.backends["robustness"] = backends_silent["robustness"]
+        c.backends["critic"] = backends_silent["critic"]
         await c.tick(1)
-        assert c._backend_error_streak["robustness"] == 0
-        assert c._backend_error_alarm_armed["robustness"] is True
+        assert c._backend_error_streak["critic"] == 0
+        assert c._backend_error_alarm_armed["critic"] is True
 
         # Re-arm: failing backend back in → alarm fires again.
-        c.backends["robustness"] = failing
+        c.backends["critic"] = failing
         await c.tick(2)
         observations = await c.bus.tail(n=50, topic="observation")
         backend_unhealthy = [o for o in observations if (o.payload or {}).get("kind") == "backend_unhealthy"]
@@ -931,7 +934,7 @@ async def test_coordinator_prune_branch_cancels_family_and_records_advisory(sess
         b = await c.tasks.create(kind="baseline", params={}, idempotency_key="kb")
 
         await c._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "baseline", "reason": "3 fails"},
@@ -1009,7 +1012,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -1345,8 +1347,10 @@ async def test_handle_unpromotable_baseline_records_failure(session_dir):
 async def test_handle_unpromotable_baseline_third_failure_sets_stop_reason(
     session_dir,
 ):
+    """--enablement=off: three consecutive failures stop the run (the documented fast-fail path)."""
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
+    c.shared_state.enablement_mode = "off"
     try:
         for i in range(3):
             await c._handle_unpromotable_result(
@@ -1489,7 +1493,7 @@ async def test_handle_unpromotable_baseline_fails_fast_when_enablement_off(sessi
 
 
 @pytest.mark.asyncio
-async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(session_dir):
+async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
     _mute_action_scoring(c)
     try:
@@ -1507,6 +1511,28 @@ async def test_promote_baseline_finalizes_eval_origin_when_accuracy_meets_floor(
         assert c.shared_state.enablement.succeeded is True
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.origin == ""
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval_disabled(session_dir):
+    """When the session has eval disabled, a revalidation baseline promotes on throughput alone."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        c.shared_state.eval_disabled = True
+        c.shared_state.enablement.validation_pending = True
+        c.shared_state.enablement.accuracy_floor = 0.3
+        c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
+        await c._promote_to_shared_state(
+            "baseline",
+            {"output_throughput": 900.0, "completed_requests": 8},
+            task=_mk_task("baseline", "t-reval-noeval"),
+        )
+        assert c.shared_state.baseline_tput == 900.0
+        assert c.shared_state.enablement.succeeded is True
+        assert c.shared_state.enablement.validation_pending is False
     finally:
         await c.stop()
 

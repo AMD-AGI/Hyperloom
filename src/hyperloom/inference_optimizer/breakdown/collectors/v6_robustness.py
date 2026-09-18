@@ -1,19 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The robustness agent's own account, for SBD V6.
+"""Read historical robustness fragments without synthesizing new turns.
 
-``robustness`` is a top-level V6 key rather than a timeline event: the agent
-watches the whole session from the side and its turns do not belong to any one
-phase or macro cycle. Like ``close``, it therefore keeps a fixed place in the
-payload so a reader can ask "did the agent ever speak" and get an answer.
-
-There is no projection behind this collector, and that is deliberate. The
-section it replaces rebuilt each turn at export time from two files nothing
-writes (see :mod:`..recorder.robustness_out`), so every row it produced was
-blank. A fallback here could only reproduce that. What the agent raised is
-known only at the moment it raises it, so a session with no fragments reports
-no turns rather than a row per workdir it happens to find on disk.
+The fixed V6 wire key remains empty for sessions without recorded turns.
+Historical fragments pass through unchanged; workdirs and finding logs are
+not sources for rebuilding the retired agent's account.
 """
 
 from __future__ import annotations

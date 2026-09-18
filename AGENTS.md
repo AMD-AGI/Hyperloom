@@ -62,6 +62,13 @@ doc is the authority on where that boundary lives.
   at all. Widen the selection when a change crosses a boundary, not by default. The full
   local run belongs at the end, before you open a PR; see the style guide's local
   development checklist.
+- **Every change lands its changelog entry.** Anything an operator can observe — a
+  behaviour, an interface, a default, a flag, an artifact — carries a `CHANGELOG.md` entry
+  under `[Unreleased]` in the same PR. Not a follow-up, and not left for the release cut to
+  reconstruct from commit subjects. Write it for someone who will never read the diff: what
+  they will now see, and what the old behaviour cost them. Refactors with nothing
+  observable, and test- or docs-only changes, are exempt — say which in the PR description
+  rather than leaving the omission to be guessed at.
 - **Fix upstream, not around it.** When the root cause is inside a component (GEAK, Magpie,
   TraceLens, IntelliKit) or a framework, fix it there and pin the fix — don't paper over it
   with a local workaround.

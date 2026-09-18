@@ -147,6 +147,26 @@ async def _all_succeed(*, grid: list[GridVariant], **_kw):
     ]
 
 
+def test_sweep_executor_uses_shared_benchmark_deadline(session_dir: Path, baseline_yaml: Path, monkeypatch):
+    from types import SimpleNamespace
+    from hyperloom.orchestrator.actions.executors import conc_sweep as executor_module
+
+    state = _state(baseline_yaml)
+    monkeypatch.setattr(executor_module.SharedState, "load_or_init", lambda _: state)
+
+    async def run_sweep(state, session_dir, *, concs, total_budget_sec, recorder):
+        return {"status": "succeeded"}
+
+    monkeypatch.setattr(executor_module, "run_conc_sweep", run_sweep)
+    executor = executor_module.ConcSweepExecutor()
+    monkeypatch.setattr(executor, "_make_recorder", lambda *args: None)
+    ctx = SimpleNamespace(
+        extra={"session_dir": str(session_dir)},
+        task=SimpleNamespace(params={"variant_timeout_sec": 1}),
+    )
+    assert asyncio.run(executor._run(ctx))["status"] == "succeeded"
+
+
 def test_a_sweep_records_both_arms_and_every_rung(session_dir: Path, baseline_yaml: Path):
     state = _state(baseline_yaml)
     with session_scope(session_dir):
@@ -204,7 +224,7 @@ def test_each_rung_carries_the_load_and_the_cap_it_ran_under(session_dir: Path, 
     assert [(rung["conc"], rung["num_prompts"]) for rung in arm["grid"]] == [(16, 80), (4, 20)]
     for point in arm["points"]:
         assert point["num_prompts"] == point["conc"] * 5
-        assert point["granted_cap_sec"] == 1800.0
+        assert point["granted_cap_sec"] == 7800.0
         assert point["start_time"]
         assert point["wall_duration_sec"] is not None
 
@@ -295,13 +315,30 @@ def test_a_budget_that_refuses_an_arm_records_the_gate(session_dir: Path, baseli
 
 
 def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: Path, baseline_yaml: Path):
-    state = _state(baseline_yaml)
+    state = _state(baseline_yaml, baseline_runtime_sec=5.0)
+    calls = []
+    clock = {"now": 100.0}
 
-    async def _slow(*, grid: list[GridVariant], **_kw):
-        # The boot rung eats most of the budget, leaving less than one rung's
-        # cap for the rung below it.
-        await asyncio.sleep(0.4)
-        return await _all_succeed(grid=grid)
+    async def _refuse_reuse(
+        *, grid: list[GridVariant], session_deadline_sec, variant_expected_sec, deadline_stop, **_kw
+    ):
+        calls.append((session_deadline_sec, variant_expected_sec, deadline_stop.error_class))
+        if len(calls) == 1:
+            clock["now"] += 6.0
+            return await _all_succeed(grid=grid)
+        assert len(calls) == 2
+        assert 0 < session_deadline_sec - clock["now"] < variant_expected_sec
+        return [
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="skipped",
+                error=deadline_stop.never_started,
+                error_class=deadline_stop.error_class,
+            )
+            for variant in grid
+        ]
 
     with (
         session_scope(session_dir),
@@ -309,8 +346,8 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
             "hyperloom.orchestrator.actions.executors._server_lifecycle.resolve_lifecycle_params",
             return_value={"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"},
         ),
-        patch("hyperloom.orchestrator.kernel.conc_sweep._granted_cap_sec", return_value=0.9),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_slow),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.time.monotonic", side_effect=lambda: clock["now"]),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_refuse_reuse),
         patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_materialize),
     ):
         asyncio.run(
@@ -318,19 +355,20 @@ def test_a_rung_the_budget_refused_mid_ladder_is_recorded_as_such(session_dir: P
                 state,
                 session_dir,
                 concs=[4, 16],
-                total_budget_sec=1,
+                total_budget_sec=10,
                 recorder=_recorder(),
             )
         )
         ext = _sweep_event(session_dir)["ext"]
 
+    assert calls == [(110.0, 5.0, "budget_exhausted")] * 2
     # The optimized arm booted at 16 and was cut off before 4.
     stages = {point["conc"]: point["stage"] for point in ext["arms"][ARM_OPTIMIZED]["points"]}
     assert stages == {16: STAGE_BOOT, 4: STAGE_BUDGET_SKIP}
     refused = [point for point in ext["arms"][ARM_OPTIMIZED]["points"] if point["conc"] == 4][0]
     assert refused["status"] == "skipped"
     assert refused["error_class"] == "budget_exhausted"
-    assert refused["budget_remaining_sec"] is not None
+    assert refused["budget_remaining_sec"] == 4.0
     assert refused["output_throughput"] is None
     # The arm that never got to start says so at the arm level instead.
     assert ext["arms"][ARM_BASELINE]["refused"]["reason"] == "insufficient_remaining_for_variant"

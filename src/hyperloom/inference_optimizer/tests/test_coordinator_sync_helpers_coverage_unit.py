@@ -25,7 +25,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def test_specialist_wall_budget_caps_at_4h(coord: Coordinator) -> None:
 def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> None:
     """Bench-capable specialists receive enough time for their advertised rebench."""
     from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
-    from hyperloom.orchestrator.specialists.rebench import DEFAULT_REBENCH_TIMEOUT_SEC
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
     params = {"scope": "domain", "mode": "patch", "bench": True}
     budget = coord._specialist_wall_budget_sec(
@@ -64,7 +64,7 @@ def test_bench_specialist_budget_covers_rebench_timeout(coord: Coordinator) -> N
         params=params,
     )
 
-    assert budget == DEFAULT_REBENCH_TIMEOUT_SEC + 10 * 60
+    assert budget == max(60 * 60, resolve_benchmark_timeouts()[1] + 10 * 60)
     assert coord._gpu_lease_ttl_sec(params=params) == pytest.approx(int(budget * (1.0 + GPU_LEASE_TTL_GRACE)), abs=2)
 
 
@@ -121,7 +121,8 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
         kind = "explore"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "RESULT"
 
     async def _fake_release(lease):
@@ -152,8 +153,11 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
         kind = "explore"
         requires_lanes: list = []
 
-    async def _boom(task, *, prebound_lease=None, extra_context=None):
-        raise RuntimeError("subprocess crashed")
+    async def _boom(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        try:
+            raise RuntimeError("subprocess crashed")
+        finally:
+            await release_resources()
 
     async def _fake_release(lease):
         released.append(lease)
@@ -184,7 +188,8 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
         kind = "report"
         requires_lanes: list = []
 
-    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None):
+    async def _fake_run_task(task, *, prebound_lease=None, extra_context=None, release_resources=None):
+        await release_resources()
         return "CPU"
 
     async def _fake_release(lease):
@@ -530,6 +535,32 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
 def test_derive_close_stop_reason_default(coord: Coordinator) -> None:
     coord.shared_state.phase_history = []
     assert coord._derive_close_stop_reason() == "time_exhausted"
+
+
+# -- phase denial gate -----------------------------------------------------
+def test_phase_denial_for_action(coord: Coordinator) -> None:
+    ss = coord.shared_state
+    ss.phase = "PRELUDE"
+    assert coord._phase_denial_for_action("baseline") is None
+    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
+    # agent asking for one is refused.
+    ss.phase = "ENABLEMENT"
+    denied = coord._phase_denial_for_action("baseline")
+    assert denied is not None and denied.rule == "phase_incompatible"
+    assert coord._phase_denial_for_action("specialist") is None
+    assert coord._phase_denial_for_action("integrate_patch") is None
+    # The gate reserves named actions only; it is not a phase-membership check.
+    assert coord._phase_denial_for_action("explore") is None
+    # An unknown phase reserves nothing, so the gate abstains.
+    ss.phase = ""
+    assert coord._phase_denial_for_action("baseline") is None
+
+
+def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
+    """The revalidation pump prices its own action and never runs the phase gate."""
+    coord.shared_state.phase = "ENABLEMENT"
+    assert coord._time_budget_denial_for_action("baseline") is None
+    assert coord._admission_denial_for_action("baseline") is not None
 
 
 # -- sequence denial gates -------------------------------------------------

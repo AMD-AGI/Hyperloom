@@ -32,7 +32,6 @@ from .backends import (
     _build_proposal_scorer,
     _official_anthropic_only,
     _official_openai_only,
-    resolve_robustness_options,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -72,7 +71,6 @@ from .credentials import (
     _CODEX_FALLBACK_MODELS as _CODEX_FALLBACK_MODELS,
     _CATALOG_RETRY_DELAYS_SEC as _CATALOG_RETRY_DELAYS_SEC,
     _CRITIC_AGENT_ROOT_ENV as _CRITIC_AGENT_ROOT_ENV,
-    _ROBUSTNESS_AGENT_ROOT_ENV as _ROBUSTNESS_AGENT_ROOT_ENV,
     _resolve_agent_root as _resolve_agent_root,
     _validate_agent_runtime as _validate_agent_runtime,
 )
@@ -101,8 +99,7 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     build_orchestration_prompt,
     default_enabled_actions,
 )
-from hyperloom.orchestrator.supervisor import spawn_supervisor, stop_supervisor
-from hyperloom.orchestrator.supervisor.watch import SUPERVISOR_RESTART_REASON
+from hyperloom.inference_optimizer.breakdown.stop_reasons import SUPERVISOR_RESTART_REASON
 
 from ..session.lock import SessionAlreadyRunning, SessionLock
 from ..session.paths import (
@@ -123,6 +120,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
 )
 from .parser import (
+    DEFAULT_MAX_HOURS,
     _build_parser as _build_parser,
     _positive_int_arg as _positive_int_arg,
     _redact_unknown_args as _redact_unknown_args,
@@ -890,26 +888,6 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-# Default robustness backend ("agent"); force observation-only mock via --robustness-mock or env.
-DEFAULT_ROBUSTNESS_BACKEND = os.environ.get(
-    "INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
-    "agent",
-)
-_VALID_ROBUSTNESS_BACKENDS = ("mock", "agent")
-
-
-def _resolve_robustness_choice(args: argparse.Namespace) -> str:
-    """Resolve the active robustness backend choice (arg → DEFAULT_ROBUSTNESS_BACKEND); hard-fails on invalid."""
-    chosen, _ = _resolve_choice(
-        "robustness_backend",
-        DEFAULT_ROBUSTNESS_BACKEND,
-        _VALID_ROBUSTNESS_BACKENDS,
-        "--robustness-mock / --robustness-agent or INFERENCE_OPTIMIZER_DEFAULT_ROBUSTNESS_BACKEND",
-        args=args,
-    )
-    return chosen
-
-
 def _reset_state_file(session_dir: Path) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched)."""
     state_path = session_dir / "state.json"
@@ -937,12 +915,6 @@ def _reset_state_file(session_dir: Path) -> None:
         "--reset-state: backed up state.json to %s; session starts blank.",
         backup_path.name,
     )
-
-
-# AgentX conc-sweep budgets, sized from a measured round: 35B / conc 64 / 3600s window = ~111 min end to end (46 min
-# per-lane warmup + 60 min measurement + ~5 min boot, corpus load and mapping).
-_AGENTX_CONC_SWEEP_TIMEOUT_SEC = 9000  # 2.5 h per variant
-_AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC = 93600  # 26 h: ~111 min x 14 runs
 
 
 def _preflight_agentx_backend(args: argparse.Namespace) -> None:
@@ -978,21 +950,20 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
 
 
 def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
-    """Widen the per-variant time budgets for AgentX's much longer runs."""
+    """Warn when AgentX is enabled without an explicit session budget."""
     if not _agentx_enabled():
         return
-    if float(getattr(args, "max_hours", 0) or 0) == 2.0:
+    # ``--max-hours`` carries no argparse default, so absence reads as ``None``
+    # here: this runs before either path settles the budget. An explicit value
+    # is a deliberate choice even when it equals the default, and gets no note.
+    if getattr(args, "max_hours", None) is None:
         print(
-            "NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of 2.0. "
+            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
             file=sys.stderr,
         )
-    if int(getattr(args, "conc_sweep_timeout_sec", 0) or 0) == 1800:
-        args.conc_sweep_timeout_sec = _AGENTX_CONC_SWEEP_TIMEOUT_SEC
-    if int(getattr(args, "conc_sweep_total_budget_sec", 0) or 0) == 9000:
-        args.conc_sweep_total_budget_sec = _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
 
 
 # Largest input+output a single request reaches in the 256k-capped weka corpus, measured over all 30,141 requests of
@@ -1067,7 +1038,11 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
 
 
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
-    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict."""
+    """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
+
+    ENABLEMENT has no flag: nothing enforces a cap for it, since
+    ``compute_next_phase`` does not consult ``phase_cap_exceeded`` there.
+    """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
         PHASE_FRAMEWORK_AGENT,
@@ -1320,6 +1295,56 @@ def _restore_partition_shape_from_state(args: Any, state: SharedState) -> None:
     if getattr(args, "streams_per_partition", None) is None:
         streams = archived.get("streams_per_partition")
         args.streams_per_partition = int(streams) if streams else None
+
+
+#: Manifest objective kinds and the flag each one was parsed from.
+_OBJECTIVE_KIND_TO_FLAG: Mapping[str, str] = {
+    "gain_pct": "target_gain",
+    "tput": "target_tput",
+    "baseline": "target_baseline_dir",
+    "roofline_pct": "target_roofline",
+}
+
+
+def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mapping[str, Any]) -> list[str]:
+    """Fill the budget and the stop target from the archive when this resume omitted them.
+
+    A bare resume would otherwise rebuild both from the flags: the budget would
+    shorten a longer session and close the leg as ``time_exhausted``, and the
+    objective would be dropped. An operator may pass only ``--resume-from``.
+    An omitted ``--max-hours`` arrives as ``None``, so a smaller
+    explicit budget still tightens the leg, which is what ``_start_run`` reads.
+
+    Args:
+        args: Parsed arguments for this resume; an explicit flag always wins.
+        state: Loaded session state, whose ``max_minutes`` already carries every
+            ``--extend-hours`` grant from earlier legs.
+        manifest: The session manifest, which is where the objective is recorded.
+
+    Returns:
+        Lines to print, each already prefixed with ``  → ``.
+    """
+    lines: list[str] = []
+    persisted_minutes = float(getattr(state, "max_minutes", 0) or 0)
+    if getattr(args, "max_hours", None) is None and persisted_minutes > 0:
+        args.max_hours = persisted_minutes / 60.0
+        lines.append(f"  → restored budget: --max-hours {args.max_hours:.2f} (persisted)")
+
+    # Restored as a set: a target named on this resume replaces the persisted
+    # objective outright rather than joining it, which build_objective refuses.
+    if any(getattr(args, flag, None) is not None for flag in _OBJECTIVE_KIND_TO_FLAG.values()):
+        return lines
+    recorded = manifest.get("objective") or {}
+    # ``_objective_summary`` writes one entry, and ``objectives`` too when a
+    # roofline target joins a throughput one.
+    for entry in recorded.get("objectives") or [recorded]:
+        flag = _OBJECTIVE_KIND_TO_FLAG.get(str(entry.get("kind") or ""))
+        value = entry.get("value")
+        if flag is None or value is None:
+            continue
+        setattr(args, flag, str(value) if flag == "target_baseline_dir" else float(value))
+        lines.append(f"  → restored objective: --{flag.replace('_', '-')} {value}")
+    return lines
 
 
 def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
@@ -1599,6 +1624,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # one place that covers both.
     _preflight_agentx_backend(args)
     _apply_agentx_budget_profile(args)
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+    resolve_benchmark_timeouts()
+    # A fresh launch has nothing to restore, so settle the budget before the
+    # manifest and the workload env read it. A resume keeps ``None`` until
+    # ``_restore_budget_and_objective`` has had its chance at the session's own.
+    if not args.resume_from and args.max_hours is None:
+        args.max_hours = DEFAULT_MAX_HOURS
 
     if args.resume_from:
         # USER_DATA_PATH stays at the workspace root; --resume-from names a subdir under it.
@@ -1636,6 +1669,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Single-optimizer guard: take the session lock before any state.json / lease access.
         session_lock = _acquire_session_lock_or_exit(session_dir)
+        from ..session.resume_guard import ResumeBlocked, ensure_resume_safe
+        from hyperloom.orchestrator.bus.resource_lock import local_owner_scope
+
+        try:
+            ensure_resume_safe(session_dir, owner_scope=local_owner_scope())
+        except ResumeBlocked as exc:
+            session_lock.release()
+            print(f"ERROR: --resume-from {exc}", file=sys.stderr)
+            sys.exit(2)
         _persist_install_event(args, session_dir)
 
         try:
@@ -1775,7 +1817,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             print(f"  re-exported HYPERLOOM_BYPASS_SCRIPTS_DIR: {state.bypass_scripts_dir}")
         if state.benchmark_backend:
             print(f"  re-exported HYPERLOOM_BENCHMARK_BACKEND: {state.benchmark_backend}")
-        # Feeds the robustness defaults and the IR-8 check only.
+        # Feeds the IR-8 check.
         if state.nodes > 1 and int(getattr(args, "nodes", 1) or 1) <= 1:
             args.nodes = state.nodes
             os.environ["INFERENCE_OPTIMIZER_NODES"] = str(state.nodes)
@@ -1879,6 +1921,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         )
         override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
         print(f"  → cleared stop_reason and crash_count (was {prior_crash}) for this leg{override_note}")
+        for line in _restore_budget_and_objective(args, state, manifest):
+            print(line)
+        if args.max_hours is None:
+            args.max_hours = DEFAULT_MAX_HOURS
         for line in _resume_budget_lines(state, extend_hours=extend_hours):
             print(line)
         # Re-bootstrap the recipe KB client (recreates client + reruns T0 warm-start); skipped when --degraded-kb.
@@ -2039,7 +2085,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
         session_dir = make_session_dir(model_name=resolve_model_display_name(args))
         # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
-        # robustness monitor.
+        # session diagnostics.
         session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
         _persist_install_event(args, session_dir)
@@ -2202,31 +2248,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Default WORKSPACE_PATH for critic-agent runtime: SKILL static-asset root (repo root), not artefact dir.
         os.environ.setdefault("WORKSPACE_PATH", str(Path(__file__).resolve().parents[4]))
 
-    # Resolve robustness backend choice + runtime root, mirroring critic.
-    robustness_choice = _resolve_robustness_choice(args)
-    robustness_agent_root: Path | None = None
-    # T0 anchor writes warm_start_* via its own SharedState load; reload before persisting launch-shape fields so
-    # seed/resume memory cannot clobber them.
+    # T0 may have persisted warm-start state; preserve it before constructing the Coordinator.
     state = SharedState.load_or_init(session_dir)
-    robustness_options = resolve_robustness_options(args, state)
-    state.robustness_options = robustness_options
-    # Persist before the Coordinator reads SharedState off disk, or the launch shape stays in-memory only and the next
-    # resume falls back to defaults.
-    state.save(session_dir)
-    if robustness_choice == "agent":
-        robustness_agent_root = _resolve_agent_root("robustness")
-        if robustness_agent_root is None:
-            print(
-                f"ERROR: --robustness-agent selected but robustness-agent "
-                f"runtime not found.\n"
-                f"  Set ${_ROBUSTNESS_AGENT_ROOT_ENV} to the directory "
-                f"containing src/robustness_agent/runtime/cli.py, or install "
-                f"robustness-agent at $REPO_ROOT/robustness-agent/.\n"
-                f"  Bypass with --robustness-mock.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        _validate_agent_runtime(robustness_agent_root, agent="robustness")
 
     backends = _build_backends(
         claude_model=args.claude_model,
@@ -2235,9 +2258,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir=session_dir,
         critic_agent_root=critic_agent_root,
         critic_kb_mode=critic_kb_mode,
-        robustness_choice=robustness_choice,
-        robustness_agent_root=robustness_agent_root,
-        robustness_options=robustness_options,
         codex_follows_claude=codex_follows_claude,
         critic_protocol=args.critic_protocol,
     )
@@ -2362,20 +2382,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             f"critic-agent(kb={critic_kb_mode}, protocol={_review_protocol}, "
             f"model={_review_model}, root={critic_agent_root})"
         )
-    if robustness_choice == "mock":
-        robustness_str = "mock"
-    else:
-        robustness_str = f"robustness-agent(root={robustness_agent_root})"
-        if robustness_options:
-            kvs = ",".join(f"{k}={v!r}" for k, v in sorted(robustness_options.items()))
-            robustness_str += f"[{kvs}]"
-    print(
-        f"Backends        : "
-        f"orchestration={orchestration_str}, "
-        f"kernel={kernel_str}, "
-        f"critic={critic_str}, "
-        f"robustness={robustness_str}"
-    )
+    print(f"Backends        : orchestration={orchestration_str}, kernel={kernel_str}, critic={critic_str}")
     print(f"Max ticks       : {args.max_ticks or 'unlimited'} (budget = {args.max_hours}h)")
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
@@ -2388,18 +2395,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             "to fetch real InferenceX reference data.",
             file=sys.stderr,
         )
-
-    # The out-of-band supervisor watches for the two failures this process
-    # cannot report on itself: dying, and ceasing to tick. It is given the
-    # session's budget so its stall window fits inside the run it watches.
-    try:
-        supervisor_proc = spawn_supervisor(session_dir, session_sec=args.max_hours * 3600.0)
-    except OSError as exc:
-        # Auxiliary: a run without a watchdog still runs, and the operator is
-        # told on both channels that it is unwatched.
-        supervisor_proc = None
-        log.warning("supervisor: could not start (%s); the run proceeds unwatched", exc)
-        print(f"[supervisor] could not start ({exc}); the run proceeds unwatched", file=sys.stderr)
 
     stop_reason: str | None = None
     try:
@@ -2414,13 +2409,8 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
-        # Stopping the leases and the agent subprocesses is itself a step that
-        # can hang, so it happens while the supervisor is still watching; the
-        # supervisor is stood down only once it has returned.
         with timed_teardown_step(state, "coordinator_stop"):
             await coordinator.stop()
-        with timed_teardown_step(state, "supervisor_stop"):
-            stop_supervisor(supervisor_proc)
         # Drop the single-optimizer session lock once the
         # coordinator has released its leases. The OS would drop it on process
         # exit anyway; this just frees it promptly for an intentional resume.
@@ -2431,12 +2421,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             state.save(session_dir)
         except Exception:  # noqa: BLE001
             log.exception("failed to persist teardown timings (non-fatal)")
-
-    if stop_reason == SUPERVISOR_RESTART_REASON:
-        # The leg is over, the session is not: the monitor resumes it, and a
-        # final summary here would speak for a run that has not ended.
-        print(f"Leg stopped for a supervisor restart; session {session_dir} stays resumable.")
-        return _exit_code_for_stop_reason(stop_reason)
 
     _reconcile_crash_count(coordinator.shared_state, session_dir)
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.

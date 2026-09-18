@@ -19,6 +19,10 @@ from hyperloom.inference_optimizer.cli.executors import (
 )
 
 
+def test_recover_executor_is_not_registered() -> None:
+    assert "recover" not in _REAL_EXECUTORS_FULL
+
+
 def _spec_args(dispatch_mode: str) -> argparse.Namespace:
     return argparse.Namespace(
         claude_model="claude-opus-4-6",
