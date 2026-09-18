@@ -267,6 +267,7 @@ def _install_fake_psutil(monkeypatch, procs, iter_raises=False):
     fake.NoSuchProcess = NoSuchProcess
     fake.AccessDenied = AccessDenied
     fake.ZombieProcess = ZombieProcess
+    fake.STATUS_ZOMBIE = "zombie"
 
     def _process_iter(fields):
         if iter_raises:
@@ -390,10 +391,41 @@ def test_sweep_skips_when_compiler_alive(monkeypatch):
     assert stats["compiler_alive"] is True
 
 
-def test_sweep_unknown_liveness_uses_mtime_gate(tmp_path, monkeypatch):
+def test_sweep_unknown_liveness_preserves_stale_lock(tmp_path, monkeypatch):
+    lock = tmp_path / "lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
     monkeypatch.setattr(aj, "_any_live_compiler", lambda *_args: None)
     stats = aj.sweep_stale_aiter_locks_if_dead(tmp_path)
     assert stats["compiler_alive"] is None
+    assert stats["deleted"] == 0
+    assert stats["errors"] == 1
+    assert lock.exists()
+
+
+def test_any_live_compiler_access_denied_is_unknown(monkeypatch):
+    fake = _install_fake_psutil(monkeypatch, [])
+    fake.process_iter = lambda fields: iter([_RaisingProc(fake.AccessDenied())])
+    assert aj._any_live_compiler() is None
+
+
+def test_any_live_compiler_unreadable_identity_is_unknown(monkeypatch):
+    _install_fake_psutil(monkeypatch, [_FakeProc({"name": None, "cmdline": None, "cwd": None})])
+    assert aj._any_live_compiler() is None
+
+
+def test_live_compiler_unreadable_build_location_is_unknown(monkeypatch, tmp_path):
+    _install_fake_psutil(monkeypatch, [_FakeProc({"name": "hipcc", "cmdline": None, "cwd": None})])
+    assert aj._any_live_compiler([tmp_path]) is None
+
+
+def test_live_compiler_match_wins_over_access_denied(monkeypatch):
+    fake = _install_fake_psutil(monkeypatch, [])
+    fake.process_iter = lambda fields: iter(
+        [_RaisingProc(fake.AccessDenied()), _FakeProc({"name": "ninja", "cmdline": []})]
+    )
+    assert aj._any_live_compiler() is True
 
 
 def test_sweep_dead_compiler_keeps_fresh_ownerless_lock(tmp_path, monkeypatch):

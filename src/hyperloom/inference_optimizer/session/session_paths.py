@@ -10,6 +10,11 @@ from pathlib import Path
 
 from ..protocol.action_surfaces import ACTION_CATALOGUE
 
+# Named because session_package.py needs them as glob strings, where a Path helper
+# does not fit.
+BRINGUP_SEGMENT: str = "bringup"
+ENABLEMENT_SEGMENT: str = "enablement"
+
 
 # Top-level files
 def manifest_path(session_dir: Path) -> Path:
@@ -25,65 +30,6 @@ def state_path(session_dir: Path) -> Path:
 def optimizer_lock_path(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/optimizer.lock`` — the single-optimizer session lock."""
     return Path(session_dir) / "runtime" / "optimizer.lock"
-
-
-def supervisor_dir(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor`` — the out-of-band supervisor's own store.
-
-    Everything the supervisor writes lives here: it must not be a second
-    writer to ``coordinator.db``, which may sit on a network filesystem.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to ``<session_dir>/runtime/supervisor``.
-    """
-    return Path(session_dir) / "runtime" / "supervisor"
-
-
-def coordinator_tick_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/coordinator_tick.json``.
-
-    Stamped by the coordinator at the top of every tick and read by the
-    supervisor, which uses it to tell a wedged loop from a busy one.
-
-    Schema: ``{pid, hostname, tick, stamped_unix}``.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the tick stamp.
-    """
-    return supervisor_dir(session_dir) / "coordinator_tick.json"
-
-
-def supervisor_status_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/status.json``.
-
-    The supervisor's own view of the session, rewritten every poll: what it
-    observed, what it would do, and what it actually did.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: The absolute path to the status snapshot.
-    """
-    return supervisor_dir(session_dir) / "status.json"
-
-
-def supervisor_log_path(session_dir: Path) -> Path:
-    """Compute ``<sd>/runtime/supervisor/supervisor.log``.
-
-    Args:
-        session_dir (Path): The session root directory.
-
-    Returns:
-        Path: Where the supervisor process's own output is redirected.
-    """
-    return supervisor_dir(session_dir) / "supervisor.log"
 
 
 def pod_history_path(session_dir: Path) -> Path:
@@ -213,13 +159,29 @@ def sbd_v6_write_warnings_path(session_dir: Path) -> Path:
 
 def enablement_dir(session_dir: Path) -> Path:
     """``<sd>/reports/enablement/`` — enablement round artifacts."""
-    return reports_dir(session_dir) / "enablement"
+    return reports_dir(session_dir) / ENABLEMENT_SEGMENT
 
 
 def enablement_round_dir(session_dir: Path, task_id: str) -> Path:
     """``<sd>/reports/enablement/<task_id>/`` — one directory per round."""
     tid = _validate_id_component(task_id, field="enablement_round_dir.task_id")
     return enablement_dir(session_dir) / tid
+
+
+def bringup_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/bringup/`` — bring-up observation artifacts."""
+    return reports_dir(session_dir) / BRINGUP_SEGMENT
+
+
+def enablement_builds_dir(session_dir: Path, task_id: str) -> Path:
+    """``<sd>/enablement/builds/<task_id>/`` — targeted-build workspace for one task."""
+    tid = _validate_id_component(task_id, field="enablement_builds_dir.task_id")
+    return Path(session_dir) / ENABLEMENT_SEGMENT / "builds" / tid
+
+
+def enablement_stacks_dir(session_dir: Path) -> Path:
+    """``<sd>/enablement/stacks/`` — venv roots for enablement launch attempts."""
+    return Path(session_dir) / ENABLEMENT_SEGMENT / "stacks"
 
 
 # Full-trace artefacts (token + decision timeline) under reports/trace/.
@@ -499,8 +461,13 @@ __all__ = [
     "failure_evidence_path",
     "forge_cycle_dir",
     "forge_handoff_dir",
+    "BRINGUP_SEGMENT",
+    "ENABLEMENT_SEGMENT",
+    "bringup_dir",
+    "enablement_builds_dir",
     "enablement_dir",
     "enablement_round_dir",
+    "enablement_stacks_dir",
     "reports_dir",
     "research_hints_json",
     "session_failures_dir",

@@ -28,9 +28,6 @@ class EnablementRound:
     # Set on an eval-origin KEEP: the patch passed the gate but a genuine baseline must revalidate accuracy before the
     # run is considered enabled.
     validation_pending: bool = False
-    # How many times the pre-enablement guard has dropped a ``skip_to_close``.
-    # Bounds the guard so it can delay a close but never forbid one.
-    skip_to_close_suppressions: int = 0
     # ``launch_log``: captured launch/traceback text when baseline cannot launch.
     launch_log: str = ""
     launch_observation_path: str = ""

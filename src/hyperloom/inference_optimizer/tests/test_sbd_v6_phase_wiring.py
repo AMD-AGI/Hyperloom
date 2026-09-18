@@ -166,9 +166,12 @@ class _Sub:
     def __init__(self, result: Any = None) -> None:
         self.result = result
         self.ran: list[str] = []
+        self.executor_registry = {}
 
-    async def run_task(self, task, *, prebound_lease=None, extra_context=None):
+    async def run_task(self, task, *, prebound_lease=None, extra_context=None, release_resources=None):
         self.ran.append(str(task.kind))
+        if release_resources is not None:
+            await release_resources()
         return self.result
 
 
@@ -180,16 +183,15 @@ def _dispatcher(tmp_path: Path, state: SharedState, sub: _Sub) -> Any:
         session_dir=tmp_path,
         locks=None,
         gpu_specialist_pool=None,
-        _inflight_actions={},
     )
-    fake.run_task_registered = types.MethodType(DispatcherCollaborator.run_task_registered, fake)
-    return fake
+    return DispatcherCollaborator(fake)
 
 
 def _task(kind: str, task_id: str) -> Any:
     return types.SimpleNamespace(
         kind=kind,
         task_id=task_id,
+        state="queued",
         params={},
         requires_lanes=(),
         lease_ttl_sec=60,
@@ -262,8 +264,11 @@ def test_a_dispatch_that_raised_is_still_on_the_timeline(tmp_path):
     machine_state.record_phase_transition(state, to_phase="KERNEL_AGENT", reason="start")
 
     class _Boom(_Sub):
-        async def run_task(self, task, *, prebound_lease=None, extra_context=None):
-            raise RuntimeError("executor died")
+        async def run_task(self, task, *, prebound_lease=None, extra_context=None, release_resources=None):
+            try:
+                raise RuntimeError("executor died")
+            finally:
+                await release_resources()
 
     dispatcher = _dispatcher(tmp_path, state, _Boom())
     with pytest.raises(RuntimeError):

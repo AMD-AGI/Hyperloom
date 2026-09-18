@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.framework import client as _fa_client
+from hyperloom.agents.framework import repo_map as _repo_map
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -119,7 +119,7 @@ class _Stub(FakeCoordinator):
         return None
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
-        return [_fa_client.repo_url_for_framework(framework or "sglang")]
+        return [_repo_map.repo_url_for_framework(framework or "sglang")]
 
 
 _CANDIDATE = {

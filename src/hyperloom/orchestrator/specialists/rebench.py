@@ -21,10 +21,6 @@ from ..actions.executors._workload_envs import (
 )
 
 
-# Default per-variant timeout (s) for a one-off specialist rebench.
-DEFAULT_REBENCH_TIMEOUT_SEC = 7800
-
-
 def _resolve_port(port: int | None) -> int:
     """Resolve the requested port, using an OS-assigned port for ``None`` or ``0``."""
     if port not in (None, 0):
@@ -50,7 +46,6 @@ async def run_specialist_rebench(
     base_extra_args: str = "",
     extra_envs: dict[str, str] | None = None,
     port: int | None = None,
-    variant_timeout_sec: int = DEFAULT_REBENCH_TIMEOUT_SEC,
     model_path: str | None = None,
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
@@ -94,7 +89,6 @@ async def run_specialist_rebench(
             base_extra_args=(base_extra_args or "").strip(),
             grid=[variant],
             output_root=out_root,
-            variant_timeout_sec=int(variant_timeout_sec),
             keep_going_on_failure=False,
             model_path=model_path or None,
             gpu_type=gpu_type or None,
@@ -160,7 +154,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, help="Output directory (conventionally inside the worktree).")
     parser.add_argument("--extra-args", default="", help="Server args merged ahead of the variant args.")
     parser.add_argument("--port", type=int, default=0, help="Server port (0 uses an OS-assigned port).")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_REBENCH_TIMEOUT_SEC, help="Per-variant timeout (s).")
     parser.add_argument("--model-path", default=None, help="Override benchmark model path.")
     parser.add_argument("--gpu-type", default=None, help="Pin the generic benchmark script GPU type.")
     parser.add_argument("--benchmark-script", default=None, help="Force-pin a benchmark script.")
@@ -176,7 +169,6 @@ def main(argv: list[str] | None = None) -> int:
                 base_extra_args=args.extra_args,
                 extra_envs=_parse_env_pairs(args.env),
                 port=args.port,
-                variant_timeout_sec=args.timeout,
                 model_path=args.model_path,
                 gpu_type=args.gpu_type,
                 benchmark_script=args.benchmark_script,
@@ -191,7 +183,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
-    "DEFAULT_REBENCH_TIMEOUT_SEC",
     "run_specialist_rebench",
 ]
 

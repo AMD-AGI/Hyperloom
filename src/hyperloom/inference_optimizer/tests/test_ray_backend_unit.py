@@ -87,6 +87,171 @@ def test_merge_worker_env_preserves_ray_visible_devices(monkeypatch: pytest.Monk
     assert "OPENAI_API_KEY" not in merged
 
 
+def test_worker_uses_invoking_policy_and_reanchors_session(monkeypatch):
+    from hyperloom.orchestrator.actions.executors import _subprocess_kill as sk
+
+    captured = {}
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "99")
+    monkeypatch.setattr(sk.time, "monotonic", lambda: 5000.0)
+
+    def run(cmd, **kwargs):
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(cmd, 0, "out", "err")
+
+    monkeypatch.setattr(sk, "run_with_session_kill", run)
+    result = rb._run_subprocess_worker(
+        cmd=["client"],
+        env={},
+        cwd=None,
+        timeout_s=7800,
+        silence_timeout_sec=600,
+        server_log_path="server.log",
+        server_already_ready=True,
+        session_remaining_sec=42,
+    )
+    assert result == (0, "out", "err")
+    assert captured["timeout"] == 7800
+    assert captured["silence_timeout_sec"] == 600
+    assert captured["session_deadline_sec"] == 5042
+
+
+@pytest.mark.parametrize("ack", [None, False, True])
+def test_specialist_close_requires_positive_worker_cleanup_ack(monkeypatch, ack):
+    from types import SimpleNamespace
+
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: ack))
+    killed = []
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease._actor = actor
+    closed = lease.close()
+    assert closed is (ack is True)
+    assert killed == ([actor] if ack is True else [])
+    assert (lease._actor is None) is (ack is True)
+
+
+@pytest.mark.parametrize(
+    ("group_present", "members"),
+    [(False, []), (True, [(10, 100, "Z")]), (True, [(10, 100, "S")]), (True, [])],
+)
+def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, group_present, members):
+    from types import SimpleNamespace
+    from hyperloom.common import proctree
+
+    proc = SimpleNamespace(pid=123456, poll=lambda: 0)
+    mgr = ManagedServerProcess()
+    mgr._proc = proc
+    monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(proctree, "group_alive", lambda pgid: group_present)
+    monkeypatch.setattr(proctree, "group_members", lambda pgid: members)
+    signals = []
+    monkeypatch.setattr(proctree, "signal_group", lambda *a, **kw: signals.append(a))
+
+    assert mgr.stop(grace_seconds=0) is False
+    assert mgr._proc is proc
+    assert signals == [], "an old PGID does not establish ownership"
+
+
+def test_pending_actor_is_retained_without_cleanup_ack(monkeypatch):
+    from types import SimpleNamespace
+
+    class RayError(Exception):
+        pass
+
+    class GetTimeoutError(RayError):
+        pass
+
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: "pending-stop"))
+    killed = []
+
+    def get(ref, **kwargs):
+        raise GetTimeoutError("actor has not answered")
+
+    monkeypatch.setitem(
+        sys.modules, "ray", SimpleNamespace(get=get, kill=killed.append, exceptions=SimpleNamespace(RayError=RayError))
+    )
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease._actor = actor
+    lease._start_ref = object()
+    closed = lease.close()
+    assert closed is False
+    assert killed == []
+    assert lease._actor is actor
+    assert lease._start_ref is not None
+    assert lease.pid() is None
+
+
+def test_specialist_close_can_confirm_on_same_actor_after_unconfirmed_stop(monkeypatch):
+    from types import SimpleNamespace
+
+    replies = iter([False, True])
+    stops = []
+
+    def stop():
+        stops.append(True)
+        return next(replies)
+
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=stop))
+    killed = []
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease._actor = actor
+    lease._start_ref = start_ref = object()
+
+    first_close = lease.close()
+    assert first_close is False
+    assert lease._actor is actor
+    assert lease._start_ref is start_ref
+    assert killed == []
+    assert len(stops) == 1
+
+    confirmed_close = lease.close()
+    assert confirmed_close is True
+    assert lease._actor is None
+    assert lease._start_ref is None
+    assert killed == [actor]
+    assert len(stops) == 2
+    repeated_close = lease.close()
+    assert repeated_close is True
+    assert len(stops) == 2
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
+    from types import SimpleNamespace
+    from hyperloom.common import proctree
+
+    waited = []
+    proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))
+    tree = object()
+    calls = []
+
+    def collect(pids):
+        calls.append(("collect", pids))
+        return tree
+
+    def kill(collected, **kwargs):
+        calls.append(("kill", collected, kwargs))
+        return confirmed
+
+    monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(proctree, "collect_tree", collect)
+    monkeypatch.setattr(proctree, "kill_tree", kill)
+    mgr = ManagedServerProcess()
+    mgr._proc = proc
+
+    assert mgr.stop(grace_seconds=0.1) is confirmed
+    assert calls == [("collect", [proc.pid]), ("kill", tree, {"grace_sec": 0.1, "confirm_sec": 0.1})]
+    assert mgr._proc is (None if confirmed else proc)
+    assert waited == ([{"timeout": 1.0}] if confirmed else [])
+
+
+def test_managed_never_started_can_confirm_stop():
+    mgr = ManagedServerProcess()
+    assert mgr.stop() is True
+    assert mgr.stop() is True
+
+
 def test_merge_worker_env_none():
     merged = rb._merge_worker_env(None)
     assert isinstance(merged, dict)
@@ -384,6 +549,7 @@ def test_managed_process_closes_files_on_spawn_failure(
 
     assert len(opened) == 2
     assert all(fh.closed for fh in opened)
+    assert mgr.stop() is True
 
 
 # ── shared artifact root ─────────────────────────────────────────────────────
@@ -747,7 +913,7 @@ class TestTheSessionBudgetReachesTheRayWorker:
             env=None,
             cwd=None,
             timeout_s=60,
-            soft_deadline_sec=None,
+            silence_timeout_sec=None,
             server_log_path=None,
             server_already_ready=False,
             session_remaining_sec=-1.0,
@@ -761,7 +927,7 @@ class TestTheSessionBudgetReachesTheRayWorker:
             env=None,
             cwd=None,
             timeout_s=60,
-            soft_deadline_sec=None,
+            silence_timeout_sec=None,
             server_log_path=None,
             server_already_ready=False,
             session_remaining_sec=3600.0,
@@ -830,7 +996,7 @@ class _FakeGpuActor:
         self.stopped = True
         self._alive = False
         self._exit = -15
-        return None
+        return True
 
 
 class _FakeRayP2:
@@ -1186,6 +1352,9 @@ class _RaisingActor:
 
 class _RaisingRay:
     class exceptions:  # noqa: N801
+        class RayError(RuntimeError):
+            pass
+
         class RayTaskError(Exception):
             pass
 
@@ -1199,10 +1368,10 @@ class _RaisingRay:
         return {}  # empty -> any feasibility check would fail fast
 
     def get(self, ref, **_kw):
-        raise RuntimeError("actor dead")
+        raise self.exceptions.RayError("actor dead")
 
     def kill(self, actor):
-        raise RuntimeError("kill failed")
+        raise self.exceptions.RayError("kill failed")
 
 
 def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatch):
@@ -1212,9 +1381,10 @@ def test_gpu_specialist_lease_dead_actor_degrades(monkeypatch: pytest.MonkeyPatc
     lease._actor = _RaisingActor()  # force the ray.get/kill paths
     assert lease.is_alive() is False  # 598-600
     assert lease.exit_code() is None  # 613-615
-    lease.stop()  # 628-630 (no raise)
-    lease.close()  # 639-641 (kill raises, swallowed)
-    assert lease._actor is None
+    assert lease.stop() is False
+    closed = lease.close()
+    assert closed is False
+    assert lease._actor is not None
 
 
 # ── coverage: ManagedServerProcess pid/exit_code before start ────────────────
@@ -1455,8 +1625,8 @@ def test_gpu_specialist_lease_stop_no_actor_noop():
 
 
 def test_gpu_specialist_lease_close_kills_live_actor(monkeypatch: pytest.MonkeyPatch):
-    """close() ray.kill()s a live actor and clears the handle (normal path)."""
-    fake = _LeaseFakeRay()
+    """A positive tree-cleanup acknowledgement allows the lease to be released."""
+    fake = _FakeRayP2()
     monkeypatch.setitem(sys.modules, "ray", fake)
     lease = rs.GpuSpecialistLease(num_gpus=1)
     actor = _FakeGpuActor()

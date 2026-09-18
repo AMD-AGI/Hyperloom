@@ -166,6 +166,7 @@ class _RenderMixin:
     ) -> str:
         """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
         from ...phases.machine_state import (
+            PHASE_ENABLEMENT,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
@@ -207,7 +208,7 @@ class _RenderMixin:
             allowed_line,
         ]
         # Whether deferring work to a later cycle is still a real option.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
             feasible = reloop and self.framework_agent_phase_enabled
             reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
@@ -224,56 +225,6 @@ class _RenderMixin:
                 reloop_line += " (projected)"
             lines.append(reloop_line)
         return "\n".join(lines)
-
-    def to_phase_budget_telemetry(
-        self,
-        *,
-        budget_pct: dict[str, float] | None = None,
-        now_unix: float | None = None,
-    ) -> str:
-        """Render the per-phase budget telemetry block for Robustness (one ``phase: elapsed=Xs cap=Ys (Z%)`` line per phase)."""
-        from ...phases.machine_state import (
-            DEFAULT_PHASE_BUDGET_PCT,
-            PHASE_NAMES,
-            is_phase_transition_row,
-            normalize_budget_pct,
-            phase_elapsed_seconds,
-        )
-
-        budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
-        # Aggregate elapsed per phase using real transitions only.
-        elapsed_per_phase: dict[str, float] = {}
-        history = [row for row in (self.phase_history or []) if is_phase_transition_row(row)]
-        for idx, row in enumerate(history):
-            if not isinstance(row, dict):
-                continue
-            phase = str(row.get("to_phase") or "").upper()
-            entered = float(row.get("ts_unix") or 0.0)
-            if not phase or entered <= 0:
-                continue
-            if idx + 1 < len(history) and isinstance(history[idx + 1], dict):
-                exited = float(history[idx + 1].get("ts_unix") or entered)
-            else:
-                # Currently-active segment — measure to now.
-                elapsed_now = phase_elapsed_seconds(self, now_unix=now_unix)
-                exited = entered + elapsed_now
-            elapsed_per_phase[phase] = elapsed_per_phase.get(phase, 0.0) + max(0.0, exited - entered)
-        if not elapsed_per_phase:
-            return "(no phase history yet)"
-        mm = float(self.max_minutes or 0.0)
-        total_budget_sec = mm * 60.0
-        lines: list[str] = []
-        # Iterate PHASE_NAMES for stable order.
-        for phase in PHASE_NAMES:
-            if phase not in elapsed_per_phase:
-                continue
-            elapsed = elapsed_per_phase[phase]
-            pct = budget.get(phase, DEFAULT_PHASE_BUDGET_PCT.get(phase, 0.0))
-            cap_sec = total_budget_sec * pct if total_budget_sec > 0 else 0.0
-            used_pct = (elapsed / cap_sec * 100.0) if cap_sec > 0 else 0.0
-            cap_line = f"cap={int(cap_sec)}s" if cap_sec > 0 else "cap=unlimited"
-            lines.append(f"  {phase}: elapsed={int(elapsed)}s {cap_line} used={used_pct:.0f}%")
-        return "\n".join(lines) or "(no phase history yet)"
 
     def to_resource_pools_summary(self) -> str:
         """Render the GPU pool / lane capacity block."""

@@ -177,7 +177,10 @@ After the runtime install, report whether it succeeded and the path to
 - `state.json` path;
 - initial health check result.
 
-During monitoring, print a short summary at each 300-second check:
+On each requested status check, read persisted state and print a short summary.
+Use platform-scheduled invocations if recurring checks are requested; do not
+start a background watchdog, hold a blocking polling connection, or auto-resume.
+Busy logs alone are not evidence of useful progress. Include:
 
 - process alive/stopped;
 - phase and `stop_reason`;
@@ -192,14 +195,14 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so robustness
-   and critic subprocesses can import `hyperloom.agents` after changing cwd.
-3. Run in background with `setsid nohup`.
+2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
+   critic subprocesses can import `hyperloom.agents` after changing cwd.
+3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the optimizer command to it with `run_in_background=true`, without shell-level detachment (`setsid`, `nohup`, or a trailing `&`); otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
 5. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
    in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
    this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT).
 6. Report the session ID, log path, PID, and initial health check result.
-7. Monitor the process every 300 seconds until work is done.
-8. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+7. Inspect persisted state on requested status checks; report when work stops.
+8. After diagnosing an unexpected crash and obtaining explicit resume approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 9. If `stop_reason` in the current session `state.json` is final, stop and exit.

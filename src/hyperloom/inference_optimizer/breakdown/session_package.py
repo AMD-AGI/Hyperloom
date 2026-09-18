@@ -18,6 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..session.paths import is_path_within
+from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
 log = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ RESERVED_PATHS: tuple[str, ...] = (
     "session_breakdown.json",
     "reports/final.json",
     "reports/session_terminal.json",
-    "reports/bringup/trees.json",
+    f"reports/{BRINGUP_SEGMENT}/trees.json",
 )
 
 # Curated artifact selection, relative to session_dir.
@@ -61,9 +62,9 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "reports/session_terminal.json",
     "reports/session_terminal.pre.json",
     # ── bring-up ladder: pinned source trees, one JSON per attempt ────
-    "reports/bringup/**",
+    f"reports/{BRINGUP_SEGMENT}/**",
     # ── reports/ ──────────────────────────────────────────────────────
-    "reports/enablement/**",
+    f"reports/{ENABLEMENT_SEGMENT}/**",
     "reports/final.md",
     "reports/optimization_journal.json",
     "reports/kernel_optimization_summary.json",

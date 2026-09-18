@@ -5,18 +5,12 @@
 
 from __future__ import annotations
 
-import json
-import logging
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
-from hyperloom.agents.robustness.role.findings import FINDINGS_SUBDIR
 from hyperloom.common.timeutil import now_iso
 
-
-log = logging.getLogger(__name__)
 
 from .errors import (
     InboxParseError,
@@ -70,7 +64,6 @@ _FRAMEWORK_OP_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
         "target_analysis",
-        "recover",
         "report",
         "session_breakdown",
     }
@@ -152,88 +145,6 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
     return ACTION_CLASS_EVIDENCE_PRODUCER
 
 
-# Robustness finding discovery / load helpers.
-
-# Severity rank for the "min_severity" filter: high > medium > low.
-_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
-
-# Findings-sink JSONL subdir; imported from the robustness role layer (``role.findings.FINDINGS_SUBDIR``, the on-disk
-# source of truth) so this cross-package path cannot silently drift from where the FindingSink writes.
-_ROBUSTNESS_FINDINGS_SUBDIR: str = FINDINGS_SUBDIR
-
-
-def _discover_robustness_findings_path(session_id: str) -> Path | None:
-    """Locate ``<session>.jsonl`` from the Robustness FindingSink."""
-    explicit = os.environ.get("CRITIC_ROBUSTNESS_FINDINGS_DIR", "").strip()
-    if explicit:
-        candidate = Path(explicit) / f"{session_id or 'default'}.jsonl"
-        return candidate if candidate.is_file() else None
-    session_dir = os.environ.get("ROBUSTNESS_AGENT_SESSION_DIR", "").strip()
-    if not session_dir:
-        return None
-    candidate = Path(session_dir) / _ROBUSTNESS_FINDINGS_SUBDIR / f"{session_id or 'default'}.jsonl"
-    return candidate if candidate.is_file() else None
-
-
-def _load_robustness_priors(
-    path: Path,
-    *,
-    limit: int,
-    min_severity: str,
-) -> list[dict[str, Any]]:
-    """Tail the JSONL and return priors that meet the severity floor."""
-    min_rank = _SEVERITY_RANK.get(min_severity, _SEVERITY_RANK["high"])
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as exc:
-        log.warning(
-            "critic: cannot read robustness findings %s: %s",
-            path,
-            exc,
-        )
-        return []
-    rows: list[dict[str, Any]] = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        sev = str(obj.get("severity") or "").lower()
-        if _SEVERITY_RANK.get(sev, 0) < min_rank:
-            continue
-        rows.append(obj)
-    if not rows:
-        return []
-    selected = rows[-limit:]
-    # Narrow projection to what the SKILL needs.
-    out: list[dict[str, Any]] = []
-    for row in selected:
-        out.append(
-            {
-                "symptom_name": row.get("symptom_name"),
-                "severity": row.get("severity"),
-                "tick_index": row.get("tick_index"),
-                "timestamp_unix": row.get("timestamp_unix"),
-                "summary": row.get("summary"),
-                "rca_text": row.get("rca_text"),
-                "intents": [
-                    {
-                        "intent_type": (i or {}).get("intent_type"),
-                        "payload": (i or {}).get("payload"),
-                    }
-                    for i in (row.get("intents") or [])
-                    if isinstance(i, dict)
-                ],
-            }
-        )
-    return out
-
-
 # ---------------------------------------------------------------------------
 @dataclass
 class JudgeBundle:
@@ -253,8 +164,6 @@ class JudgeBundle:
     kb_priors_for_decision: list[dict[str, Any]] = field(default_factory=list)
     # Audit trail for the historical KB prior reads; consumed by the Coordinator.
     kb_priors_trace: dict[str, Any] = field(default_factory=dict)
-    # Recent Robustness findings; empty when absent or disabled.
-    robustness_priors: list[dict[str, Any]] = field(default_factory=list)
     kb_read_skipped_reason: str | None = None
     review_constraints: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -275,7 +184,6 @@ class JudgeBundle:
             "kb_priors_by_proposal": {k: [dict(p) for p in v] for k, v in self.kb_priors_by_proposal.items()},
             "kb_priors_for_decision": [dict(p) for p in self.kb_priors_for_decision],
             "kb_priors_trace": dict(self.kb_priors_trace),
-            "robustness_priors": [dict(p) for p in self.robustness_priors],
             "kb_read_skipped_reason": self.kb_read_skipped_reason,
             "review_constraints": dict(self.review_constraints),
             "notes": list(self.notes),
@@ -497,35 +405,7 @@ class DecisionReviewer:
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
 
-        # Best-effort recent Robustness findings; never blocks the review.
-        self._inject_robustness_priors(bundle)
         return bundle
-
-    def _inject_robustness_priors(self, bundle: JudgeBundle) -> None:
-        """Populate ``bundle.robustness_priors`` from recent findings."""
-        if os.environ.get("CRITIC_ROBUSTNESS_PRIORS_DISABLED", "").lower() in {"1", "true", "yes"}:
-            return
-        findings_path = _discover_robustness_findings_path(bundle.session_id)
-        if findings_path is None:
-            return
-        limit = int(os.environ.get("CRITIC_ROBUSTNESS_PRIORS_LIMIT") or 5)
-        # Severity floor: HIGH by default; drop to MEDIUM via the env knob.
-        min_severity = os.environ.get("CRITIC_ROBUSTNESS_PRIORS_MIN_SEVERITY", "high").lower()
-        try:
-            priors = _load_robustness_priors(
-                findings_path,
-                limit=max(1, limit),
-                min_severity=min_severity,
-            )
-        except Exception:  # noqa: BLE001 — best-effort injection
-            log.exception(
-                "critic: failed to load robustness priors from %s",
-                findings_path,
-            )
-            return
-        if priors:
-            bundle.robustness_priors = priors
-            bundle.notes.append(f"robustness_priors_injected count={len(priors)} path={findings_path}")
 
     # Phase 2: commit-review
     def commit_review(

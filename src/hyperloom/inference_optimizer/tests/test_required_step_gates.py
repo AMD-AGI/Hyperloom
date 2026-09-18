@@ -13,7 +13,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -43,7 +42,6 @@ def _backends_full() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
