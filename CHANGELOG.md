@@ -35,8 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   and repeated inline calls return stored terminal results instead of rerunning.
 - **Refuse unsafe session resumes explicitly.** Legacy or foreign execution
   ownership and unproven historical cancellations now produce bounded task/lane
-  diagnostics before resume writes or dispatch. No ownership is cleared; cleanup
-  must be verified in the original execution environment. Resume admission and
+  diagnostics before resume writes or dispatch. Resume admission itself clears
+  no ownership. After independently verifying that a task's complete process tree,
+  remote workers and Ray actor have stopped, operators can use
+  `recover-session --confirm-stopped TASK_ID --confirmation-reason TEXT` to record
+  that confirmation, cancel an unfinished task, and release only its unattributed
+  execution/GPU records under the POSIX session lock. This explicit operation preserves rounds
+  and other tasks, rejects nonempty owner scopes, and neither stops workers nor
+  accepts old results or starts a resume. Existing `--force` remains report-only.
+  Resume admission and
   round reconciliation honor the latest recorded cleanup outcome, including
   results recorded after an earlier terminal transition. A Ray worker whose root
   exited is not treated as proof that detached descendants exited, and a missing

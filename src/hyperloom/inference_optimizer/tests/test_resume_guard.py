@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import sqlite3
 import sys
 from contextlib import closing
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -482,3 +485,504 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     resume_leg.assert_not_called()
     assert path.read_bytes() == before_db
     assert state_path.read_bytes() == before_state
+
+
+def _recover_module():
+    # Load the real offline handler without the POSIX-only CLI package on Windows.
+    path = Path(__file__).parents[1] / "cli" / "recover.py"
+    spec = importlib.util.spec_from_file_location("hyperloom.inference_optimizer.cli.recover", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _recover_args(tmp_path, **changes):
+    values = dict(
+        session_dir=tmp_path,
+        force=False,
+        backfill_trace=False,
+        confirm_stopped="task-1",
+        confirmation_reason="Verified process tree and Ray actors stopped; secret-ticket",
+    )
+    values.update(changes)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize("status", ["confirmed", "already_confirmed", "nothing_to_confirm"])
+def test_confirmation_cli_is_offline_and_does_not_resume(tmp_path, monkeypatch, capsys, status):
+    from hyperloom.inference_optimizer.session import resume_guard
+
+    recover = _recover_module()
+    status_probe = Mock(side_effect=AssertionError("reports and network must not be reached"))
+    monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
+    confirm = Mock(return_value=dict(status=status, task_id="task-1", released_leases=1, released_gpu_leases=1))
+    monkeypatch.setattr(resume_guard, "confirm_task_stopped", confirm, raising=False)
+    args = _recover_args(tmp_path)
+
+    result = recover._run_recover_session(args)
+
+    assert result == 0
+    confirm.assert_called_once_with(tmp_path.resolve(), task_id="task-1", reason=args.confirmation_reason)
+    status_probe.assert_not_called()
+    output = capsys.readouterr()
+    assert status in output.out and "task-1" in output.out
+    assert "secret-ticket" not in output.out + output.err
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"confirm_stopped": None},
+        {"confirmation_reason": None},
+        {"confirm_stopped": ""},
+        {"confirmation_reason": " \t"},
+        {"force": True},
+        {"backfill_trace": True},
+    ],
+)
+def test_confirmation_cli_rejects_bad_argument_pairs_before_reports(tmp_path, monkeypatch, changes):
+    from hyperloom.inference_optimizer.session import resume_guard
+
+    recover = _recover_module()
+    status_probe = Mock(side_effect=AssertionError("reports must not be read"))
+    monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
+    confirm = Mock(side_effect=AssertionError("invalid arguments must not reach confirmation"))
+    monkeypatch.setattr(resume_guard, "confirm_task_stopped", confirm, raising=False)
+
+    result = recover._run_recover_session(_recover_args(tmp_path, **changes))
+
+    assert result == 2
+    status_probe.assert_not_called()
+    confirm.assert_not_called()
+
+
+def test_confirmation_cli_keeps_old_namespace_compatible(tmp_path, monkeypatch):
+    recover = _recover_module()
+    status_probe = Mock(
+        return_value=dict(
+            close_done=True, breakdown_exists=True, breakdown_recorded=True, counts_final=True, looks_complete=True
+        )
+    )
+    monkeypatch.setattr(recover, "_session_recovery_status", status_probe)
+    args = argparse.Namespace(session_dir=tmp_path, force=False, backfill_trace=False)
+
+    result = recover._run_recover_session(args)
+
+    assert result == 0
+    status_probe.assert_called_once_with(tmp_path.resolve())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="CLI parser imports require POSIX fcntl")
+def test_confirmation_parser_accepts_only_explicit_task_arguments(tmp_path):
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "recover-session",
+            "--session-dir",
+            str(tmp_path),
+            "--confirm-stopped",
+            "task-1",
+            "--confirmation-reason",
+            "Verified all workers stopped",
+        ]
+    )
+    assert args.confirm_stopped == "task-1"
+    assert args.confirmation_reason == "Verified all workers stopped"
+    old = parser.parse_args(["recover-session", "--session-dir", str(tmp_path)])
+    assert old.confirm_stopped is None and old.confirmation_reason is None
+
+
+_CONFIRMED_AT = "2026-09-18T12:00:00+00:00"
+_CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor stopped"
+
+
+def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):
+    from hyperloom.inference_optimizer.session.resume_guard import _confirm_task_stopped_in_transaction
+
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True)) as db, db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        return _confirm_task_stopped_in_transaction(
+            db, task_id=task_id, reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT
+        )
+
+
+def _rows(path, table):
+    with closing(sqlite3.connect(path)) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(row) for row in db.execute(f"SELECT * FROM {table}")]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_confirmation_clears_only_target_execution_with_durable_audit(tmp_path, legacy):
+    path = _database(tmp_path, legacy=legacy)
+    _task(path)
+    _task(path, state="queued", task_id="other-task")
+    scope = "" if legacy else ", ''"
+    for lane, holder, task in [
+        ("benchmark_lane", "execution-1", "task-1"),
+        ("bringup_round", "round-1", "task-1"),
+        ("other_lane", "execution-2", "other-task"),
+    ]:
+        _execute(path, f"INSERT INTO leases VALUES (?, ?, ?, 123{scope})", (lane, holder, task))
+    _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
+    _execute(path, "INSERT INTO gpu_leases VALUES (1, 'worker-1', 'other-task')")
+    before_rounds = _rows(path, "bringup_rounds")
+    before_round_leases = [row for row in _rows(path, "leases") if row["lane"] == "bringup_round"]
+    before_other = _rows(path, "tasks")[1]
+    with pytest.raises(ResumeBlocked):
+        ensure_resume_safe(tmp_path, owner_scope="local")
+
+    result = _confirm_in_sqlite(path)
+
+    assert result == dict(status="confirmed", task_id="task-1", released_leases=1, released_gpu_leases=1)
+    task, other = _rows(path, "tasks")
+    assert task["state"] == "cancelled"
+    assert other == before_other
+    entry = json.loads(task["history"])[-1]
+    assert entry["from"] == "running" and entry["to"] == "cancelled"
+    assert entry["ts"] == _CONFIRMED_AT and "progress" not in entry
+    evidence = entry["evidence"]
+    assert evidence["reason"] == "operator_confirmed_stopped"
+    assert evidence["cleanup_confirmed"] is True
+    assert evidence["operator"] == "test-operator"
+    assert evidence["confirmation_reason"] == _CONFIRMATION_REASON
+    assert evidence["released_leases"] == [{"lane": "benchmark_lane", "holder_id": "execution-1"}]
+    assert evidence["released_gpu_leases"] == [{"gpu_id": 0, "holder_id": "worker-0"}]
+    outcome = evidence["outcome"]
+    assert set(outcome) == {"task_id", "state", "result", "error", "error_class"}
+    assert outcome["task_id"] == "task-1" and outcome["state"] == "cancelled" and outcome["result"] == {}
+    assert outcome["error"] and outcome["error_class"] == "operator_confirmed_stopped"
+    assert _rows(path, "bringup_rounds") == before_rounds
+    assert [row for row in _rows(path, "leases") if row["lane"] == "bringup_round"] == before_round_leases
+    assert _rows(path, "gpu_leases") == [{"gpu_id": 1, "holder_id": "worker-1", "task_id": "other-task"}]
+    with pytest.raises(ResumeBlocked, match="other-task"):
+        ensure_resume_safe(tmp_path, owner_scope="local")
+    _confirm_in_sqlite(path, task_id="other-task")
+    ensure_resume_safe(tmp_path, owner_scope="local")
+    if legacy:
+        assert "owner_scope" not in _rows(path, "leases")[0]
+
+
+@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
+def test_confirmation_preserves_terminal_history_payload_and_timestamp(tmp_path, state):
+    path = _database(tmp_path)
+    old_evidence = {"cleanup_confirmed": False, "outcome": {"state": "succeeded", "result": {"secret": "old-result"}}}
+    _task(path, state=state, evidence=old_evidence)
+    _execute(path, "ALTER TABLE tasks ADD COLUMN updated_at TEXT DEFAULT '2026-01-01T00:00:00+00:00'")
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
+    old_history = json.loads(_rows(path, "tasks")[0]["history"])
+
+    _confirm_in_sqlite(path)
+
+    task = _rows(path, "tasks")[0]
+    history = json.loads(task["history"])
+    assert history[:-1] == old_history
+    assert history[-1]["evidence"]["outcome"]["result"] == {}
+    assert "old-result" not in json.dumps(history[-1])
+    if state in {"queued", "running"}:
+        assert task["state"] == "cancelled" and task["updated_at"] == _CONFIRMED_AT
+    else:
+        assert task["state"] == state and task["updated_at"] == "2026-01-01T00:00:00+00:00"
+        assert set(history[-1]) == {"ts", "evidence"}
+
+
+@pytest.mark.parametrize("state", ["running", "cancelled"])
+def test_confirmation_without_execution_leases_can_resolve_uncertain_owner(tmp_path, state):
+    path = _database(tmp_path)
+    _task(path, state=state, evidence={"reason": "cancelled_in_flight"})
+    if state == "cancelled":
+        _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
+    for table in ("leases", "gpu_leases"):
+        _execute(path, f"DROP TABLE {table}")
+    result = _confirm_in_sqlite(path)
+    assert result == dict(status="confirmed", task_id="task-1", released_leases=0, released_gpu_leases=0)
+    ensure_resume_safe(tmp_path, owner_scope="local")
+    with closing(sqlite3.connect(path)) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "leases" not in tables and "gpu_leases" not in tables
+
+
+@pytest.mark.parametrize("state", ["queued", "succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("open_round", [False, True])
+def test_confirmation_does_not_cancel_clean_or_unstarted_task(tmp_path, state, open_round):
+    path = _database(tmp_path)
+    _task(path, state=state, evidence={"reason": "completed"})
+    if open_round:
+        _execute(path, "INSERT INTO bringup_rounds VALUES ('round-1', 'open', 'task-1')")
+        _execute(path, "INSERT INTO leases VALUES ('bringup_round', 'round-1', 'task-1', 0, '')")
+    before = path.read_bytes()
+    result = _confirm_in_sqlite(path)
+    assert result == dict(status="nothing_to_confirm", task_id="task-1", released_leases=0, released_gpu_leases=0)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("scope", ["local", "foreign", " ", None, 0])
+@pytest.mark.parametrize("lane", ["benchmark_lane", "bringup_round"])
+def test_confirmation_rejects_any_nonempty_or_invalid_target_scope(tmp_path, scope, lane):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
+
+    path = _database(tmp_path, legacy=True)
+    _task(path)
+    _execute(path, "ALTER TABLE leases ADD COLUMN owner_scope")
+    _execute(path, "INSERT INTO leases VALUES ('other_lane', 'empty-owner', 'task-1', 123, '')")
+    _execute(path, "INSERT INTO leases VALUES (?, 'owner', 'task-1', 123, ?)", (lane, scope))
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker-0', 'task-1')")
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError, match="scope"):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("later_work", ["gpu", "lease", "running"])
+def test_confirmation_is_idempotent_but_cannot_authorize_later_work(tmp_path, later_work):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
+
+    path = _database(tmp_path)
+    _task(path)
+    first = _confirm_in_sqlite(path)
+    assert first["status"] == "confirmed"
+    before = path.read_bytes()
+    second = _confirm_in_sqlite(path)
+    assert second == dict(status="already_confirmed", task_id="task-1", released_leases=0, released_gpu_leases=0)
+    assert path.read_bytes() == before
+    if later_work == "gpu":
+        _execute(path, "INSERT INTO gpu_leases VALUES (0, 'new-worker', 'task-1')")
+    elif later_work == "lease":
+        _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'new-holder', 'task-1', 123, '')")
+    else:
+        _execute(path, "UPDATE tasks SET state='running'")
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError, match="after|later|new"):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        {"evidence": {"cleanup_confirmed": False, "outcome": {"state": "cancelled"}}},
+        {"to": "cancelled", "evidence": {"reason": "cancelled_in_flight"}},
+        {"to": "cancelled", "evidence": {"lease_ttl_sec": 5}},
+        {"to": "running", "evidence": {}},
+        {"to": [], "evidence": {}},
+        {"evidence": {"cleanup_confirmed": True, "outcome": {"state": "succeeded", "result": {}}}},
+    ],
+)
+def test_confirmation_rejects_evidence_after_prior_manual_confirmation(tmp_path, later):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
+
+    path = _database(tmp_path)
+    _task(path)
+    _confirm_in_sqlite(path)
+    history = json.loads(_rows(path, "tasks")[0]["history"]) + [later]
+    _execute(path, "UPDATE tasks SET history=?", (json.dumps(history),))
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("bad_history", [None, "{broken", "{}", "null", '"text"'])
+def test_confirmation_rejects_unreadable_history_without_changes(tmp_path, bad_history):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
+
+    path = _database(tmp_path)
+    _task(path)
+    _execute(path, "UPDATE tasks SET history=?", (bad_history,))
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError, match="history"):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("missing", ["tasks", "row", "state"])
+def test_confirmation_requires_existing_valid_task(tmp_path, missing):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError
+
+    path = _database(tmp_path)
+    if missing == "tasks":
+        _execute(path, "DROP TABLE tasks")
+    elif missing == "state":
+        _task(path, state="invalid")
+    before = path.read_bytes()
+    with pytest.raises(CleanupConfirmationError, match="task|state"):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("failed_table", ["leases", "gpu_leases"])
+def test_confirmation_sql_failure_rolls_back_history_and_all_releases(tmp_path, failed_table):
+    path = _database(tmp_path)
+    _task(path)
+    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'owner', 'task-1', 123, '')")
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
+    _execute(
+        path,
+        f"CREATE TRIGGER reject_delete BEFORE DELETE ON {failed_table} "
+        "BEGIN SELECT RAISE(ABORT, 'injected deletion failure'); END",
+    )
+    before = path.read_bytes()
+    with pytest.raises(sqlite3.IntegrityError, match="injected deletion failure"):
+        _confirm_in_sqlite(path)
+    assert path.read_bytes() == before
+
+
+def test_confirmation_requires_fcntl_before_acquiring_session_lock(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.session import lock, resume_guard
+
+    path = _database(tmp_path)
+    _task(path)
+    before = path.read_bytes()
+    monkeypatch.setattr(lock, "fcntl", None)
+    acquire = Mock(side_effect=AssertionError("non-exclusive fallback must not be used"))
+    monkeypatch.setattr(lock.SessionLock, "acquire", acquire)
+    with pytest.raises(resume_guard.CleanupConfirmationError, match="POSIX|fcntl"):
+        resume_guard.confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
+    acquire.assert_not_called()
+    assert path.read_bytes() == before
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
+def test_confirmation_public_uses_real_session_lock_and_existing_database(tmp_path):
+    from hyperloom.inference_optimizer.session.lock import SessionLock
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
+
+    path = _database(tmp_path, legacy=True)
+    _task(path)
+    before = path.read_bytes()
+    with SessionLock(tmp_path):
+        with pytest.raises(CleanupConfirmationError, match="lock|running"):
+            confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
+    assert path.read_bytes() == before
+    result = confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
+    assert result["status"] == "confirmed"
+    ensure_resume_safe(tmp_path, owner_scope="local")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Confirmation requires a real POSIX flock")
+@pytest.mark.parametrize("kind", ["missing", "corrupt"])
+def test_confirmation_public_missing_or_corrupt_database_is_not_created_or_repaired(tmp_path, kind):
+    from hyperloom.inference_optimizer.session.resume_guard import CleanupConfirmationError, confirm_task_stopped
+
+    path = db_path_for(tmp_path)
+    if kind == "corrupt":
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"not sqlite")
+    with pytest.raises(CleanupConfirmationError):
+        confirm_task_stopped(tmp_path, task_id="task-1", reason=_CONFIRMATION_REASON)
+    if kind == "corrupt":
+        assert path.read_bytes() == b"not sqlite"
+    else:
+        assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    "task_id,reason", [("", "valid"), (" ", "valid"), (" task-1", "valid"), ("task-1", ""), ("task-1", " \t")]
+)
+def test_confirmation_public_validates_arguments_before_lock(tmp_path, monkeypatch, task_id, reason):
+    from hyperloom.inference_optimizer.session import lock, resume_guard
+
+    acquire = Mock(side_effect=AssertionError("invalid arguments must not acquire the lock"))
+    monkeypatch.setattr(lock.SessionLock, "acquire", acquire)
+    with pytest.raises(resume_guard.CleanupConfirmationError, match="task ID|reason"):
+        resume_guard.confirm_task_stopped(tmp_path, task_id=task_id, reason=reason)
+    acquire.assert_not_called()
+    assert not db_path_for(tmp_path).exists()
+
+
+def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path, monkeypatch, capsys):
+    from hyperloom.inference_optimizer.session import resume_guard
+
+    recover = _recover_module()
+    confirm = Mock(side_effect=resume_guard.CleanupConfirmationError("scope is not empty"))
+    monkeypatch.setattr(resume_guard, "confirm_task_stopped", confirm)
+    status = Mock(side_effect=AssertionError("reports must not run after a rejected confirmation"))
+    monkeypatch.setattr(recover, "_session_recovery_status", status)
+    result = recover._run_recover_session(_recover_args(tmp_path))
+    assert result == 2
+    assert "scope" in capsys.readouterr().err
+    status.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
+    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundStore
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+    path = db_path_for(tmp_path)
+    db = SqliteConnection(path)
+    try:
+        tasks = TaskRegistry(db)
+        rounds = RoundStore(db)
+        await tasks.create(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
+        await tasks.transition("task-1", "running")
+        await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
+        opened = await rounds.open("round-1", holder_task_id="task-1", lease_sec=1, now_unix=1, request_id="open")
+        assert opened.ok
+        reconciler = Reconciler(
+            rounds=rounds,
+            tasks=tasks,
+            locks=ResourceLockManager(SqliteLeaseBackend(db)),
+            shared_state=None,
+            terminal_holder_cap_sec=0,
+        )
+        report = await reconciler.run(2_000_000_000)
+        assert not report.settled and not report.failures
+        before = {table: _rows(path, table) for table in ("bringup_rounds", "leases", "events", "round_events")}
+        old_updated_at = (await tasks.get("task-1")).updated_at
+
+        result = _confirm_in_sqlite(path)
+
+        assert result["status"] == "confirmed"
+        for table, rows in before.items():
+            assert _rows(path, table) == rows
+        assert (await tasks.get("task-1")).updated_at == old_updated_at
+        ensure_resume_safe(tmp_path, owner_scope="local")
+        report = await reconciler.run(2_000_000_000)
+        assert report.settled == [("round-1", EXPIRED_REAPED)] and not report.failures
+        assert (await rounds.get("round-1")).state == "settled"
+        assert _rows(path, "leases") == []
+        assert _rows(path, "events") == before["events"]
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="End-to-end CLI confirmation requires a real POSIX flock")
+def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+    path = _database(tmp_path, legacy=True)
+    _task(path)
+    _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder', 'task-1', 123)")
+    _execute(path, "INSERT INTO gpu_leases VALUES (0, 'worker', 'task-1')")
+    with pytest.raises(ResumeBlocked):
+        ensure_resume_safe(tmp_path, owner_scope="local")
+    recover = _recover_module()
+    monkeypatch.setattr(recover, "_session_recovery_status", Mock(side_effect=AssertionError("not a report command")))
+    args = _build_parser().parse_args(
+        [
+            "recover-session",
+            "--session-dir",
+            str(tmp_path),
+            "--confirm-stopped",
+            "task-1",
+            "--confirmation-reason",
+            _CONFIRMATION_REASON,
+        ]
+    )
+    result = recover._run_recover_session(args)
+    assert result == 0
+    ensure_resume_safe(tmp_path, owner_scope="local")
+    from datetime import datetime, timedelta
+    import pwd
+
+    entry = json.loads(_rows(path, "tasks")[0]["history"])[-1]
+    assert entry["evidence"]["operator"] == pwd.getpwuid(os.getuid()).pw_name
+    assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)

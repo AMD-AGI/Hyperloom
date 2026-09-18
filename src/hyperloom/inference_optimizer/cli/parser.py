@@ -1187,5 +1187,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "session (e.g. it was disabled during the run); otherwise it "
         "duplicates generations already pushed live.",
     )
+    rec.add_argument(
+        "--confirm-stopped",
+        metavar="TASK_ID",
+        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
+        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirmation-reason",
+        metavar="TEXT",
+        help="Required audit reason for --confirm-stopped. Both options must be provided together "
+        "and cannot be combined with --force or --backfill-trace.",
+    )
 
     return p
