@@ -87,16 +87,6 @@ def _pdeathsig_preexec() -> None:
         pass
 
 
-def _managed_group_running(pgid: int) -> bool:
-    """Treat zombie-only owned groups as stopped, retaining unknown observations."""
-    from hyperloom.common.proctree import group_alive, group_members
-
-    if not group_alive(pgid):
-        return False
-    members = group_members(pgid)
-    return not members or any(state != "Z" for _pid, _start, state in members)
-
-
 @dataclass
 class ManagedServerProcess:
     """Supervise a single GPU/serving subprocess tied to this object's lifetime.
@@ -181,7 +171,7 @@ class ManagedServerProcess:
 
     def stop(self, *, grace_seconds: float = 5.0) -> bool:
         """Confirm teardown of the enumerated live tree before dropping its handle."""
-        from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
+        from hyperloom.common.proctree import collect_tree, kill_tree
         from ._subprocess_kill import kill_my_spawned_server
 
         proc = self._proc
@@ -191,19 +181,7 @@ class ManagedServerProcess:
             kill_my_spawned_server(proc, grace_seconds=grace_seconds)
             return False
         if proc.poll() is not None:
-            if not _managed_group_running(proc.pid):
-                self._proc = None
-                return True
-            for sig in (signal.SIGTERM, signal.SIGKILL):
-                signal_group(proc.pid, sig, what="ManagedServerProcess.stop")
-                deadline = time.monotonic() + grace_seconds
-                while _managed_group_running(proc.pid):
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.05)
-                else:
-                    self._proc = None
-                    return True
+            # Detached descendants can outlive both the root and its old process group.
             return False
         try:
             tree = collect_tree([proc.pid])
@@ -669,25 +647,23 @@ class GpuSpecialistLease:
     def close(self) -> bool:
         """Stop the specialist, then kill the actor to release the GPU lease.
 
-        The stop comes first for the same reason it does in
-        :meth:`ServingLease.close`: ``ray.kill`` skips ``__ray_terminate__``,
-        so killing the actor first leaves the specialist's process tree with no
-        one to reap it. Idempotent, never raises.
+        ``ray.kill`` skips ``__ray_terminate__``, so an unconfirmed stop keeps
+        the same actor available for the release callback's next cleanup attempt.
+        A pending start without an acknowledgement remains unconfirmed too.
         """
         if self._actor is None:
             return True
-        stopped = self.stop()
+        if not self.stop():
+            return False
         import ray  # noqa: PLC0415
 
         try:
-            # Revoke queued starts too; a missing cleanup ack still retains capacity.
             ray.kill(self._actor)
         except (ray.exceptions.RayError, OSError):
             return False
-        if stopped:
-            self._actor = None
-            self._start_ref = None
-        return stopped
+        self._actor = None
+        self._start_ref = None
+        return True
 
 
 def maybe_gpu_specialist_lease(

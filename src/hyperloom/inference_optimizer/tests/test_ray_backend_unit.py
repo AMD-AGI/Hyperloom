@@ -126,24 +126,33 @@ def test_specialist_close_requires_positive_worker_cleanup_ack(monkeypatch, ack)
     lease._actor = actor
     closed = lease.close()
     assert closed is (ack is True)
-    assert killed == [actor]
+    assert killed == ([actor] if ack is True else [])
     assert (lease._actor is None) is (ack is True)
 
 
-def test_managed_exited_root_confirms_its_known_group(monkeypatch):
+@pytest.mark.parametrize(
+    ("group_present", "members"),
+    [(False, []), (True, [(10, 100, "Z")]), (True, [(10, 100, "S")]), (True, [])],
+)
+def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, group_present, members):
     from types import SimpleNamespace
     from hyperloom.common import proctree
 
     proc = SimpleNamespace(pid=123456, poll=lambda: 0)
     mgr = ManagedServerProcess()
     mgr._proc = proc
-    monkeypatch.setattr(rs.os, "name", "posix")
-    monkeypatch.setattr(proctree, "group_alive", lambda pgid: False)
-    assert mgr.stop() is True
-    assert mgr._proc is None
+    monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(proctree, "group_alive", lambda pgid: group_present)
+    monkeypatch.setattr(proctree, "group_members", lambda pgid: members)
+    signals = []
+    monkeypatch.setattr(proctree, "signal_group", lambda *a, **kw: signals.append(a))
+
+    assert mgr.stop(grace_seconds=0) is False
+    assert mgr._proc is proc
+    assert signals == [], "an old PGID does not establish ownership"
 
 
-def test_pending_actor_is_cancelled_even_without_cleanup_ack(monkeypatch):
+def test_pending_actor_is_retained_without_cleanup_ack(monkeypatch):
     from types import SimpleNamespace
 
     class RayError(Exception):
@@ -166,24 +175,78 @@ def test_pending_actor_is_cancelled_even_without_cleanup_ack(monkeypatch):
     lease._start_ref = object()
     closed = lease.close()
     assert closed is False
-    assert killed == [actor]
+    assert killed == []
     assert lease._actor is actor
+    assert lease._start_ref is not None
+    assert lease.pid() is None
 
 
-def test_owned_group_with_only_zombies_is_confirmed_stopped(monkeypatch):
+def test_specialist_close_can_confirm_on_same_actor_after_unconfirmed_stop(monkeypatch):
+    from types import SimpleNamespace
+
+    replies = iter([False, True])
+    stops = []
+
+    def stop():
+        stops.append(True)
+        return next(replies)
+
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=stop))
+    killed = []
+    monkeypatch.setitem(sys.modules, "ray", SimpleNamespace(get=lambda ref, **kw: ref, kill=killed.append))
+    lease = rs.GpuSpecialistLease(num_gpus=1)
+    lease._actor = actor
+    lease._start_ref = start_ref = object()
+
+    assert lease.close() is False
+    assert lease._actor is actor
+    assert lease._start_ref is start_ref
+    assert killed == []
+    assert len(stops) == 1
+
+    assert lease.close() is True
+    assert lease._actor is None
+    assert lease._start_ref is None
+    assert killed == [actor]
+    assert len(stops) == 2
+    assert lease.close() is True
+    assert len(stops) == 2
+
+
+@pytest.mark.parametrize("confirmed", [False, True])
+def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
+    from types import SimpleNamespace
     from hyperloom.common import proctree
 
-    monkeypatch.setattr(proctree, "group_alive", lambda pgid: True)
-    monkeypatch.setattr(proctree, "group_members", lambda pgid: [(10, 100, "Z")])
-    assert rs._managed_group_running(123) is False
+    waited = []
+    proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))
+    tree = object()
+    calls = []
+
+    def collect(pids):
+        calls.append(("collect", pids))
+        return tree
+
+    def kill(collected, **kwargs):
+        calls.append(("kill", collected, kwargs))
+        return confirmed
+
+    monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
+    monkeypatch.setattr(proctree, "collect_tree", collect)
+    monkeypatch.setattr(proctree, "kill_tree", kill)
+    mgr = ManagedServerProcess()
+    mgr._proc = proc
+
+    assert mgr.stop(grace_seconds=0.1) is confirmed
+    assert calls == [("collect", [proc.pid]), ("kill", tree, {"grace_sec": 0.1, "confirm_sec": 0.1})]
+    assert mgr._proc is (None if confirmed else proc)
+    assert waited == ([{"timeout": 1.0}] if confirmed else [])
 
 
-def test_owned_group_unreadable_members_is_not_confirmed_stopped(monkeypatch):
-    from hyperloom.common import proctree
-
-    monkeypatch.setattr(proctree, "group_alive", lambda pgid: True)
-    monkeypatch.setattr(proctree, "group_members", lambda pgid: [])
-    assert rs._managed_group_running(123) is True
+def test_managed_never_started_can_confirm_stop():
+    mgr = ManagedServerProcess()
+    assert mgr.stop() is True
+    assert mgr.stop() is True
 
 
 def test_merge_worker_env_none():
@@ -483,6 +546,7 @@ def test_managed_process_closes_files_on_spawn_failure(
 
     assert len(opened) == 2
     assert all(fh.closed for fh in opened)
+    assert mgr.stop() is True
 
 
 # ── shared artifact root ─────────────────────────────────────────────────────
