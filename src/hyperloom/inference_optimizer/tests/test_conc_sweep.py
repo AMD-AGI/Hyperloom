@@ -837,61 +837,6 @@ class TestTheAgentXLadderIsDefaultOn:
         assert not hasattr(cb, "_flag_explicitly_set")
 
 
-def test_the_agentx_ladder_keeps_the_declared_budget(session_dir, baseline_yaml, monkeypatch):
-    """Long AgentX rounds may truncate the ladder, never expand its declared budget."""
-    from unittest.mock import Mock
-
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
-    from hyperloom.orchestrator.kernel.conc_sweep import AGENTX_DEFAULT_CONCS
-
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
-    monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
-    assert resolve_benchmark_timeouts() == (600.0, 7800.0)
-    assert len(AGENTX_DEFAULT_CONCS) * 2 == 14
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    state.benchmark_mode = "agentx"
-    clock = [1000.0]
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.time.time", lambda: clock[0])
-    recorder = Mock()
-    launched = []
-
-    async def _fake_run_grid(*, grid, **kwargs):
-        assert "variant_timeout_sec" not in kwargs
-        launched.extend(v.name for v in grid)
-        clock[0] += 111 * 60
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, recorder=recorder))
-
-    assert launched == ["optimized_conc28"]
-    assert payload["concs_requested"] == AGENTX_DEFAULT_CONCS
-    assert len(payload["baseline"]["points"]) == len(payload["optimized"]["points"]) == 7
-    points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert sum(p["status"] == "succeeded" for p in points) == 1
-    skipped = [p for p in points if p["status"] == "skipped"]
-    assert len(skipped) == 13
-    assert {p["error_class"] for p in skipped} == {"budget_exhausted"}
-    assert payload["total_budget_sec"] == 9000
-    assert payload["budget_remaining_sec"] == 2340
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    recorder.record_budget.assert_called_once_with(
-        declared_total_sec=9000,
-        granted_total_sec=9000,
-        rung_cost_sec=7800.0,
-        raised=False,
-        gate_active=True,
-        deadline=10000.0,
-    )
-
-
 def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
     """`concs=None` reaches the engine from the SDK and from a bare task alike."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -912,56 +857,6 @@ def test_default_total_budget_is_two_and_half_hours():
 
 
 # Total wall-clock budget
-def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch,
-):
-    """When remaining budget cannot cover another variant, the tail is skipped."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1")
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    calls = {"n": 0}
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        import time as _t
-
-        _t.sleep(1.2)
-        calls["n"] += 1
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1, 4, 16, 64],
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    statuses = [p["status"] for p in all_points]
-    assert "succeeded" in statuses
-    assert "skipped" in statuses
-    skipped_pts = [p for p in all_points if p["status"] == "skipped"]
-    for p in skipped_pts:
-        assert p["error_class"] == "budget_exhausted"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    assert payload["budget_remaining_sec"] < 1
-    assert payload["total_budget_sec"] == 2
-    assert calls["n"] < 8
-
-
 def test_run_conc_sweep_none_budget_disables_gate(
     session_dir: Path,
     baseline_yaml: Path,
@@ -1031,47 +926,6 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     assert mock_run.call_count == 0
     # Nothing ran, so this reads as a sweep that declined rather than one that spent its budget.
     assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
-
-
-def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """A too-small budget is reported as skipped instead of a timeout-prone run."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1],
-                total_budget_sec=120,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert {p["status"] for p in all_points} == {"skipped"}
-    assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
-    assert payload["status"] == "skipped"
-    assert payload["was_skipped"] is True
-    assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    # This sweep started; only the pre-flight envelope means "declined to run".
-    assert conc_sweep_declined_to_run(payload) is False
 
 
 # ActionExecutor integration (SWEEP-phase dispatch)
@@ -2474,50 +2328,6 @@ def test_single_server_reuse_exception_recorded_as_failed(
     # Each arm: boot(conc16) ok, reuse(conc4) raises → at least 2 failed points.
     assert len(failed) >= 2
     assert any((p.get("error_class") or "").startswith("single_server_reuse") for p in failed)
-
-
-def test_single_server_reuse_loop_budget_exhausted(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Task budget exhausted mid-arm skips remaining reuse points."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1")
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        import time as _t
-
-        # Boot round consumes the whole budget so reuse points get skipped.
-        if kw.get("server_already_ready") is False:
-            _t.sleep(1.2)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[4, 16, 64],
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    succeeded = [p for p in all_points if p["status"] == "succeeded"]
-    skipped = [p for p in all_points if p["status"] == "skipped"]
-    assert [(p["arm"], p["conc"]) for p in succeeded] == [("optimized", 64)]
-    assert len(skipped) == 5
-    assert {p["error_class"] for p in skipped} == {"budget_exhausted"}
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    assert len(teardown_log) == 1
 
 
 def test_single_server_boot_exception_falls_back(

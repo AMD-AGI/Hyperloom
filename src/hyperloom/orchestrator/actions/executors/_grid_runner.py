@@ -1035,8 +1035,9 @@ async def run_grid(
     serving_lease: Any = None,
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
+    deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
 ) -> list[VariantResult]:
-    """Execute each grid variant and return all per-variant results."""
+    """Execute variants; ``deadline_stop`` names the owner of the supplied deadline."""
     silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
     if not magpie_python:
         # Backend-aware: bypass uses a plain python3, not Magpie's venv.
@@ -1123,6 +1124,8 @@ async def run_grid(
         server_log: Path,
     ) -> bool:
         """Record a round the run stopped and say whether the grid is over."""
+        if returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
+            stopped = deadline_stop
         runtime_sec = round(max(0.0, time.time() - started_unix), 2)
         log.warning(
             "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
@@ -1175,32 +1178,19 @@ async def run_grid(
         if session_deadline_sec is None:
             return False
         remaining_sec = session_deadline_sec - time.monotonic()
-        # Falls back to a single ``variant_timeout_sec`` when no estimate was given, which is what callers that cannot
-        # estimate already got.
-        if variant_expected_sec is None:
-            required_sec = benchmark_timeout_sec
-        else:
-            estimated_sec = float(variant_expected_sec) * rounds_left
-            required_sec = estimated_sec
-        if remaining_sec >= required_sec:
+        required_sec = float(variant_expected_sec) * rounds_left if variant_expected_sec is not None else None
+        if remaining_sec > 0 and (required_sec is None or remaining_sec >= required_sec):
             return False
         log.warning(
-            "grid_runner: %.0fs left cannot fit this variant's %d remaining round(s) "
-            "of %.0fs (spent on: %s); skipping %d remaining variant(s) rather than "
-            "launching a pass whose measured round cannot follow it",
+            "grid_runner: %.0fs left cannot admit this variant's %d remaining round(s) "
+            "(expected_sec=%s, spent on: %s); skipping %d remaining variant(s)",
             max(0.0, remaining_sec),
             rounds_left,
             required_sec,
             spent_on,
             len(grid) - idx,
         )
-        for skipped_variant in grid[idx:]:
-            results.append(
-                _not_run_skip_result(
-                    skipped_variant,
-                    _STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_RETURNCODE],
-                )
-            )
+        results.extend(_not_run_skip_result(variant, deadline_stop) for variant in grid[idx:])
         return True
 
     for i, variant in enumerate(grid):

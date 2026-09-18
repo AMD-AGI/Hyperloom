@@ -40,7 +40,7 @@ from ..actions.executors._grid_runner import (
     variant_conc,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
-from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN
+from ..actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS, STOPPED_BY_THE_RUN, StoppedByTheRun
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -116,15 +116,23 @@ def _budget_skip_result(variant: GridVariant) -> VariantResult:
     )
 
 
-def _session_budget_skip_result(variant: GridVariant) -> VariantResult:
-    """Keep the session stop distinct from the sweep's own optional budget."""
+_SWEEP_BUDGET_STOP = StoppedByTheRun(
+    error_class="budget_exhausted",
+    interrupted="conc_sweep total budget exhausted while this round was running",
+    never_started="conc_sweep total budget exhausted before this round ran",
+    ends_the_batch=True,
+)
+
+
+def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
+    """Keep the owner of the deadline on every rung that never ran."""
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
         extra_envs=dict(variant.extra_envs),
         status="skipped",
-        error=STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS].never_started,
-        error_class=SESSION_TIME_EXHAUSTED_CLASS,
+        error=stopped.never_started,
+        error_class=stopped.error_class,
         note=variant.note,
     )
 
@@ -134,23 +142,32 @@ async def _run_session_bounded_grid(
     grid: list[GridVariant],
     session_deadline_sec: float | None,
     variant_expected_sec: float | None,
+    deadline_stop: StoppedByTheRun,
     budget_state: dict[str, Any],
     **kwargs: Any,
 ) -> list[VariantResult]:
-    """Carry a grid admission or in-flight session stop across the whole sweep."""
-    if budget_state.get("budget_skip_reason") == SESSION_TIME_EXHAUSTED_CLASS:
-        return [_session_budget_skip_result(variant) for variant in grid]
+    """Carry a grid admission or in-flight budget stop across the whole sweep."""
+    if budget_state.get("budget_exhausted"):
+        return [_deadline_skip_result(variant, deadline_stop) for variant in grid]
     results = await run_grid(
         grid=grid,
         session_deadline_sec=session_deadline_sec,
         variant_expected_sec=variant_expected_sec,
+        deadline_stop=deadline_stop,
         **kwargs,
     )
-    if any(result.error_class == SESSION_TIME_EXHAUSTED_CLASS for result in results):
+    if any(result.error_class == deadline_stop.error_class for result in results):
         remaining = session_deadline_to_remaining_sec(session_deadline_sec)
+        reason = deadline_stop.error_class
+        if deadline_stop == _SWEEP_BUDGET_STOP:
+            reason = (
+                "total_budget_exhausted"
+                if remaining is not None and remaining <= 0
+                else "insufficient_remaining_for_variant"
+            )
         budget_state.update(
             budget_exhausted=True,
-            budget_skip_reason=SESSION_TIME_EXHAUSTED_CLASS,
+            budget_skip_reason=reason,
             budget_remaining_sec=max(0.0, remaining) if remaining is not None else 0.0,
         )
     return results
@@ -454,7 +471,6 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     model_path: str,
     gpu_type: str,
     benchmark_timeout_sec: float,
-    deadline: float | None,
     state: SharedState,
     session_dir: Path,
     json_path: Path,
@@ -470,6 +486,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     benchmark_script: str | None = None,
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
+    deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
 ) -> list[VariantResult]:
     """Sweep one arm across all CONC values reusing a single persistent server.
 
@@ -480,9 +497,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
 
     ``_all_results_ref`` and ``_budget_state`` are mutated in place: the first
     so incremental flushes see the full cross-arm picture, the second so the
-    caller can inspect the final budget status. ``deadline`` is an absolute
-    ``time.time()`` epoch (``None`` when unbounded), distinct from
-    the fixed per-spawn benchmark cap.
+    caller can inspect the final budget status. ``session_deadline_sec`` is the
+    earlier monotonic sweep/session boundary, named by ``deadline_stop`` and
+    distinct from the fixed per-spawn benchmark cap.
     """
     from ..actions.executors._grid_runner import _num_gpus_for_config
     from ..actions.executors._ray_serving import maybe_serving_lease
@@ -572,9 +589,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 gpu_type=gpu_type,
                 benchmark_script=benchmark_script,
                 benchmark_timeout_sec=benchmark_timeout_sec,
-                deadline=deadline,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                deadline_stop=deadline_stop,
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,
@@ -620,6 +637,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             boot_results = await _run_session_bounded_grid(
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                deadline_stop=deadline_stop,
                 budget_state=_budget_state,
                 base_yaml_path=base_yaml_path,
                 base_extra_args="",
@@ -656,7 +674,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         boot_failed = br is None or br.status in {"failed", "skipped"}
         boot_elapsed = round(time.time() - boot_started_at, 3)
 
-        if br is not None and br.error_class == SESSION_TIME_EXHAUSTED_CLASS:
+        if br is not None and br.error_class == deadline_stop.error_class:
             for failed in failed_boots:
                 arm_results.append(failed)
                 _all_results_ref.append(failed)
@@ -667,7 +685,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         conc=variant_conc(failed),
                         point=_point_from_variant(failed, arm=arm_name),
                     )
-            stopped_results = [br, *[_session_budget_skip_result(v) for v in grid[boot_idx + 1 :]]]
+            stopped_results = [br, *[_deadline_skip_result(v, deadline_stop) for v in grid[boot_idx + 1 :]]]
             arm_results.extend(stopped_results)
             _all_results_ref.extend(stopped_results)
             for stopped in stopped_results:
@@ -812,9 +830,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             gpu_type=gpu_type,
             benchmark_script=benchmark_script,
             benchmark_timeout_sec=benchmark_timeout_sec,
-            deadline=deadline,
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
+            deadline_stop=deadline_stop,
             state=state,
             session_dir=session_dir,
             json_path=json_path,
@@ -840,42 +858,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     try:
         reuse_grid = grid[boot_idx + 1 :]
         for r_idx, variant in enumerate(reuse_grid):
-            # Check task-level budget before each reuse point.
-            _reuse_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-            if has_budget and _reuse_remaining is not None and _reuse_remaining <= 0:
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    arm_results.append(skip_r)
-                    _all_results_ref.append(skip_r)
-                    _record_rung(
-                        recorder,
-                        arm_name,
-                        skip_r,
-                        stage=STAGE_BUDGET_SKIP,
-                        budget_remaining_sec=max(0.0, float(_reuse_remaining)),
-                        granted_cap_sec=benchmark_timeout_sec,
-                    )
-                break
-            if has_budget and _reuse_remaining is not None and _reuse_remaining < benchmark_timeout_sec:
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    arm_results.append(skip_r)
-                    _all_results_ref.append(skip_r)
-                    _record_rung(
-                        recorder,
-                        arm_name,
-                        skip_r,
-                        stage=STAGE_BUDGET_SKIP,
-                        budget_remaining_sec=max(0.0, float(_reuse_remaining)),
-                        granted_cap_sec=benchmark_timeout_sec,
-                    )
-                break
+            _reuse_remaining = session_deadline_to_remaining_sec(session_deadline_sec)
             # Check session deadline before each reuse point.
             if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
                 _budget_state["budget_exhausted"] = True
@@ -907,6 +890,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 reuse_results = await _run_session_bounded_grid(
                     session_deadline_sec=session_deadline_sec,
                     variant_expected_sec=variant_expected_sec,
+                    deadline_stop=deadline_stop,
                     budget_state=_budget_state,
                     base_yaml_path=base_yaml_path,
                     base_extra_args="",
@@ -946,11 +930,15 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     recorder,
                     arm_name,
                     rr,
-                    stage=STAGE_REUSE,
+                    stage=STAGE_BUDGET_SKIP if rr.error_class == deadline_stop.error_class else STAGE_REUSE,
                     start_time=reuse_started_iso,
                     wall_duration_sec=reuse_elapsed,
                     granted_cap_sec=benchmark_timeout_sec,
-                    budget_remaining_sec=_reuse_remaining,
+                    budget_remaining_sec=(
+                        _budget_state["budget_remaining_sec"]
+                        if rr.error_class == deadline_stop.error_class
+                        else _reuse_remaining
+                    ),
                 )
             # Incremental flush after each reuse point.
             _maybe_flush(
@@ -996,7 +984,6 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     model_path: str,
     gpu_type: str,
     benchmark_timeout_sec: float,
-    deadline: float | None,
     state: SharedState,
     session_dir: Path,
     json_path: Path,
@@ -1013,53 +1000,20 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
     benchmark_script: str | None = None,
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
+    deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
 ) -> list[VariantResult]:
     """Option B fallback: run each variant with its own server (legacy behaviour).
 
     Used when ``_sweep_one_arm_single_server`` detects the framework is not
     lifecycle-eligible or all boot retries are exhausted. ``_all_results_ref``
-    and ``_budget_state`` are mutated in place; ``deadline`` is an absolute
-    ``time.time()`` epoch, ``None`` when budget tracking is off; and
-    ``serving_lease`` is ``None`` when the arm runs on the local (non-Ray)
-    path.
+    and ``_budget_state`` are mutated in place. The same monotonic deadline
+    covers both arms and all retries. ``serving_lease`` is ``None`` when the
+    arm runs on the local (non-Ray) path.
     """
     arm_results: list[VariantResult] = []
     for variant in grid:
-        # Task-level budget checks.
-        _ob_rem = (deadline - time.time()) if has_budget and deadline is not None else None
+        _ob_rem = session_deadline_to_remaining_sec(session_deadline_sec)
         _ob_cap = benchmark_timeout_sec
-        if has_budget and _ob_rem is not None and _ob_rem <= 0:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
-            skip_r = _budget_skip_result(variant)
-            arm_results.append(skip_r)
-            _all_results_ref.append(skip_r)
-            _record_rung(
-                recorder,
-                arm_name,
-                skip_r,
-                stage=STAGE_BUDGET_SKIP,
-                budget_remaining_sec=max(0.0, float(_ob_rem)),
-                granted_cap_sec=_ob_cap,
-            )
-            continue
-        if has_budget and _ob_rem is not None and _ob_rem < _ob_cap:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
-            skip_r = _budget_skip_result(variant)
-            arm_results.append(skip_r)
-            _all_results_ref.append(skip_r)
-            _record_rung(
-                recorder,
-                arm_name,
-                skip_r,
-                stage=STAGE_BUDGET_SKIP,
-                budget_remaining_sec=max(0.0, float(_ob_rem)),
-                granted_cap_sec=_ob_cap,
-            )
-            continue
         if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "session_deadline_reserve"
@@ -1082,6 +1036,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             sub = await _run_session_bounded_grid(
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                deadline_stop=deadline_stop,
                 budget_state=_budget_state,
                 base_yaml_path=base_yaml_path,
                 base_extra_args="",
@@ -1111,11 +1066,13 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                 recorder,
                 arm_name,
                 r,
-                stage=STAGE_SERVER_RESTART,
+                stage=STAGE_BUDGET_SKIP if r.error_class == deadline_stop.error_class else STAGE_SERVER_RESTART,
                 start_time=rung_started_iso,
                 wall_duration_sec=rung_elapsed,
                 granted_cap_sec=_ob_cap,
-                budget_remaining_sec=_ob_rem,
+                budget_remaining_sec=(
+                    _budget_state["budget_remaining_sec"] if r.error_class == deadline_stop.error_class else _ob_rem
+                ),
             )
         _concs = [int(v.extra_envs["CONC"]) for v in grid if v.extra_envs.get("CONC")]
         _isl = int(next((v.extra_envs["ISL"] for v in grid if v.extra_envs.get("ISL")), "0"))
@@ -1443,12 +1400,14 @@ async def run_conc_sweep(
             report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
         )
 
-    _rung_cost = benchmark_timeout_sec
-    declared_total_budget_sec = total_budget_sec
-
     has_budget = total_budget_sec is not None
     started_at = time.time()
-    deadline = started_at + total_budget_sec if has_budget else None
+    deadline_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+    if total_budget_sec is not None:
+        sweep_deadline_sec = time.monotonic() + total_budget_sec
+        if session_deadline_sec is None or sweep_deadline_sec < session_deadline_sec:
+            session_deadline_sec = sweep_deadline_sec
+            deadline_stop = _SWEEP_BUDGET_STOP
 
     # Pre-compute report paths so incremental checkpoints carry them.
     rdir = reports_dir(session_dir)
@@ -1458,12 +1417,12 @@ async def run_conc_sweep(
 
     if recorder is not None:
         recorder.record_budget(
-            declared_total_sec=declared_total_budget_sec,
+            declared_total_sec=total_budget_sec,
             granted_total_sec=total_budget_sec,
-            rung_cost_sec=_rung_cost,
+            rung_cost_sec=variant_expected_sec,
             raised=False,
             gate_active=has_budget,
-            deadline=deadline,
+            deadline=started_at + total_budget_sec if has_budget else None,
         )
 
     results: list[VariantResult] = []
@@ -1512,42 +1471,13 @@ async def run_conc_sweep(
                 arm_controls=controls_of(normalize_proposal(state.current_best or {})) if _an == "optimized" else {},
             )
 
-            if _budget_state["budget_skip_reason"] == SESSION_TIME_EXHAUSTED_CLASS:
-                results.extend(_session_budget_skip_result(v) for v in skip_grid_fn())
+            if _budget_state["budget_exhausted"] and _budget_state["budget_skip_reason"] != "session_deadline_reserve":
+                results.extend(_deadline_skip_result(v, deadline_stop) for v in skip_grid_fn())
                 if recorder is not None:
                     recorder.record_arm_refused(
                         arm_name,
-                        reason=SESSION_TIME_EXHAUSTED_CLASS,
+                        reason=_budget_state["budget_skip_reason"],
                         remaining_sec=_budget_state["budget_remaining_sec"],
-                    )
-                continue
-
-            # Check overall budget before starting each arm.
-            _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-            if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-                for v in skip_grid_fn():
-                    results.append(_budget_skip_result(v))
-                if recorder is not None:
-                    recorder.record_arm_refused(
-                        arm_name,
-                        reason="total_budget_exhausted",
-                        remaining_sec=max(0.0, float(_arm_remaining)),
-                    )
-                continue
-            if has_budget and _arm_remaining is not None and _arm_remaining < _rung_cost:
-                _budget_state["budget_exhausted"] = True
-                _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-                for v in skip_grid_fn():
-                    results.append(_budget_skip_result(v))
-                if recorder is not None:
-                    recorder.record_arm_refused(
-                        arm_name,
-                        reason="insufficient_remaining_for_variant",
-                        remaining_sec=max(0.0, float(_arm_remaining)),
                     )
                 continue
             if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
@@ -1576,9 +1506,9 @@ async def run_conc_sweep(
                 gpu_type=resolved_gpu,
                 benchmark_script=benchmark_script,
                 benchmark_timeout_sec=benchmark_timeout_sec,
-                deadline=deadline,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                deadline_stop=deadline_stop,
                 state=state,
                 session_dir=session_dir,
                 json_path=json_path,

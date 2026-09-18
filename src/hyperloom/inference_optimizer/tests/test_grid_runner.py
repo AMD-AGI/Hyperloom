@@ -1682,7 +1682,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
         _fake_workspace(slot)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
-    # Without a runtime estimate, admission reserves the benchmark policy timeout.
+    # A measured estimate, not the hard cap, determines whether another rung fits.
     with patch(
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=fake_run,
@@ -1693,6 +1693,7 @@ async def test_run_grid_skips_remaining_when_budget_cannot_fit_a_variant(tmp_pat
             grid=[GridVariant("v0"), GridVariant("v1")],
             output_root=tmp_path / "out",
             session_deadline_sec=time.monotonic() + 5.0,
+            variant_expected_sec=10.0,
         )
 
     assert ran == []
@@ -1897,8 +1898,8 @@ class TestSessionBudgetAdmission:
         assert [r.status for r in results] == ["skipped"]
 
     @pytest.mark.asyncio
-    async def test_without_an_estimate_the_stricter_backstop_check_is_kept(self, tmp_path):
-        """Callers that cannot estimate keep the pre-existing, stricter gate."""
+    async def test_without_an_estimate_positive_budget_admits_the_round(self, tmp_path):
+        """An unknown duration is not the hard timeout's worst-case duration."""
         base = tmp_path / "base.yaml"
         _write_baseline_yaml_overrides(base)
         recorded: list[dict] = []
@@ -1916,12 +1917,14 @@ class TestSessionBudgetAdmission:
                 variant_expected_sec=None,
             )
 
-        assert recorded == []
-        assert [r.status for r in results] == ["skipped"]
+        assert len(recorded) == 1
+        assert recorded[0]["timeout"] == 7800.0
+        assert recorded[0]["session_deadline_sec"] is not None
+        assert [r.status for r in results] == ["succeeded"]
 
     @pytest.mark.asyncio
     async def test_without_an_estimate_agentx_uses_the_same_benchmark_policy(self, tmp_path, monkeypatch):
-        """Legacy AgentX timeout inputs do not change the shared admission backstop."""
+        """Legacy AgentX timeout inputs do not turn the hard cap into admission cost."""
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
         monkeypatch.setenv("AGENTX_DURATION", "3600")
         monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
@@ -1943,8 +1946,10 @@ class TestSessionBudgetAdmission:
                 variant_expected_sec=None,
             )
 
-        assert recorded == []
-        assert [r.status for r in results] == ["skipped"]
+        assert len(recorded) == 1
+        assert recorded[0]["timeout"] == 7800.0
+        assert recorded[0]["session_deadline_sec"] is not None
+        assert [r.status for r in results] == ["succeeded"]
 
 
 class TestSessionBudgetIndependentWatchdog:
