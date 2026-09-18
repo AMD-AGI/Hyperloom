@@ -739,73 +739,6 @@ def prepare_serving_so_for_csvs(
     }
 
 
-def _aiter_config_csvs(jit_dir: Path) -> list[Path]:
-    """Every tuned CSV aiter merges at import, whether or not a round asked for it.
-
-    ``jit/`` sits beside ``configs/`` inside the aiter package, and aiter loads
-    ``configs/*.csv`` plus ``configs/model_configs/*.csv`` unconditionally -- tables
-    for DeepSeek, GLM and other models included.
-    """
-    configs = jit_dir.parent / "configs"
-    if not configs.is_dir():
-        return []
-    return sorted(configs.glob("*.csv")) + sorted((configs / "model_configs").glob("*.csv"))
-
-
-def audit_serving_so_against_aiter_configs(*, backup_dir: Path | None = None) -> dict[str, Any]:
-    """Rebuild any serving module whose kernels aiter's own CSVs outrun.
-
-    The env-keyed checks only compare the CSVs a round names, but aiter merges its
-    shipped tables too, and one of those referencing a kernel absent from the
-    compiled ``.so`` fails every boot in the session regardless of what the round
-    tuned. Auditing once at phase entry fixes it for every lane that follows.
-
-    Args:
-        backup_dir: Where to park the invalidated ``jit/build``.
-
-    Returns:
-        Status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``, and the
-        CSVs whose kernels were missing.
-    """
-    jit_dir = _resolve_serving_jit_dir()
-    if jit_dir is None:
-        return {"action": "noop", "reason": "aiter jit dir not found"}
-    csvs = _aiter_config_csvs(jit_dir)
-    if not csvs:
-        return {"action": "noop", "reason": "aiter configs dir not found"}
-    modules: list[str] = []
-    uncovered: list[str] = []
-    for csv_path in csvs:
-        # An empty ``modules`` makes the check resolve each kernel by its own name,
-        # which is what a shipped table needs: nothing declares its env.
-        if serving_modules_cover_csv(jit_dir, (), csv_path):
-            continue
-        uncovered.append(str(csv_path))
-        for name, libtype in csv_jit_kernel_rows(csv_path):
-            resolved = serving_module_for_kernel(name, libtype)
-            if resolved:
-                modules.append(resolved)
-    modules_t = tuple(dict.fromkeys(modules))
-    if not modules_t:
-        return {"action": "skip", "jit_dir": str(jit_dir), "csvs_checked": len(csvs)}
-    dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
-    removed = _unlink_serving_modules(jit_dir, modules_t)
-    invalidation = _invalidate_jit_build(jit_dir, dest)
-    log.warning(
-        "aiter's own CSVs name kernels missing from %d module(s); unlinked for rebuild (%s)",
-        len(removed),
-        ", ".join(Path(c).name for c in uncovered[:4]),
-    )
-    return {
-        "action": "invalidate",
-        "jit_dir": str(jit_dir),
-        "csvs_checked": len(csvs),
-        "uncovered_csvs": uncovered,
-        "removed": removed,
-        "jit_build": invalidation,
-    }
-
-
 def drop_serving_so_for_envs(
     envs: dict[str, str] | None = None,
     *,
@@ -851,7 +784,6 @@ __all__ = [
     "AITER_ENV_TO_TUNED_FILE",
     "AITER_JIT_PROBE_PATHS",
     "AITER_LOCK_STALE_MINUTES",
-    "audit_serving_so_against_aiter_configs",
     "BASELINE_COLD_START_TIMEOUT_SEC",
     "COLD_START_KERNEL_THRESHOLD",
     "COMPILER_PROCESS_NAMES",

@@ -5823,10 +5823,12 @@ async def _run_integrate_rebaseline_with_lock_retry(
     if result_is_aiter_jit_registry_mismatch(result) or _workspace_has_compiled_registry_error(workspace):
         envs = _integrate_extra_envs(ctx)
         log_sizes = _workspace_log_sizes(workspace)
-        # The env does not always reach the module at fault: a round tuning one CSV
-        # still boots against every CSV aiter merges, and AITER_CONFIG_FMOE maps to no
-        # serving module at all. Read the module out of the kernel the error named, or
-        # the drop unlinks nothing and the retry repeats the failure.
+        # The env does not always reach the module at fault: a round that pins one
+        # table leaves every other AITER_CONFIG_* unset, and each of those resolves to
+        # the shipped default plus its matching model_configs overlays, and
+        # AITER_CONFIG_FMOE maps to no serving module at all. Read the module out of
+        # the kernel the error named, or the drop unlinks nothing and the retry
+        # repeats the failure.
         from ..actions.executors._aiter_jit import registry_mismatch_modules
 
         named_modules = registry_mismatch_modules(
