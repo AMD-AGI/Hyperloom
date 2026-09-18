@@ -104,16 +104,8 @@ def test_overlay_metrics_kernel_names_replaces_truncated_symbols(tmp_path):
 
 
 def test_overlay_metrics_kernel_names_skips_fusion_sidecar(tmp_path):
-    fusion = {
-        "operations": [
-            {"name": "aten::mm", "kernel_name": "Kernel 1: should_not_apply", "args": "(1,1) bf16"}
-        ]
-    }
-    gemm = {
-        "operations": [
-            {"name": "aten::mm", "kernel_name": "Kernel 1: real_symbol", "args": "(2,2) bf16"}
-        ]
-    }
+    fusion = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: should_not_apply", "args": "(1,1) bf16"}]}
+    gemm = {"operations": [{"name": "aten::mm", "kernel_name": "Kernel 1: real_symbol", "args": "(2,2) bf16"}]}
     _write(tmp_path / "category_data" / "kernel_fusion_metrics.json", json.dumps(fusion))
     _write(tmp_path / "category_data" / "gemm_metrics.json", json.dumps(gemm))
     cands = [

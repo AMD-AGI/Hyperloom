@@ -205,9 +205,7 @@ def emit_kernel_candidates_from_analysis_output(
     analysis_output = analysis_output.expanduser().resolve()
     report_path = analysis_output / "analysis.md"
     if not report_path.is_file():
-        raise FileNotFoundError(
-            f"analysis.md is required (TraceLens ranking source of truth): {report_path}"
-        )
+        raise FileNotFoundError(f"analysis.md is required (TraceLens ranking source of truth): {report_path}")
 
     cap = _default_top_k() if top_k is None else top_k
     manifest = _load_json(analysis_output / "category_data" / "category_manifest.json")
@@ -234,9 +232,7 @@ def emit_kernel_candidates_from_analysis_output(
         )
     else:
         idle_threshold, high_idle_warning = _evaluate_high_idle_gate(idle_pct, report_path)
-    compute_threshold, low_compute_warning = _evaluate_low_compute_gate(
-        compute_pct, exposed_comm_pct, report_path
-    )
+    compute_threshold, low_compute_warning = _evaluate_low_compute_gate(compute_pct, exposed_comm_pct, report_path)
     if graph_warning is not None:
         high_idle_warning = None
         low_compute_warning = None
@@ -355,8 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
     """CLI for offline candidate emit from a TraceLens analysis_output."""
     parser = argparse.ArgumentParser(
         description=(
-            "Emit kernel_candidates.json from an existing TraceLens "
-            "analysis_output (no TraceLens orchestrator rerun)."
+            "Emit kernel_candidates.json from an existing TraceLens analysis_output (no TraceLens orchestrator rerun)."
         )
     )
     parser.add_argument(
