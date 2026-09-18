@@ -21,7 +21,6 @@ import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
@@ -62,14 +61,6 @@ SESSION_BREAKDOWN_PATH = "session_breakdown.json"
 
 #: The ``stop_reason`` meaning a robustness critic escalated to the close.
 ESCALATED_STOP_REASON = "robustness_escalated"
-
-#: Where the robustness ladder persists findings. Read rather than mirrored
-#: through a recorder: a second copy could only be poorer than the ladder's.
-ROBUSTNESS_FINDINGS_SUBDIR = "agents/robustness/findings"
-
-#: How many findings the close-out carries; the newest, being the ones the stop
-#: reason was drawn from. ``findings_total`` reports the untruncated count.
-_FINDINGS_LIMIT = 50
 
 #: The share of the theoretical ceiling the session aims at, a roofline
 #: ceiling not being reachable in practice.
@@ -433,57 +424,9 @@ def record_close_settled(
             "stop_reason": reason,
             "robustness": {
                 "escalated": reason.lower() == ESCALATED_STOP_REASON,
-                **_robustness_findings(session_dir),
             },
         },
     )
-
-
-def _robustness_findings(session_dir: Path | str) -> dict[str, Any]:
-    """Read what the robustness ladder found over the session.
-
-    Returns ``findings`` and ``findings_total``, or an empty mapping when the
-    ladder never wrote: an empty list would claim it ran and found nothing.
-    """
-    directory = Path(session_dir) / ROBUSTNESS_FINDINGS_SUBDIR
-    rows: list[dict[str, Any]] = []
-    try:
-        for path in sorted(directory.glob("*.jsonl")):
-            rows.extend(read_jsonl(path) or [])
-    except Exception as exc:  # noqa: BLE001 — a findings log we cannot read is not a close-out failure
-        note_failure(section="close", error=exc, detail=f"reading the robustness findings under {directory}")
-        return {}
-    if not rows:
-        return {}
-    # A row whose clock is unreadable sorts to the front rather than raising,
-    # so one malformed line cannot cost the close-out every finding beside it.
-    rows.sort(key=lambda row: (_to_float(row.get("timestamp_unix")) or 0.0, _to_int(row.get("tick_index"))))
-    return {
-        "findings": [_finding_row(row) for row in rows[-_FINDINGS_LIMIT:]],
-        "findings_total": len(rows),
-    }
-
-
-def _finding_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Project one persisted finding onto what the close-out reports.
-
-    ``intents`` is reduced to the intent types: one badly-degraded session's
-    worth of their payloads would dwarf the rest of the breakdown.
-    """
-    return {
-        "tick_index": _to_int(row.get("tick_index")),
-        "timestamp_unix": _to_float(row.get("timestamp_unix")),
-        "symptom_name": str(row.get("symptom_name") or ""),
-        "severity": str(row.get("severity") or ""),
-        "summary": str(row.get("summary") or ""),
-        "rca_text": str(row.get("rca_text") or ""),
-        "intents": [
-            str(intent.get("intent_type") or intent.get("type") or "")
-            for intent in row.get("intents") or []
-            if isinstance(intent, dict)
-        ],
-        "evidence": row.get("evidence") if isinstance(row.get("evidence"), dict) else {},
-    }
 
 
 def record_write_back_opened(

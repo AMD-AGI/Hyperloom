@@ -1605,7 +1605,15 @@ class PreludePhase(PhaseHandler):
             target = str(tree.get("root") or "").strip()
             pre_sha = str(tree.get("pre_sha") or "").strip()
             manifest = tree.get("snapshot_manifest")
-            if not target or not pre_sha or not isinstance(manifest, Mapping):
+            # Promotion needs a way to unwind the tree if the replay is rejected, not a sha. A git checkout
+            # answers with a pre_sha and a snapshot manifest; a pip-installed framework -- the tree a KB recipe
+            # is usually measured on -- answers with the backups nogit wrote as it applied. A tree this round
+            # never wrote to owes neither, and promotion is reached only once every required overlay applied, so
+            # it already carries what is being promoted. Records predating the flag are read as written-to.
+            backups = list(tree.get("nogit_backups") or [])
+            snapshotted = bool(pre_sha) and isinstance(manifest, Mapping)
+            mutated = bool(tree.get("mutated", True))
+            if not target or (mutated and not (snapshotted or backups)):
                 return False, {
                     "status": "failed",
                     "failure": "validated_recipe_checkout_incomplete",
@@ -1613,7 +1621,9 @@ class PreludePhase(PhaseHandler):
                 }
             try:
                 target_path = Path(target).resolve(strict=True)
-                manifest_target = Path(str(manifest.get("repo_path") or "")).resolve(strict=True)
+                manifest_target = (
+                    Path(str(manifest.get("repo_path") or "")).resolve(strict=True) if snapshotted else target_path
+                )
             except (OSError, ValueError) as exc:
                 return False, {
                     "status": "failed",
@@ -1638,7 +1648,7 @@ class PreludePhase(PhaseHandler):
         task: "Task | None",
     ) -> dict[str, Any]:
         """Restore both Recipe and Kernel halves of a combined replay."""
-        from ..actions.executors.baseline import _revert_patches
+        from ..actions.executors.baseline import _revert_warm_patch_state
 
         restores: list[dict[str, Any]] = []
         pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
@@ -1662,10 +1672,22 @@ class PreludePhase(PhaseHandler):
             if not target:
                 continue
             recipe_manifest = tree.get("snapshot_manifest")
+            backups = list(tree.get("nogit_backups") or [])
+            if not bool(tree.get("mutated", True)):
+                # An overlay the tree already carried applies as a no-op, writing
+                # nothing and so owing nothing. A record predating the flag reads as
+                # written-to, and still has to answer with a channel below.
+                continue
+            if not recipe_manifest and not backups:
+                restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
+                continue
             restores.append(
-                _revert_patches(target, str(tree.get("pre_sha") or ""), recipe_manifest)
-                if recipe_manifest
-                else {"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]}
+                _revert_warm_patch_state(
+                    target,
+                    pre_sha=str(tree.get("pre_sha") or ""),
+                    snapshot_manifest=recipe_manifest,
+                    nogit_backups=backups,
+                )
             )
         params = (task.params if task is not None else {}) or {}
         kernel_applied = (
@@ -2322,6 +2344,9 @@ class PreludePhase(PhaseHandler):
                         in {
                             "applied",
                             "applied_3way",
+                            # What a nogit apply reports when it writes; on a pip-installed
+                            # framework it is the only status an overlay can land under.
+                            "applied_nogit",
                             "present_in_dirty_worktree",
                         }
                     )

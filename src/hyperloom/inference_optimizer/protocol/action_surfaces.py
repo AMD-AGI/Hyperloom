@@ -88,14 +88,6 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
-# Robustness-only actions (driven via its action-ladder); Orchestration must ALERT instead.
-ROBUSTNESS_DELEGATE_ONLY_ACTIONS: frozenset[str] = frozenset(
-    {
-        "recover",
-    }
-)
-
-
 # Actions rendered in the Orchestration prompt for full kernel-enabled runs.
 FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "target_analysis",
@@ -259,22 +251,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
                 "Enqueued when ``--no-enable-roofline``; LLM-proposed delegate is denied."
             ),
         ),
-        "recover": ActionMetadata(
-            name="recover",
-            family="resilience",
-            pipeline_phase="support",
-            verdict_class="exploration",
-            expected_gain_pct=(0.0, 0.0),
-            accuracy_risk=0.0,
-            crash_risk=0.1,
-            typical_runtime_min=5.0,
-            lease_ttl_sec=1200,
-            requires_lanes=("server_lifecycle", "workspace_mutation"),
-            side_effects=("workspace_write", "server_restart", "reads_checkpoint"),
-            description=(
-                "Restore the workspace from the last good checkpoint and relaunch the server after a crash or REVERT."
-            ),
-        ),
         "replay_warm_recipe": ActionMetadata(
             name="replay_warm_recipe",
             family="prep",
@@ -393,5 +369,4 @@ __all__ = [
     "LLM_REQUESTABLE_KERNEL_REQUEST_KINDS",
     "NO_KERNEL_AGENT_ENABLED_ACTIONS",
     "REQUEST_KIND_TO_OWNED_ACTION",
-    "ROBUSTNESS_DELEGATE_ONLY_ACTIONS",
 ]

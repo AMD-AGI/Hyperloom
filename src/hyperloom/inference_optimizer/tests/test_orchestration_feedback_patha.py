@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from concurrent.futures import CancelledError as FuturesCancelledError
+from dataclasses import asdict
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +23,7 @@ from hyperloom.orchestrator.loop.coordinator import (
     _format_inbox_event,
 )
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext, SubAgentResult
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
@@ -104,7 +109,6 @@ def _silent_coordinator(session_dir) -> Coordinator:
         backends={
             "orchestration": MockBackend(silent, name="o"),
             "critic": MockBackend(silent, name="c"),
-            "robustness": MockBackend(silent, name="r"),
         },
     )
 
@@ -233,10 +237,10 @@ async def test_run_action_now_happy_path_emits_delegated_result(
 ):
     c = _silent_coordinator(session_dir)
     try:
-        ran: dict = {}
+        ran = {"calls": 0}
 
         async def _stub(ctx: RunnerContext) -> dict:
-            ran["called"] = True
+            ran["calls"] += 1
             return {"status": "ok", "gain_pct": 1.5}
 
         c.sub.register_executor("inline_probe", _stub)
@@ -254,17 +258,105 @@ async def test_run_action_now_happy_path_emits_delegated_result(
         )
 
         out = await c._run_action_now("inline_probe", {"p": 1})
-        assert ran.get("called") is True
+        repeated = await c._run_action_now("inline_probe", {"p": 1})
+        assert repeated.split(" topic=", 1)[-1] == out.split(" topic=", 1)[-1]
+        assert ran["calls"] == 1
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
         assert "inline run complete" in out
         assert "state='succeeded'" in out
         assert "gain=1.5" in out
 
         events = await c.bus.tail(topic="delegated_result")
-        assert events
+        assert len(events) == 1
         last = events[-1]
         assert last.payload.get("inline") is True
         assert last.payload.get("kind") == "inline_probe"
         assert last.payload.get("state") == "succeeded"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("has_payload", [False, True])
+async def test_inline_existing_task_reuses_terminal_without_execution(session_dir, monkeypatch, state, has_payload):
+    c = _silent_coordinator(session_dir)
+    try:
+        params = {"query": "same"}
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        execute = AsyncMock(return_value={"status": "ok", "gain_pct": 1.5})
+        c.sub.register_executor("inline_probe", execute)
+        fingerprint = hashlib.sha1(json.dumps(params, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:10]
+        task = await c.tasks.create(
+            kind="inline_probe",
+            params=params,
+            idempotency_key=f"inline:orchestration:inline_probe:t{int(c.shared_state.tick or 0)}:{fingerprint}",
+        )
+        stored_result = SubAgentResult(task.task_id, state, {"status": "ok", "gain_pct": 7.5})
+        if state != "queued":
+            await c.tasks.transition(task.task_id, "running")
+        if state not in ("queued", "running"):
+            evidence = {"outcome": asdict(stored_result), "cleanup_confirmed": True} if has_payload else {}
+            await c.tasks.transition(task.task_id, state, evidence=evidence)
+        out = await c._run_action_now("inline_probe", params)
+        assert execute.await_count == int(state == "queued")
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
+        assert not await c.locks.lane_holders()
+        events = await c.bus.tail(topic="delegated_result")
+        assert len(events) == int(state == "queued")
+        if state == "running":
+            assert "already 'running'" in out
+        elif state != "queued":
+            assert state in out
+            if has_payload:
+                assert "gain=7.5" in out
+            else:
+                assert "no stored result payload" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, ValueError("executor failed"), FuturesCancelledError("stop")])
+async def test_inline_repeated_outcome_does_not_rerun(session_dir, monkeypatch, error):
+    c = _silent_coordinator(session_dir)
+    try:
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        execute = AsyncMock(side_effect=error, return_value={"status": "ok", "gain_pct": 1.5})
+        c.sub.register_executor("inline_probe", execute)
+        first = await c._run_action_now("inline_probe", {})
+        second = await c._run_action_now("inline_probe", {})
+        assert second.split(" topic=", 1)[-1] == first.split(" topic=", 1)[-1]
+        assert execute.await_count == 1
+        assert len(await c.bus.tail(topic="delegated_result")) == 1
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_inline_unconfirmed_terminal_is_diagnostic_only(session_dir, monkeypatch):
+    c = _silent_coordinator(session_dir)
+    try:
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        task = await c.tasks.create(
+            kind="inline_probe", params={}, idempotency_key="inline:orchestration:inline_probe:t0:bf21a9e8fb"
+        )
+        await c.tasks.transition(task.task_id, "running")
+        result = SubAgentResult(task.task_id, "succeeded", {"status": "ok", "decision": "KEEP"})
+        await c.tasks.transition(
+            task.task_id, "succeeded", evidence={"outcome": asdict(result), "cleanup_confirmed": False}
+        )
+        execute = AsyncMock()
+        c.sub.register_executor("inline_probe", execute)
+        out = await c._run_action_now("inline_probe", {})
+        assert "cleanup unconfirmed" in out
+        assert "diagnostic only" in out
+        assert execute.await_count == 0
+        assert not await c.bus.tail(topic="delegated_result")
     finally:
         await c.stop()
 
@@ -574,41 +666,6 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
         await c.stop()
 
 
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_does_not_receive_failure_rows(session_dir):
-    """Robustness inbox must not include failure: rows."""
-    c = _silent_coordinator(session_dir)
-    try:
-        pvo = {
-            "variant_name": "fp8_kv",
-            "outcome": "FAILED",
-            "stage": "warmup",
-            "failure_id": "fail.t1.abc0000",
-            "error_class": "server_init_dead",
-            "error_excerpt": "AssertionError: batch_size=1",
-            "reason": "warmup_failed",
-        }
-        await c.bus.append_and_seq(
-            Message.new(
-                "coordinator",
-                "*",
-                "delegated_result",
-                {
-                    "task_id": "t1",
-                    "kind": "explore",
-                    "state": "succeeded",
-                    "result": {"status": "failed", "per_variant_outcomes": [pvo]},
-                    "error": None,
-                },
-            )
-        )
-        c.shared_state.max_minutes = 60
-        prompt = await c._compose_prompt("robustness")
-        assert "failure:" not in prompt
-    finally:
-        await c.stop()
-
-
 # --- ws=/log= anchor test with real-length task_id ---
 
 
@@ -700,8 +757,14 @@ def test_killed_overtime_enters_failures_and_mints_gap():
 # --- short-session reloop boundary ---
 
 
-def test_short_session_reloop_boundary():
-    """A 2h session uses an 1800s floor; just above → True, just below → False."""
+@pytest.mark.parametrize(
+    ("benchmark_timeout", "expected_floor"),
+    [(None, 3600.0), ("1800", 1800.0), ("900", 1080.0), ("9000", 3600.0)],
+    ids=["default_cap", "benchmark_cap", "session_share", "half_session_cap"],
+)
+@pytest.mark.parametrize("remaining_offset", [-1.0, 0.0, 1.0], ids=["below", "at", "above"])
+def test_short_session_reloop_boundary(monkeypatch, benchmark_timeout, expected_floor, remaining_offset):
+    """The reloop floor combines the shared benchmark cap and session shares."""
     from datetime import datetime, timedelta, timezone
     from hyperloom.orchestrator.phases import machine_state as ps
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -719,12 +782,23 @@ def test_short_session_reloop_boundary():
     st.last_conc_sweep = {"status": "succeeded"}
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
-    # The 2h floor is max(1080s session share, one 1800s variant grant).
-    reloop, ev = ps.should_reloop_to_explore(st, now_unix=start_unix + 3600)
-    assert reloop is True, f"expected reloop True, got evidence: {ev}"
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
+    if benchmark_timeout is None:
+        monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
+    else:
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", benchmark_timeout)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
+    remaining_sec = expected_floor + remaining_offset
+    reloop, ev = ps.should_reloop_to_explore(
+        st,
+        now_unix=start_unix + 7200 - remaining_sec,
+        min_remaining_sec=7200,
+    )
 
-    # Remaining = 7200 - 5401 = 1799s (just below floor) → should not reloop.
-    reloop2, ev2 = ps.should_reloop_to_explore(st, now_unix=start_unix + 5401)
-    assert reloop2 is False
-    assert ev2["reloop_blocked"] == "insufficient_remaining"
+    assert ev["min_remaining_sec_effective"] == expected_floor
+    assert reloop is (remaining_offset >= 0), ev
+    if remaining_offset < 0:
+        assert ev["reloop_blocked"] == "insufficient_remaining"
+        assert ev["session_remaining_seconds"] == remaining_sec
+    else:
+        assert ev["next_cycle"] == 1
+        assert "reloop_blocked" not in ev

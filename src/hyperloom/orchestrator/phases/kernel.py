@@ -3368,15 +3368,9 @@ class KernelPhase(PhaseHandler):
         accepted_measurement: dict[str, Any] = {}
         # Set by the last KEEP; the attempt row claims this exact string.
         adopted_tuned_file = ""
-        try:
-            from ..actions.executors.explore import _compute_explore_variant_timeout
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-            per_tuner_timeout_sec = _compute_explore_variant_timeout(
-                baseline_runtime_sec=float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0),
-                kill_ratio=float(getattr(self.shared_state, "explore_overtime_kill_ratio", 1.5) or 1.5),
-            )
-        except Exception:  # noqa: BLE001 - conservative fallback
-            per_tuner_timeout_sec = 15 * 60
+        per_tuner_timeout_sec = resolve_benchmark_timeouts()[1]
         per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
 
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a

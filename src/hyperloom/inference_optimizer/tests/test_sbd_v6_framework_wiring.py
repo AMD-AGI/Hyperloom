@@ -31,7 +31,6 @@ def _coordinator(session_dir: Path) -> Coordinator:
         backends={
             "orchestration": MockBackend(idle),
             "critic": MockBackend(idle),
-            "robustness": MockBackend(idle),
         },
         role_registry=default_role_registry(),
         recipe_kb=None,
@@ -52,14 +51,15 @@ def session_dir(tmp_path: Path):
         yield path
 
 
-def test_open_records_the_resolved_policy(session_dir: Path):
+@pytest.mark.parametrize("legacy_timeout_override", [0, 1800])
+def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_override):
     coord = _coordinator(session_dir)
     state = coord.shared_state
     state.phase = "FRAMEWORK_AGENT"
     state.macro_cycle = 0
     state.framework_agent_authoring_enabled = True
     state.explore_overtime_kill_ratio = 1.5
-    state.explore_variant_timeout_sec_override = 1800
+    state.explore_variant_timeout_sec_override = legacy_timeout_override
     state.plateau_overrides = {"explore_lookback": 7, "explore_keep_gain_pct": 1.25}
 
     coord._open_framework_timeline()
@@ -67,8 +67,9 @@ def test_open_records_the_resolved_policy(session_dir: Path):
 
     policy = _events(session_dir)[0]["ext"]["policy"]
     assert policy["keep_threshold_pct"] is not None
-    assert policy["variant_timeout_sec"] == 1800
-    assert policy["overtime_kill_ratio"] == 1.5
+    # Invocation caps are not phase policy; legacy state must not fabricate one.
+    assert policy["variant_timeout_sec"] is None
+    assert policy["overtime_kill_ratio"] is None
     assert policy["config"]["lookback"] == 7
     assert policy["config"]["keep_gain_threshold_pct"] == 1.25
     # Not overridden, so the library default the phase will actually apply.
