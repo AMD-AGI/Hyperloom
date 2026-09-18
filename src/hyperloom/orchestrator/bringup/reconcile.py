@@ -378,9 +378,14 @@ def _terminal_by_observation(task: Task) -> bool:
     if task.state not in TERMINAL_STATES:
         return False
     for entry in reversed(task.history):
-        if not isinstance(entry, dict) or entry.get("to") != task.state:
+        if not isinstance(entry, dict):
             continue
         evidence = entry.get("evidence")
+        if isinstance(evidence, dict) and isinstance(evidence.get("outcome"), dict):
+            if isinstance(evidence.get("cleanup_confirmed"), bool):
+                return evidence["cleanup_confirmed"]
+        if entry.get("to") != task.state:
+            continue
         if not isinstance(evidence, dict):
             return True
         if _EVIDENCE_DEAD_PID in evidence:

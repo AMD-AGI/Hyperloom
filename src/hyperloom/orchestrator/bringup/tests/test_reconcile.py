@@ -244,6 +244,46 @@ async def test_terminal_holder_cannot_handoff_before_gpu_cleanup(db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("appended", [False, True], ids=["transition", "terminal-race"])
+@pytest.mark.parametrize("confirmed", [False, True], ids=["unconfirmed", "confirmed"])
+@pytest.mark.parametrize("with_successor", [False, True], ids=["expire", "handoff"])
+async def test_terminal_round_uses_latest_cleanup_outcome(db, state, appended, confirmed, with_successor):
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0)
+    await _open_round(rounds, tasks, holder="spec-1", lease=1)
+    await tasks.transition("spec-1", "running")
+    evidence = {
+        "outcome": {"state": "succeeded", "result": {"status": "ok"}},
+        "cleanup_confirmed": confirmed,
+    }
+    prior_evidence = {"reason": "cancelled_in_flight" if confirmed else "completed"}
+    await tasks.transition("spec-1", state, evidence=prior_evidence if appended else evidence)
+    if appended:
+        async with db.transaction() as cur:
+            history = json.loads(cur.execute("SELECT history FROM tasks WHERE task_id='spec-1'").fetchone()["history"])
+            history.append({"ts": "2026-09-18T00:00:00Z", "evidence": evidence})
+            history.append({"progress": {"message": "completion recorded"}})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id='spec-1'", (json.dumps(history),))
+    if with_successor:
+        await tasks.create(
+            kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next", task_id="next"
+        )
+
+    report = await rec.run(_NOW + 10_000)
+
+    assert not report.failures
+    round_row = await rounds.get("round-spec-1")
+    if not confirmed:
+        assert report.handed_off == report.settled == []
+        assert round_row.state == OPEN and round_row.holder_task_id == "spec-1"
+    elif with_successor:
+        assert report.handed_off == ["round-spec-1"]
+        assert round_row.state == OPEN and round_row.holder_task_id == "next"
+    else:
+        assert round_row.state == SETTLED
+
+
+@pytest.mark.asyncio
 async def test_an_undecided_review_holds_the_round_open_until_its_ttl(db):
     """The gap between the specialist and the integrate is a proposal, not a task."""
     pending = {"m1": _Pending("spec-1")}

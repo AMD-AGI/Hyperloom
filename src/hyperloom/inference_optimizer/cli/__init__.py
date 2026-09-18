@@ -1669,6 +1669,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
         # Single-optimizer guard: take the session lock before any state.json / lease access.
         session_lock = _acquire_session_lock_or_exit(session_dir)
+        from ..session.resume_guard import ResumeBlocked, ensure_resume_safe
+        from hyperloom.orchestrator.bus.resource_lock import local_owner_scope
+
+        try:
+            ensure_resume_safe(session_dir, owner_scope=local_owner_scope())
+        except ResumeBlocked as exc:
+            session_lock.release()
+            print(f"ERROR: --resume-from {exc}", file=sys.stderr)
+            sys.exit(2)
         _persist_install_event(args, session_dir)
 
         try:
