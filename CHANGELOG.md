@@ -20,6 +20,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A fusion campaign killed before it returned reported REVERT while proven
+  work sat on disk.** `fusion_manifest.json` is the only artifact that points
+  at a keeper, and it was written once every campaign had returned. `on_keep`
+  exports the patch and smokes it the moment a recipe is kept, so a wrapper
+  killed between the last keeper and the aggregate reported `patch: null` even
+  though a sibling had already passed correctness and a serving smoke.
+  Measured: a session lost a 5.011x fusion of qkvgate split + QK norm + RoPE
+  this way, the iteration having published 44 minutes before the timeout fired.
+  The manifest is now published as each keeper is proved, so it is never
+  missing -- only as complete as the run got -- and the existing salvage path
+  reads it unchanged. The end-of-run write still overwrites it with the final
+  loop, compile-pass and error fields before any exit, and a sibling the smoke
+  rejected has its patch unlinked so no reader can find work the run refused.
 - **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
   Missing AIPerf error-rate metrics are derived from profiling request counts;
   zero errors are inferred only with successful requests and an explicitly empty
