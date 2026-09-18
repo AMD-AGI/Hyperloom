@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Docker skills: do not launch optimize with `docker exec -d`.** Detached
+  `docker exec` discards stdout and stderr, so an optimizer that dies on
+  startup looks like a backgrounding failure. Demo and optimizer skills now
+  require one attached `docker exec … bash -lc` that runs the existing
+  `setsid nohup` + run-log + `--launch-info-file` recipe.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
