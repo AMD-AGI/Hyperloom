@@ -106,3 +106,101 @@ def test_sglang_jit_needs_no_jit_cache_invalidation(akp):
     skipped = {"status": "skipped", "reason": "target is outside aiter csrc"}
 
     assert akp._runtime_jit_invalidation_error(strategy, skipped) == ""
+
+
+def test_sglang_jit_rebuild_runs_no_import_probe(akp):
+    strategy = akp._detect_strategy(Path(_KDA_CUH))
+
+    assert strategy["import_probes"] == []
+
+
+@pytest.mark.parametrize(
+    ("relative", "probes"),
+    (
+        ("python/sglang/srt/layers/attention/foo.cu", ["sglang", "sglang.srt.server_args"]),
+        ("sgl-kernel/csrc/foo.cu", ["sgl_kernel"]),
+    ),
+)
+def test_sglang_editable_rebuild_declares_import_probes(akp, relative, probes):
+    strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / relative)
+
+    assert strategy["rebuild_command"] != []
+    assert strategy["import_probes"] == probes
+
+
+def test_rebuild_fails_when_reinstall_breaks_imports(akp, monkeypatch, tmp_path):
+    monkeypatch.setattr(akp, "_run_rebuild", lambda command, cwd, timeout_sec: {"status": "ok", "returncode": 0})
+    monkeypatch.setattr(
+        akp,
+        "_verify_rebuild_imports",
+        lambda probes, interpreter, **kwargs: {
+            "status": "failed",
+            "probes": probes,
+            "error": "sglang.srt.server_args: no module spec",
+        },
+    )
+    strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / "python/sglang/srt/layers/attention/foo.cu")
+
+    result = akp._run_strategy_rebuild(
+        strategy,
+        command_override=[],
+        fallback_cwd=tmp_path,
+        timeout_sec=60,
+    )
+
+    assert result["status"] == "failed"
+    assert "sglang.srt.server_args" in result["error"]
+    assert akp._rebuild_ok_to_proceed(result) is False
+
+
+def test_rebuild_ok_records_import_metadata(akp, monkeypatch, tmp_path):
+    monkeypatch.setattr(akp, "_run_rebuild", lambda command, cwd, timeout_sec: {"status": "ok", "returncode": 0})
+    strategy = akp._detect_strategy(Path(_SGLANG_ROOT) / "python/sglang/srt/layers/attention/foo.cu")
+    captured = {}
+
+    def _probe(probes, interpreter, **kwargs):
+        captured.update(probes=probes, interpreter=interpreter)
+        return {"status": "ok", "modules": {name: {"importable": True, "origin": f"/x/{name}.py"} for name in probes}}
+
+    monkeypatch.setattr(akp, "_verify_rebuild_imports", _probe)
+
+    result = akp._run_strategy_rebuild(
+        strategy,
+        command_override=[],
+        fallback_cwd=tmp_path,
+        timeout_sec=60,
+    )
+
+    assert result["status"] == "ok"
+    assert captured == {
+        "probes": ["sglang", "sglang.srt.server_args"],
+        "interpreter": "/opt/venv/bin/python",
+    }
+    assert result["import_check"]["modules"]["sglang.srt.server_args"]["importable"] is True
+
+
+def test_import_probe_detects_missing_module(akp):
+    result = akp._verify_rebuild_imports(
+        ["json", "hyperloom_definitely_not_installed"],
+        sys.executable,
+        timeout_sec=120,
+    )
+
+    assert result["status"] == "failed"
+    assert "hyperloom_definitely_not_installed" in result["error"]
+    assert result["modules"]["json"]["importable"] is True
+    assert result["sys_path"]
+
+
+def test_import_probe_passes_for_importable_modules(akp):
+    result = akp._verify_rebuild_imports(["json", "importlib.util"], sys.executable, timeout_sec=120)
+
+    assert result["status"] == "ok"
+    assert result["modules"]["importlib.util"]["importable"] is True
+
+
+def test_import_probe_skips_non_interpreter_rebuild(akp):
+    result = akp._verify_rebuild_imports(["sglang"], "/usr/bin/make")
+
+    assert result["status"] == "skipped"
+    assert "not interpreter-led" in result["reason"]
