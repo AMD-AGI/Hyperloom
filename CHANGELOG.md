@@ -20,6 +20,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A vLLM profile round had its profiler bounds dropped before launch.** The
+  argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
+  `--profiler-config.profiler torch` and a trace directory of its own
+  afterwards. `ProfilerConfig` refuses the iteration bounds this layer injects
+  unless both are present in the same fragment, so the probe rejected an argv
+  that is valid once the launcher's flags are appended, and the round then ran
+  with no bound on the capture window. Both flags are now asserted alongside
+  the bounds so the probed fragment is self-consistent on its own. The trace
+  directory is a placeholder: the launcher's own value has to win vLLM's
+  last-wins dotted-flag merge, so the bypass backend now emits its profiler
+  flags after `EXTRA_VLLM_ARGS` the way Magpie's launcher already does, rather
+  than before it where the placeholder would have won and sent the trace
+  somewhere trace discovery never looks. An operator-set profiler flag is left
+  untouched.
+- **A campaign the host killed cost the next task in the same repository.**
+  Every in-place task is handed the same `forge_experiments` directory, and the
+  release archives it -- but a run that was killed never reaches the release.
+  The leftover then did two things: forge-loop refused the workspace outright
+  ("already contains a Forge campaign; pass --resume to continue it"), failing
+  the next task at dispatch, and recovery read the stale manifest as that
+  task's own best result, reporting the dead campaign's commit as a missing
+  base commit -- a reason with nothing to do with the task it lost. Measured: a
+  session lost a `chunk_gated_delta_rule` task to a fusion campaign left behind
+  at a timeout an hour earlier. A leftover is now archived on the way in as
+  well as on the way out, kept rather than deleted because it is the only
+  account of what that run did, and a trusted manifest has to name a commit the
+  repository still has before it is read as this task's result. An archive that
+  cannot be made says so, since the dispatch refusal that follows is otherwise
+  undiagnosable.
 - **A campaign killed mid-search lost a fusion it had already published.**
   `run_campaign` publishes each winning iteration to the shadow repo's
   `forge_experiments/best/` and points `forge_loop_<stem>.json` at it, but the
