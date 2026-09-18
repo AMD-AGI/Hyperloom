@@ -18,6 +18,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
 
+### Added
+
+- **`kernelforge fusion-intercept`: cross-check a fusion opportunity against a
+  CUDA-graph-ON trace before authoring it.** Discovery reads a CUDA-graph-disabled
+  trace, because replay amortizes the launches fusion removes and the tail vanishes
+  with graphs on. That makes the cgoff trace the only place the opportunity is
+  visible, and also the reason its size is not the opportunity production still has.
+  Until now the bridge between the two was `predict_cuda_graph_on_gain`, which
+  without measured calibration is a function of the launch-bound share -- the one
+  quantity replay leaves alone -- so it cannot distinguish an opportunity replay
+  already took from one it did not. `fusion_calibration.json` would supply the
+  measured points that make it empirical, but it is absent from the tree and
+  `FORGE_FUSION_CALIBRATION` is set nowhere outside a test, so every run takes the
+  flat-discount fallback; `diagnose` already records that the share it discounts is
+  a poor discriminator of real cg-ON gain.
+
+  The new command answers it by measurement, splitting the opportunity the way
+  fusion actually earns it. Replay closes the gaps between tiny kernels, so the
+  launch half shows up as the rise in busy-fraction-of-wall between the two traces
+  and is reported as the share of the cgoff idle time replay had already taken. A
+  fused kernel also keeps intermediates in registers rather than round-tripping
+  HBM, which replay cannot do anything about, so the memory half is measured on the
+  cg-ON trace and survives regardless. A verdict of `intercepted` means both
+  channels are spent; `headroom_remains` means traffic still clears the 3% bar or
+  replay left the gaps open. Since replay changes the gaps between kernels and never
+  which kernels run, a launch-bound share that moves sharply between the two
+  captures is reported as `not_comparable` instead of being compared, and a cg-ON
+  trace no busier than its cgoff pair is reported as `graphs_not_active` -- a
+  capture mistake that would otherwise read as "nothing was intercepted". Both exit
+  non-zero so a script cannot mistake either for a result.
+
 ### Fixed
 
 - **A vLLM profile round had its profiler bounds dropped before launch.** The
