@@ -9,7 +9,7 @@ Coordinator auto-enqueues one ``conc_sweep`` task per SWEEP phase via
 on by default; disable via ``--no-enable-conc-sweep``); a LLM-proposed
 ``conc_sweep`` delegate is denied by PolicyGate.
 
-Inputs (``task.params``): ``concs`` (CONC ladder), ``variant_timeout_sec``,
+Inputs (``task.params``): ``concs`` (CONC ladder),
 ``total_budget_sec`` (``None`` disables the gate; ``<=0`` means no time is left
 and the sweep skips without booting a server).
 
@@ -103,7 +103,6 @@ class ConcSweepExecutor:
         else:
             concs = [int(c) for c in concs_raw]
 
-        variant_timeout = int(params.get("variant_timeout_sec") or state.conc_sweep_variant_timeout_sec or 1800)
         # An explicit ``None`` means "no budget gate" and must survive as None: coercing it to 0 would instead read as
         # "no time left" and skip.
         budget_raw = params.get("total_budget_sec", state.conc_sweep_total_budget_sec)
@@ -115,7 +114,6 @@ class ConcSweepExecutor:
                 state,
                 session_dir,
                 concs=concs,
-                variant_timeout_sec=variant_timeout,
                 total_budget_sec=total_budget,
                 recorder=recorder,
             )

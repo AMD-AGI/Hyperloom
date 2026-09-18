@@ -83,7 +83,6 @@ from ._server_lifecycle import (
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
-    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -440,31 +439,6 @@ def _default_grid_for_framework(
     return []
 
 
-# Auto-derived per-variant hard timeout: derive the cap from the Coordinator-injected measured baseline runtime plus a
-# safety margin above the soft-kill ratio (preserves soft-kill → hard-cap layering).
-DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC = 2400  # 40 min
-DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC = 14400  # 4 h — roofline composite budget
-DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN = 0.5  # hard cap ≥ baseline × (kill_ratio + 0.5)
-# AgentX ceiling.
-AGENTX_EXPLORE_TIMEOUT_CEILING_SEC = 28800  # 8 h
-
-
-def _compute_explore_variant_timeout(
-    baseline_runtime_sec: float,
-    kill_ratio: float,
-    *,
-    floor_sec: int = DEFAULT_EXPLORE_TIMEOUT_FLOOR_SEC,
-    ceiling_sec: int = DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC,
-    safety_margin: float = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN,
-) -> int:
-    """Derive the per-variant hard timeout from the measured baseline."""
-    if baseline_runtime_sec <= 0:
-        return int(floor_sec)
-    effective_kill_ratio = max(1.0, float(kill_ratio))
-    derived = float(baseline_runtime_sec) * (effective_kill_ratio + float(safety_margin))
-    return int(max(floor_sec, min(ceiling_sec, derived)))
-
-
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action."""
 
@@ -475,13 +449,11 @@ class ExploreExecutor:
         *,
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
-        variant_timeout_sec: int = 2400,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
         """Initialize the explore executor and its gating thresholds."""
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = session_dir
-        self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
 
     async def __call__(self, ctx) -> dict[str, Any]:
@@ -601,11 +573,6 @@ class ExploreExecutor:
             baseline_runtime_sec = float(baseline_runtime_sec_raw) if baseline_runtime_sec_raw is not None else 0.0
         except (TypeError, ValueError):
             baseline_runtime_sec = 0.0
-        overtime_kill_ratio_raw = params.get("explore_overtime_kill_ratio")
-        try:
-            overtime_kill_ratio = float(overtime_kill_ratio_raw) if overtime_kill_ratio_raw is not None else 0.0
-        except (TypeError, ValueError):
-            overtime_kill_ratio = 0.0
         # WARM measure-round anchor (client-only).
         baseline_warm_runtime_sec_raw = params.get("baseline_warm_runtime_sec")
         try:
@@ -614,33 +581,6 @@ class ExploreExecutor:
             )
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
-        # Per-variant hard cap precedence: explicit ``params['variant_timeout_sec']`` → auto-derive from baseline
-        # runtime + kill ratio (see ``_compute_explore_variant_timeout``) → ``self.variant_timeout_sec`` floor (no
-        # baseline yet).
-        explicit_timeout = params.get("variant_timeout_sec")
-        if explicit_timeout is not None:
-            timeout_sec = int(explicit_timeout)
-        else:
-            # Operator-tunable headroom; negative clamps to 0.
-            safety_margin_raw = params.get("variant_timeout_safety_margin")
-            try:
-                safety_margin = (
-                    max(0.0, float(safety_margin_raw))
-                    if safety_margin_raw is not None
-                    else DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
-                )
-            except (TypeError, ValueError):
-                safety_margin = DEFAULT_EXPLORE_TIMEOUT_SAFETY_MARGIN
-            # The stock 4h ceiling assumes a synthetic round measured in minutes.
-            _ceiling = AGENTX_EXPLORE_TIMEOUT_CEILING_SEC if agentx_enabled() else DEFAULT_EXPLORE_TIMEOUT_CEILING_SEC
-            timeout_sec = _compute_explore_variant_timeout(
-                baseline_runtime_sec=baseline_runtime_sec,
-                kill_ratio=overtime_kill_ratio,
-                floor_sec=int(self.variant_timeout_sec),
-                ceiling_sec=_ceiling,
-                safety_margin=safety_margin,
-            )
-
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
         try:
             with config_path.open(encoding="utf-8") as _f:
@@ -891,18 +831,10 @@ class ExploreExecutor:
 
         # Warm-decision mode.
         use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
-        # Decision-round overtime anchor: the WARM measure time when warm-decision is active and available, else the
-        # cold baseline wall-clock (legacy).
+        # Admission uses the measured warm duration when this round reuses a server.
         decision_anchor_sec = (
             baseline_warm_runtime_sec if (use_warm_decision and baseline_warm_runtime_sec > 0) else baseline_runtime_sec
         )
-        # The soft deadline is anchored on the warm client-only measure time and enforced from the server-ready
-        # marker, so both the measured runtime and this anchor exclude cold boot / warmup.
-        if decision_anchor_sec > 0 and overtime_kill_ratio > 0:
-            decision_deadline_sec: float | None = decision_anchor_sec * overtime_kill_ratio
-        else:
-            decision_deadline_sec = None
-
         # One Ray serving lease (actor) spans the WHOLE round; every variant reuses it.
         round_serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path)) if runnable else None
         # Stop testing further variants once the session wall-clock budget runs out; untested variants stay out of the
@@ -947,7 +879,9 @@ class ExploreExecutor:
                         float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
                     )
                 else:
-                    fit_required_sec = float(timeout_sec)
+                    from ._subprocess_kill import resolve_benchmark_timeouts
+
+                    fit_required_sec = resolve_benchmark_timeouts()[1]
                 if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
                     run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
                     run_stop_detail = run_stop.never_started
@@ -1013,12 +947,10 @@ class ExploreExecutor:
                             base_extra_args=stack_extra_args,
                             grid=[warmup_gv],
                             output_root=warmup_slot,
-                            variant_timeout_sec=timeout_sec,
                             model_path=resolved_model,
                             gpu_type=resolved_gpu,
                             benchmark_script=override_script,
                             result_dir=override_result_dir,
-                            soft_deadline_sec=None,
                             server_lifecycle=variant_lifecycle,
                             base_args_mode=stack_base_args_mode,
                             base_extra_envs=dict(stack_extra_envs),
@@ -1112,12 +1044,10 @@ class ExploreExecutor:
                         base_extra_args=stack_extra_args,
                         grid=[decision_gv],
                         output_root=slot,
-                        variant_timeout_sec=timeout_sec,
                         model_path=resolved_model,
                         gpu_type=resolved_gpu,
                         benchmark_script=override_script,
                         result_dir=override_result_dir,
-                        soft_deadline_sec=decision_deadline_sec,
                         server_lifecycle=variant_lifecycle,
                         base_args_mode=stack_base_args_mode,
                         base_extra_envs=dict(stack_extra_envs),
@@ -1139,108 +1069,6 @@ class ExploreExecutor:
                     r = results[0]
                     if _stopped_by_the_run(r, variant=gv, idx=idx, round_label="decision"):
                         break
-
-                    # Overtime gate fired: record a ``KILLED_OVERTIME`` row (no faked tput/gain), skip downstream
-                    # gates, leave the stack unadvanced.
-                    if getattr(r, "killed_overtime", False):
-                        variant_runtime = float(r.runtime_sec or 0.0)
-                        wall_clock_ratio = (
-                            round(variant_runtime / decision_anchor_sec, 3) if decision_anchor_sec > 0 else None
-                        )
-                        # Rough output tok/s salvaged from partial server.log.
-                        est_tput = getattr(r, "estimated_output_throughput", None)
-                        round_tested[fp] = {
-                            "fingerprint": fp,
-                            "name": gv.name,
-                            "extra_server_args": gv.extra_server_args,
-                            "extra_envs": dict(gv.extra_envs),
-                            **control_fields,
-                            "note": gv.note,
-                            "outcome": "KILLED_OVERTIME",
-                            "status": r.status,
-                            "tput": None,
-                            "gain_pct": None,
-                            "estimated_output_throughput": est_tput,
-                            "base_tput": running_base_tput,
-                            # Killed before any gate ruled: the stack it ran on
-                            # is known, its verdicts are not.
-                            "measured_against": _measured_against(),
-                            "round_id": round_id,
-                            "ts": _now_iso(),
-                            "provenance": provenance,
-                            "workload_signature": ws_sig,
-                            "framework": framework,
-                            "workspace": r.workspace,
-                            "runtime_sec": round(variant_runtime, 2),
-                            "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                            "baseline_runtime_sec": round(
-                                baseline_runtime_sec,
-                                2,
-                            ),
-                            "overtime_anchor_sec": round(decision_anchor_sec, 2),
-                            "overtime_anchor_kind": (
-                                "warm"
-                                if decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0
-                                else "cold"
-                            ),
-                            "overtime_kill_ratio": overtime_kill_ratio,
-                            "stage": FAILURE_STAGE_DECISION,
-                            "error_class": "killed_overtime",
-                        }
-                        if gv.name:
-                            round_name_index[gv.name] = fp
-                        rejected_update.append(
-                            {
-                                "fingerprint": fp,
-                                "name": gv.name,
-                                "extra_server_args": gv.extra_server_args,
-                                "extra_envs": dict(gv.extra_envs),
-                                **control_fields,
-                                "note": gv.note,
-                                "reason": "killed_overtime",
-                                "gain_pct": None,
-                                "tput": None,
-                                "estimated_output_throughput": est_tput,
-                                "runtime_sec": round(variant_runtime, 2),
-                                "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                                "round_id": round_id,
-                                "ts": _now_iso(),
-                                "provenance": provenance,
-                            }
-                        )
-                        losers.append(
-                            {
-                                "fingerprint": fp,
-                                "name": gv.name,
-                                "extra_server_args": gv.extra_server_args,
-                                "extra_envs": dict(gv.extra_envs),
-                                **control_fields,
-                                "provenance": provenance,
-                                "gain_pct": None,
-                                "tput": None,
-                                "estimated_output_throughput": est_tput,
-                                "reason": "killed_overtime",
-                                "workspace": r.workspace,
-                                "runtime_sec": round(variant_runtime, 2),
-                                "wall_clock_ratio_vs_baseline": wall_clock_ratio,
-                            }
-                        )
-                        log.warning(
-                            "explore: variant %s KILLED_OVERTIME "
-                            "(runtime=%.1fs vs %s anchor=%.1fs, ratio=%.2fx, "
-                            "kill_ratio=%.2fx, est_output_tput=%s tok/s); "
-                            "skipping KEEP/REVERT ladder.",
-                            gv.name,
-                            variant_runtime,
-                            "warm"
-                            if (decision_anchor_sec == baseline_warm_runtime_sec and baseline_warm_runtime_sec > 0)
-                            else "cold",
-                            decision_anchor_sec,
-                            wall_clock_ratio if wall_clock_ratio is not None else -1.0,
-                            overtime_kill_ratio,
-                            f"{est_tput:.1f}" if est_tput is not None else "n/a",
-                        )
-                        continue
 
                     # A variant KEEPs when it clears the graded verdict and the accuracy gate. The axes and the
                     # threshold floor belong to resolve_graded_comparison, which every lane shares.

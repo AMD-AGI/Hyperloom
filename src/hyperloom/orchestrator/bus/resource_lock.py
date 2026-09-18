@@ -5,16 +5,13 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import sqlite3
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-from hyperloom.common.coerce import to_unix
+from pathlib import Path
 
 from hyperloom.common.timeutil import now_iso
 
@@ -63,15 +60,14 @@ LANE_CONFLICTS: dict[str, frozenset[str]] = {
 #: round holding a serving lane under a holder id of its own would deny its own
 #: holder the dispatch the round exists to cover. ``RoundStore`` writes and
 #: drops this row inside the transaction that opens, renews and settles the
-#: round; the rest of the lease machinery -- ``lane_holders``, ``reap_expired``,
-#: the breakdown lane timeline -- reads it like any other lease.
+#: round; capacity readers and the breakdown lane timeline read it like any
+#: other ownership row.
 BRINGUP_ROUND_LANE = "bringup_round"
 
 #: Recorded on a round's lane row in place of a pid. The round's holder is a
 #: task, not this process, and only the task registry can prove a task's process
-#: dead and date the kill an expiry outcome has to carry -- so
-#: :meth:`SqliteLeaseBackend.reap_dead_holders`, which skips non-positive pids,
-#: leaves these rows to the TTL sweep.
+#: dead. The dead-holder pass skips non-positive pids, leaving these rows to
+#: explicit round settlement.
 ROUND_LEASE_PID = 0
 
 #: Recorded in the lane row's ``action`` column.
@@ -81,11 +77,20 @@ _ROUND_LEASE_ACTION = "bringup_round"
 _now_iso = now_iso
 
 
+def local_owner_scope() -> str:
+    """Identify this boot and PID namespace, or leave ownership unobservable."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+        namespace = Path("/proc/self/ns/pid").stat().st_ino
+    except OSError:
+        return ""
+    return f"{boot}:{namespace}" if boot else ""
+
+
 def _lease_iso(unix_ts: float) -> str:
     """Render unix seconds the way the lease table's timestamps compare.
 
-    ``expires_at`` is swept by string comparison against :func:`now_iso`, so the
-    two have to agree on offset and precision.
+    Budget timestamps use the same offset and precision as :func:`now_iso`.
 
     Args:
         unix_ts: The instant to render.
@@ -240,46 +245,13 @@ class SqliteLeaseBackend:
                     int(DEFAULT_LANE_CAPACITIES.get(lane, 1)),
                 )
 
-            # Pull holders to reap expired rows and count live holders per lane.
             cur.execute(
-                f"SELECT lane, holder_id, expires_at FROM leases WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
+                f"SELECT lane, holder_id FROM leases WHERE lane IN ({placeholders})",  # nosec B608 - generated placeholders only.
                 expanded,
             )
-            rows = [dict(r) for r in cur.fetchall()]
-
             holders_per_lane: dict[str, set[str]] = {lane: set() for lane in expanded}
-            expired: list[tuple[str, str]] = []  # (lane, previous_holder)
-            for row in rows:
-                lane = row["lane"]
-                row_holder = row["holder_id"]
-                row_expires = to_unix(row["expires_at"], default=0.0)
-                if row_expires > now_ts:
-                    holders_per_lane.setdefault(lane, set()).add(row_holder)
-                else:
-                    expired.append((lane, row_holder))
-
-            # Reap expired rows + emit lease_expired events.
-            for lane, prev_holder in expired:
-                cur.execute(
-                    "DELETE FROM leases WHERE lane=? AND holder_id=?",
-                    (lane, prev_holder),
-                )
-                cur.execute(
-                    "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, ts) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (
-                        uuid.uuid4().hex,
-                        "resource_lock",
-                        "*",
-                        "lease_expired",
-                        None,
-                        json.dumps(
-                            {"lane": lane, "previous_holder": prev_holder},
-                        ),
-                        now_iso,
-                    ),
-                )
+            for row in cur.fetchall():
+                holders_per_lane[row["lane"]].add(row["holder_id"])
 
             # Distinguish capacity (LaneFull) from cross-lane mutex (LaneBusy).
             full: list[str] = []
@@ -311,8 +283,8 @@ class SqliteLeaseBackend:
                 cur.execute(
                     "INSERT OR REPLACE INTO leases(lane, holder_id, "
                     "task_id, action, pid, acquired_at, expires_at, "
-                    "heartbeat_at) "
-                    "VALUES (?,?,?,?,?,?,?,?)",
+                    "heartbeat_at, owner_scope) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         lane,
                         holder_id,
@@ -322,6 +294,7 @@ class SqliteLeaseBackend:
                         now_iso,
                         expires_iso,
                         now_iso,
+                        local_owner_scope(),
                     ),
                 )
 
@@ -371,44 +344,6 @@ class SqliteLeaseBackend:
             )
             return cur.rowcount
 
-    async def reap_expired(self) -> list[dict]:
-        """Sweep expired rows; emits one ``lease_expired`` event per stale (lane, holder_id) row."""
-        now_iso_str = _now_iso()
-        reaped: list[dict] = []
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "SELECT * FROM leases WHERE expires_at <= ?",
-                (now_iso_str,),
-            )
-            stale = [dict(r) for r in cur.fetchall()]
-            for row in stale:
-                cur.execute(
-                    "DELETE FROM leases WHERE lane=? AND holder_id=?",
-                    (row["lane"], row["holder_id"]),
-                )
-                cur.execute(
-                    "INSERT INTO events (msg_id, from_agent, to_agent, topic, "
-                    "in_reply_to, payload, ts) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (
-                        uuid.uuid4().hex,
-                        "resource_lock",
-                        "*",
-                        "lease_expired",
-                        None,
-                        json.dumps(
-                            {
-                                "lane": row["lane"],
-                                "previous_holder": row["holder_id"],
-                                "reap_pass": True,
-                            }
-                        ),
-                        now_iso_str,
-                    ),
-                )
-                reaped.append(row)
-        return reaped
-
     @staticmethod
     def _pid_alive(pid: int) -> bool:
         """Best-effort liveness probe for a lease-holder PID."""
@@ -424,23 +359,29 @@ class SqliteLeaseBackend:
             return True
         return True
 
+    @classmethod
+    def holder_is_dead(cls, row) -> bool:
+        """Accept only an absent PID observed in its recorded local PID domain."""
+        scope = local_owner_scope()
+        if not scope or row["owner_scope"] != scope:
+            return False
+        try:
+            pid = int(row["pid"] or 0)
+        except (TypeError, ValueError):
+            return False
+        return pid > 0 and not cls._pid_alive(pid)
+
     async def reap_dead_holders(self) -> list[dict]:
-        """Release leases whose holder process is no longer alive."""
-        now_iso_str = _now_iso()
+        """Release leases whose local holder process is confirmed absent."""
         reaped: list[dict] = []
         async with self.db.transaction() as cur:
-            cur.execute(
-                "SELECT * FROM leases WHERE expires_at > ?",
-                (now_iso_str,),
-            )
+            cur.execute("SELECT * FROM leases")
             live_rows = [dict(r) for r in cur.fetchall()]
+            cur.execute("SELECT DISTINCT task_id FROM gpu_leases")
+            gpu_tasks = {row["task_id"] for row in cur.fetchall()}
             for row in live_rows:
-                pid_raw = row.get("pid")
-                try:
-                    pid = int(pid_raw) if pid_raw is not None else 0
-                except (TypeError, ValueError):
-                    pid = 0
-                if pid <= 0 or self._pid_alive(pid):
+                # A lane records its coordinator, not the specialist's GPU worker.
+                if row["task_id"] in gpu_tasks or not self.holder_is_dead(row):
                     continue
                 cur.execute(
                     "DELETE FROM leases WHERE lane=? AND holder_id=?",
@@ -456,30 +397,16 @@ class SqliteLeaseBackend:
         return reaped
 
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
-        """Return the ids of rounds whose lane row is still live at ``now_unix``.
-
-        The lease a round takes when it opens is the round's clock: a round
-        missing from this set has run out, whether or not a sweep has deleted
-        its row yet.
-
-        Args:
-            now_unix: The instant to test, so the caller's pass reads one clock.
-
-        Returns:
-            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
-        """
+        """Return round ids with a retained ownership row, irrespective of age."""
         rows = await self.db.fetchall(
-            "SELECT holder_id FROM leases WHERE lane = ? AND expires_at > ?",
-            (BRINGUP_ROUND_LANE, _lease_iso(now_unix)),
+            "SELECT holder_id FROM leases WHERE lane = ?",
+            (BRINGUP_ROUND_LANE,),
         )
         return {str(r["holder_id"]) for r in rows}
 
     async def lane_holders(self) -> dict[str, int]:
-        """Return ``{lane: live_holder_count}`` for lanes with live rows."""
-        rows = await self.db.fetchall(
-            "SELECT lane, COUNT(*) AS n FROM leases WHERE expires_at > ? GROUP BY lane",
-            (_now_iso(),),
-        )
+        """Return ``{lane: holder_count}`` for every retained ownership row."""
+        rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
         return {r["lane"]: int(r["n"]) for r in rows}
 
     async def lane_capacities(self) -> dict[str, int]:
@@ -542,10 +469,6 @@ class ResourceLockManager:
         for lane in lease.lanes:
             self._bump_counter(lane, "release_count")
         return n
-
-    async def reap_expired(self) -> list[dict]:
-        """Sweep expired leases via the backend."""
-        return await self.backend.reap_expired()
 
     async def reap_dead_holders(self) -> list[dict]:
         """Release leases whose holder process is dead via the backend."""

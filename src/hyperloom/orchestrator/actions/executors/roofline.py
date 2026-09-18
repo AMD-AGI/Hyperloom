@@ -108,7 +108,7 @@ async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
 
 async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> None:
     """Free GPUs held by an orphaned server before the next profile attempt."""
-    from .recover import probe_gpu_free_mb
+    from hyperloom.common.rocm_smi import gpu_vram_usage
 
     reaped = await _reap_session_orphans(session_dir)
 
@@ -129,8 +129,9 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
     )
     await asyncio.sleep(_GPU_RECLAIM_SETTLE_S)
     try:
-        free_mb = await asyncio.to_thread(probe_gpu_free_mb)
-        log.info("roofline: post-reclaim free VRAM: %s", free_mb)
+        usage = await asyncio.to_thread(gpu_vram_usage)
+        free_mb = [max(0.0, gpu.total_mib - gpu.used_mib) for gpu in usage] if usage is not None else None
+        log.info("roofline: post-reclaim free VRAM (MiB): %s", free_mb)
     except Exception:  # noqa: BLE001 — best-effort
         log.debug("roofline: post-reclaim probe failed", exc_info=True)
 

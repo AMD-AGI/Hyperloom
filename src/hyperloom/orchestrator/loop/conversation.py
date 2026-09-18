@@ -305,24 +305,10 @@ class ConversationCollaborator:
                         "stack) will likely be cut by the deadline."
                     )
 
-        # Time budget for Robustness — drives the deadline_imminent alert.
-        if agent_name == "robustness" and self._run_deadline is not None and self._run_started_monotonic is not None:
-            remaining_min = max(0.0, self._run_deadline.remaining() / 60.0)
-            elapsed_min = (time.monotonic() - self._run_started_monotonic) / 60.0
-            budget_min = self.shared_state.max_minutes or 0
-            sections.append("=== Time budget ===")
-            sections.append(
-                f"elapsed={elapsed_min:.1f}min  remaining={remaining_min:.1f}min  "
-                f"budget={budget_min}min  "
-                f"closing_phase={self.shared_state.closing_phase}"
-            )
-
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
-        # Resource pools are orchestration-only; robustness cannot schedule GPU work.
-        if agent_name != "robustness":
-            sections.append("=== Resource pools ===")
-            sections.append(self.shared_state.to_resource_pools_summary())
+        sections.append("=== Resource pools ===")
+        sections.append(self.shared_state.to_resource_pools_summary())
         if agent_name == "orchestration":
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:
@@ -446,19 +432,6 @@ class ConversationCollaborator:
                 sections.append(discarded_escalate_block)
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
-
-        # Robustness gets phase budget telemetry for medium-severity alerts.
-        if agent_name == "robustness":
-            try:
-                budget_block = self.shared_state.to_phase_budget_telemetry(
-                    budget_pct=self._phase_budget_pct,
-                )
-            except Exception:  # noqa: BLE001 — defensive
-                log.exception("Coordinator: phase budget telemetry failed")
-                budget_block = ""
-            if budget_block:
-                sections.append("=== Phase budget telemetry ===")
-                sections.append(budget_block)
 
         # 2. Inbox tail since this agent's last cursor.
         cursor = await self.cursors.load(agent_name)
