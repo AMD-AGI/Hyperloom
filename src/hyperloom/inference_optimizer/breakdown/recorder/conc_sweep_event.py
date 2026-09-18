@@ -369,13 +369,12 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the budget the ladder was admitted under.
 
-        Both totals are kept because they disagree: the sweep raises its own
-        default when that default cannot fund even one rung at the cap the grid
-        runner will actually grant, and a sweep that spent three hours on a
-        nine-hundred-second budget otherwise reads as a contradiction.
-        ``rung_cost_sec`` is that granted cap rather than the declared timeout,
-        since pricing at the smaller admits a rung the budget cannot pay for.
-        ``deadline`` is a wall-clock epoch.
+        Current sweeps keep declared and granted totals equal and do not raise
+        the budget to fit the per-process hard cap. ``rung_cost_sec`` is the
+        measured expected duration used for admission, or ``None`` when unknown.
+        The fields also preserve historical records that raised the budget.
+        ``deadline`` is the sweep's wall-clock budget boundary, not the earlier
+        sweep/session monotonic deadline used by the runner.
         """
         self._record_action(
             {

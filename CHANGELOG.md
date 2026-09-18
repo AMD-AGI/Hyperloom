@@ -20,6 +20,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Honor concurrency-sweep budgets without treating the hard cap as a start cost.**
+  Admission uses the measured expected duration when available; unknown-duration
+  work may start while budget remains. Boot retries, reuse and fallback share
+  the earlier sweep/session deadline, and reports retain the actual stop source.
+  The manual sweep driver no longer passes or advertises the retired
+  `--variant-timeout-sec` option.
+- **Complete cooperative build and specialist cancellation without accepting
+  unconfirmed cleanup.** Cancellation reaches pending work and running workers;
+  confirmed cleanup records a cancelled outcome, while unknown cleanup retains
+  ownership. Completed outcomes remain in task history for diagnosis even when
+  cleanup fails, without publishing them for promotion or retry. Completion
+  callback failures after confirmed cleanup no longer retain execution entries,
+  and repeated inline calls return stored terminal results instead of rerunning.
+- **Refuse unsafe session resumes explicitly.** Legacy or foreign execution
+  ownership and unproven historical cancellations now produce bounded task/lane
+  diagnostics before resume writes or dispatch. No ownership is cleared; cleanup
+  must be verified in the original execution environment. Resume admission and
+  round reconciliation honor the latest recorded cleanup outcome, including
+  results recorded after an earlier terminal transition. A Ray worker whose root
+  exited is not treated as proof that detached descendants exited, and a missing
+  stop acknowledgment no longer destroys the specialist actor's cleanup channel.
+  Specialist cleanup makes one bounded follow-up confirmation on the same lease
+  before retaining unconfirmed ownership; a late acknowledgment is consumed by
+  the existing completion path rather than requiring a new background reaper.
+- **Restore safe AITER lock cleanup at baseline startup.** Stale locks are cleaned
+  only when compiler absence is established. Unreadable live-process identity
+  leaves locks untouched; known zombies do not block cleanup.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
