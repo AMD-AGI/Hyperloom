@@ -1071,16 +1071,30 @@ def _revert_warm_patch_state(
 
 #: The per-tree fields that leave this module. ``use_nogit`` stays behind: it
 #: describes how the apply ran, and the restore reads the channel off whether
-#: backups are present.
-_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups")
+#: backups are present. ``mutated`` says whether this round wrote to the tree at
+#: all, which absent restore artifacts alone cannot: a no-op apply and an apply
+#: whose artifacts were lost both record none, and only the first is safe to
+#: leave standing.
+_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups", "mutated")
 
 
 def _warm_tree_records(
     trees: Mapping[str, Mapping[str, Any]],
     order: Sequence[str],
+    *,
+    before_mutation: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return one JSON-safe record per touched tree, in apply order."""
-    return [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    """Return one JSON-safe record per touched tree, in apply order.
+
+    ``before_mutation`` stamps ``mutated`` true. A record persisted ahead of the apply is
+    the one record that cannot know what the round went on to write, so a resume that finds
+    it has to treat the tree as written-to and restore it from the snapshot taken with it.
+    """
+    records = [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    if before_mutation:
+        for record in records:
+            record["mutated"] = True
+    return records
 
 
 def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1166,27 +1180,13 @@ def _apply_warm_patches(
             continue
         git_tree = _is_git_tree(Path(root))
         pre_sha = _git_head_sha(root) if git_tree else ""
-        # prelude promotes a required timeline's tree only against a pre_sha and a git snapshot manifest. nogit
-        # produces neither, so serving this path from it turned a successful replay into
-        # validated_recipe_checkout_incomplete -- worse than the fast failure it replaced.
-        if required_timeline and not pre_sha:
-            return {
-                "required": True,
-                "status": "failed",
-                "patches": [],
-                "applied": [],
-                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                "failure": "missing_git_head",
-                "pre_sha": "",
-                "target_repo": root,
-                "rolled_back": False,
-            }
         trees[root] = {
             "root": root,
             "pre_sha": pre_sha,
             "use_nogit": not git_tree or not pre_sha,
             "snapshot_manifest": None,
             "nogit_backups": [],
+            "mutated": False,
         }
     tree_order = [root for root in tree_order if root in trees]
     if not tree_order:
@@ -1273,9 +1273,11 @@ def _apply_warm_patches(
             return []
     snapshot_manifest = primary["snapshot_manifest"]
     if any(tree["snapshot_manifest"] for tree in trees.values()):
-        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order)
+        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order, before_mutation=True)
         params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-        if before_mutation is not None and not bool(before_mutation(_warm_tree_records(trees, tree_order))):
+        if before_mutation is not None and not bool(
+            before_mutation(_warm_tree_records(trees, tree_order, before_mutation=True))
+        ):
             return {
                 "required": required_timeline,
                 "status": "failed",
@@ -1399,7 +1401,9 @@ def _apply_warm_patches(
                 if not ok:
                     raise RuntimeError(err or "nogit patch apply failed")
                 nogit_backups.extend(backups)
-                method = "applied_nogit"
+                # A real apply backs up every file it writes, so an empty set is the
+                # applier reporting an overlay the tree already carried.
+                method = "applied_nogit" if backups else "already_present"
             else:
                 checked = subprocess.run(
                     ["git", "apply", "--check", str(patch_path)],
@@ -1482,6 +1486,8 @@ def _apply_warm_patches(
                 break
             continue
 
+        if method in ("applied", "applied_3way", "applied_nogit"):
+            tree["mutated"] = True
         item = {
             "patch_file": patch_file,
             "idx": str(idx),
