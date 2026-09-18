@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -370,9 +371,37 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
 
 _DIFF_TARGET_RE = re.compile(r"^diff --git a/(\S+) b/\S+", re.MULTILINE)
+#: ``driver_shim`` renders this as a module-level literal, so it reads back without importing.
+_DRIVER_ENV_FLAGS_RE = re.compile(r"^ENV_FLAGS\s*=\s*(.+)$", re.MULTILINE)
 
 #: Where a campaign's best manifest sits under the shadow repo it was built in.
 _SHADOW_EXPERIMENTS_MARKER = "/forge_experiments/"
+
+
+def _campaign_env_flag(root: Path, stem: str) -> str:
+    """Read back the env flags the campaign gated its fused path behind.
+
+    ``run_campaign`` splits ``recipe.env_flag`` on whitespace and renders the result into
+    ``driver_<stem>.py`` beside the loop result, so the driver is where a killed run still
+    says which flags turn the fusion on.
+    """
+    driver = root / f"driver_{stem}.py"
+    try:
+        source = driver.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = _DRIVER_ENV_FLAGS_RE.search(source)
+    if not match:
+        return ""
+    try:
+        flags = ast.literal_eval(match.group(1))
+    except (SyntaxError, ValueError):
+        return ""
+    if isinstance(flags, str):
+        flags = (flags,)
+    if not isinstance(flags, (tuple, list)):
+        return ""
+    return " ".join(str(flag).strip() for flag in flags if str(flag).strip())
 
 
 def _patch_target_file(patch_path: Path) -> str:
@@ -436,11 +465,22 @@ def _campaign_patches_on_disk(root: Path) -> list[dict[str, Any]]:
         target_file = _patch_target_file(patch_file)
         if not target_file:
             continue
+        env_flag = _campaign_env_flag(root, stem)
+        if not env_flag:
+            # An authored fusion is env-gated, and the flag is the only way the fused path
+            # reaches the re-baseline server. Salvaging the patch without it queues a win to be
+            # measured on the eager path and REVERTed, which loses it one stage later instead.
+            sys.stderr.write(
+                f"forge_fusion: not salvaging {stem}: its driver names no env flag, and without one "
+                "the patch would be re-baselined un-gated and rejected\n"
+            )
+            continue
         rows.append(
             {
                 "kernel_name": stem,
                 "patch_path": str(patch_file),
                 "target_file": target_file,
+                "env_flag": env_flag,
                 "kernel_repo": best_manifest.split(_SHADOW_EXPERIMENTS_MARKER)[0]
                 if _SHADOW_EXPERIMENTS_MARKER in best_manifest
                 else "",

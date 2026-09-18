@@ -1474,6 +1474,57 @@ def test_build_cmd_omits_the_recipe_ceiling_when_none_was_derived(tmp_path):
     assert cmd[cmd.index("--framework") + 1] == "sglang"
 
 
+def test_a_salvaged_row_carries_the_flag_its_fused_path_is_gated_behind(tmp_path):
+    """Without it integrate boots the re-baseline server un-gated and REVERTs a real win.
+
+    ``NominatedPatch.env_flag`` -> ``fusion_env_flags`` -> ``extra_envs`` is the only way the
+    flag reaches the re-baseline, and the exported patch does not carry it. ``run_campaign``
+    renders it into ``driver_<stem>.py`` beside the loop result, which is where a killed run
+    still has it.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch").write_text(
+        "diff --git a/qk.py b/qk.py\n", encoding="utf-8"
+    )
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.011)), encoding="utf-8"
+    )
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope", "SGLANG_FUSED_QKVGATE")
+
+    result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
+
+    assert [p.env_flag for p in parse_outcome(result).patches] == ["SGLANG_FUSED_QKVGATE"]
+
+
+def test_a_campaign_whose_flag_cannot_be_read_is_not_salvaged(tmp_path):
+    """Queuing it un-gated loses the same win one stage later, after ~25 min of integrate."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_llm_qkvgate_split_qknorm_rope.patch").write_text(
+        "diff --git a/qk.py b/qk.py\n", encoding="utf-8"
+    )
+    (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(
+        json.dumps(_campaign_loop_result(total_speedup=5.011)), encoding="utf-8"
+    )
+    # No driver_<stem>.py beside it.
+
+    assert forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir)) is None
+
+
+def _campaign_driver(output_dir, stem: str, env_flag: str = "SGLANG_FUSED_QKVGATE") -> None:
+    """What ``run_campaign`` writes beside the loop result, rendered by ``driver_shim``.
+
+    It is the only artifact a killed run leaves that still names the flag the fused path is
+    gated behind, and without that flag the salvaged patch is re-baselined un-gated.
+    """
+    flags = tuple(f for f in env_flag.split() if f)
+    (output_dir / f"driver_{stem}.py").write_text(
+        f"HARNESS = '/w/harness.py'\nENV_FLAGS = {flags!r}\nCASE_ID = {stem!r}\n",
+        encoding="utf-8",
+    )
+
+
 def _campaign_loop_result(*, total_speedup: float, improved: bool = True) -> dict:
     """What ``kernelforge.cli`` writes to ``forge_loop_<stem>.json`` per campaign."""
     return {
@@ -1506,11 +1557,13 @@ def test_salvage_recovers_campaign_artifacts_when_the_run_dies_before_the_manife
     (output_dir / "forge_loop_llm_qkgate_split_qknorm_rope.json").write_text(
         json.dumps(_campaign_loop_result(total_speedup=11.99)), encoding="utf-8"
     )
+    _campaign_driver(output_dir, "llm_qkgate_split_qknorm_rope", "SGLANG_FUSED_QKGATE")
     weak = output_dir / "fusion_llm_qk_gemma_norm_rope_gate.patch"
     weak.write_text("diff --git a/gate.py b/gate.py\n", encoding="utf-8")
     (output_dir / "forge_loop_llm_qk_gemma_norm_rope_gate.json").write_text(
         json.dumps(_campaign_loop_result(total_speedup=5.53)), encoding="utf-8"
     )
+    _campaign_driver(output_dir, "llm_qk_gemma_norm_rope_gate", "SGLANG_FUSED_GEMMA_GATE")
 
     result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
 
@@ -1615,6 +1668,7 @@ def test_salvage_reads_the_published_best_when_the_campaign_never_returned(tmp_p
     loop = _campaign_loop_result(total_speedup=5.011)
     loop["best_manifest"] = str(manifest)
     (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope")
 
     result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
 
@@ -1643,6 +1697,7 @@ def test_salvage_prefers_the_exported_patch_over_the_published_best(tmp_path):
     loop = _campaign_loop_result(total_speedup=5.011)
     loop["best_manifest"] = str(manifest)
     (output_dir / "forge_loop_llm_qkvgate_split_qknorm_rope.json").write_text(json.dumps(loop), encoding="utf-8")
+    _campaign_driver(output_dir, "llm_qkvgate_split_qknorm_rope")
 
     result = forge_fusion.salvage_forge_fusion_from_workspace(str(output_dir))
 
