@@ -34,6 +34,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   than before it where the placeholder would have won and sent the trace
   somewhere trace discovery never looks. An operator-set profiler flag is left
   untouched.
+- **A campaign the host killed cost the next task in the same repository.**
+  Every in-place task is handed the same `forge_experiments` directory, and the
+  release archives it -- but a run that was killed never reaches the release.
+  The leftover then did two things: forge-loop refused the workspace outright
+  ("already contains a Forge campaign; pass --resume to continue it"), failing
+  the next task at dispatch, and recovery read the stale manifest as that
+  task's own best result, reporting the dead campaign's commit as a missing
+  base commit -- a reason with nothing to do with the task it lost. Measured: a
+  session lost a `chunk_gated_delta_rule` task to a fusion campaign left behind
+  at a timeout an hour earlier. A leftover is now archived on the way in as
+  well as on the way out, kept rather than deleted because it is the only
+  account of what that run did, and a trusted manifest has to name a commit the
+  repository still has before it is read as this task's result. An archive that
+  cannot be made says so, since the dispatch refusal that follows is otherwise
+  undiagnosable.
 - **A KB recipe carrying code overlays could not be replayed into a framework
   installed from a wheel.** A Recipe whose patch timeline is non-empty replays
   as required, and that path refused any tree without a git HEAD -- which a
