@@ -22,7 +22,11 @@ CONF_DIR="${HL_CONF_DIR:?HL_CONF_DIR not set (submit via submit.sh)}"
 # --- resolve the model row -------------------------------------------------
 ROW="$(awk -F'\t' -v k="$MODEL_KEY" '$1==k{print;exit}' "$CONF_DIR/models.tsv")"
 [ -n "$ROW" ] || { echo "unknown model key: $MODEL_KEY (see $CONF_DIR/models.tsv)" >&2; exit 2; }
-IFS=$'\t' read -r KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN <<<"$ROW"
+# ep_size trails target_gain so a 13-column row from before it existed still
+# parses; unset means expert parallelism stays at 1, which is what the optimizer
+# defaults to anyway.
+IFS=$'\t' read -r KEY REPO_ID FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN EP_SIZE <<<"$ROW"
+EP_SIZE="${EP_SIZE:-1}"
 # Real hardware may differ from the model's tabled target (e.g. an MI355X-only
 # cluster running an MI300X-tagged row). HL_GPU_TYPE_OVERRIDE wins when set.
 GPU_TYPE="${HL_GPU_TYPE_OVERRIDE:-$GPU_TYPE}"
@@ -39,7 +43,7 @@ elif [ -n "${HL_MODEL_BASE:-}" ] && [ -d "${HL_MODEL_BASE%/}/${REPO_ID##*/}" ]; 
   MODEL_PATH="${HL_MODEL_BASE%/}/${REPO_ID##*/}"
 fi
 echo "[hl] model resolve: repo_id=$REPO_ID base=${HL_MODEL_BASE:-<none>} -> $MODEL_PATH"
-export KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN BACKEND
+export KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE IMAGE TP PREC ISL OSL CONC MODEL_CLASS MAX_HOURS TARGET_GAIN EP_SIZE BACKEND
 
 # --- identity: end-to-end join key the optimizer reads from env ------------
 export CLAW_SESSION_ID="${CLAW_SESSION_ID:-$(cat /proc/sys/kernel/random/uuid)}"
@@ -117,7 +121,7 @@ case "$RUNTIME" in
              REQUESTS_CA_BUNDLE SSL_CERT_FILE HF_TOKEN HYPERLOOM_SOURCE_DIR \
              HYPERLOOM_SOURCE_REPO HYPERLOOM_SOURCE_REF \
              KEY REPO_ID MODEL_PATH FRAMEWORK GPU_TYPE TP PREC ISL OSL CONC MODEL_CLASS \
-             MAX_HOURS TARGET_GAIN BACKEND KERNEL_OPT_BACKEND_ORDER HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
+             MAX_HOURS TARGET_GAIN EP_SIZE BACKEND KERNEL_OPT_BACKEND_ORDER HL_HOST_ALIAS_IP HL_HOST_ALIAS_NAME \
              CURSOR_DEFAULT_MODEL GEAK_CLAUDE_MODEL CLAUDE_MODEL CODEX_MODEL LLM_MODEL \
              KNOWLEDGE_STORE_MODE KNOWLEDGE_LOCAL_ROOT \
              GBRAIN_BASE_URL GBRAIN_TOKEN \

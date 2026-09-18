@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A Slurm row declaring a workload shape was benchmarked at the defaults.**
+  The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
+  flag > persisted state > default and deliberately never reads them from the
+  environment, but `_incontainer.sh.in` only exported them. A row declaring
+  `tp=4` therefore materialised a `tp=1` baseline, where sglang's rank math
+  divided by zero; a row declaring `isl=8192 osl=512` silently measured
+  1024/1024, and `precision` came from the checkpoint sniffer rather than the
+  row. The whole declared shape is now passed as flags in both the python and
+  claude backends. The exports stay, because the framework recipes downstream
+  do read them -- that split is now stated where the command is spelled out,
+  since the old wording pointed the carrier at the ignored mechanism. `ep_size`
+  also gains a producer: it is a new trailing `models.tsv` column, parsed and
+  exported by `run_hyperloom.sbatch` and added to the docker backend's `-e`
+  allowlist so enroot and docker agree on the shape. It trails `target_gain` so
+  existing 13-column rows still parse, and an absent value keeps expert
+  parallelism at 1.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and
