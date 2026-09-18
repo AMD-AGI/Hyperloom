@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Robustness storm detector + intervention-mix primitives."""
+"""Intervention-mix primitives."""
 
 from __future__ import annotations
 

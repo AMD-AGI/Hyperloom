@@ -10,8 +10,7 @@ A consolidated symptom → cause → fix index for the most common Hyperloom fai
 upstream SKILL file for the component you're touching:
 [`inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md),
 [`kernel-execution-path.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/kernel-execution-path.md),
-[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md),
-[`robustness/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/robustness/SKILL.md).
+[`critic/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/agents/critic/SKILL.md).
 
 ```{note}
 Shell paths on this page follow the recommended `pip install --target .` layout.
@@ -232,11 +231,10 @@ the baseline benchmark fails with VRAM allocation errors.
    `--max-model-len`.
 4. Lower `CONC` to reduce simultaneous KV cache pressure.
 
-The Robustness agent classifies repeated OOMs as a `log_error_pattern`
-high-severity symptom and emits an `escalate_strategy_change` intent;
-check the latest finding in
-`$SESSION_DIR/agents/robustness/findings/<session_id>.jsonl` for
-context.
+Inspect the failed action's server log and result artifacts under
+`$SESSION_DIR/runs/<action>/<task_id>/` for the first allocation failure and
+its workload context. There is no runtime recovery agent that diagnoses or
+restarts the session for you.
 
 ---
 
@@ -455,8 +453,8 @@ python -m hyperloom.inference_optimizer.tools.event_counts "$SD"
 # 2. What was the last action's outcome?
 jq '.optimization_stack | last' "$SD/state.json"
 
-# 3. Any Robustness findings since the last tick?
-tail -n 5 "$SD"/agents/robustness/findings/*.jsonl 2>/dev/null
+# 3. What phase, lifecycle events, and stop reason are persisted?
+python -m hyperloom.inference_optimizer.tools.read_optimizer_state "$SD"
 ```
 
 See [Hyperloom operator scripts](operator-scripts.md) for the full set of

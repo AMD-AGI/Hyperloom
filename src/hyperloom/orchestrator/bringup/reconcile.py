@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import uuid
@@ -16,25 +15,13 @@ from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
-from ..bus.resource_lock import ResourceLockManager
-from .reap import (
-    CLAIM_REACHABLE,
-    REAP_HOLDER_ALIVE,
-    REAP_HOLDER_REPORTED,
-    REAP_UNOBSERVABLE,
-    Reap,
-    ReapBackend,
-    holder_target,
-    select_reaper,
-)
+from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
 from ..state.round_store import (
     EXPIRED_REAPED,
-    EXPIRED_UNREAPED,
     Round,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
-from ..supervisor import store as supervisor_store
 
 log = logging.getLogger(__name__)
 
@@ -139,7 +126,6 @@ class Reconciler:
         resources: Any = None,
         proposals: Callable[[], Mapping[str, Any]] | None = None,
         session_dir: Any = None,
-        reaper: Any = None,
         terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
         review_ttl_sec: float = REVIEW_TTL_SEC,
     ):
@@ -155,7 +141,6 @@ class Reconciler:
             proposals: Returns the in-memory pending proposals, so a durable
                 timeout deny also reaches the copy the loop consults.
             session_dir: Where SharedState is saved after a terminal is set.
-            reaper: The reap unit; defaults to :func:`.reap.select_reaper`.
             terminal_holder_cap_sec: Cap for a round whose holder went terminal.
             review_ttl_sec: TTL for an undecided review.
         """
@@ -169,7 +154,6 @@ class Reconciler:
         self._resources = resources
         self._proposals = proposals
         self._session_dir = session_dir
-        self._reaper: ReapBackend = reaper if reaper is not None else select_reaper()
         self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
         self.review_ttl_sec = max(0.0, float(review_ttl_sec))
         self.last_report = ReconcileReport()
@@ -185,12 +169,11 @@ class Reconciler:
         """
         report = ReconcileReport()
         for rule in (
-            self._stamp_tick,
             self._fail_dead_tasks,
+            self._reap_leases,
             self._deny_timed_out_reviews,
             self._resolve_open_rounds,
             self._close_stale_validation_window,
-            self._reap_leases,
             self._rebuild_projection,
         ):
             try:
@@ -209,24 +192,6 @@ class Reconciler:
                 report.leases_reaped,
             )
         return report
-
-    async def _stamp_tick(self, now_unix: float, report: ReconcileReport) -> None:
-        """Record that a tick has started, for the process watching from outside."""
-        await self.stamp_progress(now_unix)
-
-    async def stamp_progress(self, now_unix: float) -> None:
-        """Refresh the coordinator progress timestamp."""
-        if self._session_dir is None:
-            return
-        try:
-            await asyncio.to_thread(
-                supervisor_store.stamp_tick,
-                self._session_dir,
-                tick=int(getattr(self._shared_state, "tick", 0)),
-                now_unix=now_unix,
-            )
-        except OSError as exc:
-            log.warning("reconcile: progress stamp failed: %s", exc)
 
     async def _fail_dead_tasks(self, now_unix: float, report: ReconcileReport) -> None:
         """Fail every running task whose process is provably gone."""
@@ -286,12 +251,8 @@ class Reconciler:
         pending.verdict = TIMEOUT_VERDICT
 
     async def _resolve_open_rounds(self, now_unix: float, report: ReconcileReport) -> None:
-        """Expire, advance or leave each open round, oldest first."""
-        holding = await self._locks.bringup_round_holders(now_unix)
+        """Advance completed owners without timing out active ownership."""
         for round_row in await self._rounds.open_rounds():
-            if round_row.round_id not in holding:
-                await self._expire(round_row, now_unix, report, why="lease_expired")
-                continue
             await self._advance_or_expire(round_row, now_unix, report)
 
     async def _close_stale_validation_window(self, now_unix: float, report: ReconcileReport) -> None:
@@ -312,13 +273,15 @@ class Reconciler:
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
-        """Sweep every lease past its TTL, this loop's only sweep of the table."""
-        report.leases_reaped = len(await self._locks.reap_expired())
+        """Release only leases with confirmed-dead local owners."""
+        report.leases_reaped = len(await self._locks.reap_dead_holders())
 
     async def _advance_or_expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Move a terminal-holder round forward, or end it once its cap passes."""
         holder = await self._task(round_row.holder_task_id)
-        if holder is None or holder.state not in TERMINAL_STATES:
+        if holder is None or not _terminal_by_observation(holder):
+            return
+        if await self._holder_has_resources(holder.task_id):
             return
         successor = await self._successor(round_row.holder_task_id)
         if successor is not None:
@@ -343,9 +306,8 @@ class Reconciler:
         await self._expire(round_row, now_unix, report, why="holder_terminal_without_result")
 
     async def _expire(self, round_row: Round, now_unix: float, report: ReconcileReport, *, why: str) -> None:
-        """End a round, reaped on proof and unreaped without it."""
-        reap = await self._confirm_gone(round_row.holder_task_id, now_unix)
-        outcome = EXPIRED_REAPED if reap.confirmed_unix is not None else EXPIRED_UNREAPED
+        """Settle a completed owner after its successor/review window ends."""
+        outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
             round_row.round_id,
             holder_task_id=round_row.holder_task_id,
@@ -353,39 +315,20 @@ class Reconciler:
             outcome=outcome,
             now_unix=now_unix,
             request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": why, "reap": reap.outcome, "claim": reap.claim},
+            evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
         )
         if not result.ok:
             return
         report.settled.append((round_row.round_id, outcome))
-        if outcome == EXPIRED_UNREAPED:
-            # Recorded, not acted on: an unconfirmable reap is the ordinary
-            # answer from a process-group unit, and the lease has already run
-            # out, so the machine is released either way.
-            log.warning(
-                "RECONCILE: round %s expired with nothing confirming holder %s dead (%s)",
-                round_row.round_id,
-                round_row.holder_task_id,
-                reap.outcome,
-            )
 
-    async def _confirm_gone(self, holder_task_id: str, now_unix: float) -> Reap:
-        """Establish whether the holder is gone, and say so only if it is.
-
-        Returns:
-            Reap: The confirmation, carrying the claim of whichever unit ran, or
-            the reason there is none.
-        """
-        target = await holder_target(self._db, holder_task_id)
-        reap = await self._reaper.reap(target, now_unix=now_unix)
-        if reap.confirmed_unix is not None or reap.outcome == REAP_HOLDER_ALIVE:
-            return reap
-        holder = await self._task(holder_task_id)
-        if holder is not None and _terminal_by_observation(holder):
-            # A row the worker wrote as its work ended is a report, not an
-            # enumeration: no unit looked at a process to produce it.
-            return Reap(float(now_unix), REAP_HOLDER_REPORTED, self._reaper.name, CLAIM_REACHABLE)
-        return Reap(None, REAP_UNOBSERVABLE, self._reaper.name, reap.claim)
+    async def _holder_has_resources(self, task_id: str) -> bool:
+        """Keep round ownership while execution or GPU cleanup still owns rows."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM leases WHERE task_id=? AND lane != ? "
+            "UNION ALL SELECT 1 FROM gpu_leases WHERE task_id=? LIMIT 1",
+            (task_id, BRINGUP_ROUND_LANE, task_id),
+        )
+        return row is not None
 
     def _save_state(self) -> None:
         """Persist SharedState after a terminal, if there is somewhere to put it."""
@@ -435,14 +378,19 @@ def _terminal_by_observation(task: Task) -> bool:
     if task.state not in TERMINAL_STATES:
         return False
     for entry in reversed(task.history):
-        if not isinstance(entry, dict) or entry.get("to") != task.state:
+        if not isinstance(entry, dict):
             continue
         evidence = entry.get("evidence")
+        if isinstance(evidence, dict) and isinstance(evidence.get("outcome"), dict):
+            if isinstance(evidence.get("cleanup_confirmed"), bool):
+                return evidence["cleanup_confirmed"]
+        if entry.get("to") != task.state:
+            continue
         if not isinstance(evidence, dict):
             return True
         if _EVIDENCE_DEAD_PID in evidence:
             return True
-        return _EVIDENCE_LEASE_TTL not in evidence
+        return _EVIDENCE_LEASE_TTL not in evidence and evidence.get("reason") != "cancelled_in_flight"
     return True
 
 

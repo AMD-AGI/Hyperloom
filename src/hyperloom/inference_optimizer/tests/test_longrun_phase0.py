@@ -204,9 +204,9 @@ async def test_run_db_retention_aggregates(conn):
     assert res.total == res.events_deleted + res.tasks_deleted
 
 
-# GPU lease reaper
+# Retained GPU ownership
 @pytest.mark.asyncio
-async def test_gpu_pool_reap_expired(conn):
+async def test_gpu_pool_retains_old_leases(conn):
     pool = SpecialistGpuPool(conn, gpu_ids=[0, 1, 2, 3])
     now = datetime.now(timezone.utc)
     # Insert one live + two expired leases directly.
@@ -221,10 +221,11 @@ async def test_gpu_pool_reap_expired(conn):
             "expires_at, heartbeat_at) VALUES (?,?,?,?,?,?)",
             row,
         )
-    reaped = await pool.reap_expired()
-    assert reaped == 2
+    lease = await pool.try_acquire(count=1, holder_id="new", task_id="new")
+    assert lease is not None and lease.gpu_ids == (3,)
+    assert await pool.try_acquire(count=1, holder_id="full", task_id="full") is None
     remaining = await conn.fetchall("SELECT gpu_id FROM gpu_leases")
-    assert [r["gpu_id"] for r in remaining] == [0]
+    assert sorted(r["gpu_id"] for r in remaining) == [0, 1, 2, 3]
 
 
 # retry/backoff
@@ -297,7 +298,6 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -307,7 +307,6 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
     try:
@@ -324,10 +323,10 @@ async def test_coordinator_maintenance_reaps_leases_and_prunes(tmp_path, monkeyp
 
         summary = await c._run_maintenance(tick=10)
         assert summary is not None
-        assert summary["gpu_leases_reaped"] == 1
+        assert "gpu_leases_reaped" not in summary
         assert "events_pruned" in summary and "tasks_pruned" in summary
         rows = await c.db.fetchall("SELECT COUNT(*) AS c FROM gpu_leases")
-        assert int(rows[0]["c"]) == 0
+        assert int(rows[0]["c"]) == 1
         # The wall-clock gate is seeded at construction, so tick 1 of a fresh
         # session must not already be past the interval.
         assert time.monotonic() - c._last_maintenance_ts < MAINTENANCE_INTERVAL_SEC

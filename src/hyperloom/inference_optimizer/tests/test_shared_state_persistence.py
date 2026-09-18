@@ -17,7 +17,6 @@ import pytest
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -41,7 +40,6 @@ def _backends_full() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -201,7 +199,7 @@ async def test_coordinator_prune_branch_persists(session_dir):
     c = Coordinator(session_dir, backends=_backends_full())
     try:
         await c._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "deep_kernel", "reason": "3 fails"},
@@ -219,7 +217,7 @@ async def test_pruned_family_survives_coordinator_restart(session_dir):
     c1 = Coordinator(session_dir, backends=_backends_full())
     try:
         await c1._handle_intent(
-            "robustness",
+            "orchestration",
             Intent(
                 type=IntentType.PRUNE_BRANCH,
                 payload={"family": "long", "reason": "expensive"},

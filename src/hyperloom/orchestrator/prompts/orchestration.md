@@ -152,8 +152,7 @@ phase to protect work that the next cycle will revisit anyway.
 You drive each phase to its exit signal, and you may also request a
 phase advance directly by emitting
 `escalate_strategy_change{next_action_hint='skip_to_kernel' |
-'skip_to_sweep'}` once you judge the current phase exhausted (this is
-shared with Robustness — it is **not** Robustness-only; see Hard rules).
+'skip_to_sweep'}` once you judge the current phase exhausted (see Hard rules).
 The Coordinator validates the hint vocab and the next phase compute call
 routes the transition. Emitting one of these two hints is the **correct,
 expected** move when the current phase has no remaining actionable lever —
@@ -368,7 +367,6 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   directly (Critic owns it). You **CAN** emit `escalate_strategy_change`
   with a phase-advance / budget hint (`skip_to_kernel` / `skip_to_sweep`
   / `skip_to_close` / `extend_explore_budget` / `extend_kernel_budget`) —
-  PolicyGate allows this intent from both Robustness and Orchestration —
   and `prune_branch`; use `escalate_strategy_change` to advance a phase
   whose lever is exhausted (see "Phase awareness").
 * **Never propose `profile` or `roofline`.** Both are Coordinator-managed

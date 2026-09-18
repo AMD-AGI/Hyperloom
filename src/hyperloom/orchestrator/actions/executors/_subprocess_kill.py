@@ -5,9 +5,13 @@
 
 from __future__ import annotations
 
+import codecs
 import glob
+import io
 import logging
+import math
 import os
+from collections.abc import Mapping
 import subprocess
 import sys
 import threading
@@ -151,10 +155,6 @@ def kill_my_spawned_server(
 
 # Sentinel ``returncode`` allocation.
 
-# Sentinel ``returncode`` when ``run_with_session_kill`` reaps a child for an elapsed ``soft_deadline_sec`` (vs the
-# ``timeout=`` hard cap, which raises ``TimeoutExpired``).
-OVERTIME_KILL_RETURNCODE: int = -909
-
 # Sentinel ``returncode`` when the server-liveness watchdog reaps a child whose engine/worker bootstrap died but whose
 # parent ``vllm serve`` / ``sglang.launch_server`` process hung instead of exiting.
 SERVER_DEAD_RETURNCODE: int = -910
@@ -176,10 +176,6 @@ _SERVER_DEAD_MARKERS: tuple[str, ...] = (
     "ValidationError for ModelConfig",
     "are not supported for now",
 )
-
-# Default grace after the first fatal marker before forcing a reap.
-_SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
-
 
 # Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child that came up healthy but then produced no
 # generation progress (hung engine / detokenizer wedge).
@@ -254,13 +250,29 @@ _AGENTX_LOG_RELPATH: str = "aiperf_artifacts/logs/aiperf.log"
 # start on some other signal or it never starts at all.
 _WARM_REUSE_PROBE_AFTER_SEC: float = 30.0
 
-# Default grace: how long after the server reports ready it may emit no log output before the watchdog declares a hang
-# / detokenizer stall.
-_DETOK_STALL_GRACE_SEC_DEFAULT: float = 1800.0
+
+def resolve_benchmark_timeouts(env: Mapping[str, str] | None = None) -> tuple[float, float]:
+    """Resolve the invocation's silence and hard caps, rejecting invalid overrides."""
+    source = os.environ if env is None else env
+
+    def positive(name: str, default: float) -> float:
+        raw = source.get(name, str(default))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be finite and positive, got {raw!r}") from exc
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive, got {raw!r}")
+        return value
+
+    return (
+        positive("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", 600.0),
+        positive("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", 7800.0),
+    )
 
 
 class _StreamCapture:
-    """Capture child output while mirroring each line to the parent stream."""
+    """Capture pipe bytes promptly, decoding text incrementally for capture and mirroring."""
 
     def __init__(
         self,
@@ -272,6 +284,7 @@ class _StreamCapture:
         """Set up capture/mirror threads for a child's stdout and stderr."""
         self._text = text
         self._on_output = on_output
+        self.last_activity_at: float | None = None
         self._stdout_chunks: list[str | bytes] = []
         self._stderr_chunks: list[str | bytes] = []
         self._threads: list[threading.Thread] = []
@@ -321,19 +334,29 @@ class _StreamCapture:
         return "".join(chunks) if self._text else b"".join(chunks)  # type: ignore[arg-type,return-value]
 
     def _pump(self, pipe, chunks: list[str | bytes], mirror) -> None:
-        """Read a pipe line-by-line, capturing and mirroring each line."""
+        """Read available bytes without waiting for a newline or a complete codepoint."""
+        decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")(errors="replace"), True)
+        raw = getattr(pipe, "buffer", pipe)
         try:
             while True:
-                chunk = pipe.readline()
-                if not chunk:
+                data = raw.read1(65536)
+                if not data:
                     break
-                chunks.append(chunk)
-                self._mirror(chunk, mirror)
+                self.last_activity_at = time.monotonic()
                 self.note_output()
+                chunk = decoder.decode(data) if self._text else data
+                if chunk:
+                    chunks.append(chunk)
+                    self._mirror(chunk, mirror)
+            if self._text:
+                final = decoder.decode(b"", final=True)
+                if final:
+                    chunks.append(final)
+                    self._mirror(final, mirror)
         finally:
             try:
                 pipe.close()
-            except Exception:  # noqa: BLE001 - best-effort close
+            except OSError:
                 pass
 
     def _mirror(self, chunk: str | bytes, mirror) -> None:
@@ -557,15 +580,13 @@ _RESIDUAL_MAX_CHARS = 8192
 
 
 def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
-    """Current byte length of each nested log that already exists at spawn."""
-    owned_dir = Path(server_log_path).parent
+    """Snapshot existing bytes before spawn so previous rounds cannot signal activity."""
     sizes: dict[str, int] = {}
     for path in _resolve_scan_logs(server_log_path):
         candidate = Path(path)
-        if candidate.parent == owned_dir:
-            continue
         try:
-            sizes[path] = candidate.stat().st_size
+            size = candidate.stat().st_size
+            sizes[path] = -1 if candidate.parent != Path(server_log_path).parent else size
         except OSError:
             continue
     return sizes
@@ -575,12 +596,28 @@ def _scan_logs_increment(
     server_log_path: str,
     offsets: dict[str, int],
     residuals: dict[str, str] | None = None,
+    identities: dict[str, tuple[int, int]] | None = None,
 ) -> _LogScan:
-    """Scan every resolved log for markers, advancing ``offsets`` (and ``residuals``, when given) in place."""
+    """Scan appended bytes; replacing or truncating a watched file is not activity."""
     saw_ready = saw_progress = saw_eval_start = grew = child_spoke = False
     saw_warmup_begin = saw_measured_begin = False
     for path in _resolve_scan_logs(server_log_path):
         prev = offsets.get(path, 0)
+        if prev < 0:
+            continue
+        if identities is not None:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            identity = (stat.st_dev, stat.st_ino)
+            replaced = path in identities and identities[path] != identity
+            identities[path] = identity
+            if replaced or stat.st_size < prev:
+                offsets[path] = stat.st_size
+                if residuals is not None:
+                    residuals.pop(path, None)
+                continue
         scan = _scan_server_log_increment(path, prev, "" if residuals is None else residuals.get(path, ""))
         offsets[path] = scan.offset
         if residuals is not None:
@@ -709,69 +746,51 @@ def run_with_session_kill(
     cwd: str | None = None,
     timeout: int | float | None = None,
     text: bool = True,
-    soft_deadline_sec: float | None = None,
     server_log_path: str | None = None,
-    server_dead_grace_sec: float | None = None,
-    detok_stall_grace_sec: float | None = None,
+    silence_timeout_sec: float | None = None,
     server_already_ready: bool = False,
     on_output: Callable[[], None] | None = None,
     session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a subprocess in its own session and reap descendants on every exit path."""
-    if server_dead_grace_sec is None:
-        try:
-            server_dead_grace_sec = float(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_SERVER_DEAD_GRACE_SEC",
-                    _SERVER_DEAD_GRACE_SEC_DEFAULT,
-                )
-            )
-        except (TypeError, ValueError):
-            server_dead_grace_sec = _SERVER_DEAD_GRACE_SEC_DEFAULT
-    if detok_stall_grace_sec is None:
-        try:
-            detok_stall_grace_sec = float(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_DETOK_STALL_GRACE_SEC",
-                    _DETOK_STALL_GRACE_SEC_DEFAULT,
-                )
-            )
-        except (TypeError, ValueError):
-            detok_stall_grace_sec = _DETOK_STALL_GRACE_SEC_DEFAULT
+    child_env = dict(os.environ if env is None else env)
+    if silence_timeout_sec is not None:
+        child_env["PYTHONUNBUFFERED"] = "1"
+    scan_offsets = _stale_scan_log_sizes(server_log_path) if server_log_path else {}
     proc: subprocess.Popen | None = None
     capture: _StreamCapture | None = None
     empty: str | bytes = "" if text else b""
     try:
         with cancel_scope_listener() as cancel_scope:
+            started_at = time.monotonic()
             proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=text,
-                env=env,
+                text=False,
+                env=child_env,
                 cwd=cwd,
                 **new_session_kwargs(),
             )
             capture = _StreamCapture(proc, text=text, on_output=on_output)
             capture.start()
             try:
-                stdout, stderr = _communicate_with_soft_deadline(
+                stdout, stderr = _communicate_with_watchdog(
                     proc,
                     hard_timeout=timeout,
-                    soft_deadline_sec=soft_deadline_sec,
                     server_log_path=server_log_path,
-                    server_dead_grace_sec=server_dead_grace_sec,
-                    detok_stall_grace_sec=detok_stall_grace_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    started_at=started_at,
+                    scan_offsets=scan_offsets,
                     capture=capture,
                     server_already_ready=server_already_ready,
                     session_deadline_sec=session_deadline_sec,
                     cancel_scope=cancel_scope,
                     kv_recorder=_build_kv_recorder(server_log_path, env),
                 )
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as exc:
                 kill_my_spawned_server(proc)
-                if capture is not None:
-                    capture.finish(timeout=_CAPTURE_DRAIN_SECONDS)
+                exc.output, exc.stderr = _finish_capture(capture, text=text)
                 raise
             except _ReapedByWatchdog as exc:
                 kill_my_spawned_server(proc)
@@ -845,41 +864,6 @@ class _OrchestratorCancelled(_ReapedByWatchdog):
         self.elapsed_sec = float(elapsed_sec)
 
 
-class _SoftDeadlineExceeded(_ReapedByWatchdog):
-    """Internal sentinel for an elapsed soft deadline."""
-
-    returncode = OVERTIME_KILL_RETURNCODE
-    log_level = logging.INFO
-
-    def __init__(self, *, deadline_sec: float, elapsed_sec: float) -> None:
-        """Record the deadline and actual elapsed time on the sentinel."""
-        super().__init__(f"soft_deadline_sec={deadline_sec:.1f}s elapsed (actual={elapsed_sec:.1f}s)")
-        self.deadline_sec = float(deadline_sec)
-        self.elapsed_sec = float(elapsed_sec)
-
-
-class _ServerDeadDetected(_ReapedByWatchdog):
-    """Internal sentinel: the server-liveness watchdog saw a terminal engine / worker init marker that persisted past the grace window."""
-
-    returncode = SERVER_DEAD_RETURNCODE
-
-    def __init__(
-        self,
-        *,
-        marker: str,
-        grace_sec: float,
-        elapsed_sec: float,
-    ) -> None:
-        """Build the error message describing the hung-after-death condition."""
-        super().__init__(
-            f"server init died (marker={marker!r}) and the parent hung past "
-            f"grace {grace_sec:.1f}s (elapsed={elapsed_sec:.1f}s)"
-        )
-        self.marker = marker
-        self.grace_sec = float(grace_sec)
-        self.elapsed_sec = float(elapsed_sec)
-
-
 class _ServerStalledDetected(_ReapedByWatchdog):
     """Internal sentinel: the detokenizer-stall watchdog saw the server report ready and then produce no generation progress for the grace window."""
 
@@ -893,217 +877,105 @@ class _ServerStalledDetected(_ReapedByWatchdog):
     ) -> None:
         """Build the error message describing the ready-but-no-progress stall."""
         super().__init__(
-            f"server reported ready but emitted no log output for "
-            f"{grace_sec:.1f}s (hung engine / detokenizer stall; "
+            f"benchmark reported ready but emitted no pipe or log bytes for "
+            f"{grace_sec:.1f}s (silence timeout; "
             f"elapsed={elapsed_sec:.1f}s)"
         )
         self.grace_sec = float(grace_sec)
         self.elapsed_sec = float(elapsed_sec)
 
 
-def _communicate_with_soft_deadline(
+def _communicate_with_watchdog(
     proc: subprocess.Popen,
     *,
     hard_timeout: int | float | None,
-    soft_deadline_sec: float | None,
     server_log_path: str | None = None,
-    server_dead_grace_sec: float | None = None,
-    detok_stall_grace_sec: float | None = None,
+    silence_timeout_sec: float | None = None,
     capture: _StreamCapture | None = None,
     server_already_ready: bool = False,
     session_deadline_sec: float | None = None,
     cancel_scope: CancelScope | None = None,
     kv_recorder: Any = None,
+    started_at: float | None = None,
+    scan_offsets: dict[str, int] | None = None,
 ) -> tuple[str | bytes, str | bytes]:
-    """Communicate with a child while enforcing soft and server-log watchdogs."""
-    watchdog_active = bool(server_log_path) and (
-        server_dead_grace_sec is not None and float(server_dead_grace_sec) > 0.0
-    )
-    stall_active = bool(server_log_path) and (detok_stall_grace_sec is not None and float(detok_stall_grace_sec) > 0.0)
-    soft_active = soft_deadline_sec is not None and float(soft_deadline_sec) > 0.0
-    session_active = session_deadline_sec is not None
-    # A cancel scope is polled like any other gate, so its presence rules out the single-wait fast paths below: a call
-    # that blocks until the child exits cannot notice a cancel that arrives while it is blocked.
-    gated = soft_active or watchdog_active or stall_active or session_active or cancel_scope is not None
-    if capture is None and not gated:
-        return proc.communicate(timeout=hard_timeout)
-    if capture is not None and not gated:
-        proc.wait(timeout=hard_timeout)
-        return capture.finish()
-
-    deadline_sec = float(soft_deadline_sec) if soft_active else None
-    grace_sec = float(server_dead_grace_sec) if watchdog_active else None
-    stall_grace_sec = float(detok_stall_grace_sec) if stall_active else None
-    # When a ``server.log`` is available the soft deadline measures only the post-ready phase (clock starts at the
-    # server-ready marker, excluding boot / weight load / first-request JIT).
-    soft_from_ready = (
-        soft_active
-        and bool(server_log_path)
-        and not server_already_ready
-        and os.environ.get("INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY", "1").strip().lower()
-        not in {"0", "false", "no", "off"}
-    )
-    # The log increment scan feeds the stall watchdog, the from-ready soft-deadline anchor, the eval-start boundary
-    # and the ready timestamp the caller prices later work off; run it once per slice whenever a log is present.
-    scan_active = bool(server_log_path) and gated
-    poll_interval = STOP_GATE_POLL_SECONDS
-    start = time.monotonic()
-    dead_marker_since: float | None = None
-    # Detokenizer-stall watchdog state: per-log byte offsets consumed so far, whether a ready marker has been seen,
-    # and the last time a log showed any new output (seeded to the ready time).
-    scan_offsets: dict[str, int] = {}
-    if scan_active:
-        # A reused output_dir can still hold a prior attempt's nested workspace, whose markers are not this round's.
-        scan_offsets.update(_stale_scan_log_sizes(server_log_path))  # type: ignore[arg-type]
-    # Partial trailing line per log, carried into the next scan so a marker split across two reads is still found.
-    scan_residuals: dict[str, str] = {}
-    # A warm-reuse round re-attaches to a server that came up in an earlier round, so no ready marker will ever land in
-    # this process's scan window. Without this the phase would stay "boot" for the whole round and every sample would
-    # be filed under a phase the round never actually ran.
+    """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
+    start = time.monotonic() if started_at is None else started_at
+    offsets = {} if scan_offsets is None else scan_offsets
+    residuals: dict[str, str] = {}
+    identities: dict[str, tuple[int, int]] = {}
+    for path in offsets:
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        identities[path] = (stat.st_dev, stat.st_ino)
+    ready_at: float | None = None
+    last_activity_at: float | None = None
+    completed = False
     if kv_recorder is not None and server_already_ready:
         kv_recorder.note_phase("measured", start)
-    server_ready_since: float | None = None
-    last_activity_at: float | None = None
-    # Latched once the accuracy eval starts: the soft deadline bounds the throughput phase only, so it is retired for
-    # the rest of the process.
-    soft_deadline_suspended = False
-    # Separates a child that finished from a gate that raised, so the recorder can mark an aborted round as such.
-    # Closing happens in the `finally` below, which is what covers every exit path: the five gate exceptions, the
-    # hard timeout, and the normal return. An unclosed window is the one failure a consumer cannot recover from --
-    # it has no way to tell a round still running from one that died mid-window.
-    completed = False
+    if server_log_path and server_already_ready:
+        stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
+            # An exit already observed belongs to the child, not to an expired gate.
+            if proc.poll() is not None:
+                result = proc.communicate() if capture is None else capture.finish()
+                completed = True
+                return result
             now = time.monotonic()
             elapsed = now - start
-            # Session budget.
-            if session_active and session_deadline_sec is not None and now >= session_deadline_sec:
-                raise _SessionDeadlineExceeded(
-                    overrun_sec=now - float(session_deadline_sec),
-                    elapsed_sec=elapsed,
-                )
-            # Orchestrator cancellation.
+            if session_deadline_sec is not None and now >= session_deadline_sec:
+                raise _SessionDeadlineExceeded(overrun_sec=now - session_deadline_sec, elapsed_sec=elapsed)
             if cancel_scope is not None and cancel_scope.cancelled:
-                raise _OrchestratorCancelled(
-                    reason=cancel_scope.reason,
-                    elapsed_sec=elapsed,
-                )
-            # Advance the log scan, latching the server-ready, last-activity and eval-start signals.
-            if scan_active:
-                scan = _scan_logs_increment(
-                    server_log_path,  # type: ignore[arg-type]
-                    scan_offsets,
-                    scan_residuals,
-                )
-                if scan.saw_ready and server_ready_since is None:
-                    server_ready_since = now
-                    last_activity_at = now  # start the silence clock at ready
-                    # Recorded for the caller, which prices later work off the
-                    # post-ready segment rather than the whole round: a pass that
-                    # re-attaches to this server pays none of the boot. Taken as
-                    # ``now - start`` so the boot is measured end to end on this
-                    # process's own clock, whatever host the caller reads it on.
-                    stamp_server_ready(server_log_path, now - start)  # type: ignore[arg-type]
-                    # Ready opens the measured window for a synthetic round, which has no warmup marker of its own.
-                    # AgentX corrects this a moment later, when aiperf announces its cold-cache warmup, so only the
-                    # handful of samples in between carry the wrong label.
+                raise _OrchestratorCancelled(reason=cancel_scope.reason, elapsed_sec=elapsed)
+            if hard_timeout is not None and elapsed >= hard_timeout:
+                raise subprocess.TimeoutExpired(proc.args, hard_timeout)
+            if server_log_path:
+                scan = _scan_logs_increment(server_log_path, offsets, residuals, identities)
+                if scan.saw_ready and ready_at is None:
+                    ready_at = last_activity_at = now
+                    stamp_server_ready(server_log_path, elapsed)
                     if kv_recorder is not None:
                         kv_recorder.note_phase("measured", now)
+                if scan.grew:
+                    last_activity_at = now
                 if kv_recorder is not None:
                     if scan.saw_warmup_begin:
                         kv_recorder.note_phase("warmup", now)
                     if scan.saw_measured_begin:
                         kv_recorder.note_phase("measured", now)
                     if scan.saw_eval_start:
-                        # Eval traffic is not the throughput benchmark: its request shape differs, and it would drag
-                        # both occupancy and hit rate toward numbers no cross-round comparison should see.
                         kv_recorder.note_phase("eval", now)
-                if scan.saw_eval_start and not soft_deadline_suspended:
-                    soft_deadline_suspended = True
-                    log.info(
-                        "_subprocess_kill: accuracy eval started; soft_deadline_sec=%.1fs no longer enforced "
-                        "(it bounds the throughput phase only)",
-                        float(deadline_sec or 0.0),
-                    )
-                # Any new bytes count as liveness; only total silence trips the stall gate.
-                if scan.grew:
-                    last_activity_at = now
-                # The liveness callback makes a narrower claim than the stall gate — that this child is working, not that
-                # something on the box is — so it takes narrower evidence: tokens flowing, or the child's own redirected
-                # stderr growing.
                 if capture is not None and (scan.saw_progress or scan.child_spoke):
                     capture.note_output()
-            # Held until the engine is up, because scraping during boot only collects connection refusals. The third
-            # arm is the warm-reuse round: it re-attaches to a server an earlier round booted, so it owns no log and no
-            # ready marker will ever land in its scan set. Waiting for one there means never collecting at all -- which
-            # is what a real session did, on the measured round, the only phase allowed into a comparison.
-            # The elapsed guard keeps a normal round from scraping through its own boot: a round that owns a server
-            # writes its log within seconds, so still having none this late means nobody is going to write one.
-            warm_reuse_round = scan_active and not scan_offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-            if kv_recorder is not None and (server_ready_since is not None or server_already_ready or warm_reuse_round):
+            if capture is not None and capture.last_activity_at is not None:
+                last_activity_at = max(last_activity_at or start, capture.last_activity_at)
+            # This telemetry-only guess never arms the silence gate.
+            warm_reuse_probe = server_log_path and not offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
+            if kv_recorder is not None and (ready_at is not None or server_already_ready or warm_reuse_probe):
                 kv_recorder.tick(now)
-            # Soft deadline.
-            if soft_active and deadline_sec is not None and not soft_deadline_suspended:
-                if soft_from_ready:
-                    if server_ready_since is not None:
-                        soft_elapsed = now - server_ready_since
-                        if deadline_sec - soft_elapsed <= 0.0:
-                            raise _SoftDeadlineExceeded(
-                                deadline_sec=deadline_sec,
-                                elapsed_sec=soft_elapsed,
-                            )
-                elif deadline_sec - elapsed <= 0.0:
-                    raise _SoftDeadlineExceeded(
-                        deadline_sec=deadline_sec,
-                        elapsed_sec=elapsed,
-                    )
-            if watchdog_active and grace_sec is not None:
-                death_marker = _server_log_shows_death(server_log_path)  # type: ignore[arg-type]
-                if death_marker is not None:
-                    if dead_marker_since is None:
-                        dead_marker_since = now
-                    elif now - dead_marker_since >= grace_sec:
-                        raise _ServerDeadDetected(
-                            marker=death_marker,
-                            grace_sec=grace_sec,
-                            elapsed_sec=elapsed,
-                        )
-                else:
-                    dead_marker_since = None
-            # Detokenizer-stall watchdog — armed only once the server is ready.
-            if stall_active and stall_grace_sec is not None:
-                if server_ready_since is not None and last_activity_at is not None:
-                    if now - last_activity_at >= stall_grace_sec:
-                        raise _ServerStalledDetected(
-                            grace_sec=stall_grace_sec,
-                            elapsed_sec=elapsed,
-                        )
-            # Slice bounded by every active remaining window so the right gate fires first; the child can still finish
-            # inside any slice.
-            slice_sec = poll_interval
-            if session_active and session_deadline_sec is not None:
-                slice_sec = min(slice_sec, float(session_deadline_sec) - now)
-            if soft_active and deadline_sec is not None and not soft_deadline_suspended:
-                if soft_from_ready:
-                    if server_ready_since is not None:
-                        slice_sec = min(slice_sec, deadline_sec - (now - server_ready_since))
-                else:
-                    slice_sec = min(slice_sec, deadline_sec - elapsed)
+            silence_remaining = None
+            if ready_at is not None and silence_timeout_sec is not None:
+                silence_remaining = silence_timeout_sec - (now - last_activity_at)
+                if silence_remaining <= 0:
+                    raise _ServerStalledDetected(grace_sec=silence_timeout_sec, elapsed_sec=elapsed)
+            slice_sec = STOP_GATE_POLL_SECONDS
             if hard_timeout is not None:
-                hard_remaining = float(hard_timeout) - elapsed
-                if hard_remaining <= 0.0:
-                    raise subprocess.TimeoutExpired(proc.args, hard_timeout)
-                slice_sec = min(slice_sec, hard_remaining)
-            slice_sec = max(slice_sec, 0.0)
+                slice_sec = min(slice_sec, hard_timeout - elapsed)
+            if session_deadline_sec is not None:
+                slice_sec = min(slice_sec, session_deadline_sec - now)
+            if silence_remaining is not None:
+                slice_sec = min(slice_sec, silence_remaining)
             try:
                 if capture is None:
-                    result = proc.communicate(timeout=slice_sec)
-                    completed = True
-                    return result
-                proc.wait(timeout=slice_sec)
-                captured = capture.finish()
+                    result = proc.communicate(timeout=max(0.0, slice_sec))
+                else:
+                    proc.wait(timeout=max(0.0, slice_sec))
+                    result = capture.finish()
                 completed = True
-                return captured
+                return result
             except subprocess.TimeoutExpired:
                 continue
     finally:
@@ -1118,7 +990,6 @@ __all__ = [
     "DETOKENIZER_STALL_RETURNCODE",
     "EVAL_PROBE_UNPATCHABLE_RETURNCODE",
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
-    "OVERTIME_KILL_RETURNCODE",
     "SERVER_DEAD_RETURNCODE",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
     "STOP_GATE_POLL_SECONDS",
@@ -1127,6 +998,7 @@ __all__ = [
     "kill_my_spawned_server",
     "new_session_kwargs",
     "post_ready_runtime_sec",
+    "resolve_benchmark_timeouts",
     "run_with_session_kill",
     "server_log_death_excerpt",
     "server_ready_unix",

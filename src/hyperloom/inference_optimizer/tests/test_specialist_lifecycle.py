@@ -232,7 +232,7 @@ def test_task_id_from_specialist_source_returns_empty_for_bad():
     assert Coordinator._task_id_from_specialist_source("") == ""
     assert (
         Coordinator._task_id_from_specialist_source(
-            "robustness",
+            "unknown",
         )
         == ""
     )
@@ -361,7 +361,6 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         backends = {
             "orchestration": MockOrchBackend(idle_plan),
             "critic": MockOrchBackend(idle_plan),
-            "robustness": MockOrchBackend(idle_plan),
         }
 
         session_dir = tmp_path / "session"

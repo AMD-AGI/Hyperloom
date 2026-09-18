@@ -13,6 +13,18 @@ from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
+@pytest.fixture(autouse=True)
+def _isolated_benchmark_timeouts(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", raising=False)
+
+
+def test_cycle_reloop_floor_uses_configured_benchmark_cap(monkeypatch):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "2100")
+    state = SharedState(max_minutes=180)
+    assert ps._cycle_reloop_min_remaining_sec(state) == 2100.0
+
+
 def _sweep_state(
     *,
     macro_cycle: int = 0,
@@ -86,7 +98,7 @@ def test_sweep_closes_when_insufficient_remaining():
 
 
 def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
-    """LLM skip_to_close after a refused conc_sweep must not become robustness_escalated."""
+    """LLM skip_to_close after a refused conc_sweep must not become global_converged."""
     st = _sweep_state(max_minutes=180, started_hours_ago=166 / 60.0)
     st.last_conc_sweep = {}
     st.last_conc_sweep = {
@@ -104,7 +116,7 @@ def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
 
 
 def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
-    """skip_to_close remains a robustness abort when SWEEP has nothing to close on."""
+    """skip_to_close remains an early close when SWEEP has nothing to close on."""
     st = _sweep_state(max_minutes=180, started_hours_ago=1.0)
     st.last_conc_sweep = {}
     st.last_conc_sweep = {}
@@ -113,7 +125,7 @@ def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
     assert nxt is not None
     target, reason, _evidence = nxt
     assert target == ps.PHASE_CLOSE
-    assert reason == "robustness_escalated"
+    assert reason == "global_converged"
 
 
 def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) -> SharedState:
@@ -128,8 +140,8 @@ def _framework_state(*, max_minutes: int = 180, started_hours_ago: float = 1.0) 
 
 
 def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
-    """A budget-driven close is time_exhausted, not a robustness abort."""
-    # 3h budget, ~2h39m spent -> ~1260s left, under the 1800s reloop floor.
+    """A budget-driven close is time_exhausted, not an early close."""
+    # 3h budget, ~2h39m spent -> ~1260s left, under the 5400s reloop floor.
     st = _framework_state(max_minutes=180, started_hours_ago=2.65)
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
     nxt = ps.compute_next_phase(st)
@@ -137,7 +149,7 @@ def test_framework_skip_to_close_at_budget_end_is_time_exhausted():
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
     assert reason == "time_exhausted"
-    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert evidence["min_remaining_sec_effective"] == 5400.0
     assert evidence["session_remaining_seconds"] < 1800.0
 
 
@@ -149,19 +161,19 @@ def test_framework_skip_to_close_with_budget_left_stays_escalated():
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
-    assert reason == "robustness_escalated"
+    assert reason == "global_converged"
     assert evidence["session_remaining_seconds"] >= 1620.0
 
 
 def test_cycle_reloop_floor_covers_one_variant_grant():
     """The floor prices a cycle at what one variant round is actually granted."""
     st = _framework_state(max_minutes=180)
-    # 15% of a 3h budget is 1620s, below the 1800s a variant round is granted.
-    assert ps._cycle_reloop_min_remaining_sec(st) == float(st.conc_sweep_variant_timeout_sec)
+    # The 7800s benchmark grant is capped at half of the 3h session budget.
+    assert ps._cycle_reloop_min_remaining_sec(st) == 5400.0
 
 
 def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
-    """Budget that cannot fund one variant round is exhausted, not a robustness abort."""
+    """Budget that cannot fund one variant round is exhausted, not an early close."""
     # 3h budget, ~1699s left: above the old 15% floor, below one variant grant.
     st = _framework_state(max_minutes=180, started_hours_ago=2.528)
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
@@ -170,20 +182,8 @@ def test_framework_skip_to_close_below_variant_grant_is_time_exhausted():
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
     assert reason == "time_exhausted"
-    assert evidence["min_remaining_sec_effective"] == 1800.0
+    assert evidence["min_remaining_sec_effective"] == 5400.0
     assert 1620.0 < evidence["session_remaining_seconds"] < 1800.0
-
-
-def test_escalate_evidence_records_crash_count():
-    """A genuine escalation must carry the crash evidence that justifies its label."""
-    st = _framework_state(max_minutes=180, started_hours_ago=1.0)
-    st.crash_count = 4
-    st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
-    nxt = ps.compute_next_phase(st)
-    assert nxt is not None
-    _target, reason, evidence = nxt
-    assert reason == "robustness_escalated"
-    assert evidence["crash_count"] == 4
 
 
 def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
@@ -225,7 +225,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
 
 
 def test_short_bounded_run_closes_when_insufficient_remaining():
-    # 12h bounded run with ~10min left: below the 3h reloop floor.
+    # 12h bounded run with ~10min left: below the 7800s reloop floor.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=12 - 10 / 60.0)
     reloop, ev = ps.should_reloop_to_explore(st)
     assert reloop is False
@@ -239,7 +239,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
 
 def test_reloop_blocked_when_insufficient_budget_remains():
-    # 12h session: effective floor = min(10800, 12*3600*0.15) = min(10800, 6480) = 6480s.
+    # A 12h session prices a new cycle at the uniform 7800s benchmark grant.
     st = _sweep_state(max_minutes=12 * 60, started_hours_ago=0.0)
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
@@ -252,14 +252,14 @@ def test_reloop_blocked_when_insufficient_budget_remains():
     assert ev["reloop"] is True
     assert "min_remaining_sec_effective" in ev
 
-    # Just past the proportional floor (remaining drops below 6480s).
+    # Remaining budget falls below the benchmark grant.
     reloop, ev = ps.should_reloop_to_explore(
         st,
         now_unix=start_unix + 12 * 3600 - 6479,
     )
     assert reloop is False
     assert ev["reloop_blocked"] == "insufficient_remaining"
-    assert ev["min_remaining_sec_effective"] == pytest.approx(6480.0, abs=1.0)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(7800.0, abs=1.0)
 
 
 def test_exactly_24h_is_long_run():
@@ -406,7 +406,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -416,7 +415,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
     yield c
@@ -529,15 +527,15 @@ def test_unbounded_run_uses_absolute_floor():
 
 
 def test_short_bounded_run_scales_floor():
-    # 2h session: the 1080s share is below one 1800s variant grant, so the grant wins.
+    # A 2h session caps the 7800s benchmark grant at half its budget (3600s).
     st = _sweep_state(max_minutes=2 * 60, started_hours_ago=0.0)
     _, ev = ps.should_reloop_to_explore(st)
-    assert ev["min_remaining_sec_effective"] == pytest.approx(1800.0, abs=1.0)
+    assert ev["min_remaining_sec_effective"] == pytest.approx(3600.0, abs=1.0)
 
 
 def test_very_short_run_caps_the_floor_at_half_the_budget():
     """A run too short to fund a variant round must not read as exhausted at tick one."""
-    # 30min session: the 1800s grant exceeds the budget, so it is capped at 900s.
+    # A 30min session caps the benchmark grant at half its budget (900s).
     st = _sweep_state(max_minutes=30, started_hours_ago=0.0)
     _, ev = ps.should_reloop_to_explore(st)
     assert ev["min_remaining_sec_effective"] == pytest.approx(900.0, abs=1.0)

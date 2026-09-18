@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
+  agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
+  supervision and resume, and task/lease age expiry. Each actual benchmark spawn
+  uses a 7800-second hard deadline (including boot and accuracy), plus a
+  600-second output-silence limit only after a ready marker is observed in this
+  round's logs; both are finite positive settings. A warm-reuse hint alone does
+  not arm silence, avoiding false kills when original Magpie buffers client
+  output and the reused server writes its previous round's log. Reuse rounds
+  without a current ready marker remain bounded by the hard deadline, session
+  budget, and cancellation. Output cannot extend the hard deadline. Session
+  cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
+  offline `recover-session`, process cleanup, and historical SBDv6 readers.
+
 ### Fixed
 
 - **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
@@ -13,6 +26,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   error summary. Warmup accounting is excluded, and invalid or unknown evidence
   remains fail-closed. Valid zero-error baselines no longer lose their quality
   signal merely because serving lm-eval is disabled.
+- **Honor concurrency-sweep budgets without treating the hard cap as a start cost.**
+  Admission uses the measured expected duration when available; unknown-duration
+  work may start while budget remains. Boot retries, reuse and fallback share
+  the earlier sweep/session deadline, and reports retain the actual stop source.
+  The manual sweep driver no longer passes or advertises the retired
+  `--variant-timeout-sec` option.
+- **Complete cooperative build and specialist cancellation without accepting
+  unconfirmed cleanup.** Cancellation reaches pending work and running workers;
+  confirmed cleanup records a cancelled outcome, while unknown cleanup retains
+  ownership. Completed outcomes remain in task history for diagnosis even when
+  cleanup fails, without publishing them for promotion or retry. Completion
+  callback failures after confirmed cleanup no longer retain execution entries,
+  and repeated inline calls return stored terminal results instead of rerunning.
+- **Refuse unsafe session resumes explicitly.** Legacy or foreign execution
+  ownership and unproven historical cancellations now produce bounded task/lane
+  diagnostics before resume writes or dispatch. Resume admission itself clears
+  no ownership. After independently verifying that a task's complete process tree,
+  remote workers and Ray actor have stopped, operators can use
+  `recover-session --confirm-stopped TASK_ID --confirmation-reason TEXT` to record
+  that confirmation, cancel an unfinished task, and release only its unattributed
+  execution/GPU records under the POSIX session lock. This explicit operation preserves rounds
+  and other tasks, rejects nonempty owner scopes, and neither stops workers nor
+  accepts old results or starts a resume. Existing `--force` remains report-only.
+  Resume admission and
+  round reconciliation honor the latest recorded cleanup outcome, including
+  results recorded after an earlier terminal transition. A Ray worker whose root
+  exited is not treated as proof that detached descendants exited, and a missing
+  stop acknowledgment no longer destroys the specialist actor's cleanup channel.
+  Specialist cleanup makes one bounded follow-up confirmation on the same lease
+  before retaining unconfirmed ownership; a late acknowledgment is consumed by
+  the existing completion path rather than requiring a new background reaper.
+- **Restore safe AITER lock cleanup at baseline startup.** Stale locks are cleaned
+  only when compiler absence is established. Unreadable live-process identity
+  leaves locks untouched; known zombies do not block cleanup.
 
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing

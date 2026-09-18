@@ -38,36 +38,24 @@ class _Reconciler:
     """
 
     def __init__(self, reaped=0, raises=False):
-        self.last_report = None if raises else SimpleNamespace(leases_reaped=reaped)
+        self.last_report = None if raises else SimpleNamespace(leases_reaped=reaped, failed_tasks=["t1"])
 
 
 class _Pool:
-    def __init__(self, count=0, raises=False):
-        self._count, self._raises = count, raises
-
     async def reap_expired(self):
-        if self._raises:
-            raise RuntimeError("pool gone")
-        return self._count
+        pytest.fail("maintenance must not expire occupied GPUs")
 
 
 class _Tasks:
-    def __init__(self, reclaimed=(), raises=False):
-        self._reclaimed, self._raises = reclaimed, raises
-        self.reason = None
-
     async def reclaim_expired_running(self, *, reason):
-        self.reason = reason
-        if self._raises:
-            raise RuntimeError("task table locked")
-        return list(self._reclaimed)
+        pytest.fail("maintenance must not fail tasks by age")
 
 
 def _host(**kw):
     return SimpleNamespace(
         reconciler=kw.get("reconciler", _Reconciler(reaped=2)),
-        gpu_specialist_pool=kw.get("pool", _Pool(count=3)),
-        tasks=kw.get("tasks", _Tasks(reclaimed=["t1"])),
+        gpu_specialist_pool=kw.get("pool", _Pool()),
+        tasks=kw.get("tasks", _Tasks()),
         db=kw.get("db", object()),
     )
 
@@ -93,21 +81,20 @@ class TestReclaimReportsWhatEachStepDid:
 
         assert summary == {
             "leases_reaped": 2,
-            "gpu_leases_reaped": 3,
             "running_tasks_reclaimed": 1,
             "events_pruned": 5,
             "tasks_pruned": 2,
         }
 
     @pytest.mark.asyncio
-    async def test_the_reason_reaches_the_task_reclaim(self, monkeypatch: pytest.MonkeyPatch):
-        """The R6 watchdog records why a running task was failed."""
+    async def test_soft_restart_does_not_expire_running_work(self, monkeypatch: pytest.MonkeyPatch):
         _patch_retention(monkeypatch)
-        tasks = _Tasks()
+        summary: dict = {}
 
-        await run_lease_and_db_reclaim(_host(tasks=tasks), {}, reason="cycle_soft_restart")
+        await run_lease_and_db_reclaim(_host(), summary, reason="cycle_soft_restart")
 
-        assert tasks.reason == "cycle_soft_restart"
+        assert summary["running_tasks_reclaimed"] == 1
+        assert "gpu_leases_reaped" not in summary
 
 
 class TestNoSingleStepCanEndTheRun:
@@ -119,28 +106,8 @@ class TestNoSingleStepCanEndTheRun:
         await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
 
         assert "leases_reaped" not in summary
-        assert summary["gpu_leases_reaped"] == 3
-        assert summary["events_pruned"] == 5
-
-    @pytest.mark.asyncio
-    async def test_a_failed_gpu_lease_reap_is_survived(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
-        summary: dict = {}
-
-        await run_lease_and_db_reclaim(_host(pool=_Pool(raises=True)), summary, reason="r")
-
-        assert "gpu_leases_reaped" not in summary
-        assert summary["leases_reaped"] == 2
-
-    @pytest.mark.asyncio
-    async def test_a_failed_task_reclaim_is_survived(self, monkeypatch: pytest.MonkeyPatch):
-        _patch_retention(monkeypatch)
-        summary: dict = {}
-
-        await run_lease_and_db_reclaim(_host(tasks=_Tasks(raises=True)), summary, reason="r")
-
         assert "running_tasks_reclaimed" not in summary
-        assert summary["tasks_pruned"] == 2
+        assert summary["events_pruned"] == 5
 
     @pytest.mark.asyncio
     async def test_a_failed_db_retention_is_survived(self, monkeypatch: pytest.MonkeyPatch):
