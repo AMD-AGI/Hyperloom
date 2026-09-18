@@ -725,6 +725,24 @@ def test_required_timeline_applies_on_a_non_git_install_tree(tmp_path, output_di
     assert tree["nogit_backups"], "promote reads the restore channel off these"
 
 
+def test_the_record_persisted_before_the_apply_reads_as_written_to(fake_repo, output_dir):
+    """A crash between the persist and the apply must still restore the tree."""
+    persisted: list[list] = []
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+
+    _apply_warm_patches(
+        params,
+        str(fake_repo),
+        output_dir,
+        before_mutation=lambda records: persisted.append(records) or True,
+    )
+
+    assert [tree["mutated"] for tree in persisted[0]] == [True]
+
+
 def test_required_timeline_on_a_non_git_tree_reverts_whole(tmp_path, output_dir):
     """The replay that could not be kept has to leave the install tree pristine."""
     _require_patch_cli()

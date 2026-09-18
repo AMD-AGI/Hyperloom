@@ -1057,9 +1057,20 @@ _WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups", "m
 def _warm_tree_records(
     trees: Mapping[str, Mapping[str, Any]],
     order: Sequence[str],
+    *,
+    before_mutation: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return one JSON-safe record per touched tree, in apply order."""
-    return [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    """Return one JSON-safe record per touched tree, in apply order.
+
+    ``before_mutation`` stamps ``mutated`` true. A record persisted ahead of the apply is
+    the one record that cannot know what the round went on to write, so a resume that finds
+    it has to treat the tree as written-to and restore it from the snapshot taken with it.
+    """
+    records = [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    if before_mutation:
+        for record in records:
+            record["mutated"] = True
+    return records
 
 
 def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1238,9 +1249,11 @@ def _apply_warm_patches(
             return []
     snapshot_manifest = primary["snapshot_manifest"]
     if any(tree["snapshot_manifest"] for tree in trees.values()):
-        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order)
+        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order, before_mutation=True)
         params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-        if before_mutation is not None and not bool(before_mutation(_warm_tree_records(trees, tree_order))):
+        if before_mutation is not None and not bool(
+            before_mutation(_warm_tree_records(trees, tree_order, before_mutation=True))
+        ):
             return {
                 "required": required_timeline,
                 "status": "failed",

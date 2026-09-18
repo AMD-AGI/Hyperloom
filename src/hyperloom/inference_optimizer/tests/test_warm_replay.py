@@ -2286,6 +2286,41 @@ def test_every_patched_tree_is_promoted(tmp_path):
     assert promotion["target_repos"] == [str(sglang), str(tuning)]
 
 
+def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
+    """On a pip-installed framework it is the only status an overlay can land under."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+        lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_current_contract": True,
+            "combined_keep_threshold_pct": 1.0,
+            # The whole recipe is the timeline: nothing else can carry the replay.
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+        }
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 750.0,
+            "warm_patches_applied": [{"patch_file": "p.patch", "status": "applied_nogit"}],
+        },
+        task=task,
+    )
+
+    # The recipe's only content is the timeline, so a filtered-out status leaves the replay
+    # with nothing to carry and it is dropped as "reproduced but no params".
+    assert coord.shared_state.warm_replay_outcome.get("reason") != "reproduced_but_no_params"
+    assert coord.shared_state.optimization_stack, "the reproduced overlay has to reach the stack"
+
+
 def test_a_nogit_tree_promotes_on_the_backups_that_restore_it(tmp_path):
     """A pip-installed framework has no sha; its backups are the restore channel."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())

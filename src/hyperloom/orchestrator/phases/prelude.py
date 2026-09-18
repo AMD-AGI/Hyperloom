@@ -2344,6 +2344,9 @@ class PreludePhase(PhaseHandler):
                         in {
                             "applied",
                             "applied_3way",
+                            # What a nogit apply reports when it writes; on a pip-installed
+                            # framework it is the only status an overlay can land under.
+                            "applied_nogit",
                             "present_in_dirty_worktree",
                         }
                     )
