@@ -893,6 +893,12 @@ _AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
 _REBUILD_MODE_COMMAND = "command"
 _REBUILD_MODE_NONE = "none"
 _REBUILD_MODE_RUNTIME_JIT = "runtime_jit"
+_REBUILD_MODE_CONTENT_ADDRESSED_JIT = "content_addressed_jit"
+
+# SGLang's in-tree JIT kernels are compiled by tvm-ffi on first import into a
+# cache directory keyed on a hash of the source closure, so a patched source
+# builds under a new key instead of colliding with the baseline module.
+_SGLANG_JIT_SOURCE_MARKER = "/sglang/kernels/jit/"
 
 
 def _isolated_aiter_pkg_root() -> Path | None:
@@ -981,6 +987,23 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     """
     norm = str(target_file).replace(os.sep, "/")
     return any(marker in norm for marker in _AITER_CSRC_MARKERS)
+
+
+def _target_is_sglang_jit_source(target_file: Path) -> bool:
+    """Report whether a file lives under SGLang's in-tree JIT source tree.
+
+    Matches both the editable checkout
+    (``/sgl-workspace/sglang/python/sglang/kernels/jit/...``) and an installed
+    wheel (``.../site-packages/sglang/kernels/jit/...``).
+
+    Args:
+        target_file: The file path to test.
+
+    Returns:
+        ``True`` if the path is under a ``sglang/kernels/jit/`` directory.
+    """
+    norm = str(target_file).replace(os.sep, "/").lower()
+    return _SGLANG_JIT_SOURCE_MARKER in norm
 
 
 def _target_uses_aiter_jit(target_file: Path) -> bool:
@@ -1492,7 +1515,9 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     Matches the target against the known framework roots (aiter / sglang /
     vllm) to pick the rebuild command and artifact roots, and decides whether
     the target feeds a compiled runtime. Python codegen under AITER ``csrc``
-    requires the same rebuild/JIT invalidation as a native source.
+    requires the same rebuild/JIT invalidation as a native source. Native
+    sources under SGLang's ``kernels/jit`` tree are compiled by the runtime
+    under a source-hashed cache key, so they defer instead of rebuilding.
 
     Args:
         target_file (Path): The file being patched.
@@ -1531,9 +1556,12 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     elif "/sgl-workspace/sglang/" in lower:
         root = Path("/sgl-workspace/sglang")
         deploy_roots = _editable_kernel_deploy_roots()
-        rebuild_mode = _REBUILD_MODE_COMMAND
-        rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
-        artifact_roots = [root]
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
+        else:
+            rebuild_mode = _REBUILD_MODE_COMMAND
+            rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
+            artifact_roots = [root]
     elif "/sgl-workspace/vllm/" in lower:
         root = Path("/sgl-workspace/vllm")
         deploy_roots = _editable_kernel_deploy_roots()
@@ -1556,6 +1584,8 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
     # An unrecognised layout leaves ``root`` unset: snapshot mode resolves
     # repo-relative descriptors against it, so a guessed parent writes the
     # optimized bytes beside the target instead of into it.
@@ -1674,6 +1704,13 @@ def _run_strategy_rebuild(
             "status": "deferred",
             "mode": _REBUILD_MODE_RUNTIME_JIT,
             "reason": ("installed AITER sources compile on runtime import after JIT cache invalidation"),
+            "cwd": str(cwd),
+        }
+    if strategy.get("rebuild_mode") == _REBUILD_MODE_CONTENT_ADDRESSED_JIT:
+        return {
+            "status": "deferred",
+            "mode": _REBUILD_MODE_CONTENT_ADDRESSED_JIT,
+            "reason": ("SGLang in-tree JIT sources compile on runtime import under a source-hashed cache key"),
             "cwd": str(cwd),
         }
     return _run_rebuild([], cwd, timeout_sec)
