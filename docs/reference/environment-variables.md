@@ -208,6 +208,22 @@ The following variables control the kernel optimization backend ladder.
 
 ---
 
+## Optional Kernel Trust Harness gate
+
+Off by default. When enabled, Hyperloom qualifies an exact candidate artifact
+through KTH after apply and before KEEP. See
+[Optional Kernel Trust Harness qualification](../how-to/kth-qualification.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `HYPERLOOM_KTH_ENABLE` | unset (off) | When `1`/`true`/`yes`/`on`, every applied controller patch is sent to KTH. `Blocked` and `Inconclusive` cannot KEEP. |
+| `HYPERLOOM_KTH_ADAPTIVE` | follows `HYPERLOOM_KTH_ENABLE` | Send a `2.0.0` candidate envelope instead of a pinned `plan_id` request. |
+| `HYPERLOOM_KTH_QUALIFY_EXECUTABLE` | `kth-qualify` | Subprocess entry. AutoSpec, planning, and verdicts remain in KTH. |
+| `HYPERLOOM_KTH_TIMEOUT_S` | `300` | Qualification timeout. Timeouts fail closed and do not KEEP. |
+| `HYPERLOOM_KTH_EXPECTED_SHA` | unset | Optional expected KTH revision. Mismatch fails closed. |
+
+---
+
 ## Fusion lane
 
 The fusion lane is Coordinator-owned and forge-only: it runs at KERNEL entry on

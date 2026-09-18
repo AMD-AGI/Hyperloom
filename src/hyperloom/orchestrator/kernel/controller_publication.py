@@ -43,6 +43,7 @@ class ControllerPatchPublication:
     report_path: Path
     publication_path: Path
     changed_files: tuple[str, ...] = ()
+    kth_plan_id: str | None = None
 
 
 def discover_controller_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
@@ -127,6 +128,14 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     if not isinstance(changed_files_raw, list):
         raise ControllerPublicationError("changed_files must be a JSON list")
     changed_files = tuple(_relative_path(value, "changed_files entry") for value in changed_files_raw)
+    kth_raw = payload.get("kth_qualification")
+    kth_plan_id = None
+    if kth_raw is not None:
+        if not isinstance(kth_raw, dict) or set(kth_raw) != {"plan_id"}:
+            raise ControllerPublicationError("kth_qualification must contain only plan_id")
+        kth_plan_id = str(kth_raw.get("plan_id") or "").strip()
+        if not kth_plan_id or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}", kth_plan_id):
+            raise ControllerPublicationError("kth_qualification.plan_id is invalid")
     return ControllerPatchPublication(
         operator_id=operator_id,
         identity=identity,
@@ -140,6 +149,7 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
         report_path=report_path.resolve(),
         publication_path=publication_path.resolve(),
         changed_files=changed_files,
+        kth_plan_id=kth_plan_id,
     )
 
 

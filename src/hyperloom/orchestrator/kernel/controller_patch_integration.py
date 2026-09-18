@@ -8,7 +8,7 @@ from __future__ import annotations
 import contextlib
 import subprocess
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,7 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
+from .kth_qualification import KthQualificationProvider, KthQualificationResult
 from .patch_conflict_merge import apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
@@ -47,6 +48,12 @@ class PatchIntegrationResult:
     keep_commit: str = ""
     new_tput: float = 0.0
     gain_pct: float = 0.0
+    kth_verdict: str = ""
+    kth_subject_digest: str = ""
+    kth_primary_detector: str = ""
+    kth_artifacts_dir: str = ""
+    performance_reached: bool = False
+    repair_feedback: dict[str, Any] = field(default_factory=dict)
     #: How the patch reached the worktree; anything but ``strict`` was rebuilt
     #: against the KEEPs that landed ahead of it.
     merge_strategy: str = ""
@@ -76,6 +83,19 @@ PatchValidator = Callable[[ControllerPatchPublication], Awaitable[dict[str, Any]
 
 #: Records one validated KEEP into SharedState.
 KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _kth_fields(result: KthQualificationResult | None) -> dict[str, Any]:
+    if result is None:
+        return {}
+    return {
+        "kth_verdict": result.verdict,
+        "kth_subject_digest": result.subject_digest,
+        "kth_primary_detector": result.primary_detector,
+        "kth_artifacts_dir": result.artifacts_dir,
+        "performance_reached": result.performance_reached,
+        "repair_feedback": dict(result.repair_feedback or {}),
+    }
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -220,6 +240,7 @@ async def integrate_controller_patches(
     shared_state: Any,
     record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
+    kth_provider: KthQualificationProvider | None = None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate every complete Controller patch in filename order.
 
@@ -366,6 +387,74 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
+        kth_result = None
+        provider = kth_provider
+        enabled = False
+        if provider is not None:
+            maybe_enabled = getattr(provider, "enabled", None)
+            if callable(maybe_enabled):
+                enabled = bool(maybe_enabled())
+            elif isinstance(maybe_enabled, bool):
+                enabled = maybe_enabled
+        if publication.kth_plan_id or enabled:
+            provider = provider or KthQualificationProvider()
+            try:
+                kth_result = provider.qualify(
+                    publication,
+                    artifacts_root=Path(session_dir) / "kth_qualification",
+                )
+            except Exception as error:  # noqa: BLE001
+                kth_result = KthQualificationResult(
+                    status="needs_review",
+                    reason=f"KTH provider infrastructure failure: {error}",
+                    verdict="Inconclusive",
+                    request_id="",
+                    subject_digest="",
+                    primary_detector="",
+                    artifacts_dir=str(Path(session_dir) / "kth_qualification"),
+                    repair_feedback={"instruction": "Repair the KTH provider failure and replay qualification."},
+                )
+            if not kth_result.eligible:
+                result = PatchIntegrationResult(
+                    operator_id=publication.operator_id,
+                    status=kth_result.status,
+                    reason=kth_result.reason + _revert_note(repo, publication.patch_path),
+                    base_commit=publication.base_commit,
+                    best_commit=publication.best_commit,
+                    repo_root=str(repo),
+                    integration_head_before=head_before,
+                    **_kth_fields(kth_result),
+                )
+                results.append(result)
+                _write_result(results_dir, index, result)
+                continue
+            try:
+                kth_result = provider.mark_performance_reached(kth_result)
+            except Exception as error:  # noqa: BLE001
+                failed_result = KthQualificationResult(
+                    status="needs_review",
+                    reason=f"Could not persist the KTH performance boundary: {error}",
+                    verdict=kth_result.verdict,
+                    request_id=kth_result.request_id,
+                    subject_digest=kth_result.subject_digest,
+                    primary_detector=kth_result.primary_detector,
+                    artifacts_dir=kth_result.artifacts_dir,
+                    repair_feedback={"instruction": "Repair artifact persistence and replay qualification."},
+                )
+                result = PatchIntegrationResult(
+                    operator_id=publication.operator_id,
+                    status=failed_result.status,
+                    reason=failed_result.reason + _revert_note(repo, publication.patch_path),
+                    base_commit=publication.base_commit,
+                    best_commit=publication.best_commit,
+                    repo_root=str(repo),
+                    integration_head_before=head_before,
+                    **_kth_fields(failed_result),
+                )
+                results.append(result)
+                _write_result(results_dir, index, result)
+                continue
+
         try:
             validation = await validate(publication)
         except Exception as error:
@@ -377,6 +466,7 @@ async def integrate_controller_patches(
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
                 integration_head_before=head_before,
+                **_kth_fields(kth_result),
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -397,6 +487,7 @@ async def integrate_controller_patches(
                 integration_head_before=head_before,
                 new_tput=float(validation.get("new_tput") or 0.0),
                 gain_pct=float(validation.get("gain_pct") or 0.0),
+                **_kth_fields(kth_result),
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -423,6 +514,7 @@ async def integrate_controller_patches(
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
                 integration_head_before=head_before,
+                **_kth_fields(kth_result),
             )
             results.append(result)
             _write_result(results_dir, index, result)
@@ -449,12 +541,16 @@ async def integrate_controller_patches(
             keep_commit=keep_commit,
             new_tput=float(validation.get("new_tput") or 0.0),
             gain_pct=float(validation.get("gain_pct") or 0.0),
+            **_kth_fields(kth_result),
         )
         results.append(result)
         _write_result(results_dir, index, result)
 
     kept = sum(result.status == "kept" for result in results)
-    reverted = sum(result.status.startswith("reverted_") for result in results)
+    reverted = sum(
+        result.status.startswith("reverted_") or result.status in {"kth_blocked", "kth_inconclusive", "needs_review"}
+        for result in results
+    )
     skipped = len(results) - kept - reverted
     # "completed" says the loop ran, which is not the same as the loop having done anything.
     if results and kept == 0 and reverted == 0:
