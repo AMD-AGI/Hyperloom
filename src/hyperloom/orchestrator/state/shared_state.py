@@ -497,8 +497,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
-    # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
-    conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
@@ -595,12 +593,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # The card's compute-partition shape this session was measured in, as observed at launch: mode, partition count,
     # CU and memory per partition, streams per partition.
     compute_partition: dict[str, Any] = field(default_factory=dict)
-    # ``--nodes``, feeding the robustness defaults and the IR-8 check.
+    # ``--nodes``, feeding the IR-8 check.
     nodes: int = 1
     # Per-agent Unix timestamp of the most recent completed reactor pass.
     agent_last_active: dict[str, float] = field(default_factory=dict)
-    # Resolved robustness-agent ``request.options``; a resume layers its own flags on top, per-key.
-    robustness_options: dict[str, Any] = field(default_factory=dict)
     # Warm-recipe replay gates (``--no-warm-replay`` / ``--warm-replay-min-*``).
     warm_replay_enabled: bool = True
     warm_replay_min_confidence: float = 0.7
@@ -741,13 +737,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
-    # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision run past anchor*ratio
-    # (outcome='KILLED_OVERTIME').
-    explore_overtime_kill_ratio: float = 2.0
-    # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
-    explore_variant_timeout_sec_override: int = 0
-    # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
-    explore_variant_timeout_safety_margin: float = 0.5
     # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing

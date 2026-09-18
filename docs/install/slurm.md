@@ -34,7 +34,7 @@ The ready-to-use scripts ship under
 | `submit.sh` | Generic submitter: validates the model key, wires the config dir, applies cluster overrides, and submits one job per model. |
 | `submit-vultr.sh` | Preset wrapper (MI355X / docker / `/mnt/vast`) around `submit.sh`. Copy and adapt for your own cluster. |
 | `run_hyperloom.sbatch` | The job body: starts the container, sets the gateway host alias, mounts the CA bundle, installs the optimizer, and launches the backend. |
-| `models.tsv` | Model table (key / repo / framework / image / TP / precision / ISL / OSL / concurrency / model-class / max-hours / target-gain). |
+| `models.tsv` | Model table (key / repo / framework / image / TP / precision / ISL / OSL / concurrency / model-class / max-hours / target-gain / EP size). `ep_size` is optional: it trails `target-gain`, and an absent value keeps expert parallelism at 1. |
 | `proxy.env.template` | Gateway connectivity profile. Copy to `proxy.env` and fill in before use. |
 
 ---

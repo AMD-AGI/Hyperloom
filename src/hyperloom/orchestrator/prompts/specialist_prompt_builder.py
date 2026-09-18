@@ -2243,10 +2243,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         '``{"ts": "<iso8601>", "status": "running", "note": "<short>"}``.',
         "Going silent past 5 minutes kills your subprocess.",
         "",
-        (
-            f"Hard cap: at most **{inp.max_turns}** LLM turns. Silence past "
-            "the cap = stale (robustness will synthesize an empty done)."
-        ),
+        (f"Hard cap: at most **{inp.max_turns}** LLM turns. Emit specialist_done before the cap."),
     ]
 
 

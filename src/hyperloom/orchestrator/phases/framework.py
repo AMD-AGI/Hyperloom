@@ -356,8 +356,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             overrides = {}
         return {
             "keep_threshold_pct": _phase_state.resolve_keep_threshold(state),
-            "variant_timeout_sec": getattr(state, "explore_variant_timeout_sec_override", None),
-            "overtime_kill_ratio": getattr(state, "explore_overtime_kill_ratio", None),
             "config": {
                 "keep_gain_threshold_pct": overrides.get(
                     "explore_keep_gain_pct",

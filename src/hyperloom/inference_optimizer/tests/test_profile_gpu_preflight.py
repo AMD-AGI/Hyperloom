@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-from hyperloom.orchestrator.actions.executors import recover as rc
+from hyperloom.common.rocm_smi import GpuVram
 from hyperloom.orchestrator.actions.executors import roofline as rf
 from hyperloom.orchestrator.actions.executors.baseline import (
     _is_cuda_graph_capture_failure,
@@ -79,8 +79,8 @@ def _patch_reclaim(*, reaped, probe=None):
             return_value=reaped,
         ),
         patch(
-            "hyperloom.orchestrator.actions.executors.recover.probe_gpu_free_mb",
-            return_value=probe if probe is not None else [{"gpu_id": 0, "free_mb": 280000.0}],
+            "hyperloom.common.rocm_smi.gpu_vram_usage",
+            return_value=probe if probe is not None else [GpuVram(used_mib=7000.0, total_mib=287000.0)],
         ),
         patch.object(rf.asyncio, "sleep", new=fake_sleep),
     )
@@ -107,19 +107,12 @@ def test_reclaim_does_not_settle_when_nothing_was_reclaimed(tmp_path):
 
 
 def test_reclaim_never_sweeps_the_whole_box_for_gpu_owners(tmp_path):
-    # recover's ``_kill_stale_owners`` pgreps the machine for vllm / EngineCore / Magpie and signals every match.
     slept, p_reap, p_probe, p_sleep = _patch_reclaim(reaped=[])
-    with (
-        p_reap,
-        p_probe,
-        p_sleep,
-        patch.object(rc.recover_executor, "_kill_stale_owners") as kill,
-        patch.object(rc.recover_executor, "_discover_stale_pids") as discover,
-    ):
+    with p_reap as reap, p_probe as probe, p_sleep:
         asyncio.run(rf._reclaim_gpus_for_retry(tmp_path, attempt=1))
-    kill.assert_not_called()
-    discover.assert_not_called()
-    assert not hasattr(rc, "kill_stale_gpu_owners")
+    reap.assert_called_once_with(tmp_path)
+    probe.assert_not_called()
+    assert slept == []
 
 
 def test_reclaim_refuses_an_unresolved_session_dir():
@@ -139,7 +132,7 @@ def test_reclaim_never_raises_when_the_helpers_blow_up(tmp_path):
             side_effect=OSError("proc gone"),
         ),
         patch(
-            "hyperloom.orchestrator.actions.executors.recover.probe_gpu_free_mb",
+            "hyperloom.common.rocm_smi.gpu_vram_usage",
             side_effect=RuntimeError("rocm-smi missing"),
         ),
     ):

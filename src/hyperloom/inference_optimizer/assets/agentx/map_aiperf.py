@@ -5,6 +5,7 @@
 """CLI wrapper: aiperf ``profile_export_aiperf.json`` -> ``inferencex_result.json``."""
 
 import json
+import math
 import os
 import sys
 
@@ -22,7 +23,11 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
     def _stat(m, key, sub="avg", default=0.0):
         v = m.get(key)
         if isinstance(v, dict):
-            return v.get(sub, v.get("avg", default))
+            sv = v.get(sub)
+            if sv is not None:
+                return sv
+            av = v.get("avg")
+            return av if av is not None else default
         return v if v is not None else default
 
     def _pct(m, key, sub, default=0.0):
@@ -31,6 +36,34 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             sv = v.get(sub)
             return sv if sv is not None else default
         return default
+
+    def _valid_count(value):
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+    def _request_error_rate(metrics, export):
+        rate = _stat(metrics, "request_error_rate", default=None)
+        if rate is not None:
+            return float(rate) if _valid_count(rate) and rate <= 100 else None
+
+        success = _stat(metrics, "request_count", default=None)
+        errors = _stat(metrics, "error_request_count", default=None)
+        completed = _stat(metrics, "completed_request_count", default=None)
+        if any(value is not None and not _valid_count(value) for value in (success, errors, completed)):
+            return None
+        # AIPerf omits zero-error metrics; accounting counters also include warmup.
+        if errors is None:
+            if success is None or success <= 0 or export.get("error_summary") != []:
+                return None
+            errors = 0
+        if completed is None:
+            if success is None:
+                return None
+            completed = success + errors
+        elif success is not None and completed != success + errors:
+            return None
+        if not math.isfinite(completed) or completed <= 0 or errors > completed:
+            return None
+        return 100.0 * (errors / completed)
 
     def _submission_outcome(export):
         # Tri-state: True / False / None(absent).
@@ -64,7 +97,8 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         out_tput = _stat(m, "output_token_throughput")
         in_tput = _stat(m, "input_token_throughput")
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
-        rc = int(_stat(m, "request_count") or 0)
+        success = _stat(m, "request_count", default=None)
+        rc = int(success) if _valid_count(success) else 0
         isl = _stat(m, "input_sequence_length")
         # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
         intvty_p90 = _pct(m, "e2e_output_token_throughput", "p10")
@@ -98,7 +132,7 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "theoretical_prefix_cache_hit": _stat(m, "theoretical_prefix_cache_hit"),
             "submission_valid": _verdict,
             "submission_invalid_reasons": _reasons,
-            "request_error_rate": _stat(m, "request_error_rate", default=None),
+            "request_error_rate": _request_error_rate(m, d),
             "corpus_loader": _corpus_loader(d),
             "isl_distribution": _distribution(m.get("input_sequence_length")),
             "osl_distribution": _distribution(m.get("output_sequence_length")),
