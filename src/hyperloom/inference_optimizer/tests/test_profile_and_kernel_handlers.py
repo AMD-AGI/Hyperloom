@@ -2423,6 +2423,136 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_profile_executor_finds_a_trace_the_injected_dir_redirected(tmp_path):
+    """The profiler dir this layer injects wins, so the trace lands beside the workspace, not in it.
+
+    Magpie's launcher emits its own ``--profiler-config.torch_profiler_dir
+    <workspace>/torch_trace`` *before* EXTRA_VLLM_ARGS, so the placeholder this
+    layer appends -- the task root -- is the one vLLM resolves under its
+    dotted-flag last-wins merge. Steady-state traces therefore land directly in
+    the task root while the graph-capture sidecars go to its ``capture_traces``
+    subdirectory, and probing only the workspace found the sidecars alone.
+    """
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True)
+
+    def _fake_run(cmd, *args, **kwargs):
+        workspace = output_dir / "benchmark_vllm_20260501_001122"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "vllm",
+                    "model": "/path/models/Qwen-Qwen3-8B",
+                    "throughput": {
+                        "request_throughput": 3.2,
+                        "output_throughput": 800.0,
+                        "total_token_throughput": 1600.0,
+                        "completed_requests": 80,
+                        "duration_seconds": 25.0,
+                    },
+                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+                }
+            )
+        )
+        # Magpie's own dir is created and left empty: it lost the merge.
+        (workspace / "torch_trace").mkdir(exist_ok=True)
+        capture_dir = output_dir / "capture_traces"
+        capture_dir.mkdir(exist_ok=True)
+        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"capture")
+        for rank in range(2):
+            (output_dir / f"dp0_pp0_tp{rank}_dcp0_ep{rank}_rank{rank}.1.pt.trace.json.gz").write_bytes(
+                b"steady-state" * (rank + 1)
+            )
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-redirected",
+    )
+    sub.register_executor("profile", pe)
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result["trace_dir"] == str(output_dir)
+    assert len(res.result["trace_files"]) == 2, "both ranks' steady-state traces"
+    assert all("graph_capture" not in path for path in res.result["trace_files"])
+    assert res.result.get("profile_trace_selection_reason") != "capture_only_fallback"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_ignores_a_previous_attempts_trace_in_the_task_root(tmp_path):
+    """Attempts share the task root, so a trace found there must be proved to be this one's."""
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True)
+    # What an earlier attempt left behind: its own workspace, and its traces in the shared root.
+    stale_ws = output_dir / "benchmark_vllm_20260501_000000"
+    (stale_ws / "torch_trace").mkdir(parents=True)
+    stale = [
+        output_dir / "dp0_pp0_tp0_dcp0_ep0_rank0.0.pt.trace.json.gz",
+        stale_ws / "torch_trace" / "dp0_pp0_tp1_dcp0_ep1_rank1.0.pt.trace.json.gz",
+    ]
+    for path in stale:
+        path.write_bytes(b"stale" * 4096)
+        os.utime(path, (1.0, 1.0))
+
+    def _fake_run(cmd, *args, **kwargs):
+        workspace = output_dir / "benchmark_vllm_20260501_001122"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "vllm",
+                    "model": "/path/models/Qwen-Qwen3-8B",
+                    "throughput": {
+                        "request_throughput": 3.2,
+                        "output_throughput": 800.0,
+                        "total_token_throughput": 1600.0,
+                        "completed_requests": 80,
+                        "duration_seconds": 25.0,
+                    },
+                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+                }
+            )
+        )
+        (workspace / "torch_trace").mkdir(exist_ok=True)
+        (output_dir / "dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz").write_bytes(b"fresh")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-stale",
+    )
+    sub.register_executor("profile", pe)
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    found = res.result.get("trace_files") or []
+    assert [Path(p).name for p in found] == ["dp0_pp0_tp0_dcp0_ep0_rank0.1.pt.trace.json.gz"]
+    assert all(str(path) not in found for path in stale), "a previous attempt's trace was adopted"
+    db.close()
+
+
 def _capture_trace_dir(
     tmp_path,
     *,

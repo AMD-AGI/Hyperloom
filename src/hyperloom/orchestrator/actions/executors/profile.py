@@ -774,11 +774,22 @@ def _preferred_main_trace_path(
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
+    """Trace directories to probe for a Magpie profile workspace.
+
+    The task root is probed last and on purpose. Magpie's launcher emits its own
+    ``--profiler-config.torch_profiler_dir <workspace>/torch_trace`` *before*
+    EXTRA_VLLM_ARGS, so whichever side appends last decides where the server
+    writes, and that order is not ours to rely on: the placeholder
+    ``_workload_envs`` appends -- the task root -- currently wins, which puts the
+    steady-state traces beside the workspace rather than inside it. Probing both
+    destinations answers for either order; the workspace keeps priority so a
+    round whose traces did land there is unaffected.
+    """
     return [
         workspace / "torch_trace",
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
+        workspace.parent,
     ]
 
 
@@ -1398,13 +1409,18 @@ class ProfileExecutor(BaselineExecutor):
             existing_empty_dirs: list[Path] = []
             capture_only = False
             candidate_trace_dirs = _candidate_trace_dirs(workspace)
+            # Every attempt gets its own workspace but they all share the task root, so a trace
+            # found there has to be proved to be this attempt's. ``task_started_unix`` is taken
+            # per executor call, which is per attempt, and a rglob from the root also reaches the
+            # sibling workspaces -- the same watermark rules those out.
             for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
+                scoped = agentx_profile or trace_dir == workspace.parent
                 trace_files = [
                     path
                     for path in _trace_files_for_dir(trace_dir)
-                    if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
+                    if not scoped or safe_mtime(path) >= int(task_started_unix)
                 ]
                 if trace_files:
                     selected_trace_dir = trace_dir
