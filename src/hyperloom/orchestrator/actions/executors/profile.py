@@ -1409,13 +1409,18 @@ class ProfileExecutor(BaselineExecutor):
             existing_empty_dirs: list[Path] = []
             capture_only = False
             candidate_trace_dirs = _candidate_trace_dirs(workspace)
+            # Every attempt gets its own workspace but they all share the task root, so a trace
+            # found there has to be proved to be this attempt's. ``task_started_unix`` is taken
+            # per executor call, which is per attempt, and a rglob from the root also reaches the
+            # sibling workspaces -- the same watermark rules those out.
             for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
+                scoped = agentx_profile or trace_dir == workspace.parent
                 trace_files = [
                     path
                     for path in _trace_files_for_dir(trace_dir)
-                    if not agentx_profile or safe_mtime(path) >= int(task_started_unix)
+                    if not scoped or safe_mtime(path) >= int(task_started_unix)
                 ]
                 if trace_files:
                     selected_trace_dir = trace_dir

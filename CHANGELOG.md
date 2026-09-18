@@ -20,6 +20,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A profile's steady-state trace was written one directory above where the
+  run looked for it, so every roofline attempt failed as capture-only.**
+  Magpie's launcher emits its own `--profiler-config.torch_profiler_dir
+  <workspace>/torch_trace` *before* `EXTRA_VLLM_ARGS`, so the placeholder the
+  bounds above are asserted with -- the task root -- is the value vLLM resolves
+  under its dotted-flag last-wins merge. The server therefore wrote its
+  steady-state traces straight into the task root and its graph-capture
+  sidecars into that root's `capture_traces/`, while Magpie's own
+  `torch_trace/` stayed empty and said so. Trace discovery probed the workspace
+  and that `capture_traces/`, found sidecars alone, and fell back to
+  capture-only -- which roofline rejects. Measured: one session lost both
+  roofline tasks this way, 3 of 3 attempts each, against 24 complete annotated
+  traces already on disk; the kernel phase then had no shapes to derive for
+  GEMM tuning and skipped fusion outright, leaving KB replay as the session's
+  only source of gain. The task root is now probed too, since which side wins
+  that merge is not ours to rely on, and a trace found there is admitted only
+  when it postdates this attempt's start -- attempts share the root, so one
+  that does not is a previous attempt's.
+
 - **A vLLM profile round had its profiler bounds dropped before launch.** The
   argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
   `--profiler-config.profiler torch` and a trace directory of its own
