@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
+  Missing AIPerf error-rate metrics are derived from profiling request counts;
+  zero errors are inferred only with successful requests and an explicitly empty
+  error summary. Warmup accounting is excluded, and invalid or unknown evidence
+  remains fail-closed. Valid zero-error baselines no longer lose their quality
+  signal merely because serving lm-eval is disabled.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and

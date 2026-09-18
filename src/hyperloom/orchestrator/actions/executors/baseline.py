@@ -27,6 +27,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -4200,7 +4201,9 @@ class BaselineExecutor:
 
         # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         eval_scriptable = framework_registry.is_scriptable(eval_framework)
-        if run_eval_disabled and not eval_scriptable:
+        shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
+        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
+        if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
             # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
@@ -4215,9 +4218,7 @@ class BaselineExecutor:
             eval_data = parse_eval_results(
                 eval_search_root,
                 framework=eval_framework,
-                benchmark_mode=str(
-                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
-                ),
+                benchmark_mode=benchmark_mode,
             )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]

@@ -424,6 +424,52 @@ def test_baseline_mn_warmup_eval_result_dir_is_discarded(tmp_path, monkeypatch):
     assert result.get("accuracy") == pytest.approx(0.83)
 
 
+@pytest.mark.parametrize("rate,expected", [(0.0, 1.0), (25.0, 0.0), (None, 0.0)])
+@pytest.mark.parametrize("state_in_context", [False, True])
+def test_agentx_baseline_grades_requests_with_run_eval_off(tmp_path, rate, expected, state_in_context):
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    config = yaml.safe_load(base.read_text(encoding="utf-8"))
+    config["benchmark"]["envs"]["RUN_EVAL"] = False
+    base.write_text(yaml.safe_dump(config), encoding="utf-8")
+    state = _StopRecorder()
+    state.benchmark_mode = "agentx"
+    state.enablement_mode = "eval"
+    state.eval_disabled = False
+    output_dir = tmp_path / "ws"
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ws = _fake_workspace(slot)
+        (ws / "inferencex_result.json").write_text(
+            json.dumps({"request_error_rate": rate, "submission_valid": True}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    executor = BaselineExecutor(
+        magpie_python="/opt/venv/bin/python",
+        default_config_path=base,
+        session_dir=tmp_path,
+        shared_state=None if state_in_context else state,
+    )
+    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10, "baseline_double_run": False})
+    ctx.task.kind = "baseline"
+    if state_in_context:
+        ctx.extra["shared_state"] = state
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=fake_run):
+        result = asyncio.run(executor(ctx))
+
+    assert result["status"] == "succeeded"
+    assert result["run_eval_disabled"] is True
+    assert result["accuracy"] == expected
+    assert result["accuracy_task"] == "agentx_error_rate"
+    assert bool(result.get("baseline_eval_failed")) is (expected == 0.0)
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    coordinator = object.__new__(Coordinator)
+    assert coordinator._is_promotable_result("baseline", result) is (expected == 1.0)
+
+
 def test_baseline_skips_accuracy_when_run_eval_disabled(tmp_path):
     """RUN_EVAL off -> no accuracy parse, even if the slot holds stale results."""
     base = tmp_path / "base.yaml"
