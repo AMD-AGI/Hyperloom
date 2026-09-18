@@ -12,7 +12,7 @@ import os
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -111,6 +111,7 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 
 
 # Structured verdict ids for the post-profile trace validation.
+CHECK_INSTRUMENTATION_PREFLIGHT = "instrumentation_preflight"
 CHECK_CAPTURE_TRACES_PRESENT = "capture_traces_present"
 CHECK_CAPTURE_INPUT_DIMS = "capture_input_dims"
 CHECK_STEP_ANNOTATIONS = "step_annotations"
@@ -131,6 +132,52 @@ def _check_row(
 ) -> dict[str, Any]:
     """Build one structured check row."""
     return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
+
+
+def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """State, before the run, whether the annotations the trace checks look for can land at all.
+
+    When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
+    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. That decision was previously read back one
+    line later and then discarded, so the post-hoc failures arrived without their cause. This only reports it --
+    the run proceeds exactly as before, because a trace without annotations is still a trace.
+
+    ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
+    is not the same as which patcher ran and what it returned: a successful patch previously wrote nothing at all,
+    so "instrumentation was fine" and "nobody looked" were the same record.
+    """
+    envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
+    if not isinstance(envs, dict):
+        return _check_row(
+            CHECK_INSTRUMENTATION_PREFLIGHT,
+            status="skipped",
+            skip_reason="materialized config carries no benchmark.envs block",
+        )
+    degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
+    patchers = dict(patchers or {})
+    try:
+        extra_body = json.loads(str(envs.get("PROFILE_EXTRA_BODY") or "{}"))
+    except (TypeError, ValueError):
+        extra_body = {}
+    if not isinstance(extra_body, dict):
+        extra_body = {}
+    failed_patchers = sorted(name for name, ok in patchers.items() if ok is False)
+    return _check_row(
+        CHECK_INSTRUMENTATION_PREFLIGHT,
+        status="failed" if (degraded or failed_patchers) else "passed",
+        degraded_reason=degraded,
+        tracelens_patch_status=str(envs.get("HYPERLOOM_TRACELENS_PATCH_STATUS") or ""),
+        detailed_annotations=extra_body.get("detailed_annotations"),
+        shape_discovery=extra_body.get("shape_discovery"),
+        # The sglang flag the patched build exposes; absent means capture-time shapes were never requested.
+        shape_discovery_flag_present=(
+            "shape-discovery-for-cuda-graph-profile" in str(envs.get("EXTRA_SGLANG_ARGS") or "")
+        ),
+        patchers=patchers,
+        failed_patchers=failed_patchers,
+        # Named so a reader knows which post-hoc checks this predicts rather than having to rediscover the link.
+        predicts_failure_of=[CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER] if degraded else [],
+    )
 
 
 def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
@@ -227,9 +274,16 @@ def _build_trace_validate(
     framework: str,
     certificate: dict[str, Any] | None = None,
     probe_error: str = "",
+    preflight: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the profile-stage trace validation block."""
+    """Assemble the profile-stage trace validation block.
+
+    ``preflight`` leads the check list because it was known before the run: when it failed, the trace checks that
+    follow are consequences rather than independent findings.
+    """
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
+    if isinstance(preflight, dict):
+        checks = [preflight] + checks
     certificate = certificate or {}
     if certificate:
         checks = checks + _probe_check_rows(certificate)
@@ -251,6 +305,25 @@ def _build_trace_validate(
         "chunk_level": [],
         "checks": checks,
     }
+
+
+def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
+    """Write the full certificate beside the trace it describes, returning the path (empty when unwritable).
+
+    Deliberately written *outside* ``trace_dir``: the resolver's ``_trace_candidates`` rglobs that directory for
+    anything ending in ``_TRACE_EXTS``, which includes a bare ``.json``, so a certificate stored among the traces
+    becomes a trace candidate itself. That is not hypothetical -- it makes ``require_single_rank`` resolution
+    return nothing (a second unranked candidate) and lets an 82 KB certificate outrank a small real trace in the
+    size fallback. A subdirectory would not help, the scan is recursive. The name carries ``trace_dir``'s so the
+    ``torch_trace`` and ``capture_traces`` certificates of one workspace do not collide.
+    """
+    target = trace_dir.parent / f"{trace_dir.name}.selfcert.json"
+    try:
+        atomic_write_json(target, validate)
+    except OSError as exc:
+        log.warning("profile_executor: cannot write trace certificate to %s: %s", target, exc)
+        return ""
+    return str(target)
 
 
 def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
@@ -368,7 +441,11 @@ def _validate_trace_structure(
                 sampled_file=target.name,
             )
         else:
-            cpu_op_count = _count_substring_occurrences(text, '"name": "cpu_op"')
+            # ``cpu_op`` is the event's category; its ``name`` is the operator (``aten::mm``). Matching on the
+            # name key found nothing in any real trace, so this check reported "no cpu_op events" on captures
+            # that were fully instrumented, and the advisory below rationalised the miss as an SGLang naming
+            # quirk. Verified against a real sglang capture: 0 hits for the name form, 2915 for this one.
+            cpu_op_count = _count_substring_occurrences(text, '"cat": "cpu_op"')
             input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
             _input_dims_fraction = input_dims_count / cpu_op_count if cpu_op_count else None
             if _input_dims_fraction is None:
@@ -583,20 +660,25 @@ def _validate_trace_structure(
             skip_reason="main trace could not be sampled",
         )
     else:
+        # Shape markers left by either mechanism: the sglang_profiler:: op
+        # namespace, or the kernel_shape_profiler frame (when with_stack is on).
+        _shape_markers = ("sglang_profiler::", "kernel_shape_profiler")
+        _shape_present = any(m in main_text for m in _shape_markers)
         _note_check(
             CHECK_SGLANG_SHAPE_PROFILER,
-            status="passed" if "kernel_shape_profiler" in main_text else "failed",
+            status="passed" if _shape_present else "failed",
             sampled_file=main_traces[0].name,
             sampled_bytes=_TRACE_INSPECT_BYTES,
         )
-        if "kernel_shape_profiler" not in main_text:
+        if not _shape_present:
             issues.append(
                 f"[5] sglang main trace ({main_traces[0].name}, sampled "
                 f"first {_TRACE_INSPECT_BYTES // 1_000_000} MB) lacks "
-                "kernel_shape_profiler events — shape-discovery "
-                "patch didn't reach the live SGLang. Verify "
-                "_server_patcher (PR #207) succeeded for the "
-                "deployed SGLang version (check log warnings)."
+                "kernel-shape events — shape discovery didn't reach the live "
+                "SGLang. For SGLang < 0.5.18 verify the _server_patcher "
+                "git-apply succeeded; for >= 0.5.18 verify the kernel_shape_tool "
+                "is on the server PYTHONPATH and TRACELENS_SHAPE_DISCOVERY=1 "
+                "(check log warnings)."
             )
 
     if issues:
@@ -721,6 +803,8 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BaselineExecutor):
     """Subclass that swaps the default config + extracts trace_dir."""
 
+    benchmark_watchdog = False
+
     def __init__(
         self,
         *,
@@ -744,6 +828,9 @@ class ProfileExecutor(BaselineExecutor):
         # Non-empty only when arming failed, and then it carries why: an empty probe dir alone cannot say whether the
         # probe was never asked for or could not be installed.
         self._host_probe_status: str = ""
+        # Set by ``_after_materialize_config`` from the config the run will actually execute, so the post-hoc trace
+        # checks ship alongside the pre-run statement of whether their subject could have been produced.
+        self._instrumentation_preflight: dict[str, Any] | None = None
 
     def _resolve_sink(self, ctx) -> Any:
         """Decline the baseline event a profile run must never open."""
@@ -861,6 +948,24 @@ class ProfileExecutor(BaselineExecutor):
                 "error": f"cannot read materialized profile config {config_path}: {exc}",
             }
         bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        patchers: dict[str, Any] = {}
+
+        def _note_instrumentation() -> None:
+            """Re-state the instrumentation report. Called before every exit below, so no path leaves it unset."""
+            self._instrumentation_preflight = _instrumentation_preflight_row(bench, patchers)
+            detail = self._instrumentation_preflight["detail"]
+            if self._instrumentation_preflight["status"] != "failed":
+                return
+            log.warning(
+                "profile_executor: instrumentation preflight — degraded_reason=%r failed_patchers=%s; "
+                "annotation-dependent trace checks (%s, %s) cannot pass for this run",
+                detail.get("degraded_reason"),
+                detail.get("failed_patchers"),
+                CHECK_STEP_ANNOTATIONS,
+                CHECK_SGLANG_SHAPE_PROFILER,
+            )
+
+        _note_instrumentation()
         framework = ""
         if isinstance(bench, dict):
             framework = str(bench.get("framework") or "").strip().lower()
@@ -870,7 +975,9 @@ class ProfileExecutor(BaselineExecutor):
         if framework_registry.is_scriptable(framework):
             # The baked-profiler verifier is xDiT/xfuser-specific (it inspects xfuser's base_model.py).
             if str(framework or "").strip().lower() == "xdit":
-                verify_xdit_profiler_baked()
+                # Recorded but still non-fatal: a warning that nothing keeps is a warning nobody reads.
+                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
+                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):
@@ -883,12 +990,18 @@ class ProfileExecutor(BaselineExecutor):
                 "INFERENCEX_PATH configured; skipping InferenceX profile "
                 "patch validation"
             )
+            # ``None`` rather than ``False``: not run at all is a different fact from run and failed, and only the
+            # latter says the checkout is broken.
+            patchers["inferencex"] = None
+            _note_instrumentation()
             return None
 
         ix_root = Path(inferencex_path)
         lib_ok = ensure_benchmark_lib_patched(ix_root)
-        ensure_benchmark_lib_eval_dest_patched(ix_root)
+        patchers["benchmark_lib"] = lib_ok
+        patchers["benchmark_lib_eval_dest"] = ensure_benchmark_lib_eval_dest_patched(ix_root)
         serving_ok = ensure_benchmark_serving_patched(ix_root)
+        patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
         serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
 
@@ -901,6 +1014,12 @@ class ProfileExecutor(BaselineExecutor):
 
         lib_valid = _contains(lib_path, "${NUM_PROMPTS:-$max_concurrency}")
         serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
+        # The sentinels are a separate fact from the patcher's return: a patcher can report success against a
+        # checkout whose anchors have since moved, and only reading the file back tells them apart.
+        patchers["benchmark_lib_sentinel"] = lib_valid
+        patchers["benchmark_serving_sentinel"] = serving_valid
+        patchers["inferencex_path"] = str(ix_root)
+        _note_instrumentation()
         if not (lib_ok and serving_ok and lib_valid and serving_valid):
             return {
                 "status": "failed",
@@ -917,6 +1036,17 @@ class ProfileExecutor(BaselineExecutor):
                 "benchmark_serving": str(serving_path),
             }
         return None
+
+    def drain_instrumentation_report(self) -> dict[str, Any] | None:
+        """Take the instrumentation report this executor produced, clearing it.
+
+        Draining rather than reading: the caller runs several profile attempts against this module-level singleton,
+        and an attempt that dies before materializing a config must report nothing rather than inherit the
+        previous attempt's report. Exposed because the report has to survive the paths where no result dict does
+        -- an executor that raises still patched, or still failed to.
+        """
+        report, self._instrumentation_preflight = self._instrumentation_preflight, None
+        return report
 
     def _collect_rewrite_evidence(self, result: dict[str, Any]) -> None:
         """Merge the per-rank host-probe reports onto ``result``."""
@@ -1377,6 +1507,14 @@ class ProfileExecutor(BaselineExecutor):
                             framework=framework,
                             certificate=certificate,
                             probe_error=probe_error,
+                            preflight=self._instrumentation_preflight,
+                        )
+                        # The certificate's per-rank, per-candidate and per-chunk tables are unbounded in the
+                        # number of ranks and files, so they go to a file and the event keeps the path. Until now
+                        # they were computed and dropped: nothing wrote them anywhere.
+                        result["trace_validate_path"] = _write_trace_certificate(
+                            selected_trace_dir,
+                            result["trace_validate"],
                         )
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(

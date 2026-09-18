@@ -167,6 +167,40 @@ def test_write_minimal_final_json_creates(tmp_path):
         assert key in data
 
 
+@pytest.mark.parametrize("producer", [ex.FINAL_PRODUCER_COORDINATOR, ex.FINAL_PRODUCER_SUPERVISOR])
+def test_fallback_never_replaces_a_complete_report(tmp_path, producer):
+    target = tmp_path / "reports" / "final.json"
+    target.parent.mkdir(parents=True)
+    report = {"report_complete": True, "stop_reason": "target_reached"}
+    target.write_text(json.dumps(report), encoding="utf-8")
+
+    ex.write_minimal_final_json(tmp_path, producer=producer, extra={"stop_reason": "supervisor_coordinator_died"})
+
+    assert json.loads(target.read_text(encoding="utf-8")) == report
+
+
+def test_coordinator_fallback_preserves_historical_supervisor_priority(tmp_path):
+    target = ex.write_minimal_final_json(
+        tmp_path,
+        producer=ex.FINAL_PRODUCER_SUPERVISOR,
+        extra={"stop_reason": "supervisor_coordinator_died"},
+    )
+    ex.write_minimal_final_json(tmp_path, producer=ex.FINAL_PRODUCER_COORDINATOR)
+
+    final = json.loads(target.read_text(encoding="utf-8"))
+    assert final["producer"] == ex.FINAL_PRODUCER_SUPERVISOR
+    assert final["stop_reason"] == "supervisor_coordinator_died"
+
+
+def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
+    from hyperloom.inference_optimizer.breakdown import stop_reasons
+
+    assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
+    assert stop_reasons.outcome_status("supervisor_coordinator_died") == "aborted"
+    assert stop_reasons.outcome_status("supervisor_tick_stalled") == "aborted"
+    assert stop_reasons.outcome_status("robustness_escalated") == "completed"
+
+
 def test_write_minimal_final_json_idempotent(tmp_path):
     # A pre-existing final.json must never be clobbered by the minimal fallback.
     reports = tmp_path / "reports"

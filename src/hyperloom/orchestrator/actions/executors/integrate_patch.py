@@ -21,6 +21,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
@@ -82,11 +83,10 @@ from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
-    DEFAULT_VARIANT_TIMEOUT_SEC,
     GridVariant,
+    SessionDirField,
     VariantResult,
     _num_gpus_for_config,
-    _resolve_session_dir,
     run_grid,
     sanitize_result_dir,
     sanitize_script_name,
@@ -1700,12 +1700,13 @@ def _enforce_critic_gate(
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
+    session_dir = SessionDirField()
+
     def __init__(
         self,
         *,
         session_dir: Path | str | None = None,
         default_config_path: Path | str | None = None,
-        variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
         """Initialize the integrate-patch executor.
@@ -1715,14 +1716,11 @@ class IntegratePatchExecutor:
                 auto-resolved when ``None``.
             default_config_path (Path | str | None): Fallback benchmark
                 config path, if any.
-            variant_timeout_sec (int): Per-variant benchmark hard timeout.
-                Defaults to :data:`DEFAULT_VARIANT_TIMEOUT_SEC`.
             keep_threshold_pct (float): Minimum gain to KEEP a patch.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
         """
-        self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
+        self.session_dir = session_dir
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self._apply_attempted: bool = False
         # Re-derived per round by _stage_apply so the revert reads this round's
@@ -2037,14 +2035,12 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping runtime provision in multi-node mode")
             return None
 
-        from ...framework.adapters import get_adapter
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.adapters import get_adapter
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
         attempt_dir = (
-            self.session_dir
-            / "enablement"
-            / "stacks"
+            enablement_stacks_dir(self.session_dir)
             / (action.framework or "unknown")
             / (specialist_task_id or "attempt")
         )
@@ -2072,7 +2068,7 @@ class IntegratePatchExecutor:
         def _provision_and_probe():
             provisioned = adapter.provision(action, attempt_dir)
             if provisioned.ok and not adapter.probe(provisioned, action):
-                from ...framework.stack_actions import ProvisionResult as _PR
+                from ...enablement.runtime.stack_actions import ProvisionResult as _PR
 
                 return _PR(ok=False, log_path=provisioned.log_path, error="adapter probe failed after provision")
             return provisioned
@@ -2157,8 +2153,8 @@ class IntegratePatchExecutor:
             log.info("integrate_patch: skipping localization in multi-node mode")
             return None
 
-        from ...framework.localization import build_localization_diff
-        from ...framework.stack_actions import EnablementStackAction
+        from ...enablement.runtime.localization import build_localization_diff
+        from ...enablement.runtime.stack_actions import EnablementStackAction
 
         action = EnablementStackAction.from_state(raw)
 
@@ -2902,12 +2898,12 @@ class IntegratePatchExecutor:
                 # venv_root is ``<attempt_dir>/venv``; GC the whole attempt dir.
                 self._gc_attempt_dir(Path(root).parent)
 
-        from hyperloom.agents.framework.enablement import runnable_decision
+        from hyperloom.common.failure_signature import runnable_decision
 
         from ...bringup import round_advanced
+        from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
-        boot_timed_out = bool(gate_evidence.get("timed_out"))
 
         enablement_accuracy = gate_evidence.get("enablement_accuracy")
         _param_floor = params.get("enablement_accuracy_floor")
@@ -2968,16 +2964,12 @@ class IntegratePatchExecutor:
             "after_observation_degraded": after_loaded.degraded,
         }
 
-        # The boot verdict is the ladder observation's, never the benchmark's
-        # throughput, which cannot separate a slow server from a dead one.
-        booted = after_loaded.observation.booted if after_loaded.observation is not None else None
+        # A measurement exists only where the client completed requests, so it
+        # witnesses the serving instead of inferring it from a log marker.
+        served = is_valid_measurement(bench_result)
 
-        runs, run_reason = runnable_decision(
-            booted=booted,
-            correctness_ok=correctness_ok,
-            boot_timed_out=boot_timed_out,
-        )
-        advanced = not runs and not booted and round_advanced(before_loaded.observation, after_loaded.observation)
+        runs, run_reason = runnable_decision(served=served, correctness_ok=correctness_ok)
+        advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
@@ -3103,7 +3095,7 @@ class IntegratePatchExecutor:
         provisional = correctness_ok is None
         reason = f"enablement runnable: {run_reason}"
         if provisional:
-            reason += " (provisional: booted but eval produced no accuracy; correctness not verified)"
+            reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(
             params=params,
             done_payload=done_payload,
@@ -3219,7 +3211,7 @@ class IntegratePatchExecutor:
         # Editable-refresh so localized Python changes take effect in the attempt
         # runtime (no-op for plain wheel trees like atom).
         try:
-            from ...framework.adapters import get_adapter
+            from ...enablement.runtime.adapters import get_adapter
 
             venv_py = ""
             if provision_result is not None and getattr(provision_result, "ok", False):
@@ -3627,7 +3619,7 @@ class IntegratePatchExecutor:
                     ]
                 )
                 rel_paths += inside_root
-                from ...framework.adapters import get_adapter
+                from ...enablement.runtime.adapters import get_adapter
 
                 source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
                     str(framework_root)
@@ -4496,9 +4488,6 @@ class IntegratePatchExecutor:
                 grid=[variant],
                 output_root=output_root,
                 magpie_python=params.get("magpie_python") or None,
-                variant_timeout_sec=int(
-                    params.get("variant_timeout_sec", self.variant_timeout_sec),
-                ),
                 keep_going_on_failure=False,
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
@@ -4735,7 +4724,6 @@ class IntegratePatchExecutor:
 
 __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
-    "DEFAULT_VARIANT_TIMEOUT_SEC",
     "IntegratePatchExecutor",
     "_detect_p_level",
     "_git_apply",

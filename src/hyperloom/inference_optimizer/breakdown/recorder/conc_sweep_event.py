@@ -29,6 +29,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
+    bool_or_none as _bool_or_none,
     clip as _clip,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
@@ -274,7 +275,7 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the shape the ladder is swept over. Which axis pair the points
         are drawn on follows from ``benchmark_mode``, so a reader never infers
-        it from whether ``intvty_p90`` happens to be null."""
+        it from whether ``e2e_norm_intvty_p90`` happens to be null."""
         self._record_action(
             {
                 "workload": {
@@ -368,13 +369,12 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the budget the ladder was admitted under.
 
-        Both totals are kept because they disagree: the sweep raises its own
-        default when that default cannot fund even one rung at the cap the grid
-        runner will actually grant, and a sweep that spent three hours on a
-        nine-hundred-second budget otherwise reads as a contradiction.
-        ``rung_cost_sec`` is that granted cap rather than the declared timeout,
-        since pricing at the smaller admits a rung the budget cannot pay for.
-        ``deadline`` is a wall-clock epoch.
+        Current sweeps keep declared and granted totals equal and do not raise
+        the budget to fit the per-process hard cap. ``rung_cost_sec`` is the
+        measured expected duration used for admission, or ``None`` when unknown.
+        The fields also preserve historical records that raised the budget.
+        ``deadline`` is the sweep's wall-clock budget boundary, not the earlier
+        sweep/session monotonic deadline used by the runner.
         """
         self._record_action(
             {
@@ -620,6 +620,13 @@ class ConcSweepEventRecorder:
         concurrency, so a later pass revises a row rather than adding one, and
         a failure reason is settled here because the arm that broke is the only
         one that can say why.
+
+        ``baseline_value``/``optimized_value`` are on the axis named by
+        ``result.metric``, which is an interactivity percentile rather than a
+        throughput whenever the session grades on one. The guard axis rides
+        along beside them, null off the interactivity objective, so a rung that
+        bought interactivity by giving up throughput is visible as such instead
+        of reading as a clean win.
         """
         for row in _as_list(comparison):
             if not isinstance(row, Mapping):
@@ -630,10 +637,13 @@ class ConcSweepEventRecorder:
                 {
                     "task_id": self._action_id,
                     "conc": rung,
-                    "baseline_throughput": _float_or_none(row.get("baseline_tput")),
-                    "optimized_throughput": _float_or_none(row.get("optimized_tput")),
+                    "baseline_value": _float_or_none(row.get("baseline_value")),
+                    "optimized_value": _float_or_none(row.get("optimized_value")),
                     "speedup": _float_or_none(row.get("speedup")),
                     "delta_pct": _float_or_none(row.get("delta_pct")),
+                    "baseline_guard": _float_or_none(row.get("baseline_guard")),
+                    "optimized_guard": _float_or_none(row.get("optimized_guard")),
+                    "guard_holds": _bool_or_none(row.get("guard_holds")),
                     "baseline_status": _text(row.get("baseline_status")),
                     "optimized_status": _text(row.get("optimized_status")),
                     "error": _pair_error(
@@ -650,8 +660,10 @@ class ConcSweepEventRecorder:
             {
                 "result": {
                     "metric": _text(roll_up.get("metric")),
+                    "guard_axis": _text(roll_up.get("guard_axis")),
                     "best_conc": _int_or_none(roll_up.get("best_conc")),
                     "best_speedup": _float_or_none(roll_up.get("best_speedup")),
+                    "best_conc_guard_holds": _bool_or_none(roll_up.get("best_conc_guard_holds")),
                     "successful_pairs": _int_or_none(roll_up.get("successful_pairs")),
                     "failed_pairs": _int_or_none(roll_up.get("failed_pairs")),
                     "median_speedup": _float_or_none(roll_up.get("median_speedup")),
@@ -697,8 +709,10 @@ class ConcSweepEventRecorder:
         result = {
             "status": status,
             "metric": _text(roll_up.get("metric")),
+            "guard_axis": _text(roll_up.get("guard_axis")),
             "best_conc": _int_or_none(roll_up.get("best_conc")),
             "best_speedup": _float_or_none(roll_up.get("best_speedup")),
+            "best_conc_guard_holds": _bool_or_none(roll_up.get("best_conc_guard_holds")),
             "successful_pairs": _int_or_none(roll_up.get("successful_pairs")),
             "failed_pairs": _int_or_none(roll_up.get("failed_pairs")),
             "median_speedup": _float_or_none(roll_up.get("median_speedup")),

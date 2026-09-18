@@ -22,7 +22,6 @@ from hyperloom.orchestrator.actions.executors import (
     baseline_executor,
     conc_sweep_executor,
     explore_executor,
-    recover_executor,
     report_executor,
     session_breakdown_executor,
 )
@@ -54,8 +53,6 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,
-    # recover cleans up leaked VRAM owners.
-    "recover": recover_executor,
 }
 
 

@@ -18,6 +18,7 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
     workload as _r_workload,
     baseline as _r_baseline,
     final as _r_final,
+    enablement as _r_enablement,
     capability_summary as _r_capability_summary,
     phase_timeline as _r_phase_timeline,
     kernel_lifecycle as _r_kernel_lifecycle,
@@ -33,15 +34,14 @@ from ._renderers import (  # noqa: F401  (side-effect imports)
 # Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
 SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ("Session & Workload", ["session", "workload"]),
+    ("Enablement", ["enablement"]),
     (
         "Performance Results",
         ["baseline", "final", "roofline", "optimizations", "attribution"],
     ),
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
-    # The two side-channel agents watch the run rather than take part in it, so
-    # they sit after the optimization story and before the raw trace.
-    ("Review & Robustness", ["critic", "robustness"]),
+    ("Review", ["critic", "robustness"]),
     ("Run Trace", ["phase_timeline"]),
 ]
 
@@ -54,6 +54,7 @@ __all__ = [
     "_r_workload",
     "_r_baseline",
     "_r_final",
+    "_r_enablement",
     "_r_capability_summary",
     "_r_phase_timeline",
     "_r_kernel_lifecycle",

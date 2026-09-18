@@ -4547,7 +4547,10 @@ async def _run_geak_gemm_tuning(
 
     from hyperloom.orchestrator.actions.executors._workload_envs import geak_metric_axis
 
-    _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+    _geak_e2e_metric, _ = geak_metric_axis(
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        grading=getattr(state, "grading", None),
+    )
 
     input_json = workspace / "gemm_tuning_input.json"
     input_payload = {
@@ -6017,135 +6020,6 @@ def _grade_integrate_accuracy(
     }
 
 
-def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -> int:
-    """Raise a re-baseline timeout to what an AgentX round needs.
-
-    Same shape, and the same root cause, as
-    :func:`_cold_start_rebaseline_timeout`: the explicit ``timeout_sec`` that
-    integrate passes suppresses the baseline executor's own AgentX branch, so a
-    value sized for the synthetic shape becomes the only budget the round gets.
-    Observed values are 7200s and 9000s; a canonical AgentX warmup is 10
-    requests per lane over real agentic traces and does not fit either.
-
-    Measured on Qwen3.8: a round whose server answered all 685
-    chat/completions with 200 was cut at exactly its 7200s param, mid-warmup,
-    after which the client could no longer connect. Nothing in the abort reason
-    names the timeout -- aiperf reports the cancelled warmup credit as
-    ``warmup_failure``, so it reads as a workload problem.
-
-    Raised here, where the param is produced, rather than in the executor that
-    consumes it: ``_resolve_timeout`` deliberately lets an explicit param
-    outrank the AgentX derivation, and that contract has a test on it. AgentX
-    is an opt-in branch, so with it disabled this returns ``resolved_sec``
-    untouched and the default path is unaffected.
-
-    Args:
-        resolved_sec: The timeout the payload/contract resolved to.
-        shared_state: Session state, so a persisted ``benchmark_mode`` still
-            triggers the raise when this integrate call runs in a subprocess
-            that did not inherit ``HYPERLOOM_AGENTX``.
-
-    Returns:
-        int: ``resolved_sec``, or the AgentX-derived cap when that is larger.
-    """
-    from ..actions.executors._workload_envs import agentx_active
-
-    if not agentx_active(shared_state):
-        return resolved_sec
-    from ..actions.executors.baseline import agentx_baseline_timeout_sec
-
-    agentx_sec = agentx_baseline_timeout_sec()
-    if agentx_sec <= resolved_sec:
-        return resolved_sec
-    log.warning(
-        "integrate_handler: raising re-baseline timeout %ds -> %ds "
-        "(AgentX: AGENTX_DURATION + overhead; a synthetic-sized param cannot "
-        "cover a canonical agentic warmup and kills the round mid-warmup)",
-        resolved_sec,
-        agentx_sec,
-    )
-    return agentx_sec
-
-
-def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
-    """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
-
-    An apply moves the cache aside, so the re-baseline recompiles from scratch;
-    the explicit ``timeout_sec`` integrate passes also suppresses the baseline
-    executor's own cold-start branch, leaving the warm budget as the only one.
-    """
-    from ..actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-        probe_aiter_jit_cache,
-    )
-
-    cache = probe_aiter_jit_cache()
-    if cache.get("probe_status") != "found" or not cache.get("is_cold"):
-        return resolved_sec
-    cold_cap = int(
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-            BASELINE_COLD_START_TIMEOUT_SEC,
-        )
-    )
-    if cold_cap <= resolved_sec:
-        return resolved_sec
-    log.warning(
-        "integrate_handler: aiter JIT cache is cold (%s kernels); raising "
-        "re-baseline timeout %ds -> %ds for the recompile the patch forces",
-        cache.get("kernel_count"),
-        resolved_sec,
-        cold_cap,
-    )
-    return cold_cap
-
-
-def _integrate_rebaseline_timeout_sec(
-    payload: dict,
-    *,
-    default_timeout_sec: int,
-) -> int:
-    """Resolve the E2E timeout from explicit input or benchmark contract."""
-    explicit = payload.get("timeout_sec")
-    if explicit is not None:
-        try:
-            value = int(explicit)
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            log.debug(
-                "integrate_handler: invalid timeout_sec; trying fallback timeout sources",
-                exc_info=True,
-            )
-    if "budget_minutes" in payload:
-        try:
-            value = int(float(payload["budget_minutes"]) * 60)
-            if value > 0:
-                return value
-        except (TypeError, ValueError):
-            log.debug(
-                "integrate_handler: invalid budget_minutes; trying fallback timeout sources",
-                exc_info=True,
-            )
-    config_path = str(payload.get("config_path") or "")
-    if config_path and Path(config_path).is_file():
-        try:
-            import yaml  # type: ignore[import-untyped]
-
-            config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-            benchmark = config.get("benchmark")
-            if isinstance(benchmark, dict):
-                value = int(benchmark.get("timeout_seconds") or 0)
-                if value > 0:
-                    return value
-        except (OSError, TypeError, ValueError, yaml.YAMLError):
-            log.debug(
-                "integrate_handler: invalid benchmark timeout config; using executor default",
-                exc_info=True,
-            )
-    return max(1, int(default_timeout_sec))
-
-
 async def integrate_handler(
     payload: dict,
     *,
@@ -6165,9 +6039,8 @@ async def integrate_handler(
     SharedState when a baseline has been recorded, so a bare ``{kernel_id}`` (or
     ``{integration_id}``) payload is accepted. Optional: patch_path,
     target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
-    extra_envs, source, task_group_key, keep_threshold_pct (1.0), timeout_sec,
-    or budget_minutes. Without an explicit timeout, the benchmark config's
-    timeout contract is used. Returns ``{status, decision, base_tput, new_tput,
+    extra_envs, source, task_group_key, keep_threshold_pct (1.0). The baseline
+    benchmark launch applies the invocation's fixed benchmark timeout policy. Returns ``{status, decision, base_tput, new_tput,
     gain_pct, kernel_id, patch_path, report_path, workspace}``.
 
     Args:
@@ -6350,15 +6223,6 @@ async def integrate_handler(
     fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
-    rebaseline_timeout_sec = _agentx_rebaseline_timeout(
-        _cold_start_rebaseline_timeout(
-            _integrate_rebaseline_timeout_sec(
-                payload,
-                default_timeout_sec=baseline_executor.default_timeout_sec,
-            )
-        ),
-        shared_state=state,
-    )
     fake_task = Task(
         task_id=fake_task_id,
         kind="baseline",
@@ -6366,7 +6230,6 @@ async def integrate_handler(
         params={
             "config_path": payload.get("config_path"),
             "output_dir": str(workspace),
-            "timeout_sec": rebaseline_timeout_sec,
             "extra_server_args": extra_args,
             "extra_envs": dict(payload.get("extra_envs") or {}),
             "remove_args": to_str_list(payload.get("remove_args")),
@@ -6378,7 +6241,6 @@ async def integrate_handler(
             "defer_accuracy_until_after_measure": True,
             "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
             **({"post_measure_accuracy_keep_policy": performance_policy} if not paired_measurement else {}),
-            "accuracy_timeout_sec": rebaseline_timeout_sec,
             # Synthetic kind="baseline": candidate A/B validation against the
             # already-anchored reference. It runs eval for the kernel accuracy
             # gate but never establishes a replacement quality reference.
@@ -6556,7 +6418,7 @@ async def integrate_handler(
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
     graded = performance.graded
     if graded.degrade_reason:
-        log.info("integrate_handler: grading on output throughput (%s)", graded.degrade_reason)
+        log.info("integrate_handler: grading unavailable (%s)", graded.degrade_reason)
     gain_pct = performance.gain_pct
     stack_incremental_gain_pct = performance.stack_incremental_gain_pct
     stack_positive_keep = performance.stack_positive_keep
