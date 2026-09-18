@@ -1172,7 +1172,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
+    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
     return Coordinator(session_dir, backends=backends)
 
 

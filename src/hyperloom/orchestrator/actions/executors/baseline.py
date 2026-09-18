@@ -27,6 +27,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -54,8 +55,6 @@ from ._aiter_jit import (
     BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
     is_aiter_jit_registry_mismatch,
-    probe_aiter_jit_cache as _probe_aiter_jit_cache,
-    sweep_stale_aiter_locks_if_dead,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
@@ -67,9 +66,9 @@ from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
-    session_clamped_timeout_sec,
     session_grid_bounds,
     stopped_by_the_run,
+    sync_benchmark_timeout,
 )
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -77,6 +76,7 @@ from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
+    resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -86,19 +86,15 @@ from ._accuracy_gate import (
     materialized_run_eval_disabled,
 )
 from ._agentx_timeouts import (
-    AGENTX_BASELINE_OVERHEAD_SEC as AGENTX_BASELINE_OVERHEAD_SEC,
-    AGENTX_DEFAULT_DURATION_SEC as AGENTX_DEFAULT_DURATION_SEC,
     AGENTX_CANON_WARMUP_GRACE_SEC as AGENTX_CANON_WARMUP_GRACE_SEC,
     AGENTX_CANON_WARMUP_CONC as AGENTX_CANON_WARMUP_CONC,
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
-    agentx_baseline_timeout_sec as agentx_baseline_timeout_sec,
 )
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     agentx_active,
-    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
     prepare_agentx_runtime,
@@ -572,18 +568,6 @@ def _round_post_ready_sec(
     )
 
 
-def _logged_session_clamp(timeout_sec: int, clamped: int, *, output_dir: Path) -> int:
-    """Announce a round's cap being cut by the session budget, and return the cut."""
-    if clamped != timeout_sec:
-        log.info(
-            "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
-            timeout_sec,
-            clamped,
-            output_dir.name,
-        )
-    return clamped
-
-
 def _stopped_round_result(
     stopped: StoppedByTheRun,
     *,
@@ -712,8 +696,6 @@ def _classify_subprocess_error(
         return "fast_exit_arg_error"
     return "subprocess_nonzero"
 
-
-BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
 # from this module.
@@ -1569,6 +1551,7 @@ def _rollback_warm_kernel_apply_results(
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
+    benchmark_watchdog = True
     session_dir = SessionDirField()
 
     def __init__(
@@ -1578,7 +1561,7 @@ class BaselineExecutor:
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
-        default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
+        default_timeout_sec: int | None = None,
         cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults."""
@@ -1644,100 +1627,11 @@ class BaselineExecutor:
             )
             return False
 
-    def _resolve_timeout(self, params: dict[str, Any]) -> int:
-        """Pick the subprocess timeout for this baseline launch."""
-        explicit = params.get("timeout_sec")
-        if explicit:
-            timeout_sec = int(explicit)
-            log.info(
-                "baseline_executor: timeout=%ds (explicit task param)",
-                timeout_sec,
-            )
-            return timeout_sec
-
-        # Ahead of the probe on purpose: the probe cannot answer this case.
-        if agentx_enabled():
-            timeout_sec = agentx_baseline_timeout_sec()
-            log.info(
-                "baseline_executor: timeout=%ds (AgentX: AGENTX_DURATION + overhead). "
-                "The aiter cold/warm probe is not consulted -- it counts kernels "
-                "globally and cannot see that AgentX changes the JIT signature, so "
-                "it reports WARM while the round pays a first-compile.",
-                timeout_sec,
-            )
-            return timeout_sec
-
-        cache = _probe_aiter_jit_cache()
-        cold_cap = int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-                BASELINE_COLD_START_TIMEOUT_SEC,
-            )
-        )
-        if cache["probe_status"] == "found" and cache["is_cold"]:
-            # Before paying the cold-start compile, reap aiter JIT locks left by a killed hipcc.
-            sweep = sweep_stale_aiter_locks_if_dead()
-            if sweep.get("skipped_live"):
-                log.info(
-                    "baseline_executor: aiter lock sweep skipped — live "
-                    "compiler process present (jit dir node-shared).",
-                )
-            elif sweep.get("deleted"):
-                log.warning(
-                    "baseline_executor: reaped %d stale aiter JIT lock(s) "
-                    "under %s (compiler_alive=%s) before cold start.",
-                    sweep["deleted"],
-                    sweep.get("dir"),
-                    sweep.get("compiler_alive"),
-                )
-                # Locks gone — re-probe so the log line below reflects reality.
-                cache = _probe_aiter_jit_cache()
-        if cache["probe_status"] == "found" and cache["is_cold"]:
-            log.warning(
-                "baseline_executor: COLD_START detected — aiter jit/build/ "
-                "at %s has %d .so (< %d threshold), %d MB. Bumping timeout "
-                "%ds -> %ds. First-time JIT compile on a new "
-                "(model, dtype, TP, max_model_len) signature can take 30+ "
-                "minutes for large FP8 / MoE models.",
-                cache["path"],
-                cache["kernel_count"],
-                COLD_START_KERNEL_THRESHOLD,
-                cache["size_mb"],
-                self.default_timeout_sec,
-                cold_cap,
-            )
-            return cold_cap
-        if cache["probe_status"] == "found":
-            log.info(
-                "baseline_executor: WARM start — aiter jit/build/ at %s has %d .so, %d MB. Using default timeout=%ds.",
-                cache["path"],
-                cache["kernel_count"],
-                cache["size_mb"],
-                self.default_timeout_sec,
-            )
-            return self.default_timeout_sec
-        log.warning(
-            "baseline_executor: aiter jit cache not located "
-            "(probe_status=%s). Using default timeout=%ds. Cold-start "
-            "auto-bump disabled for this run.",
-            cache["probe_status"],
-            self.default_timeout_sec,
-        )
-        return self.default_timeout_sec
-
-    @staticmethod
-    def _session_capped_timeout(
-        timeout_sec: int,
-        session_deadline_sec: float | None,
-        *,
-        output_dir: Path,
-    ) -> int:
-        """``timeout_sec`` reduced to what the session can still pay for."""
-        return _logged_session_clamp(
-            timeout_sec,
-            session_clamped_timeout_sec(timeout_sec, session_deadline_sec),
-            output_dir=output_dir,
-        )
+    def _resolve_timeout(self, params: dict[str, Any]) -> float:
+        """Benchmark rounds share one cap; other executor purposes keep their budgets."""
+        if self.benchmark_watchdog:
+            return resolve_benchmark_timeouts()[1]
+        return float(params.get("timeout_sec") or self.default_timeout_sec)
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
@@ -3025,8 +2919,7 @@ class BaselineExecutor:
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
                 warmup_dir,
             )
-            # The warmup runs under the round's own cap, which the session clamp leaves sitting past the session
-            # deadline so the watchdog reaches it first and a budget kill is recorded as one.
+            # Each warmup starts a fresh benchmark cap; the session deadline never resets.
             warmup_result = await self._run_reported_round(
                 label=ROUND_WARMUP,
                 config_path=warmup_cfg,
@@ -3113,6 +3006,7 @@ class BaselineExecutor:
             )
             result = await self._run_reported_round(
                 label=ROUND_MEASURE,
+                server_already_ready=True,
                 config_path=measure_cfg,
                 output_dir=measure_dir,
                 recorder=recorder,
@@ -3230,22 +3124,15 @@ class BaselineExecutor:
                             port=port,
                             run_eval=True,
                         )
-                        try:
-                            accuracy_timeout_sec = int(params.get("accuracy_timeout_sec") or timeout_sec)
-                        except (TypeError, ValueError):
-                            accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_reported_round(
                             label=ROUND_ACCURACY,
+                            server_already_ready=True,
                             config_path=accuracy_cfg,
                             output_dir=accuracy_dir,
                             recorder=recorder,
                             run_index=run_index,
                             **{
                                 **common,
-                                "timeout_sec": max(
-                                    1,
-                                    accuracy_timeout_sec,
-                                ),
                                 "run_eval_disabled": False,
                             },
                         )
@@ -3506,6 +3393,7 @@ class BaselineExecutor:
         framework: str,
         timeout_sec: int,
         session_deadline_sec: float | None,
+        silence_timeout_sec: float | None = None,
         capture_meta: dict[str, Any],
         round_warnings: list[str],
         ctx_extra: dict[str, Any] | None = None,
@@ -3563,6 +3451,8 @@ class BaselineExecutor:
                     env=warm_env,
                     cwd=str(warm_dir),
                     timeout=timeout_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=True,
                     server_log_path=_watchdog_server_log_path(warm_dir, framework),
                     on_output=warm_activity.note,
                     session_deadline_sec=session_deadline_sec,
@@ -3695,6 +3585,7 @@ class BaselineExecutor:
         ctx: RunnerContext,
         run_eval_disabled: bool = False,
         serving_lease: Any = None,
+        server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
         cmd = build_benchmark_command(
@@ -3754,7 +3645,11 @@ class BaselineExecutor:
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
         _session_state = ctx_extra.get("shared_state") or self.shared_state
         session_deadline_sec, _ = session_grid_bounds(_session_state)
-        timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
+        silence_timeout_sec = None
+        if self.benchmark_watchdog:
+            silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
+            env["PYTHONUNBUFFERED"] = "1"
+            sync_benchmark_timeout(config_path, timeout_sec)
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
@@ -3811,6 +3706,7 @@ class BaselineExecutor:
                 framework=framework,
                 timeout_sec=timeout_sec,
                 session_deadline_sec=session_deadline_sec,
+                silence_timeout_sec=silence_timeout_sec,
                 capture_meta=capture_meta,
                 round_warnings=round_warnings,
                 ctx_extra=ctx_extra,
@@ -3870,6 +3766,16 @@ class BaselineExecutor:
         if refusal is not None:
             return refusal
 
+        if self.benchmark_watchdog and not (server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()):
+            from ._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+            lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
+            if lock_sweep.get("deleted"):
+                log.warning(
+                    "baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch",
+                    lock_sweep["deleted"],
+                )
+
         try:
             if serving_lease is not None:
                 # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
@@ -3891,6 +3797,10 @@ class BaselineExecutor:
                     env=env,
                     cwd=str(output_dir),
                     timeout=timeout_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=bool(
+                        server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
+                    ),
                     server_log_path=watchdog_server_log,
                     session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
                 )
@@ -3906,6 +3816,10 @@ class BaselineExecutor:
                         env=env,
                         cwd=str(output_dir),
                         timeout=timeout_sec,
+                        silence_timeout_sec=silence_timeout_sec,
+                        server_already_ready=bool(
+                            server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
+                        ),
                         server_log_path=watchdog_server_log,
                         on_output=activity.note,
                         session_deadline_sec=session_deadline_sec,
@@ -4206,7 +4120,9 @@ class BaselineExecutor:
 
         # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         eval_scriptable = framework_registry.is_scriptable(eval_framework)
-        if run_eval_disabled and not eval_scriptable:
+        shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
+        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
+        if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
             # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
@@ -4221,9 +4137,7 @@ class BaselineExecutor:
             eval_data = parse_eval_results(
                 eval_search_root,
                 framework=eval_framework,
-                benchmark_mode=str(
-                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
-                ),
+                benchmark_mode=benchmark_mode,
             )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
@@ -4254,14 +4168,10 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
-    "AGENTX_BASELINE_OVERHEAD_SEC",
-    "AGENTX_DEFAULT_DURATION_SEC",
     "AGENTX_CANON_WARMUP_GRACE_SEC",
     "AGENTX_CANON_WARMUP_CONC",
-    "BASELINE_DEFAULT_TIMEOUT_SEC",
     "agentx_warmup_grace_conc",
     "agentx_warmup_grace_sec",
-    "agentx_baseline_timeout_sec",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",

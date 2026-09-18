@@ -175,31 +175,6 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
     assert "unlimited run" in out.lower()
 
 
-def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
-    s = SharedState(max_minutes=60)
-    s.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1_000_000.0,
-    )
-    s.record_phase_transition(
-        to_phase="FRAMEWORK_AGENT",
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:01:00+00:00",
-        ts_unix=1_000_060.0,
-    )
-    out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
-    # PRELUDE: 60s elapsed, cap 108s (3% of 3600s), used 56%.
-    assert "PRELUDE: elapsed=60s" in out
-    # FRAMEWORK_AGENT: 240s elapsed (300-60).
-    assert "FRAMEWORK_AGENT: elapsed=240s" in out
-    # Both lines present.
-    assert out.count("elapsed=") == 2
-
-
 def test_shared_state_warm_start_summary_empty_when_no_recipe():
     assert SharedState().to_warm_start_summary() == ""
 
@@ -334,7 +309,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -343,7 +317,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -354,7 +327,7 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
 ):
     c = coordinator_with_mocks
     try:
-        for role in ("orchestration", "critic", "robustness"):
+        for role in ("orchestration", "critic"):
             prompt = await c._compose_prompt(role)
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
@@ -401,7 +374,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent_name", ["robustness", "orchestration"])
+@pytest.mark.parametrize("agent_name", ["orchestration"])
 async def test_compose_prompt_omits_specialist_health_block(
     coordinator_with_mocks,
     agent_name,
@@ -412,25 +385,6 @@ async def test_compose_prompt_omits_specialist_health_block(
         prompt = await c._compose_prompt(agent_name)
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_compose_prompt_robustness_includes_budget_telemetry(
-    coordinator_with_mocks,
-    session_dir,
-):
-    c = coordinator_with_mocks
-    try:
-        # Force PRELUDE -> FRAMEWORK_AGENT so there is a segment to report.
-        c.shared_state.baseline_tput = 1500.0
-        c.shared_state.save(session_dir)
-        await c.tick(1)
-        prompt = await c._compose_prompt("robustness")
-        assert "=== Phase budget telemetry ===" in prompt
-        assert "PRELUDE: elapsed=" in prompt
-        assert "FRAMEWORK_AGENT: elapsed=" in prompt
     finally:
         await c.stop()
 

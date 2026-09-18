@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring and robustness option overrides."""
+"""Coverage for ``cli_backends``: per-role backend construction (mock/agent choices, kernel selection, validation errors), advisory proposal-scorer wiring."""
 
 from __future__ import annotations
 
@@ -34,16 +34,10 @@ def _stub_backends(monkeypatch):
     monkeypatch.setattr(clib, "ClaudeBackend", lambda **kw: ("claude", kw))
     monkeypatch.setattr(clib, "CodexBackend", lambda **kw: ("codex", kw))
     monkeypatch.setattr(clib, "MockCriticBackend", lambda: ("mock_critic",))
-    monkeypatch.setattr(clib, "MockRobustnessBackend", lambda: ("mock_rob",))
     monkeypatch.setattr(
         clib,
         "CriticAgentBackend",
         lambda **kw: ("critic_agent", kw),
-    )
-    monkeypatch.setattr(
-        clib,
-        "RobustnessAgentBackend",
-        lambda **kw: ("rob_agent", kw),
     )
 
 
@@ -68,7 +62,7 @@ def test_build_backends_mock_defaults() -> None:
     b = _build()
     assert b["orchestration"][0] == "claude"
     assert b["critic"] == ("mock_critic",)
-    assert b["robustness"] == ("mock_rob",)
+    assert set(b) == {"orchestration", "critic"}
     assert "kernel_agent" not in b
 
 
@@ -258,21 +252,6 @@ def test_build_backends_openai_only_uses_codex_for_orchestration(monkeypatch) ->
     assert "kernel_agent" not in b
 
 
-def test_build_backends_invalid_robustness_choice() -> None:
-    with pytest.raises(ValueError, match="robustness_choice"):
-        _build(robustness_choice="bogus")
-
-
-def test_build_backends_robustness_agent_requires_root() -> None:
-    with pytest.raises(ValueError, match="robustness_agent_root"):
-        _build(robustness_choice="agent")
-
-
-def test_build_backends_robustness_agent_with_root() -> None:
-    b = _build(robustness_choice="agent", robustness_agent_root=Path("/tmp/rob"))
-    assert b["robustness"][0] == "rob_agent"
-
-
 def test_proposal_scorer_disabled_by_default(monkeypatch) -> None:
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -356,28 +335,3 @@ def test_proposal_scorer_models_without_enable_stays_off(monkeypatch) -> None:
     assert args.proposal_scorer_models == "m1,m2"
     assert args.proposal_scoring is False
     assert clib._build_proposal_scorer(args) is None
-
-
-def test_robustness_options_single_node_minimal() -> None:
-    args = argparse.Namespace(
-        robustness_llm_rca=None,
-        nodes=1,
-        robustness_disable_local_probe=None,
-    )
-    opts = clib._build_robustness_options(args)
-    assert "auto_probe_inference_server" not in opts
-    assert "nodes" not in opts
-
-
-def test_robustness_options_multi_node_defaults() -> None:
-    args = argparse.Namespace(
-        robustness_llm_rca=True,
-        nodes=4,
-        robustness_disable_local_probe=None,
-    )
-    opts = clib._build_robustness_options(args)
-    assert opts["nodes"] == 4
-    assert opts["llm_rca_enabled"] is True
-    assert opts["disable_local_probe"] is True
-    assert opts["auto_probe_inference_server"] is False
-    assert opts["progress_no_levers_min_minutes"] == 60.0

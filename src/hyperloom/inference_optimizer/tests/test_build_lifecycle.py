@@ -276,6 +276,145 @@ async def test_a_failed_sentinel_write_still_kills_the_compile(build_coord, buil
         os.killpg(spawned[0].pgid, 0)
 
 
+@pytest.mark.asyncio
+async def test_scope_cancelled_build_does_not_spawn(monkeypatch, tmp_path):
+    from concurrent.futures import CancelledError
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+    from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    scope = CancelScope()
+    scope.cancel(reason="session_stopped")
+    spawn = Mock(side_effect=AssertionError("cancelled build must not spawn"))
+    monkeypatch.setattr(tbe, "spawn_build", spawn)
+    ctx = RunnerContext(
+        task=SimpleNamespace(task_id="cancelled-build", params=_fake_action().to_state()),
+        lease=None,
+        extra={"session_dir": str(tmp_path)},
+    )
+    with use_cancel_scope(scope), pytest.raises(CancelledError, match="session_stopped"):
+        await tbe.TargetedBuildExecutor()(ctx)
+    spawn.assert_not_called()
+    assert not scope.has_listeners
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed_dead", [True, False])
+@pytest.mark.parametrize("cancel_kind", ["scope", "direct", "success", "compile_error", "timeout"])
+async def test_scope_cancellation_reaps_build_and_preserves_cleanup_evidence(
+    monkeypatch, tmp_path, confirmed_dead, cancel_kind
+):
+    import asyncio
+    import subprocess
+    from concurrent.futures import CancelledError
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+    from hyperloom.orchestrator.actions.executors import targeted_build_executor as tbe
+    from hyperloom.orchestrator.enablement.runtime.targeted_build import BuildHandle
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed, RunnerContext
+
+    entered = asyncio.Event()
+    action = _fake_action(attempt_root=str(tmp_path), build_budget_sec=30)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.exit(int(sys.stdin.readline()))"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    handle = BuildHandle(
+        action, str(tmp_path), str(tmp_path / "aiter_jit"), str(tmp_path / "build.log"), child, child.pid, child.pid
+    )
+    shared = SimpleNamespace(pending_targeted_build={}, save=Mock())
+    scope = CancelScope()
+    cleanup = Mock()
+
+    def spawn(*args, **kwargs):
+        entered.set()
+        return handle
+
+    def ensure_dead(build):
+        cleanup(build)
+        if confirmed_dead:
+            child.terminate()
+            child.wait(timeout=3)
+        return confirmed_dead
+
+    monkeypatch.setattr(tbe, "spawn_build", spawn)
+    monkeypatch.setattr(tbe, "ensure_build_dead", ensure_dead)
+    if cancel_kind == "timeout":
+        monkeypatch.setattr(tbe, "_resolve_budget_sec", lambda action: 0.05)
+    record = Mock()
+    monkeypatch.setattr(tbe.TargetedBuildExecutor, "_record_result", record)
+    ctx = RunnerContext(
+        task=SimpleNamespace(task_id="running-build", params=action.to_state()),
+        lease=None,
+        extra={"session_dir": str(tmp_path), "shared_state": shared},
+    )
+    run = None
+    try:
+        with use_cancel_scope(scope):
+            run = asyncio.create_task(tbe.TargetedBuildExecutor()(ctx))
+        await asyncio.wait_for(entered.wait(), 3)
+        assert scope.has_listeners
+        if cancel_kind == "scope":
+            scope.cancel(reason="session_stopped")
+        elif cancel_kind == "direct":
+            run.cancel()
+        elif cancel_kind in {"success", "compile_error"}:
+            child.stdin.write(b"0\n" if cancel_kind == "success" else b"2\n")
+            child.stdin.flush()
+        if confirmed_dead and cancel_kind == "success":
+            result = await asyncio.wait_for(asyncio.shield(run), 3)
+            assert result["ok"] is True
+        else:
+            expected = (
+                ExecutionCleanupUnconfirmed
+                if not confirmed_dead
+                else CancelledError
+                if cancel_kind == "scope"
+                else asyncio.CancelledError
+                if cancel_kind == "direct"
+                else RuntimeError
+            )
+            with pytest.raises(expected) as raised:
+                await asyncio.wait_for(asyncio.shield(run), 3)
+        cleanup.assert_called_once_with(handle)
+        if confirmed_dead:
+            assert child.poll() is not None
+            assert shared.pending_targeted_build == {}
+        else:
+            assert (child.poll() is not None) is (cancel_kind in {"success", "compile_error"})
+            assert shared.pending_targeted_build["pid"] == child.pid
+            if cancel_kind == "direct":
+                assert raised.value.result is None
+            else:
+                expected_class = (
+                    "cancelled" if cancel_kind == "scope" else "ok" if cancel_kind == "success" else cancel_kind
+                )
+                assert raised.value.result.result["failure_class"] == expected_class
+                assert raised.value.result.state == (
+                    "cancelled" if cancel_kind == "scope" else "succeeded" if cancel_kind == "success" else "failed"
+                )
+        if confirmed_dead and cancel_kind != "direct":
+            record.assert_called_once()
+            assert record.call_args.args[0].failure_class == (
+                "cancelled" if cancel_kind == "scope" else "ok" if cancel_kind == "success" else cancel_kind
+            )
+        assert not scope.has_listeners
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=3)
+        child.stdin.close()
+        if run is not None:
+            await asyncio.gather(run, return_exceptions=True)
+
+
 # Driver wiring
 
 
@@ -467,7 +606,7 @@ def _silent_plan():
 def _build_backends():
     from hyperloom.orchestrator.roles import MockBackend
 
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture

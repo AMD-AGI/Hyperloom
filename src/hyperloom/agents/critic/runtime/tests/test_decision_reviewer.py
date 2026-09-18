@@ -81,6 +81,23 @@ def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     assert by_cls["framework_op"] == []
 
 
+def test_prepare_review_ignores_retired_robustness_findings(reviewer, tmp_path, monkeypatch):
+    rev, _, _ = reviewer
+    findings = tmp_path / "agents" / "robustness" / "findings"
+    findings.mkdir(parents=True)
+    (findings / "sess_a.jsonl").write_text(
+        json.dumps({"severity": "high", "summary": "Historical finding", "rca_text": "Do not inject"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROBUSTNESS_AGENT_SESSION_DIR", str(tmp_path))
+    monkeypatch.setenv("CRITIC_ROBUSTNESS_FINDINGS_DIR", str(findings))
+    bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
+    assert "robustness_priors" not in bundle.to_dict()
+    assert bundle.merged_context["model"] == "Qwen3-14B"
+    assert bundle.kb_priors_trace["configured"] is True
+    assert sorted(bundle.kb_priors_by_proposal) == ["aaa1", "bbb2"]
+
+
 def test_prepare_review_propagates_known_actions(reviewer):
     rev, kb, sm = reviewer
     bundle = rev.prepare_review(

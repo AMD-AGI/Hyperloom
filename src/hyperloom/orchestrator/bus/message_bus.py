@@ -59,16 +59,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "observation",
         }
     ),
-    "robustness": frozenset(
-        {
-            "delegated_result",
-            "review_verdict",
-            "proposal",
-            "observation",
-            "alert",
-            "strategy_change",
-        }
-    ),
 }
 
 

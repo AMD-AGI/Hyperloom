@@ -218,6 +218,48 @@ else
 
   # Fail loud if the builtin server phase did not record a pid: proceeding would
   # run a benchmark against a server we cannot reliably tear down.
+  #
+  # An agentic recipe is the exception: it ignores MAGPIE_RUN_PHASE and owns the
+  # whole lifecycle -- boot, replay, aggregate, teardown -- so it returns with
+  # the result already written and no server left to track. Replaying again here
+  # would drive a server that is already gone.
+  if [ -z "${SERVER_PID:-}" ] && [ -f "${RESULT_DIR}/${RESULT_FILENAME}.json" ]; then
+    case "$BUILTIN" in
+      */agentic/*)
+        _AG_RESULT="${RESULT_DIR}/${RESULT_FILENAME}.json"
+        log "agentic recipe ran its own replay; result at ${_AG_RESULT}"
+        # The agentic writer emits only InferenceX's NESTED leaderboard schema,
+        # but Magpie reads FLAT top-level keys, so returning as-is makes a
+        # healthy run read as 0.00 req/s. Derive the flat keys with the same
+        # map_aiperf.py the non-agentic path uses and UNION them in; existing
+        # (nested) keys always win, so the leaderboard schema is untouched.
+        _AG_PJ="$(find "$RESULT_DIR" -name 'profile_export_aiperf.json' -print -quit 2>/dev/null || true)"
+        if [ -n "$_AG_PJ" ]; then
+          _AG_FLAT="$(mktemp)"
+          if python3 "${BENCH_DIR}/map_aiperf.py" "$_AG_PJ" "$_AG_FLAT" >/dev/null 2>&1 \
+             && python3 - "$_AG_RESULT" "$_AG_FLAT" <<'PYMERGE'
+import json, os, sys
+res, flat = sys.argv[1], sys.argv[2]
+with open(res) as f: agentic = json.load(f)
+with open(flat) as f: mapped = json.load(f)
+merged = {**mapped, **agentic}
+assert all(merged[k] == agentic[k] for k in agentic)
+with open(res + ".tmp", "w") as f: json.dump(merged, f, indent=2)
+os.replace(res + ".tmp", res)
+PYMERGE
+          then
+            log "merged flat Magpie metrics into ${_AG_RESULT} (agentic schema preserved)"
+          else
+            log "WARN could not derive flat metrics; Magpie may read 0.00 req/s"
+          fi
+          rm -f "$_AG_FLAT"
+        else
+          log "WARN no profile_export_aiperf.json under ${RESULT_DIR}; Magpie may read 0.00 req/s"
+        fi
+        exit 0
+        ;;
+    esac
+  fi
   if [ -z "${SERVER_PID:-}" ]; then
     log "ERROR: builtin server phase wrote no pid to ${PIDFILE}; refusing to run (would risk a GPU leak)"
     exit 3
