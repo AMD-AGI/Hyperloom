@@ -35,6 +35,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   campaign whose flag cannot be read is not salvaged at all, rather than queued
   to fail that way. Artifacts a previous run left in the same output directory
   are swept before the run starts, so they cannot be salvaged as its own.
+- **A KB recipe carrying code overlays could not be replayed into a framework
+  installed from a wheel.** A Recipe whose patch timeline is non-empty replays
+  as required, and that path refused any tree without a git HEAD -- which a
+  pip-installed framework never has. Every code-level optimization a session
+  published therefore became unreplayable the moment it reached the KB: warm
+  replay failed before booting a server, and the recorded gain could only be
+  re-earned from scratch. What promotion needs is a way to unwind the tree if
+  the replay is rejected, not a sha, so it now accepts either channel: a git
+  checkout's snapshot, or the backups a nogit apply records as it writes. An
+  overlay the tree already carried applies as a no-op and records neither,
+  which is not the same as an apply whose artifacts were lost, so each tree now
+  states whether the round wrote to it -- a no-op tree promotes and is skipped
+  by the rollback, a written-to tree still has to answer with a channel, and a
+  record persisted ahead of the apply reads as written-to so a resume restores
+  it. Framework-agnostic; the shape of the checkout decides the channel.
 - **A shipped aiter tuned CSV naming a kernel this host never compiled failed
   every boot of the session.** aiter resolves its tuned tables two ways: a
   pinned `AITER_CONFIG_*` env is taken as the exact `:`-joined list, and an
