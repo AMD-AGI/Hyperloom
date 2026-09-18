@@ -1764,6 +1764,54 @@ def test_baseline_executor_picks_framework_yaml_at_call_time(tmp_path, monkeypat
     assert pe._resolve_default_config().name == "baseline_vllm.yaml"
 
 
+def test_profile_argv_preflight_includes_inferencex_vllm_profiler_args(tmp_path, monkeypatch):
+    import yaml
+
+    from hyperloom.orchestrator.bringup.argv_preflight import OK
+
+    config_path = tmp_path / "profile.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {
+                        "PROFILE": "1",
+                        "EXTRA_VLLM_ARGS": "--profiler-config.capture_torch_profiler True",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen = {}
+
+    def _capture(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(status=OK, reason="parsed", detail="", argv=tuple(kwargs["argv"]), dropped=())
+
+    monkeypatch.setattr("hyperloom.orchestrator.bringup.check_server_argv", _capture)
+    state = SimpleNamespace(enablement=SimpleNamespace(argv_repairs=[]))
+    executor = BaselineExecutor(session_dir=tmp_path, shared_state=state)
+
+    result = executor._preflight_server_argv(
+        config_path=config_path,
+        framework="vllm",
+        launch_env={},
+        output_dir=tmp_path / "round",
+        attempt=1,
+        capture_meta={},
+    )
+
+    assert result is None
+    assert seen["argv"][:4] == (
+        "--profiler-config.profiler",
+        "torch",
+        "--profiler-config.torch_profiler_dir",
+        str(tmp_path / "round" / "torch_trace"),
+    )
+
+
 def test_profile_executor_picks_framework_yaml_at_call_time(monkeypatch):
     monkeypatch.setenv("FRAMEWORK", "vllm")
     pe = ProfileExecutor()

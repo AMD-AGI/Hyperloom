@@ -3623,15 +3623,26 @@ class BaselineExecutor:
         if not sealed.tokenized or not sealed.argv:
             return None
 
+        effective_launch_env = config_launch_env(config_path, launch_env)
+        probe_argv = sealed.argv
+        if framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
+            probe_argv = (
+                "--profiler-config.profiler",
+                "torch",
+                "--profiler-config.torch_profiler_dir",
+                str(output_dir / "torch_trace"),
+                *probe_argv,
+            )
+
         # ``_resolve_shared_state`` is typed loosely and callers inject partial
         # doubles, so the round's repair ledger may not be present at all.
         enablement = getattr(self._resolve_shared_state(), "enablement", None)
         spent: list[str] = enablement.argv_repairs if enablement is not None else []
         verdict = check_server_argv(
             framework=framework,
-            argv=sealed.argv,
+            argv=probe_argv,
             text=sealed.text,
-            launch_env=config_launch_env(config_path, launch_env),
+            launch_env=effective_launch_env,
             repaired=spent,
             digest=sealed.digest,
         )
