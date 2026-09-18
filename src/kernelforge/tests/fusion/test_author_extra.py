@@ -1288,13 +1288,13 @@ def _counting_backend(*outcomes):
 
 def _author_with(tmp_path, backend_cls, **kwargs):
     repo, target, _non_target = _author_repo(tmp_path)
+    kwargs.setdefault("timeout_s", 1)
     rc = run_author(
         "P",
         workdir=str(repo),
         log_path=str(tmp_path / "author.log"),
         backend=backend_cls(),
         target_files=[str(target)],
-        timeout_s=1,
         **kwargs,
     )
     return rc, backend_cls.calls
@@ -1311,6 +1311,34 @@ def test_a_stalled_transport_is_retried(tmp_path):
 
     assert rc == 0
     assert calls == 2
+
+
+def test_a_stalled_transport_is_retried_on_a_real_attempt_budget(tmp_path):
+    """The gate is checked against what the next attempt costs, so its own cost cannot close it."""
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    # _agent_timeout_sec's default, which is four times llm_failure's generic retry deadline.
+    rc, calls = _author_with(tmp_path, backend, timeout_s=7200)
+
+    assert rc == 0
+    assert calls == 2
+
+
+def test_an_operator_deadline_that_cannot_hold_another_attempt_stops_the_retry(tmp_path, monkeypatch):
+    """A deadline the operator set is still enforced against the next attempt's cost."""
+    monkeypatch.setenv("FORGE_LLM_RETRY_DEADLINE_SEC", "60")
+    backend = _counting_backend(
+        RuntimeError("API Error: Response stalled mid-stream"),
+        AgentRunResult(text="AUTHORING_RESULT: ok", end_reason="agent_stopped"),
+    )
+
+    rc, calls = _author_with(tmp_path, backend, timeout_s=7200)
+
+    assert rc == AUTHOR_RC_FAILED
+    assert calls == 1
 
 
 def test_a_stalled_transport_is_not_retried_forever(tmp_path):

@@ -28,7 +28,6 @@ from kernelforge.agent_backends.base import (
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
 from .llm_failure import (
     DEFAULT_BASE_DELAY_SEC,
-    DEFAULT_DEADLINE_SEC,
     DEFAULT_MAX_DELAY_SEC,
     RETRYABLE_KINDS,
     classify_llm_error,
@@ -1079,9 +1078,15 @@ def _run_registered_author(
 ) -> int:
     """Run authoring, retrying only a transport that never delivered an answer."""
     attempts = max(1, int(env_setting("FORGE_FUSION_AUTHOR_ATTEMPTS", DEFAULT_AUTHOR_ATTEMPTS, cast=int)))
-    deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float))
     base_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float))
     max_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float))
+    # llm_failure's 1800s default is sized for the short calls discover.py makes; an author attempt
+    # is allowed timeout_s, which defaults to 7200. Defaulting to it here would make the gate below
+    # read `elapsed + delay + 7200 >= 1800` on the first failure, so the retry could never start.
+    # The default budget is what the configured attempts can legitimately cost; an operator who
+    # sets the deadline still gets it enforced.
+    default_deadline = attempts * (float(timeout_s) + max_delay)
+    deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", default_deadline, cast=float))
     started_at = time.monotonic()
     for attempt in range(1, attempts + 1):
         rc, retryable = _run_registered_author_once(

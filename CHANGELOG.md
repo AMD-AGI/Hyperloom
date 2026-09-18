@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **An author whose transport died took the whole fusion lane with it.** A lane
+  costs hours and an authoring call costs minutes, but a provider that never
+  delivered an answer -- a stream stalled mid-response, a connection reset --
+  ended the lane on the first failure. The classification that tells "the model
+  never answered" apart from "the model answered nothing" already exists in
+  `llm_failure`, so authoring now consults it where the exception is still in
+  hand and retries only the transport, with backoff and against a deadline. A
+  provider safety stop is still never retried, because retrying one is the
+  anti-pattern the session-resume allowlist already refuses; neither is a
+  timeout, which has just spent a full attempt's budget. The deadline defaults
+  to what the configured attempts can legitimately cost, since the generic
+  1800s LLM default is shorter than a single 7200s authoring attempt and would
+  have made the retry unreachable.
+
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
   model that scored badly the same way -- a non-zero exit -- so the eval-rooted
