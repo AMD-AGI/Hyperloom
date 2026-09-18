@@ -170,7 +170,7 @@ class DispatcherCollaborator:
             _done, pending = await asyncio.wait(pending, timeout=_COOPERATIVE_CANCEL_GRACE_SEC)
         unconfirmed = {
             execution
-            for execution in executions - pending
+            for execution in (executions - pending) & self._executions
             if execution.cancelled() or execution.exception() is not None
         }
         if pending or unconfirmed:
@@ -961,11 +961,13 @@ class DispatcherCollaborator:
                 extra_context=extra_context,
                 release_resources=release_resources,
             )
-            if on_complete is not None:
-                await on_complete(result)
-            self._inflight_actions.pop(task.task_id, None)
-            self._executions.discard(asyncio.current_task())
-            return result
+            try:
+                if on_complete is not None:
+                    await on_complete(result)
+                return result
+            finally:
+                self._inflight_actions.pop(task.task_id, None)
+                self._executions.discard(asyncio.current_task())
 
         with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
             execution = asyncio.create_task(execute_and_complete())
@@ -1232,7 +1234,7 @@ class DispatcherCollaborator:
             # timeout / crash / stale-heartbeat, re-enqueue a fresh specialist
             # task and skip this attempt's bookkeeping. Semantic empties fall
             # through and are recorded.
-            if task.kind == "specialist":
+            if task.kind == "specialist" and result.state != "cancelled":
                 try:
                     if await self._maybe_auto_retry_specialist(task, result):
                         continue
@@ -1325,7 +1327,7 @@ class DispatcherCollaborator:
                         task.task_id,
                     )
             # integrate_patch completion handling.
-            if task.kind == "integrate_patch":
+            if task.kind == "integrate_patch" and result.state != "cancelled":
                 # FRAMEWORK authoring bridge: record authored-patch KEEP/REVERT.
                 if bool((getattr(task, "params", None) or {}).get("framework_agent_authoring")):
                     try:
@@ -1362,7 +1364,7 @@ class DispatcherCollaborator:
             # that handler owns rollback of pre-applied framework patches and
             # clears the PRELUDE ``in_flight`` gate.
             result_payload = dict(result.result or {})
-            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state != "succeeded"
+            replay_needs_cleanup = task.kind == "replay_warm_recipe" and result.state == "failed"
             if replay_needs_cleanup:
                 result_payload.setdefault("status", "failed")
                 result_payload.setdefault("error_class", "dispatch_failed")
@@ -1390,7 +1392,7 @@ class DispatcherCollaborator:
                 )
             except Exception:  # noqa: BLE001 — a verdict outranks its own record
                 log.debug("dispatcher: phase settle record failed", exc_info=True)
-            if result.state == "cancelled" and result.error_class == "unsupported_action":
+            if result.state == "cancelled":
                 continue
             try:
                 if kept:
@@ -1989,12 +1991,26 @@ class DispatcherCollaborator:
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )
-        if was_existing and task.state not in (
-            "queued",
-            "succeeded",
-            "failed",
-            "cancelled",
-        ):
+        if was_existing and task.state in ("succeeded", "failed", "cancelled"):
+            for entry in reversed(task.history):
+                evidence = entry.get("evidence") or {}
+                outcome = evidence.get("outcome")
+                if outcome is None:
+                    continue
+                if evidence.get("cleanup_confirmed") is False:
+                    return (
+                        f"(run_action_now: {action_name!r} task {task.task_id} is {task.state!r}; "
+                        f"cleanup unconfirmed; stored outcome is diagnostic only: {json.dumps(outcome)})"
+                    )
+                rendered = _format_inbox_event(
+                    Message.new("coordinator", "orchestration", "delegated_result", {**outcome, "kind": task.kind})
+                )
+                return f"inline run complete: {rendered}"
+            return (
+                f"(run_action_now: {action_name!r} task {task.task_id} is already {task.state!r}; "
+                "no stored result payload; not rerunning)"
+            )
+        if was_existing and task.state != "queued":
             return (
                 f"(run_action_now: an identical {action_name!r} task is "
                 f"already {task.state!r}; wait for its delegated_result)"

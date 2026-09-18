@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+from concurrent.futures import CancelledError as FuturesCancelledError
+from dataclasses import asdict
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -18,7 +23,7 @@ from hyperloom.orchestrator.loop.coordinator import (
     _format_inbox_event,
 )
 from hyperloom.orchestrator.bus.message_bus import Message
-from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext, SubAgentResult
 from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
@@ -232,10 +237,10 @@ async def test_run_action_now_happy_path_emits_delegated_result(
 ):
     c = _silent_coordinator(session_dir)
     try:
-        ran: dict = {}
+        ran = {"calls": 0}
 
         async def _stub(ctx: RunnerContext) -> dict:
-            ran["called"] = True
+            ran["calls"] += 1
             return {"status": "ok", "gain_pct": 1.5}
 
         c.sub.register_executor("inline_probe", _stub)
@@ -253,17 +258,105 @@ async def test_run_action_now_happy_path_emits_delegated_result(
         )
 
         out = await c._run_action_now("inline_probe", {"p": 1})
-        assert ran.get("called") is True
+        repeated = await c._run_action_now("inline_probe", {"p": 1})
+        assert repeated.split(" topic=", 1)[-1] == out.split(" topic=", 1)[-1]
+        assert ran["calls"] == 1
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
         assert "inline run complete" in out
         assert "state='succeeded'" in out
         assert "gain=1.5" in out
 
         events = await c.bus.tail(topic="delegated_result")
-        assert events
+        assert len(events) == 1
         last = events[-1]
         assert last.payload.get("inline") is True
         assert last.payload.get("kind") == "inline_probe"
         assert last.payload.get("state") == "succeeded"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["queued", "running", "succeeded", "failed", "cancelled"])
+@pytest.mark.parametrize("has_payload", [False, True])
+async def test_inline_existing_task_reuses_terminal_without_execution(session_dir, monkeypatch, state, has_payload):
+    c = _silent_coordinator(session_dir)
+    try:
+        params = {"query": "same"}
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        execute = AsyncMock(return_value={"status": "ok", "gain_pct": 1.5})
+        c.sub.register_executor("inline_probe", execute)
+        fingerprint = hashlib.sha1(json.dumps(params, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:10]
+        task = await c.tasks.create(
+            kind="inline_probe",
+            params=params,
+            idempotency_key=f"inline:orchestration:inline_probe:t{int(c.shared_state.tick or 0)}:{fingerprint}",
+        )
+        stored_result = SubAgentResult(task.task_id, state, {"status": "ok", "gain_pct": 7.5})
+        if state != "queued":
+            await c.tasks.transition(task.task_id, "running")
+        if state not in ("queued", "running"):
+            evidence = {"outcome": asdict(stored_result), "cleanup_confirmed": True} if has_payload else {}
+            await c.tasks.transition(task.task_id, state, evidence=evidence)
+        out = await c._run_action_now("inline_probe", params)
+        assert execute.await_count == int(state == "queued")
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
+        assert not await c.locks.lane_holders()
+        events = await c.bus.tail(topic="delegated_result")
+        assert len(events) == int(state == "queued")
+        if state == "running":
+            assert "already 'running'" in out
+        elif state != "queued":
+            assert state in out
+            if has_payload:
+                assert "gain=7.5" in out
+            else:
+                assert "no stored result payload" in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, ValueError("executor failed"), FuturesCancelledError("stop")])
+async def test_inline_repeated_outcome_does_not_rerun(session_dir, monkeypatch, error):
+    c = _silent_coordinator(session_dir)
+    try:
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        execute = AsyncMock(side_effect=error, return_value={"status": "ok", "gain_pct": 1.5})
+        c.sub.register_executor("inline_probe", execute)
+        first = await c._run_action_now("inline_probe", {})
+        second = await c._run_action_now("inline_probe", {})
+        assert second.split(" topic=", 1)[-1] == first.split(" topic=", 1)[-1]
+        assert execute.await_count == 1
+        assert len(await c.bus.tail(topic="delegated_result")) == 1
+        assert not c.dispatcher._executions and not c.dispatcher._inflight_actions
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_inline_unconfirmed_terminal_is_diagnostic_only(session_dir, monkeypatch):
+    c = _silent_coordinator(session_dir)
+    try:
+        monkeypatch.setattr(c.dispatcher, "_inline_action_denial", AsyncMock(return_value=None))
+        monkeypatch.setattr(c.dispatcher, "_registry_lanes_ttl", lambda _kind: ([], 60))
+        task = await c.tasks.create(
+            kind="inline_probe", params={}, idempotency_key="inline:orchestration:inline_probe:t0:bf21a9e8fb"
+        )
+        await c.tasks.transition(task.task_id, "running")
+        result = SubAgentResult(task.task_id, "succeeded", {"status": "ok", "decision": "KEEP"})
+        await c.tasks.transition(
+            task.task_id, "succeeded", evidence={"outcome": asdict(result), "cleanup_confirmed": False}
+        )
+        execute = AsyncMock()
+        c.sub.register_executor("inline_probe", execute)
+        out = await c._run_action_now("inline_probe", {})
+        assert "cleanup unconfirmed" in out
+        assert "diagnostic only" in out
+        assert execute.await_count == 0
+        assert not await c.bus.tail(topic="delegated_result")
     finally:
         await c.stop()
 
