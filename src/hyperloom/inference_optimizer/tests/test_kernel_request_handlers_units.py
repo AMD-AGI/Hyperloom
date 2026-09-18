@@ -3658,6 +3658,10 @@ class TestRunGemmTuningHandler:
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        # The backend is chosen by KERNEL_OPT_BACKEND_ORDER, not by GEMM_TUNING_BACKEND, so
+        # leaving it to the ambient environment sends this down the forge branch instead --
+        # which reports model_path_missing, a prerequisite this test is not about.
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
