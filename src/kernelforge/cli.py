@@ -2498,6 +2498,16 @@ def _register_forge_fuse() -> None:
 _register_forge_fuse()
 
 
+def _register_fusion_intercept() -> None:
+    """Attach the cg-OFF/cg-ON fusion cross-check under `fusion-intercept`."""
+    from kernelforge.fusion.intercept import fusion_intercept
+
+    main.add_command(fusion_intercept, name="fusion-intercept")
+
+
+_register_fusion_intercept()
+
+
 def _register_gemm_tune() -> None:
     """Attach the deterministic GEMM tuner under `gemm-tune`."""
     from kernelforge.gemm_tune.cli import gemm_tune
