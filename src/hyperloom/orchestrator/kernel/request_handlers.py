@@ -5120,6 +5120,7 @@ def _build_trace_analyze_cmd(
 ) -> "tuple[list[str], str]":
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
+    agentx = str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx"
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
@@ -5135,7 +5136,7 @@ def _build_trace_analyze_cmd(
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
         cmd += ["--tracelens-root", str(tracelens_root)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+    elif agentx:
         cmd += ["--require-single-rank"]
         try:
             state_tp = int(getattr(state, "tp", 0) or 0)
@@ -5184,17 +5185,29 @@ def _build_trace_analyze_cmd(
             except (TypeError, ValueError):
                 pass
     else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
-        split_conc = payload.get("split_conc") or workload.get("conc")
-        if split_conc not in (None, ""):
-            cmd += ["--split-conc", str(split_conc).strip()]
-        split_osl = payload.get("split_osl") or workload.get("osl")
-        if split_osl not in (None, ""):
-            cmd += ["--split-osl", str(split_osl).strip()]
-        split_r = payload.get("split_r") or workload.get("random_range_ratio")
-        if split_r not in (None, ""):
-            cmd += ["--split-r", str(split_r).strip()]
+        if agentx:
+            cmd += [
+                "--split-num-steps",
+                "64",
+                "--split-r",
+                "0.1",
+                "--split-conc",
+                str(workload.get("conc") or getattr(state, "conc", 0)),
+                "--split-osl",
+                "512",
+            ]
+        else:
+            # Splitter workload hints. Priority: payload override > baseline
+            # metadata > drop the flag.
+            split_conc = payload.get("split_conc") or workload.get("conc")
+            if split_conc not in (None, ""):
+                cmd += ["--split-conc", str(split_conc).strip()]
+            split_osl = payload.get("split_osl") or workload.get("osl")
+            if split_osl not in (None, ""):
+                cmd += ["--split-osl", str(split_osl).strip()]
+            split_r = payload.get("split_r") or workload.get("random_range_ratio")
+            if split_r not in (None, ""):
+                cmd += ["--split-r", str(split_r).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")

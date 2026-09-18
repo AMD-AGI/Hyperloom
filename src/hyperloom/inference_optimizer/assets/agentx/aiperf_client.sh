@@ -48,7 +48,8 @@
 #     where NO trace file appears at all -- a failed capture, not a slow one;
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
 #     landed at t+350s on that same GLM-5.3 capture),
-#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_START_DELAY_S,
+#   AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
 #     replaced the fixed warmup delay),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
@@ -573,8 +574,10 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # framework's --profiler-config/env when PROFILE=1); /start_profile begins
   # recording and /stop_profile flushes the trace to torch_profiler_dir for
   # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
-  PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
+  PWIN="${AGENTX_PROFILE_WINDOW_S:-100}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
+  PROFILE_START_DELAY="${AGENTX_PROFILE_START_DELAY_S:-300}"
+  _require_uint AGENTX_PROFILE_START_DELAY_S "$PROFILE_START_DELAY"
   : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
   : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
   PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
@@ -740,6 +743,14 @@ if [ "${PROFILE:-0}" = "1" ]; then
       --timeout-seconds "$PHASE_WAIT_TIMEOUT"
   )"; then
     log "AIPerf measured phase started (start_ns=${PHASE_START_NS})"
+    if [ "$PROFILE_START_DELAY" -gt 0 ]; then
+      log "waiting ${PROFILE_START_DELAY}s after measured phase before starting the profiler"
+      sleep "$PROFILE_START_DELAY"
+    fi
+    if ! kill -0 "$APID" 2>/dev/null; then
+      log "WARN AIPerf exited before the profile start delay elapsed; skipping trace capture"
+      _write_profile_capture_status "failed" "profiling_phase_unavailable" "$PHASE_START_NS"
+    else
     # SGLang takes its capture bounds in the /start_profile BODY, not on the
     # serve line. Hyperloom computes them into $PROFILE_EXTRA_BODY, but only
     # InferenceX's own client ever posted it -- a bare POST leaves the capture
@@ -778,18 +789,22 @@ if [ "${PROFILE:-0}" = "1" ]; then
       # Auto-stop validation and any subsequent flush share one completion budget.
       TRACE_FLUSH_START_NS=$(date +%s%N)
       TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
-      # Native num_steps may already have stopped SGLang. Never POST a redundant
-      # stop unless current complete traces cannot prove that auto-stop finished.
+      NATIVE_COMPLETE=0
       if [ "$AUTO_BOUNDED" -eq 1 ] && _trace_complete; then
+        NATIVE_COMPLETE=1
+      fi
+      # Always issue the explicit stop at the client boundary. A native
+      # num_steps completion may have stopped the profiler first.
+      if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
         STOP_OK=1
-        log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+        log "stop_profile OK"
+      elif [ "$NATIVE_COMPLETE" -eq 1 ]; then
+        STOP_OK=1
+        log "stop_profile was already satisfied by native profile completion"
       else
-        if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
-          STOP_OK=1
-          log "stop_profile OK"
-        else
-          log "WARN stop_profile failed"
-        fi
+        log "WARN stop_profile failed"
+      fi
+      if [ "$NATIVE_COMPLETE" -ne 1 ]; then
         _wait_for_trace_flush || FLUSH_RC=$?
       fi
       if [ "$STOP_OK" -eq 1 ] && [ "$FLUSH_RC" -eq 0 ]; then
@@ -808,6 +823,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     else
       log "WARN start_profile failed (trace may be empty)"
       _write_profile_capture_status "failed" "start_profile_failed" "$PHASE_START_NS"
+    fi
     fi
   else
     log "WARN AIPerf did not expose a measured phase; the measurement will finish without trace capture"

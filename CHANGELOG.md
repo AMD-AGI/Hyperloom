@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **AgentX profiles now sample settled workload with bounded, agentic windows.**
+  Profiling starts 300 seconds after AIPerf enters its measured phase and stops
+  after either 256 engine steps or 100 seconds. AgentX trace analysis now asks
+  TraceLens for a 64-step window with `R=0.1`, the measured concurrency, and an
+  OSL hint of 512 instead of inheriting synthetic-workload splitter defaults.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and

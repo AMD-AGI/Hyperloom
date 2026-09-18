@@ -1000,10 +1000,12 @@ scriptable frameworks (xDiT, custom) keep output-throughput grading.
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
-AgentX profiling starts when AIPerf reports its measured phase. The legacy
-`AGENTX_PROFILE_WARMUP_S` delay is ignored. `AGENTX_PROFILE_WINDOW_S` controls
-the capture window and defaults to 20 seconds; phase waiting is bounded by the
-materialized benchmark timeout. Capture lifecycle status is
+AgentX profiling starts 300 seconds after AIPerf reports its measured phase.
+`AGENTX_PROFILE_START_DELAY_S` overrides that delay, while the legacy
+`AGENTX_PROFILE_WARMUP_S` remains ignored. Capture stops after 256 engine steps
+or `AGENTX_PROFILE_WINDOW_S` seconds, whichever comes first; the window defaults
+to 100 seconds. Phase waiting is bounded by the materialized benchmark timeout.
+Capture lifecycle status is
 written to a per-invocation `capture-status.json`; the adjacent
 `trace-manifest.json` records the selected primary and per-rank traces.
 Benchmark measurement success and trace-capture success are reported

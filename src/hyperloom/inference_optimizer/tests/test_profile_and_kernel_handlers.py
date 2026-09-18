@@ -837,66 +837,54 @@ def test_materialize_profile_window_sglang_skill_formula(
     assert body["num_steps"] == 128
 
 
-def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
+def test_materialize_profile_agentx_uses_its_own_capture_length(
     tmp_path,
     monkeypatch,
-    caplog,
 ):
-    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor."""
+    """AgentX capture length is independent of the synthetic 128-step cap."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+    out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.max_iterations 8" in extra, extra
-    assert any("steady-state floor" in r.message for r in caplog.records)
+    assert "--profiler-config.max_iterations 256" in extra, extra
 
 
-def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
+def test_materialize_profile_agentx_ignores_synthetic_steps_cap(
     tmp_path,
     monkeypatch,
-    caplog,
 ):
-    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden."""
+    """HYPERLOOM_PROFILE_MAX_STEPS_CAP only controls synthetic profiles."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+    out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.max_iterations 8" in extra, extra
-    assert any("explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=64" in r.message for r in caplog.records)
+    assert "--profiler-config.max_iterations 256" in extra, extra
 
 
-def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound(
+def test_materialize_profile_max_iters_overrides_agentx_default(
     tmp_path,
     monkeypatch,
-    caplog,
 ):
-    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else."""
+    """HYPERLOOM_PROFILE_MAX_ITERS remains the explicit AgentX override."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
-    with caplog.at_level("WARNING"):
-        out = _materialize_config_with_envs(src, tmp_path)
+    out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    # The override is still honored verbatim; this is a visibility fix only.
     assert "--profiler-config.max_iterations 128" in extra, extra
-    assert any(
-        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message for r in caplog.records
-    ), [r.message for r in caplog.records]
 
 
 def test_materialize_profile_max_iters_override_is_quiet_without_agentx(

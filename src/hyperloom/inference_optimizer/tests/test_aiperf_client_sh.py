@@ -444,8 +444,11 @@ def _client_only_env(bind, tmp_path):
     bash_env = tmp_path / "bash-env.sh"
     bash_env.write_text(
         f"""kill() {{
+  if [ "${{1:-}}" = "-0" ]; then
+    command kill "$@"
+    return
+  fi
   printf 'kill %s\\n' "$*" >> {lifecycle_marker}
-  [ "${{1:-}}" != "-0" ]
 }}
 """,
         encoding="utf-8",
@@ -836,13 +839,14 @@ def _run_profile(bench, bind, res, tmp_path, **extra_env):
     """PROFILE=1 with the window collapsed, so the branch runs in seconds."""
     capture_dir = res / "agentx-profile" / "test-capture"
     capture_dir.mkdir(parents=True, exist_ok=True)
+    extra_env.setdefault("AGENTX_PROFILE_WINDOW_S", "0")
+    extra_env.setdefault("AGENTX_PROFILE_START_DELAY_S", "0")
     return _run(
         bench,
         bind,
         res,
         tmp_path,
         PROFILE="1",
-        AGENTX_PROFILE_WINDOW_S="0",
         AGENTX_CAPTURE_ID="test-capture",
         AGENTX_CAPTURE_STATUS_PATH=str(capture_dir / "capture-status.json"),
         FAKE_AIPERF_SLEEP="6",
@@ -853,6 +857,41 @@ def _run_profile(bench, bind, res, tmp_path, **extra_env):
 
 def _capture_status_path(res: Path) -> Path:
     return res / "agentx-profile" / "test-capture" / "capture-status.json"
+
+
+def test_profile_waits_after_measured_phase_before_starting(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    delay_marker = tmp_path / "profile-delay.txt"
+    bash_env = tmp_path / "profile-delay-env.sh"
+    bash_env.write_text(
+        f"""sleep() {{
+  if [ "${{1:-}}" = "300" ]; then
+    printf '%s\\n' "$1" > {shlex.quote(str(delay_marker))}
+    return
+  fi
+  command sleep "$@"
+}}
+""",
+        encoding="utf-8",
+    )
+    result = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_PROFILE_START_DELAY_S="300",
+        BASH_ENV=str(bash_env),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert delay_marker.read_text(encoding="utf-8").strip() == "300"
+
+
+def test_profile_window_defaults_to_100_seconds(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    result = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WINDOW_S=None)
+    assert result.returncode == 0, result.stdout + result.stderr
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["requested_window_seconds"] == 100
 
 
 def _fast_trace_poll_env(bind, tmp_path):
@@ -914,6 +953,7 @@ def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, st
         SGLANG_TORCH_PROFILER_DIR="",
         VLLM_TORCH_PROFILER_DIR="",
         AGENTX_PROFILE_WINDOW_S="20",
+        AGENTX_PROFILE_START_DELAY_S="0",
         AGENTX_PHASE_WAIT_TIMEOUT_S="10",
         AGENTX_CAPTURE_ID="test-capture",
         AGENTX_CAPTURE_STATUS_PATH=str(_capture_status_path(res)),
@@ -949,7 +989,7 @@ def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, st
 @pytest.mark.parametrize(
     "framework,body,case,stop_rc,reason,stop_called",
     [
-        ("sglang", '{"num_steps":8}', "complete", "22", "capture_complete", False),
+        ("sglang", '{"num_steps":8}', "complete", "22", "capture_complete", True),
         ("sglang", '{"num_steps":8}', "stale", "0", "trace_files_missing", True),
         ("sglang", '{"num_steps":8}', "partial_ranks", "0", "trace_flush_timeout", True),
         ("sglang", '{"num_steps":8}', "bad_gzip", "0", "trace_flush_timeout", True),
@@ -958,7 +998,7 @@ def test_client_only_profiles_measured_phase_without_server_cleanup(tmp_path, st
         ("sglang", '{"num_steps":true}', "complete", "22", "stop_profile_failed", True),
     ],
 )
-def test_stop_is_skipped_only_for_proven_current_native_completion(
+def test_stop_is_sent_even_after_proven_current_native_completion(
     tmp_path, framework, body, case, stop_rc, reason, stop_called
 ):
     bench, bind, res = _sandbox(tmp_path, write_pid=False)
@@ -1416,6 +1456,7 @@ def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
     "knob,value",
     [
         ("AGENTX_PROFILE_WINDOW_S", "20.5"),
+        ("AGENTX_PROFILE_START_DELAY_S", "300.5"),
         ("AGENTX_DURATION", "3600.0"),
     ],
 )

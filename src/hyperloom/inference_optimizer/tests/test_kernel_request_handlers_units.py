@@ -4675,6 +4675,29 @@ class TestBuildTraceAnalyzeCmd:
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
 
+    def test_agentx_tracelens_uses_agentic_splitter_hints(self, monkeypatch, tmp_path):
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        state.benchmark_mode = "agentx"
+        cmd, _steady = krh._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=Path("/tl"),
+            is_bypass=False,
+            scriptable=False,
+            workload={"conc": 32, "osl": 4096, "random_range_ratio": "1.0"},
+            model_name="",
+            framework="sglang",
+            target_platform="",
+            analysis_mode="inference",
+        )
+        assert cmd[cmd.index("--split-num-steps") + 1] == "64"
+        assert cmd[cmd.index("--split-r") + 1] == "0.1"
+        assert cmd[cmd.index("--split-conc") + 1] == "32"
+        assert cmd[cmd.index("--split-osl") + 1] == "512"
+
     def test_steady_state_mode_from_env(self, monkeypatch, tmp_path):
         state, session_dir = self._common(monkeypatch, tmp_path)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "median")

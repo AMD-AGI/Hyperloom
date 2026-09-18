@@ -97,14 +97,9 @@ _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(
 # serialization-safe on a large TP=8 MoE. Tunable via
 # HYPERLOOM_PROFILE_MAX_STEPS_CAP.
 _DEFAULT_PROFILE_MAX_STEPS = 128
-# AgentX counterpart of the cap above. The 128 is calibrated in decode steps
-# against the synthetic 1024/1024 shape; an agentic step carries a measured ISL
-# p50 of 56k-96k tokens, so the same step count buffers orders of magnitude more
-# profiler events in HOST RAM. Measured on DeepSeek-V4-Pro: eight vLLM workers at
-# 113-127 GB each, Ray reported 1012/1024 GB and killed the capture three times.
-# The AgentX client bounds the window by wall clock anyway (~20s of steady
-# state), so the extra steps buy nothing. HYPERLOOM_PROFILE_MAX_ITERS overrides.
-_AGENTX_PROFILE_MAX_ITERS = 8
+# AgentX uses its own step bound rather than the synthetic serialization cap.
+# The client also enforces a wall-clock bound, whichever the profiler reaches first.
+_AGENTX_PROFILE_MAX_ITERS = 256
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
@@ -1104,14 +1099,13 @@ def _finalize_framework_server_args(
         envs[framework_env] = resolved_server_args
 
 
-def _profile_steps_cap(policy_env: Mapping[str, Any]) -> tuple[int, bool]:
+def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
     raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
-    explicit = raw.isdigit() and int(raw) >= 1
     try:
         cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
     except ValueError:
         cap = _DEFAULT_PROFILE_MAX_STEPS
-    return (cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS), explicit
+    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
 def _profile_capture_window(
@@ -1119,43 +1113,21 @@ def _profile_capture_window(
     *,
     agentx: bool,
     cap: int,
-    cap_explicit: bool,
     delay_iters: int = 0,
     steady_floor: int | None = None,
 ) -> tuple[int, int]:
     """Resolve capture steps and delay without consulting the ambient environment."""
-    max_iters = cap
+    max_iters = _AGENTX_PROFILE_MAX_ITERS if agentx else cap
     if agentx:
         delay_iters = 0
-        if max_iters > _AGENTX_PROFILE_MAX_ITERS:
-            if cap_explicit:
-                log.warning(
-                    "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
-                    "being overridden to %d. The cap is calibrated on the "
-                    "synthetic ISL/OSL shape; an agentic step carries orders "
-                    "of magnitude more, and the torch profiler buffers "
-                    "events in host RAM until the OOM killer arrives.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            else:
-                log.info(
-                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
-                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
-                    "carries orders of magnitude more, and the torch profiler "
-                    "buffers events in host RAM until the OOM killer arrives.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            max_iters = _AGENTX_PROFILE_MAX_ITERS
-            if steady_floor is not None and max_iters < steady_floor:
-                log.warning(
-                    "AgentX: capped profile steps %d is below the steady-state "
-                    "floor of %d; the trace may lack a steady-state window "
-                    "(trace_split_no_steady_state).",
-                    max_iters,
-                    steady_floor,
-                )
+        if steady_floor is not None and max_iters < steady_floor:
+            log.warning(
+                "AgentX: profile steps %d is below the steady-state floor of %d; "
+                "the trace may lack a steady-state window "
+                "(trace_split_no_steady_state).",
+                max_iters,
+                steady_floor,
+            )
     override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
     if override.isdigit() and int(override) > 0:
         max_iters = int(override)
@@ -1439,7 +1411,7 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
-        cap, cap_explicit = _profile_steps_cap(os.environ)
+        cap = _profile_steps_cap(os.environ)
 
         # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
         # honored as-is; otherwise default to min(served OSL,
@@ -1492,7 +1464,6 @@ def materialize_config_with_envs(
             os.environ,
             agentx=agentx_enabled(),
             cap=cap,
-            cap_explicit=cap_explicit,
             delay_iters=max(0, int(osl_val * (r_val + 1) * 3 - cap / 2)),
             steady_floor=steady_floor,
         )
