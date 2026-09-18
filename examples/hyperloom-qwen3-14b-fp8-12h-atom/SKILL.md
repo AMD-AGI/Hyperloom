@@ -353,7 +353,10 @@ Check these right after launch and report the values. If `kernel_optimizer` is
 did not reach the optimizer, instead of letting a 12-hour run continue
 mislabelled.
 
-During monitoring, print a short summary at each 300-second check:
+On each requested status check, read persisted state and print a short summary.
+Use platform-scheduled invocations if recurring checks are requested; do not
+start a background watchdog, hold a blocking polling connection, or auto-resume.
+Busy logs alone are not evidence of useful progress. Include:
 
 - process alive/stopped;
 - phase and `stop_reason`;
@@ -381,7 +384,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT), and
    `--no-kernel` would skip the very phase this demo exists to exercise.
 7. Report the session ID, log path, PID, and initial health check result.
-8. Monitor the process every 300 seconds until work is done.
+8. Inspect persisted state on requested status checks; report when work stops.
 9. Unexpected crashes are not automatically resumed. After explicit operator approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `FRAMEWORK=atom` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 10. If an approved relaunch is needed after a crash, clear any surviving ATOM workers
     first (see [Prior workload cleanup](#prior-workload-cleanup-required)); an
