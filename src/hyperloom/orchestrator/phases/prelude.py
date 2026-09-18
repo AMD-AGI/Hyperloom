@@ -2421,6 +2421,8 @@ class PreludePhase(PhaseHandler):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
+                    # The latency budget grades on this and fails closed without it.
+                    "e2el_mean_ms": result.get("e2el_mean_ms"),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {

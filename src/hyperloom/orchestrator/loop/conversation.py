@@ -319,6 +319,13 @@ class ConversationCollaborator:
 
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
+        # Not wrapped, unlike the advisory blocks below: a latency budget changes
+        # what a KEEP means, so losing it silently would have the model route as
+        # if the session were unconstrained. Pure string assembly, no I/O.
+        latency_block = self.shared_state.to_latency_budget_summary()
+        if latency_block:
+            sections.append("=== Latency budget (constraint) ===")
+            sections.append(latency_block)
         # Resource pools are orchestration-only; robustness cannot schedule GPU work.
         if agent_name != "robustness":
             sections.append("=== Resource pools ===")
