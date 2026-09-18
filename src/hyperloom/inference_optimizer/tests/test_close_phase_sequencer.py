@@ -423,45 +423,54 @@ async def test_a_running_task_that_never_lands_is_reported_not_waited_on_forever
     assert coord.sub.run_calls == []
 
 
-class _HangsUntilCancelled(_StubSubAgentRunner):
-    """A report writer that never returns unless the waiter cancels it."""
-
-    def __init__(self):
-        super().__init__()
-        self.cancelled = False
-
-    async def run_task(self, task, *args, **kwargs):
-        self.run_calls.append(task)
-        try:
-            await asyncio.sleep(3600)
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
-        return _StubSubResult(state="succeeded")
-
-
 @pytest.mark.asyncio
 async def test_a_fresh_report_that_never_lands_is_not_awaited_forever(coord):
-    """The in-flight wait had a bound; a newly started report must too."""
-    coord.sub = _HangsUntilCancelled()
+    """The close-step timeout cancels its waiter, not the execution's ownership."""
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+    db = SqliteConnection(coord.session_dir / "close-task.db")
+    coord.tasks = TaskRegistry(db)
+    coord.locks = ResourceLockManager(SqliteLeaseBackend(db))
+    coord.sub = SubAgentRunner(coord.locks, coord.tasks)
     coord.shared_state.max_minutes = 60
     coord.phase_close._close_step_wait_sec = lambda _task: 0.05  # type: ignore[method-assign]
-    queued = _StubTaskRow(
-        task_id="fresh-report",
-        kind="report",
-        state="queued",
-        params={},
-        idempotency_key="internal-report-close_phase_entry",
-    )
+    finish = asyncio.Event()
+    calls = []
 
-    started = time.monotonic()
-    state = await coord._run_close_task(queued, step="1 (report)")
-    elapsed = time.monotonic() - started
+    async def execute(ctx):
+        calls.append(ctx.task.task_id)
+        await finish.wait()
+        return {"status": "ok"}
 
-    assert state == "running"
-    assert elapsed < 2.0
-    assert coord.sub.run_calls == [queued]
-    assert coord.sub.cancelled is True
+    coord.sub.register_executor("report", execute)
+    queued = await coord.tasks.create(kind="report", params={}, idempotency_key="internal-report-close_phase_entry")
+    try:
+        started = time.monotonic()
+        state = await coord._run_close_task(queued, step="1 (report)")
+        elapsed = time.monotonic() - started
+
+        assert state == "running"
+        assert elapsed < 2.0
+        assert calls == [queued.task_id]
+        assert (await coord.tasks.get(queued.task_id)).state == "running"
+        handle = coord.dispatcher._inflight_actions[queued.task_id]
+        assert handle.scope.cancelled
+        assert handle.scope.reason == "caller_cancelled"
+        assert coord.dispatcher._executions
+        assert all(not execution.done() for execution in coord.dispatcher._executions)
+    finally:
+        executions = tuple(coord.dispatcher._executions)
+        finish.set()
+        await asyncio.gather(*executions)
+    try:
+        assert (await coord.tasks.get(queued.task_id)).state == "succeeded"
+        assert not coord.dispatcher._inflight_actions
+        assert not coord.dispatcher._executions
+    finally:
+        db.close()
 
 
 @pytest.mark.asyncio
@@ -838,7 +847,6 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -894,7 +902,7 @@ class TestEveryTerminalReachesAWrittenReport:
         idle = ScriptedPlan(turns=[MockTurn(intents=[])])
         return Coordinator(
             session_dir=session_dir,
-            backends={name: MockBackend(idle) for name in ("orchestration", "critic", "robustness")},
+            backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
             role_registry=default_role_registry(),
             recipe_kb=None,
             knowledge_plane=None,
@@ -983,7 +991,6 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
         backends={
             "orchestration": MockBackend(idle_plan),
             "critic": MockBackend(idle_plan),
-            "robustness": MockBackend(idle_plan),
         },
         role_registry=default_role_registry(),
         recipe_kb=None,
@@ -1023,7 +1030,6 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1049,7 +1055,6 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     coord = Coordinator(
         session_dir=session_dir,
@@ -1083,7 +1088,6 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb-store.example.test")
@@ -1123,7 +1127,6 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
@@ -1160,7 +1163,6 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.REMOTE,
@@ -1201,7 +1203,6 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.LOCAL,
@@ -1233,7 +1234,6 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     config = KnowledgeConfig(
         mode=KnowledgeStoreMode.LOCAL,

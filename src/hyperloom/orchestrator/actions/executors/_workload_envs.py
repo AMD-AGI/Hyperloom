@@ -413,47 +413,9 @@ def apply_agentx_switch(
         return
     envs = bench.setdefault("envs", {})
     bench["benchmark_script"] = "aiperf_client.sh"
-    # The Magpie benchmark config's flat wall-clock cap (``benchmark.timeout_seconds``,
-    # e.g. 7200s from baseline_vllm.yaml) is one deadline over server boot + warmup +
-    # the measurement window + result export. AgentX runs at the model's native
-    # context (``max_model_len`` lifted from the synthetic 6144 to e.g. 1M), so boot +
-    # warmup alone can consume ~45 min before the window even opens; the flat cap then
-    # SIGKILLs the benchmark before aiperf writes ``inferencex_result.json`` -- a 0-tput
-    # baseline that fails the session. Raise the inner cap to the same AgentX budget the
-    # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
-    # layers stay consistent. AgentX-only: this function returned early above when AgentX
-    # is off, so the default (synthetic) cap is untouched. The import is function-local
-    # so standalone workload materialization uses the same timeout derivation.
-    #
-    # max(), never assignment: this is the ONLY place in the AgentX path that
-    # writes an existing cap, and a bare assignment LOWERS every config that
-    # already declares more than the AgentX derivation. profile_sglang.yaml
-    # declares 14400s ("Qwen-32B TP=1 profile with steady-state window can take
-    # ~3 h") against a default derivation of 10800s, so an AgentX profile round
-    # there was being cut from four hours to three -- the same mid-round kill this
-    # module exists to prevent, introduced by the fix for it. A declared cap is a
-    # measured statement about that config; the derivation is a floor under it,
-    # not a replacement for it.
-    from ._agentx_timeouts import (
-        agentx_baseline_timeout_sec,
-        agentx_warmup_grace_sec,
-    )
+    from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
-    _derived = agentx_baseline_timeout_sec(_agentx_env)
-    try:
-        _declared = int(bench.get("timeout_seconds") or 0)
-    except (TypeError, ValueError):
-        _declared = 0
-    if _declared > _derived:
-        log.info(
-            "AgentX: keeping the config's declared benchmark timeout %ds (> the AgentX "
-            "derivation %ds). The derivation is a floor, never a ceiling -- lowering a "
-            "cap the config measured for itself is how a round gets killed mid-window.",
-            _declared,
-            _derived,
-        )
-    bench["timeout_seconds"] = max(_declared, _derived)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -465,31 +427,15 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
-    # ...but AGENTX_WARMUP_GRACE_PERIOD must not be forwarded raw. It is read by
-    # TWO layers that have to agree: this process derives the subprocess cap from
-    # it (scaled by CONC, because warmup is per-lane requests x CONC lanes), while
-    # aiperf_client.sh hands it to aiperf as --warmup-grace-period, which is what
-    # actually cuts the warmup off. The loop above copies the operator's raw
-    # value, so the client was bounded at the UNSCALED number while the cap
-    # budgeted the scaled one.
-    #
-    # Measured on a Kimi-K3 conc=32 round: cap 14400s of warmup vs client bound
-    # 3600s. Warmup would have been cut at 106 of 354 requests -- not a crash, a
-    # round that reports a prefix-reuse figure measured before the cache had
-    # anything in it. Export the derived value so both layers see one number.
-    #
-    # AgentX-only by construction: this function returned early when AgentX is
-    # off, and AGENTX_* has no meaning on the synthetic path.
+    # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
-    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
+    if bench.get("timeout_seconds") is not None:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
-            "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
-            "(operator value %s). The client's --warmup-grace-period and this "
-            "process's subprocess cap are derived from the same number, so a "
-            "raw forward here would bound the warmup below what the cap pays for.",
+            "AgentX: exporting the CONC-scaled warmup grace %ds to the client (operator value %s).",
             _grace,
             _raw_grace or "unset",
         )
@@ -1513,7 +1459,13 @@ def materialize_config_with_envs(
         # try to patch, fall back to the safe set on failure. Default-on
         # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
         tracelens_patch_ok = False
-        patch_attempted = _tracelens_patch_enabled() and not is_atom
+        # Function-local import to stay out of the module-level import cycle
+        # (matches _multi_node_server_lifecycle).
+        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
+
+        is_sglang = "sglang" in fw
+        sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
+        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
         # Written in every branch, not only the failing one. "No status" used to mean both "patched fine" and
         # "never tried because the image already carries it", and those two call for different reactions when a
         # trace later turns up without annotations.
@@ -1633,39 +1585,49 @@ def materialize_config_with_envs(
                             "imprecise.",
                             _model,
                         )
-            # Both capture options are annotation-only and need TraceLens
-            # server-side support to land: without it the trace carries no
-            # ``kernel_shape_profiler`` events (trace-health check 5), so asking
-            # for them pays the capture cost for data nothing downstream reads.
-            # Keyed on the degraded *reason* rather than ``tracelens_patch_ok``:
-            # a patch that was never attempted (HYPERLOOM_ENABLE_PATCH=0) can
-            # still be baked into the image, and must keep the annotations.
-            _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
-            if _patch_degraded:
-                _shape_disc = False
-            extra_body["shape_discovery"] = _shape_disc
-            if _patch_degraded:
-                extra_body["detailed_annotations"] = False
-            else:
+            if sglang_sitecustomize:
+                # No-patch path: shapes come from the tool via PYTHONPATH, not a
+                # request-body flag or CUDA-graph arg (unpatched SGLang rejects both).
+                extra_body.pop("shape_discovery", None)
                 extra_body.setdefault("detailed_annotations", True)
-            # NOTE: this write happens before the per-task ``extra_envs`` merge, so
-            # an ``extra_envs`` entry for PROFILE_EXTRA_BODY can still drop
-            # start_step/num_steps the way ``args_mode="replace"`` used to drop
-            # vLLM's --profiler-config bounds. The vLLM side is re-asserted at the
-            # end of this function; SGLang is NOT, because deciding whether a
-            # non-positive num_steps means "unbounded" or "no capture" needs a
-            # SGLang-side answer this layer does not have. Every OOM observed so
-            # far was vLLM.
-            envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-            if tracelens_patch_ok and _shape_disc:
-                # TraceLens-patched SGLang exposes
-                # --enable-shape-discovery-for-cuda-graph-profile; unpatched
-                # SGLang errors on it.
-                existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
-                if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
-                    envs["EXTRA_SGLANG_ARGS"] = (
-                        f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
-                    ).strip()
+                _tool_dir = kernel_shape_tool_dir()
+                if _shape_disc and _tool_dir is not None:
+                    _existing_pp = str(envs.get("PYTHONPATH", "")).strip()
+                    envs["PYTHONPATH"] = f"{_tool_dir}{os.pathsep}{_existing_pp}" if _existing_pp else str(_tool_dir)
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
+                else:
+                    envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
+                    if _shape_disc and _tool_dir is None:
+                        log.warning(
+                            "SGLang shape mode=sitecustomize but kernel_shape_tool "
+                            "not found under TRACELENS_ROOT; shapes will be absent "
+                            "(set TRACELENS_ROOT to an NFS path visible to the server).",
+                        )
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+            else:
+                # Legacy patched path: capture options need the git-apply patch to
+                # land. Keyed on the degraded reason, not tracelens_patch_ok, since a
+                # patch may be baked into the image without being attempted here.
+                _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
+                if _patch_degraded:
+                    _shape_disc = False
+                extra_body["shape_discovery"] = _shape_disc
+                if _patch_degraded:
+                    extra_body["detailed_annotations"] = False
+                else:
+                    extra_body.setdefault("detailed_annotations", True)
+                # Written before the per-task extra_envs merge, so an extra_envs
+                # PROFILE_EXTRA_BODY can still drop start_step/num_steps. Not
+                # re-asserted for SGLang (unlike vLLM): "unbounded" vs "no capture"
+                # for non-positive num_steps needs a SGLang-side answer.
+                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
+                if tracelens_patch_ok and _shape_disc:
+                    # Patched SGLang exposes this arg; unpatched errors on it.
+                    existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
+                    if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
+                        envs["EXTRA_SGLANG_ARGS"] = (
+                            f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
+                        ).strip()
 
     if not _is_scriptable_profile:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its

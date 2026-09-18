@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.model_config_utils as mcu_mod
-import hyperloom.orchestrator.actions.executors.explore as explore_mod
 import hyperloom.orchestrator.kernel.request_handlers as krh_mod
 import hyperloom.orchestrator.phases.kernel as kernel_phase_mod
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -130,7 +129,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -748,7 +746,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -849,7 +847,7 @@ class TestForgeGemmRuntimeConfigMerge:
             }
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -909,7 +907,7 @@ class TestForgeGemmRuntimeConfigMerge:
             return responses[len(calls) - 1]
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", lambda **_k: 61)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -2543,13 +2541,10 @@ class TestValidateForgeGemmTuningE2E:
         assert result["e2e_results"]["reverted"] == []
 
     @pytest.mark.asyncio
-    async def test_timeout_fallback_when_explore_helper_raises(self, tmp_path, monkeypatch):
+    async def test_gemm_validation_uses_fixed_benchmark_budget(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
 
-        def _raise(**kwargs):
-            raise ValueError("no runtime budget")
-
-        monkeypatch.setattr(explore_mod, "_compute_explore_variant_timeout", _raise)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
 
         captured: dict[str, object] = {}
 
@@ -2576,8 +2571,7 @@ class TestValidateForgeGemmTuningE2E:
         }
         await coord._validate_gemm_tuning_e2e(result)
 
-        # Fallback budget is 15 minutes.
-        assert captured["budget"] == 15
+        assert captured["budget"] == 130
 
     @pytest.mark.asyncio
     async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Mapping, Sequence
 
 # The canonical corpus, measured from Kimi-K3 session 20260831T124523Z (825
@@ -44,6 +45,36 @@ def pct(m: Mapping[str, Any], key: str, sub: str, default: float = 0.0) -> Any:
     return default
 
 
+def _valid_count(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
+
+
+def _request_error_rate(metrics: Mapping[str, Any], export: Mapping[str, Any]) -> float | None:
+    rate = stat(metrics, "request_error_rate", default=None)
+    if rate is not None:
+        return float(rate) if _valid_count(rate) and rate <= 100 else None
+
+    success = stat(metrics, "request_count", default=None)
+    errors = stat(metrics, "error_request_count", default=None)
+    completed = stat(metrics, "completed_request_count", default=None)
+    if any(value is not None and not _valid_count(value) for value in (success, errors, completed)):
+        return None
+    # AIPerf omits zero-error metrics; accounting counters also include warmup.
+    if errors is None:
+        if success is None or success <= 0 or export.get("error_summary") != []:
+            return None
+        errors = 0
+    if completed is None:
+        if success is None:
+            return None
+        completed = success + errors
+    elif success is not None and completed != success + errors:
+        return None
+    if not math.isfinite(completed) or completed <= 0 or errors > completed:
+        return None
+    return 100.0 * (errors / completed)
+
+
 def submission_outcome(export: Mapping[str, Any]) -> tuple[bool | None, list[str]]:
     """Read the scenario's submission verdict from an aiperf export."""
     md = export.get("metadata")
@@ -73,7 +104,8 @@ def map_aiperf(
     out_tput = stat(m, "output_token_throughput")
     in_tput = stat(m, "input_token_throughput")
     total_tput = stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
-    rc = int(stat(m, "request_count") or 0)
+    success = stat(m, "request_count", default=None)
+    rc = int(success) if _valid_count(success) else 0
     isl = stat(m, "input_sequence_length")
 
     # Scoring and comparison use aiperf's summary P10 of the per-request rate OSL/E2EL_s.
@@ -110,11 +142,8 @@ def map_aiperf(
         # Tri-state on purpose: True / False / None(unknown).
         "submission_valid": verdict,
         "submission_invalid_reasons": reasons,
-        # Upstream's hard validity gate, as a percentage (aiperf declares this
-        # metric PERCENT). ``default=None`` rather than 0.0: aiperf omits the
-        # metric when no request completed, and coalescing that to zero would
-        # report a perfect error rate for a run that measured nothing.
-        "request_error_rate": stat(m, "request_error_rate", default=None),
+        # A percentage, or unknown when profiling provides insufficient evidence.
+        "request_error_rate": _request_error_rate(m, d),
         # Corpus shape. A single ISL/OSL scalar cannot describe this workload
         # (p50 95k, p99 506k), so the distributions travel instead.
         "corpus_loader": _corpus_loader(d),

@@ -12,7 +12,7 @@ name: Lint
 #
 # Pylint: ``--errors-only`` limits output to fatal/error-severity messages
 # (not convention or refactor hints). tree-reform.MD P2.5: critic-agent,
-# robustness-agent, framework-agent, and quantization_agent were all promoted
+# framework-agent and quantization_agent were all promoted
 # into the single ``hyperloom`` distribution (``hyperloom.agents.*``); the
 # single editable install below covers all of them (no more per-agent
 # editable installs / separate PYTHONPATH entries / bare ``runtime`` module).
@@ -183,7 +183,6 @@ jobs:
           pylint --errors-only \
             hyperloom.inference_optimizer \
             hyperloom.orchestrator \
-            hyperloom.agents.robustness \
             hyperloom.agents.framework \
             hyperloom.agents.critic.runtime \
             hyperloom.agents.quantization

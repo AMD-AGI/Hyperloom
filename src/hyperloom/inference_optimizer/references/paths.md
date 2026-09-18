@@ -16,11 +16,11 @@ $USER_DATA_PATH/                          # workspace_root — set by operator /
         ├── manifest.json
         ├── state.json
         ├── storage/coordinator.db
-        ├── agents/{orchestration,kernel,critic,robustness}/
+        ├── agents/{orchestration,kernel,critic}/
         ├── runs/{baseline,profile,roofline,explore,sweep,...}/<task_id>/
         ├── kernel-agent/runs/<session_id>/
         ├── kernel-agent-workspace/<kernel_id>/
-        ├── optimizer_runs/               # per-session launcher logs / PID / monitor
+        ├── optimizer_runs/               # per-session launcher logs / PID
         ├── reports/
         └── …
 ```
