@@ -127,7 +127,7 @@ def _infer_model_name(analysis_output: Path) -> str:
     if not raw:
         return ""
     lowered = raw.lower()
-    if any(token in lowered for token in _INFERRED_PLACEHOLDERS):
+    if lowered in _INFERRED_PLACEHOLDERS or lowered.startswith("cannot be inferred"):
         return ""
     return raw
 
