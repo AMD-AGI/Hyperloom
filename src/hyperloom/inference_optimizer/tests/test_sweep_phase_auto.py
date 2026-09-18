@@ -434,7 +434,9 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
                 "NEEDS_REVIEW",
                 "output_throughput",
                 (output - 110.0) / 110.0 * 100.0,
-                "KEEP" if direction == "up" else "REVERT",
+                # A degraded pair never carries a KEEP verdict, whichever way
+                # the output figure moved: it is a diagnostic, not a decision.
+                "REVERT",
                 id=f"missing-{side}-{axis}-output-{direction}",
             )
             for side in ("candidate", "reference")

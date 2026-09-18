@@ -202,6 +202,79 @@ def inventory(trace_dir: Path) -> dict[str, Any]:
     }
 
 
+#: Sidecars parsed in full per directory. A graph capture writes one per captured batch size, so a representative
+#: slice characterises the capture; the count present is reported separately so a truncated scan cannot read as a
+#: complete one.
+CAPTURE_SIDECAR_SCAN_LIMIT = 24
+
+
+def _scan_capture_sidecar(path: Path) -> dict[str, Any]:
+    """Measure one capture sidecar's operator metadata coverage, full-stream."""
+    errors: list[str] = []
+    cpu_op_total = 0
+    cpu_op_with_meta = 0
+    kernel_count = 0
+    event_total = 0
+    try:
+        fobj = _open_trace_binary(path)
+    except OSError as exc:
+        return {"path": str(path), "error": repr(exc)}
+    try:
+        for ev in stream_events(fobj, errors=errors):
+            event_total += 1
+            cat = ev.get("cat", "")
+            if cat == "cpu_op":
+                cpu_op_total += 1
+                # The same two keys ``StepPass`` uses on the source trace, so the two coverages are comparable.
+                if (ev.get("args") or {}).get("Input Dims") or (ev.get("args") or {}).get("Input type"):
+                    cpu_op_with_meta += 1
+            elif cat == "kernel":
+                kernel_count += 1
+    finally:
+        fobj.close()
+    return {
+        "path": str(path),
+        "event_total": event_total,
+        "cpu_op_total": cpu_op_total,
+        "cpu_op_with_meta": cpu_op_with_meta,
+        "op_meta_coverage": _ratio(cpu_op_with_meta, cpu_op_total),
+        "kernel_count": kernel_count,
+        "stream_errors": errors,
+    }
+
+
+def certify_capture_sidecars(
+    paths: Sequence[Path],
+    *,
+    limit: int = CAPTURE_SIDECAR_SCAN_LIMIT,
+) -> dict[str, Any]:
+    """Measure whether the capture sidecars carry the operator metadata that graph attribution depends on.
+
+    Nothing read these files before: the inventory classified them by name and counted them, and the only other
+    look was a substring count over the first couple of megabytes of the single heaviest one. When the
+    shape-discovery pass does not land, the kernels captured inside a CUDA graph cannot be attributed afterwards,
+    and that degradation left no measurement anywhere. This reports the coverage; it does not gate on it.
+    """
+    ordered = sorted(paths)
+    scanned = [_scan_capture_sidecar(p) for p in ordered[: max(0, limit)]]
+    measured = [f for f in scanned if "error" not in f]
+    cpu_op_total = sum(f["cpu_op_total"] for f in measured)
+    cpu_op_with_meta = sum(f["cpu_op_with_meta"] for f in measured)
+    return {
+        "files_present": len(ordered),
+        "files_scanned": len(scanned),
+        "scan_limit": limit,
+        "truncated_scan": len(ordered) > len(scanned),
+        "event_total": sum(f["event_total"] for f in measured),
+        "cpu_op_total": cpu_op_total,
+        "cpu_op_with_meta": cpu_op_with_meta,
+        "op_meta_coverage": _ratio(cpu_op_with_meta, cpu_op_total),
+        "kernel_count": sum(f["kernel_count"] for f in measured),
+        "files_with_errors": len(scanned) - len(measured),
+        "files": scanned,
+    }
+
+
 # groups 6/7/8: the second pass
 
 
@@ -781,8 +854,16 @@ def build_verdict(
     graph_under_recorded: bool | None,
     thresholds: dict[str, Any],
     production_pick: dict[str, Any] | None = None,
+    graph_launch_coverage: float | None = None,
+    op_meta_coverage: float | None = None,
+    capture_op_meta_coverage: float | None = None,
 ) -> dict[str, Any]:
-    """Answer the two questions separately, per the checklist's hard-requirement table."""
+    """Answer the two questions separately, per the checklist's hard-requirement table.
+
+    The three coverage arguments feed ``measures`` only. They are reported next to the categorical answer because
+    a boolean cannot distinguish a trace that just missed a gate from one that missed it by an order of
+    magnitude, and the two call for different responses -- but choosing the response is not this function's job.
+    """
     blocking: list[str] = []
     bypass_ok = True
 
@@ -870,10 +951,23 @@ def build_verdict(
         if forecast_modelled and tracelens_ok
         else None
     )
+    silently_wrong = "tracelens" in usable and not valid
+    # A restatement of the answers above on one ordered scale, so a fleet-wide query can rank outcomes without
+    # re-deriving the precedence. ``silently_wrong`` outranks a plain warning: an analysis that runs clean and
+    # concludes wrongly is worse than one that announces its own doubt.
+    if blocking:
+        severity = "blocked"
+    elif silently_wrong:
+        severity = "silently_wrong"
+    elif warnings:
+        severity = "warn"
+    else:
+        severity = "ok"
     return {
         "usable_by": usable,
         "decode_conclusions_valid": valid,
-        "silently_wrong": "tracelens" in usable and not valid,
+        "silently_wrong": silently_wrong,
+        "severity": severity,
         "blocking_reasons": blocking,
         "warnings": warnings,
         "hot_kernel_list_would_be_suppressed": suppressed,
@@ -881,6 +975,20 @@ def build_verdict(
         "recommended_splitter_mode": recommended,
         "modes_that_would_fail": failing,
         "thresholds_effective": thresholds,
+        # The continuous quantities the categorical answers were derived from. Reported, never compared here.
+        "measures": {
+            "kernel_count": kernel_count,
+            "attributed_pct": attributed_pct,
+            "graph_launch_coverage": graph_launch_coverage,
+            "graph_launch_coverage_max": thresholds.get("graph_launch_coverage_max"),
+            "op_meta_coverage": op_meta_coverage,
+            "capture_op_meta_coverage": capture_op_meta_coverage,
+            "idle_pct_window": rec_idle.get("idle_pct_window") if rec_idle else None,
+            "idle_pct_threshold": rec_idle.get("idle_pct_threshold_effective")
+            if rec_idle
+            else thresholds.get("idle_pct_threshold"),
+            "viable_mode_count": len(viable_modes),
+        },
     }
 
 
@@ -917,6 +1025,12 @@ def certify_trace_dir(
         "rank_level": [],
         "chunk_level": [],
     }
+
+    # Before the early return below: a directory that produced only capture sidecars and no usable trace is
+    # exactly the case where knowing what the sidecars contain matters most.
+    capture_paths = [Path(c["path"]) for c in inv["candidates"] if c["role"] == "capture_sidecar"]
+    if capture_paths:
+        record["trace_dir_level"]["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
 
     selected = inv["selected_path"]
     if not selected:
@@ -1017,6 +1131,12 @@ def certify_trace_dir(
             "event_total": analysis.get("event_total", 0),
             "bytes": size,
             "gz": sel.name.lower().endswith(".gz"),
+            # Carried from the reader rather than left behind: a ratio computed over a truncated aggregation is
+            # not the same measurement as one computed over the whole trace, and until now the record gave a
+            # reader no way to tell the two apart.
+            "aggregation_scope": analysis.get("aggregation_scope"),
+            "truncated": bool(analysis.get("truncated")),
+            "truncation_reason": analysis.get("truncation_reason") or "",
         },
         "attribution": {
             "cuda_runtime_links": attribution.get("cuda_runtime_links"),
@@ -1025,7 +1145,12 @@ def certify_trace_dir(
             "unlinked_kernels": attribution.get("unlinked_kernels"),
             "graph_attributed_kernels": attribution.get("graph_attributed_kernels"),
             "attributed_pct": attribution.get("attributed_pct"),
+            # The terms the percentage is a ratio of. Without them a reader cannot tell 90% of a millisecond
+            # from 90% of a minute, and the two warrant opposite reactions.
+            "attributed_gpu_ms": attribution.get("attributed_gpu_ms"),
+            "gpu_kernel_sum_ms": timeline.get("gpu_kernel_sum_ms"),
             "op_meta_coverage": _ratio(sp.cpu_op_with_meta, sp.cpu_op_total),
+            "op_meta_basis": {"cpu_op_total": sp.cpu_op_total, "cpu_op_with_meta": sp.cpu_op_with_meta},
         },
         "density": {
             "kernel_count": kernel_count,
@@ -1034,6 +1159,8 @@ def certify_trace_dir(
             "graph_launches_with_kernels": graph_with_kernels,
             "graph_launch_coverage": coverage,
             "graph_under_recorded": coverage_block.get("graph_under_recorded"),
+            # The boolean above is a comparison, so it travels with the number it was compared against.
+            "graph_under_recorded_threshold": thresholds["graph_launch_coverage_max"],
             "busy_fraction": coverage_block.get("busy_fraction"),
             "runtime_launch_count": len(sp.runtime_ts),
             "kernel_per_launch": _ratio(kernel_count, len(sp.runtime_ts)),
@@ -1066,5 +1193,8 @@ def certify_trace_dir(
         idle=gate,
         graph_under_recorded=coverage_block.get("graph_under_recorded"),
         thresholds=thresholds,
+        graph_launch_coverage=coverage,
+        op_meta_coverage=rank_record["attribution"]["op_meta_coverage"],
+        capture_op_meta_coverage=(record["trace_dir_level"].get("capture_sidecar_probe") or {}).get("op_meta_coverage"),
     )
     return record

@@ -345,11 +345,11 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_from", ["candidate", "current_best", "baseline"])
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
-@pytest.mark.parametrize("output,expected_outcome", [(20000.0, "KEEP"), (180.0, "REVERT")])
-async def test_explore_missing_axes_grades_both_sides_on_output(
-    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis, output, expected_outcome
+@pytest.mark.parametrize("output", [20000.0, 180.0])
+async def test_explore_missing_axes_fails_closed(
+    sub_agent_runner, tmp_path, monkeypatch, missing_from, missing_axis, output
 ):
-    """Incomplete AgentX evidence degrades the pair, not just one side, to output throughput."""
+    """Incomplete AgentX evidence fails closed instead of KEEPing on output throughput."""
     _force_cold_decision(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -416,31 +416,23 @@ async def test_explore_missing_axes_grades_both_sides_on_output(
     out = res.result
     tested = out["explore_search_update"]["tested"][canonical_fingerprint("--incomplete-flag", {})]
     assert tested["status"] == "succeeded"
-    assert tested["outcome"] == expected_outcome
+    assert tested["outcome"] == "FAILED"
     assert tested["graded_objective"] == "output_throughput"
     assert tested["tput"] == output
     assert tested["base_tput"] == base_tput
-    if expected_outcome == "KEEP":
-        assert tested["gain_pct"] == pytest.approx((output / base_tput - 1.0) * 100.0)
-        assert [winner["name"] for winner in out["winners"]] == ["v_incomplete"]
-        assert out["best_variant"]["name"] == "v_incomplete"
-        assert out["output_throughput"] == output
-        assert out["running_base_tput"] == output
-        assert out["losers"] == []
-    else:
-        assert tested["gain_pct"] is None
-        assert out["winners"] == []
-        assert out["best_variant"] is None
-        assert out["output_throughput"] is None
-        assert out["running_base_tput"] == base_tput
-        assert out["losers"][0]["reason"] == "gain_below_threshold"
+    assert tested["gain_pct"] is None
+    assert out["winners"] == []
+    assert out["best_variant"] is None
+    assert out["output_throughput"] is None
+    assert out["running_base_tput"] == base_tput
+    assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing_axis", ["total", "intvty"])
-@pytest.mark.parametrize("incomplete_output", [170.0, 20000.0], ids=["fallback-revert", "fallback-keep"])
+@pytest.mark.parametrize("incomplete_output", [170.0, 20000.0])
 @pytest.mark.parametrize(
     "next_intvty,next_total,intvty_outcome",
     [(363.0, 23000.0, "KEEP"), (313.0, 20000.0, "REVERT"), (335.0, 22000.0, "RECORDED")],
@@ -448,7 +440,7 @@ async def test_explore_missing_axes_grades_both_sides_on_output(
 async def test_explore_missing_axes_preserves_running_grading_anchor(
     sub_agent_runner, tmp_path, monkeypatch, missing_axis, incomplete_output, next_intvty, next_total, intvty_outcome
 ):
-    """A fallback REVERT keeps the measured anchor; a fallback KEEP degrades the next comparison."""
+    """An incomparable variant fails closed and leaves the intvty anchor on the last KEEP."""
     _force_cold_decision(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
@@ -518,28 +510,23 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert tested["v_good"]["gain_pct"] == pytest.approx(10.0)
     assert tested["v_good"]["tput"] == 180.0
     assert tested["v_incomplete"]["status"] == "succeeded"
-    fallback_kept = incomplete_output > 180.0
-    assert tested["v_incomplete"]["outcome"] == ("KEEP" if fallback_kept else "REVERT")
+    assert tested["v_incomplete"]["outcome"] == "FAILED"
     assert tested["v_incomplete"]["graded_objective"] == "output_throughput"
     assert tested["v_incomplete"]["base_tput"] == 180.0
-    expected_base = incomplete_output if fallback_kept else 180.0
-    expected_outcome = "REVERT" if fallback_kept else intvty_outcome
-    assert tested["v_next"]["base_tput"] == expected_base
-    assert tested["v_next"]["graded_objective"] == ("output_throughput" if fallback_kept else "e2e_norm_intvty_p90")
-    if expected_outcome == "REVERT":
+    assert tested["v_next"]["base_tput"] == 180.0
+    assert tested["v_next"]["graded_objective"] == "e2e_norm_intvty_p90"
+    if intvty_outcome == "REVERT":
         assert tested["v_next"]["gain_pct"] is None
     else:
         assert tested["v_next"]["gain_pct"] == pytest.approx((next_intvty / 330.0 - 1.0) * 100.0)
-    assert tested["v_next"]["outcome"] == expected_outcome
+    assert tested["v_next"]["outcome"] == intvty_outcome
     assert "--good-flag" in observed_args["v02_v_next"]
-    assert ("--incomplete-flag" in observed_args["v02_v_next"]) is fallback_kept
+    assert "--incomplete-flag" not in observed_args["v02_v_next"]
     assert "--next-flag" in observed_args["v02_v_next"]
-    expected_winners = ["v_good"] + (["v_incomplete"] if fallback_kept else [])
-    if expected_outcome == "KEEP":
-        expected_winners.append("v_next")
+    expected_winners = ["v_good"] + (["v_next"] if intvty_outcome == "KEEP" else [])
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
-    assert out["running_base_tput"] == (160.0 if expected_outcome == "KEEP" else expected_base)
+    assert out["running_base_tput"] == (160.0 if intvty_outcome == "KEEP" else 180.0)
 
 
 @pytest.mark.asyncio

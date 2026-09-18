@@ -83,10 +83,29 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
 
 
-#: ``anchor_perf`` value meaning "this round has already degraded to the output
-#: axis". Distinct from ``None``, which means "no explicit anchor supplied" and
-#: resolves the session anchor instead.
-ANCHOR_DEGRADED: Any = object()
+def resolved_grading(state: Any) -> tuple[bool, float | None]:
+    """Whether the interactivity objective applies to *state*, and the noise band it grades under.
+
+    Prefers what the session recorded at seed over re-deriving it. The derivation reads the environment, and every
+    later reader of it is somewhere the environment is not evidence: a resumed process, a re-baseline subprocess, an
+    export driven from CLOSE. Sessions seeded before ``SharedState.grading`` existed carry nothing and only those
+    derive, reporting a null band because the band they actually applied was never recorded.
+    """
+    from hyperloom.common.perf_metric import GRADED_INTVTY, intvty_serving_grading_enabled
+
+    recorded = getattr(state, "grading", None)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    objective = str(recorded.get("objective") or "").strip()
+    if objective:
+        noise_pct = recorded.get("noise_pct")
+        return objective == GRADED_INTVTY, (float(noise_pct) if isinstance(noise_pct, (int, float)) else None)
+    return (
+        intvty_serving_grading_enabled(
+            scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        ),
+        None,
+    )
 
 
 def resolve_graded_comparison(
@@ -102,12 +121,14 @@ def resolve_graded_comparison(
     # The AgentX verdict is 2-D: KEEP needs an interactivity gain clearing the threshold with throughput inside the
     # noise band, REVERT needs both axes outside it, anything else is RECORDED. Both sides come from perf snapshots,
     # which exist only when both axes are present, so a lane cannot half-apply the objective; when either side
-    # cannot supply them both degrade to output throughput together and ``degrade_reason`` says why.
+    # cannot supply them both degrade together and ``degrade_reason`` says why. The output-axis figures on a
+    # degraded pair are diagnostic only; promotion lanes read ``comparable`` and fail closed rather than KEEPing on
+    # throughput.
     #
     # ``keep_threshold_pct`` is floored at AGENTX_KEEP_THRESHOLD_FLOOR_PCT here because this is the one place every
     # lane's threshold passes through. ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes
-    # its own because variants stack within a round, and ANCHOR_DEGRADED holds a round on the output axis rather than
-    # re-resolving the session anchor the way None does.
+    # its own because variants stack within a round. The objective and the band come from ``resolved_grading``, so
+    # both are the ones the session was seeded with rather than whatever the calling process's environment holds.
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         AGENTX_KEEP_THRESHOLD_FLOOR_PCT,
@@ -118,7 +139,6 @@ def resolve_graded_comparison(
         VERDICT_RECORDED,
         VERDICT_REVERT,
         intvty_of,
-        intvty_serving_grading_enabled,
         output_tput_of,
         passes_intvty_gate,
         passes_tput_guard,
@@ -127,18 +147,10 @@ def resolve_graded_comparison(
         total_tput_of,
     )
 
+    on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
-    if intvty_serving_grading_enabled(
-        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-    ):
-        if anchor_perf is ANCHOR_DEGRADED:
-            # Already on the output axis for this round. Re-resolving the
-            # session anchor here would grade later variants on interactivity
-            # against the round's opening state while they stack on top of a
-            # KEEP that was graded on output.
-            ref_perf, reason = None, "round_degraded"
-        elif anchor_perf is not None:
+    if on_intvty:
+        if anchor_perf is not None:
             ref_perf, reason = anchor_perf, ""
         elif against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
@@ -156,10 +168,10 @@ def resolve_graded_comparison(
                     keep_threshold_pct,
                     threshold,
                 )
-            tput_holds = passes_tput_guard(cand_perf, ref_perf)
+            tput_holds = passes_tput_guard(cand_perf, ref_perf, noise_pct=noise_pct)
             if gain is not None and gain >= threshold and tput_holds:
                 verdict = VERDICT_KEEP
-            elif not passes_intvty_gate(cand_perf, ref_perf) and not tput_holds:
+            elif not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct) and not tput_holds:
                 verdict = VERDICT_REVERT
             else:
                 verdict = VERDICT_RECORDED
@@ -181,11 +193,17 @@ def resolve_graded_comparison(
         reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
     gain = gain_pct(candidate, reference) if reference > 0 else None
+    if degrade_reason:
+        # The output-axis figures are diagnostic only. A degraded AgentX pair
+        # must not read as a throughput KEEP at the resolver chokepoint.
+        verdict = VERDICT_REVERT
+    else:
+        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT,
+        verdict=verdict,
         degrade_reason=degrade_reason,
     )
 
@@ -467,6 +485,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
+    # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
+    # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
+    # mid-run, and a lost noise band would silently widen a 3.5% guard back to the 5% default. The KEEP/REVERT rule
+    # has to be the one the session started with. Empty on sessions predating the field, which fall back to deriving.
+    grading: dict[str, Any] = field(default_factory=dict)
     # Stamped once when the run objective is first met.
     target_reached_at: str = ""
     # CONC ladder for conc_sweep, seeded from the workload's own ladder by ``_parse_conc_sweep_concs``.
