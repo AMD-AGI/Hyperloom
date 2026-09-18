@@ -5,7 +5,126 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- **AgentX grading failures no longer fall back to throughput KEEP.** When an
+  AgentX session cannot grade on interactivity because either side is missing
+  the axis pair, explore, ``_lift_to_current_best``, and
+  ``resolve_graded_comparison`` fail closed instead of promoting on the
+  diagnostic output figure. The removed ``ANCHOR_DEGRADED`` round-local output
+  fallback is part of the same rule. ``degrade_reason`` still travels on the
+  explore, stack-validation and integrate rows that record a refused
+  comparison, so the breakdown can still name why a variant did not KEEP; an
+  *adoption* row can no longer carry one, because the resolver now returns
+  REVERT on a degraded pair and a REVERT never reaches the adoption writeback.
+
+- **A partitioned card is now a different machine in the KB key, so a warm-start
+  hit can no longer replay a config tuned on a differently shaped one.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. The compute-partition mode was
+  not among those dimensions, and neither was expert parallelism on a single
+  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
+  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
+  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
+  not just on a cluster: both are fixed at launch rather than explored, which is
+  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
+  read an SPX row because it is asking a different `canonical_id` — no flag, no
+  demotion, and no second comparison that could be applied to a different row
+  than the one that gets replayed, since `resolve_kb_topology` is the single call
+  both the reader and the writer build the key from. Every suffix is omitted at
+  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
+  this build does not recognise), so existing keys stay byte-identical and
+  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
+  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
+  exactly the rows these suffixes were added for.
+
+  `workload_shape` still publishes `ep` and `partitions` as a description of the
+  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
+  to 1, so publishing it would have every dense run claim a formation it never
+  chose, and one partition is the whole card. The count a launch published wins
+  over one re-derived from the mode name, so there is only ever one derivation to
+  keep in agreement.
+
+### Removed
+
+- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
+  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
+  with the pod — which was never the exposure, since framework version and
+  precision are already identity dimensions. Encoding the partition mode in the
+  key makes the mismatch it would have caught unrepresentable, so a read-side
+  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
+  written into every row's `stack_fingerprint` and compared nowhere at read time;
+  that is a real gap and is tracked in #1507 rather than under a flag whose name
+  says fingerprint and whose behaviour would have been workload shape.
+
 ### Changed
+
+- **breaking: the SBD V6 concurrency-sweep comparison rows are named for the
+  axis they carry rather than for throughput.** `baseline_throughput` →
+  `baseline_value` and `optimized_throughput` → `optimized_value` in each
+  `conc_sweep` event's `comparison` rows. The old names were a lie on an AgentX
+  session: the figure they held is whatever `result.metric` names, which is the
+  slow-tail interactivity percentile (`e2e_norm_intvty_p90`, milliseconds)
+  whenever the session grades on one, so a consumer reading `*_throughput` was
+  plotting latencies as throughputs against rungs measured in tokens/s. No
+  alias is kept — an alias would preserve exactly the misreading the rename
+  exists to stop. External parsers of `reports/sbd_v6/` must be updated.
+
+  The rows also gained `baseline_guard`, `optimized_guard` and `guard_holds`,
+  and the roll-up gained `guard_axis` and `best_conc_guard_holds`: the throughput
+  the session would have held a promotion to, reported beside the ranked axis
+  rather than enforced, so a rung that bought interactivity by giving up
+  throughput is visible as such instead of reading as a clean win. All are null
+  off the interactivity objective. `guard_holds` is tri-state — `null` means the
+  framework never answered, which is not the same fact as `false`.
+
+- **SBD V6 publishes the axis a session graded on, at the session level and on
+  each settled figure.** Three additions to the wire shape, all of them facts no
+  consumer could previously recover:
+
+  - `metadata.grading` — `{benchmark_mode, objective, tput_guard: {enabled,
+    noise_pct}}`. An AgentX replay is ranked on `e2e_norm_intvty_p90` with total
+    throughput held as a guard; a synthetic run is ranked on output throughput
+    alone. Every throughput field elsewhere in the document is the output axis by
+    construction and `benchmark_mode` never reached the breakdown at all, so
+    without this block the two kinds of session are indistinguishable — and on
+    the canonical corpus the two axes differ by roughly two orders of magnitude,
+    which is enough for a consumer to sort one against the other and never
+    notice. Recorded from `SharedState.grading` rather than re-derived at export:
+    the axis is settled once at seed, where the run can still see its own
+    configuration, and re-deriving it here would read the exporting subprocess's
+    environment. `tput_guard.noise_pct` is `null` on a session seeded before the
+    band was recorded — the band that session applied is unknown, and today's
+    default is not evidence of it.
+  - `outcome.baseline.perf` and `outcome.final.perf` — the four graded axes the
+    measurement reported (`e2e_norm_intvty_p90`, `total_throughput`,
+    `input_throughput`, `tpot_p90_ms`), each an explicit `null` where nothing
+    measured it. All four keys are always present: absent would be
+    indistinguishable from an axis the framework failed to report, and zero reads
+    as "measured, and it was zero". A synthetic run publishes four nulls.
+  - `outcome.final.graded_on` and `outcome.validation.graded_on` — the axis the
+    gain beside them is on. The stack reconciliation has to be single-axis, since
+    an attributed figure on one axis against an unattributed figure on another
+    makes the gap meaningless, and `graded_on` is what names it.
+    `outcome.validation.perf` carries the settled measurement's own axes on the
+    same row as the gain they produced, because a revalidation moves the
+    cumulative figure without re-promoting the recipe.
+
+- **Roofline CUDA graph capture failures are classified instead of retried in
+  eager mode.** When profiling cannot capture a graph, the executor records a
+  structured failure category and writes a diagnosis artifact rather than
+  rebooting the server in eager mode and retrying. Timeline rows now publish
+  ``graph_capture_disabled`` instead of ``eager_fallback_applied``. Blocking
+  filesystem and liveness probes run in ``asyncio.to_thread`` so the roofline
+  action no longer stalls the coordinator event loop.
 
 - **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
   run inside FRAMEWORK_AGENT, which left it a lane with no lifecycle of its
@@ -33,6 +152,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   window, and the baseline is Coordinator-owned while the phase is ENABLEMENT.
 
 ### Fixed
+
+- **A KernelForge Controller KEEP now reaches the stack ledger in every
+  benchmark mode, not only under AgentX.** `_run_kernel_rewrite_controller`
+  handed `integrate_controller_patches` the session-owned writeback only when
+  `agentx_active` held; every other mode fell back to a module-local recorder
+  that wrote `optimization_stack`, `current_best` and
+  `cumulative_gain_validated` directly. That writer bypassed
+  `_lift_to_current_best`, which is the only caller of
+  `stack_event.record_adoption`, so a controller KEEP in synthetic mode landed
+  in `state.json` and never produced an adoption row — `session_breakdown` sat
+  behind the state it was meant to describe.
+
+  This is visible in the document: for a non-AgentX run the kernel bucket and
+  its `by_backend.forge` split go from empty to populated, and
+  `validated_total_gain_pct` / `at_head` now account for controller KEEPs. The
+  KEEP result carries `backend: forge` / `engine: kernel_rewrite_controller`, so
+  the adoption is attributed rather than folded into `unattributed`. The local
+  recorder and the `record_keep is None` branch that selected it are gone and
+  `record_keep` is now required, so a caller cannot silently reacquire the
+  no-ledger path.
+
+- **A measured Controller patch was dropped because the patch kept before it
+  had moved its context.** Lanes run in parallel from one pinned base commit,
+  so two lanes touching the same file each ship a diff written against that
+  same base; integration applies them one at a time and commits every KEEP,
+  which leaves the later diff stale by the time its turn comes. Measured in the
+  Kimi-K3 session of 2026-09-13: `flydsl_moe_stage2` (1.1727x micro) was lost
+  to `error: patch failed: aiter/ops/flydsl/moe_kernels.py:14` once
+  `flydsl_moe_stage1` had landed, although the two touched disjoint functions
+  and defined disjoint module-level symbols -- they collided only because each
+  inserted its own sweep helpers at the same anchor. A refused diff is now
+  rebuilt in escalating steps: `git apply -3` for pure line drift, then keeping
+  both sides of every conflict region whose merge base is empty, then an LLM
+  for the regions where the lanes genuinely edited the same lines -- one region
+  at a time, carrying the surrounding source as context rather than the file to
+  rewrite. Whatever the last two steps reconstruct is discarded unless it still
+  contains every line the incoming patch and every landed KEEP added, parses,
+  carries no conflict marker and redefines no module-level name; a lane that
+  fails any of those is dropped exactly as it was before, with the worktree put
+  back to HEAD. Nothing here decides a KEEP: the E2E gate downstream still
+  measures and still reverts, so a bad merge costs what a dropped patch already
+  cost and can never produce an unmeasured KEEP. A lane that landed as a merge
+  rather than verbatim is reported as `merge_strategy` on the integration
+  result and in `summary.json`. A patch that applies cleanly takes the path it
+  always took, and the resolver runs on whichever backend
+  `preferred_agent_backend` picks for this deployment -- Claude through the
+  single-shot Anthropic transport, Codex through `achat_completion` -- and is
+  skipped entirely when neither side is credentialed.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a

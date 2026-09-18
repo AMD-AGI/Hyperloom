@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import gzip
-import hashlib
 import json
 import logging
 import os
@@ -25,7 +24,6 @@ from typing import Any, BinaryIO, Iterable, Mapping, Sequence
 import yaml
 
 from hyperloom.common.env import is_truthy
-from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -51,7 +49,6 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._file_lock import best_effort_file_lock
 from ._aiter_jit import (
     AITER_JIT_PROBE_PATHS,
     BASELINE_COLD_START_TIMEOUT_SEC,
@@ -450,30 +447,47 @@ def _claim_attempt_index(attempts: Path) -> int:
     return index
 
 
-def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+#: Capture-failure categories. ``instrumentation`` is the profiler's own shape discovery colliding with capture --
+#: the same server args capture cleanly with no profiler attached, so the fix belongs to the instrumentation.
+#: ``config`` is the server args themselves failing to capture. Roofline reports the category instead of acting on
+#: it; only baseline still uses the boolean, to decide its one-shot retry.
+CUDA_GRAPH_CAPTURE_INSTRUMENTATION = "instrumentation"
+CUDA_GRAPH_CAPTURE_CONFIG = "config"
+
+
+def _classify_cuda_graph_capture_failure(*texts: str) -> tuple[str, str]:
+    """Classify a capture failure as ``(category, matched_marker)``; empty category means no marker matched.
+
+    The marker is reported alongside the category because the match is a string heuristic: an offline reader has to
+    be able to see what fired and overrule it.
+    """
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
     # Profile-cuda-graph assert wins over the assertionerror gate.
     if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
-        return True
+        return CUDA_GRAPH_CAPTURE_INSTRUMENTATION, " + ".join(_CUDA_GRAPH_PROFILE_ASSERT_MARKERS)
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
     blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
     saw_pure_weak = False
     for idx, line in enumerate(lowered):
-        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
-        if is_strong:
+        strong = next((m for m in _CUDA_GRAPH_STRONG_MARKERS if m in line), "")
+        if strong:
             lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
             hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
             if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
-                return True
+                return CUDA_GRAPH_CAPTURE_CONFIG, strong
             continue
         if _CUDA_GRAPH_WEAK_MARKER in line:
             saw_pure_weak = True
     if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
-        return True
-    return False
+        return CUDA_GRAPH_CAPTURE_CONFIG, _CUDA_GRAPH_WEAK_MARKER
+    return "", ""
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+    return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
 # Startup-time "the GPUs are already occupied" refusals.
@@ -754,91 +768,6 @@ def _is_double_run_accuracy_handoff(
         return False
     source = str((salvaged or {}).get("source_file") or "")
     return _WARMUP_ROUND_DIR in Path(source).parts
-
-
-def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
-    """Mirror an InferenceX checkout onto stable local disk."""
-    src = str(src)
-    if (
-        os.environ.get(
-            "INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX",
-            "",
-        ).strip()
-        == "1"
-    ):
-        return src
-    try:
-        if not is_network_fs(src):
-            return src
-    except Exception:  # noqa: BLE001 — detection is best-effort
-        return src
-
-    real_src = os.path.realpath(src)
-    local_root = Path(
-        os.environ.get("INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT", "")
-        or os.path.join(
-            os.path.expanduser("~"),
-            ".cache",
-            "hyperloom",
-            "inferencex_local",
-        )
-    )
-    src_hash = hashlib.sha1(real_src.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
-    key_hash = hashlib.sha1(str(mirror_key or "").encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
-    dest_name = src_hash if not mirror_key else f"{src_hash}-{key_hash}"
-    dest = local_root / dest_name
-    try:
-        local_root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: could not create local InferenceX root %s (%s); using the network-mount checkout.",
-            local_root,
-            exc,
-        )
-        return src
-    # Lock keyed on dest so concurrent tasks mirroring the same source serialize their rmtree/replace instead of
-    # racing.
-    lock_path = str(local_root / f".{dest.name}.lock")
-    staging: Path | None = None
-    try:
-        with best_effort_file_lock(lock_path, label="baseline_executor: InferenceX mirror lock"):
-            staging = Path(tempfile.mkdtemp(dir=str(local_root)))
-            staged_ix = staging / "InferenceX"
-            # Copy the tree fresh every run because the per-task patch step rewrites the mirror in place.
-            shutil.copytree(real_src, staged_ix, symlinks=True)
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
-            os.replace(staged_ix, dest)
-    except OSError as exc:
-        log.warning(
-            "baseline_executor: could not mirror InferenceX %s to local disk "
-            "(%s); using the network-mount checkout. The #523 cuda-graph "
-            "pickle dump may ENOENT if the mount flaps mid-run.",
-            real_src,
-            exc,
-        )
-        return src
-    finally:
-        # Always clear the staging dir so it doesn't accumulate across runs.
-        if staging is not None:
-            shutil.rmtree(staging, ignore_errors=True)
-
-    if not (dest / "benchmarks" / "benchmark_lib.sh").is_file():
-        log.warning(
-            "baseline_executor: local InferenceX mirror at %s is incomplete; using original %s",
-            dest,
-            real_src,
-        )
-        shutil.rmtree(dest, ignore_errors=True)
-        return src
-    log.info(
-        "baseline_executor: #523 — mirrored InferenceX from network mount %s "
-        "to local disk %s so the server cwd (cuda-graph pickle dump target) "
-        "survives a wekafs/NFS flap.",
-        real_src,
-        dest,
-    )
-    return str(dest)
 
 
 def _git_head_sha(repo_path: str) -> str:
@@ -2673,11 +2602,6 @@ class BaselineExecutor:
         output_dir = self._resolve_workspace(ctx, "baseline")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Keep the InferenceX checkout Magpie ``cd``s into on stable local disk so SGLang's relative-path cuda-graph
-        # dump survives a wekafs/NFS flap.
-        ix_env = os.environ.get("INFERENCEX_PATH", "").strip()
-        effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
-
         # Warm patches are prepared after config/runtime preflight, immediately before the single final benchmark.
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
@@ -2727,12 +2651,12 @@ class BaselineExecutor:
                 args_mode=str(params.get("args_mode") or "append"),
                 model_path=resolved_model,
                 gpu_type=resolved_gpu,
-                inferencex_path=effective_inferencex_path,
                 benchmark_script=override_script,
                 establish_quality_ref=is_genuine_baseline,
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
+                grading=getattr(live_shared_state, "grading", None),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -2744,6 +2668,7 @@ class BaselineExecutor:
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
+        effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
         # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
         # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
         _rt_from_params = params.get("runtime_override")

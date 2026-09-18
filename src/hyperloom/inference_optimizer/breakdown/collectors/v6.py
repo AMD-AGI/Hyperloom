@@ -350,6 +350,25 @@ _BASELINE_OUTCOME_FIELDS = (
 _ANCHORING_BASELINE_STATUSES = frozenset({"succeeded", "degraded"})
 
 
+def _graded_axes(recorded: Any) -> dict[str, Any]:
+    """Publish the four graded axes a recorder projected, absent ones as explicit nulls.
+
+    The recorder already filled all four, so this only has to hold the shape for a session recorded before it did.
+    All four are always present because absent would be indistinguishable from an axis the framework failed to
+    report, and zero reads as "measured, and it was zero".
+
+    Args:
+        recorded (Any): The recorded ``perf`` block, or ``None`` on a session that has none.
+
+    Returns:
+        dict[str, Any]: The four axes, each ``None`` where nothing measured it.
+    """
+    from hyperloom.common.perf_metric import GRADED_AXIS_KEYS
+
+    source = _mapping(recorded)
+    return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
+
+
 def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
@@ -383,10 +402,13 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
             # no chronology of its own.
             anchors.append((str(action.get("end_time") or action.get("start_time") or ""), action))
     if not anchors:
-        return dict.fromkeys(_BASELINE_OUTCOME_FIELDS)
+        return {**dict.fromkeys(_BASELINE_OUTCOME_FIELDS), "perf": _graded_axes(None)}
     anchors.sort(key=lambda row: row[0])
     measurement = _mapping(anchors[-1][1].get("measurement"))
-    return {field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS}
+    return {
+        **{field: _optional_float(measurement.get(field)) for field in _BASELINE_OUTCOME_FIELDS},
+        "perf": _graded_axes(measurement.get("perf")),
+    }
 
 
 def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
@@ -433,6 +455,15 @@ def _validation_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     validations = _mapping(ledger.get("validations"))
     settled = _mapping(validations.get("settled"))
     return {
+        # The axis every percentage below shares. The reconciliation has to be single-axis: an attributed figure on
+        # one axis against an unattributed figure on another makes the gap meaningless. Read off the validation row
+        # that produced the settled figure, falling back to the axis the adoptions were graded on for a session that
+        # adopted but never validated -- and never from the session's configured axis, which says what was asked
+        # for rather than what this figure was measured on.
+        "graded_on": str(settled.get("graded_objective") or ledger.get("objective") or "") or None,
+        # The settled measurement's own axes, carried beside the gain they produced rather than read off
+        # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
+        "perf": _graded_axes(settled.get("perf")),
         "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
         "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
@@ -537,6 +568,8 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
             "either an adoption is missing from the ledger or its recorded throughputs disagree "
             "with the end-to-end measurement"
         )
+    # No note for an off-objective adoption: a comparison that cannot supply the configured axis pair fails instead
+    # of settling for another axis, so every row in this sum is on the axis ``graded_on`` names by construction.
     validations = _mapping(ledger.get("validations"))
     if not _optional_int(validations.get("count")):
         notes.append("no whole-stack validation was measured, so the ledger has nothing to reconcile against")
@@ -591,6 +624,12 @@ def collect_v6_outcome(
             # session's total means, and asking two sources the same question
             # is how the export came to publish an answer nothing measured.
             "gain_pct": validation.get("validated_total_gain_pct") or 0.0,
+            # The same axis and the same measurement as the gain above, from the one row that produced both. A
+            # consumer sorting sessions has to be able to tell an interactivity-graded AgentX result from an
+            # output-graded synthetic one: on the canonical corpus the two axes differ by two orders of magnitude,
+            # and every other throughput field in this document is the output axis by construction.
+            "graded_on": validation.get("graded_on"),
+            "perf": validation.get("perf"),
             "action_path": [str(step) for step in recipe.get("action_path") or []],
             "extra_envs": dict(_mapping(recipe.get("extra_envs"))),
             "extra_server_args": str(recipe.get("extra_server_args") or ""),
