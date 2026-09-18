@@ -76,13 +76,16 @@ Load the repository skill instructions, then run this exact optimizer command
 for the workload. Do not omit the env exports, model-class, precision, or
 launch-info-file wiring:
 
-export TP=${TP} EP=1 CONC=${CONC} ISL=${ISL} OSL=${OSL} PRECISION=${PREC} NODES=1
+export TP=${TP} EP=${EP_SIZE:-1} CONC=${CONC} ISL=${ISL} OSL=${OSL} PRECISION=${PREC} NODES=1
 export KERNEL_OPT_BACKEND_ORDER="\${KERNEL_OPT_BACKEND_ORDER:-geak}"
 python3 -m hyperloom.inference_optimizer.cli --verbose optimize \\
   --model "${MODEL_PATH:-$REPO_ID}" \\
   --framework "${FRAMEWORK}" \\
   --gpu-type "${GPU_TYPE}" \\
   --model-class "${MODEL_CLASS}" \\
+  --tp "${TP}" \\
+  --conc "${CONC}" \\
+  --ep "${EP_SIZE:-1}" \\
   --target-gain "${TARGET_GAIN}" \\
   --max-hours "${MAX_HOURS}" \\
   --tick-interval-sec 30 \\
@@ -96,13 +99,16 @@ PROMPT_EOF
 case "$BACKEND" in
   python)
     # Workload envs the Coordinator reuses for baseline -> params -> sweep.
-    export TP EP=1 CONC ISL OSL PRECISION="$PREC" NODES=1
+    export TP EP="${EP_SIZE:-1}" CONC ISL OSL PRECISION="$PREC" NODES=1
     export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
     exec python3 -m hyperloom.inference_optimizer.cli --verbose optimize \
       --model "$MODEL_PATH" \
       --framework "$FRAMEWORK" \
       --gpu-type "$GPU_TYPE" \
       --model-class "$MODEL_CLASS" \
+      --tp "$TP" \
+      --conc "$CONC" \
+      --ep "${EP_SIZE:-1}" \
       --target-gain "$TARGET_GAIN" \
       --max-hours "$MAX_HOURS" \
       --tick-interval-sec 30 \
