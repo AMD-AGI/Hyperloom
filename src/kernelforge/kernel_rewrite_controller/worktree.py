@@ -397,16 +397,28 @@ def _archive_stale_campaign_output(repo_root: Path, destination: Path) -> None:
     source = repo_root / FORGE_LOOP_OUTPUT_DIRNAME
     if not source.is_dir():
         return
-    with contextlib.suppress(OSError, shutil.Error):
+    try:
         destination.mkdir(parents=True, exist_ok=True)
         target = destination / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}"
         shutil.rmtree(target, ignore_errors=True)
         shutil.move(str(source), str(target))
+    except (OSError, shutil.Error) as exc:
+        # The borrow continues either way, and forge-loop then refuses the workspace for a
+        # leftover that is still there. Saying so here is the difference between that refusal
+        # being diagnosable and it being the undiagnosable failure this archive exists to end.
         log.warning(
-            "archived a previous campaign's %s from %s; it was left by a run that did not release the repository",
+            "could not archive a previous campaign's %s from %s (%s); the next task will be "
+            "refused for a leftover campaign until it is moved by hand",
             FORGE_LOOP_OUTPUT_DIRNAME,
             repo_root,
+            exc,
         )
+        return
+    log.warning(
+        "archived a previous campaign's %s from %s; it was left by a run that did not release the repository",
+        FORGE_LOOP_OUTPUT_DIRNAME,
+        repo_root,
+    )
 
 
 def _remove_partial_worktree(repo_root: Path, workspace: Path, branch: str) -> None:

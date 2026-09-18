@@ -617,6 +617,27 @@ def test_a_leftover_campaign_is_archived_before_the_next_borrow(
         release_operator_worktree(borrowed)
 
 
+def test_an_archive_that_failed_says_so(tmp_path: Path, monkeypatch, caplog) -> None:
+    """A silent failure here is the undiagnosable dispatch refusal this archive exists to end."""
+    import shutil as shutil_module
+
+    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
+
+    repo = tmp_path / "repo"
+    (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True)
+    monkeypatch.setattr(
+        worktree_module.shutil,
+        "move",
+        lambda *_a, **_k: (_ for _ in ()).throw(shutil_module.Error("workspace.lock is held")),
+    )
+
+    with caplog.at_level("WARNING"):
+        worktree_module._archive_stale_campaign_output(repo, tmp_path / "archive")
+
+    assert "could not archive" in caplog.text
+    assert "workspace.lock is held" in caplog.text
+
+
 def test_a_borrow_without_a_leftover_archives_nothing(tmp_path: Path, editable) -> None:
     """The common case must not leave an empty archive behind for the sweep to read."""
     repo, base_commit = _source_repo(tmp_path)
