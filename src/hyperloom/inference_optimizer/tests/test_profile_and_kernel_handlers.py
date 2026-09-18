@@ -2423,6 +2423,74 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_profile_executor_finds_a_trace_the_injected_dir_redirected(tmp_path):
+    """The profiler dir this layer injects wins, so the trace lands beside the workspace, not in it.
+
+    Magpie's launcher emits its own ``--profiler-config.torch_profiler_dir
+    <workspace>/torch_trace`` *before* EXTRA_VLLM_ARGS, so the placeholder this
+    layer appends -- the task root -- is the one vLLM resolves under its
+    dotted-flag last-wins merge. Steady-state traces therefore land directly in
+    the task root while the graph-capture sidecars go to its ``capture_traces``
+    subdirectory, and probing only the workspace found the sidecars alone.
+    """
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True)
+
+    def _fake_run(cmd, *args, **kwargs):
+        workspace = output_dir / "benchmark_vllm_20260501_001122"
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "vllm",
+                    "model": "/path/models/Qwen-Qwen3-8B",
+                    "throughput": {
+                        "request_throughput": 3.2,
+                        "output_throughput": 800.0,
+                        "total_token_throughput": 1600.0,
+                        "completed_requests": 80,
+                        "duration_seconds": 25.0,
+                    },
+                    "latency": {"ttft": {"mean_ms": 140, "p99_ms": 158}, "e2el": {"mean_ms": 2500, "p99_ms": 2580}},
+                }
+            )
+        )
+        # Magpie's own dir is created and left empty: it lost the merge.
+        (workspace / "torch_trace").mkdir(exist_ok=True)
+        capture_dir = output_dir / "capture_traces"
+        capture_dir.mkdir(exist_ok=True)
+        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"capture")
+        for rank in range(2):
+            (output_dir / f"dp0_pp0_tp{rank}_dcp0_ep{rank}_rank{rank}.1.pt.trace.json.gz").write_bytes(
+                b"steady-state" * (rank + 1)
+            )
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-redirected",
+    )
+    sub.register_executor("profile", pe)
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await sub.run_task(task)
+
+    assert res.state == "succeeded"
+    assert res.result["trace_dir"] == str(output_dir)
+    assert len(res.result["trace_files"]) == 2, "both ranks' steady-state traces"
+    assert all("graph_capture" not in path for path in res.result["trace_files"])
+    assert res.result.get("profile_trace_selection_reason") != "capture_only_fallback"
+    db.close()
+
+
 def _capture_trace_dir(
     tmp_path,
     *,

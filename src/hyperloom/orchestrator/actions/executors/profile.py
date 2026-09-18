@@ -774,11 +774,22 @@ def _preferred_main_trace_path(
 
 
 def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
+    """Trace directories to probe for a Magpie profile workspace.
+
+    The task root is probed last and on purpose. Magpie's launcher emits its own
+    ``--profiler-config.torch_profiler_dir <workspace>/torch_trace`` *before*
+    EXTRA_VLLM_ARGS, so whichever side appends last decides where the server
+    writes, and that order is not ours to rely on: the placeholder
+    ``_workload_envs`` appends -- the task root -- currently wins, which puts the
+    steady-state traces beside the workspace rather than inside it. Probing both
+    destinations answers for either order; the workspace keeps priority so a
+    round whose traces did land there is unaffected.
+    """
     return [
         workspace / "torch_trace",
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
+        workspace.parent,
     ]
 
 
