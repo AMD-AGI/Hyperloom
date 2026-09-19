@@ -285,6 +285,36 @@ when no fusion is found.
 | `--verbose` / `-v` | off | Verbose logging. |
 | `--version` | — | Print the version and exit. |
 
+## fusion-intercept
+
+Cross-checks a fusion opportunity against a CUDA-graph-ON trace of the same
+workload, to separate what graph replay has already taken from what survives it.
+`forge-fuse` reads a graph-disabled trace because replay amortizes the launches
+fusion removes, which makes that trace the only place the opportunity is visible
+and also the reason its size is not the opportunity production still has.
+
+The split follows what fusion earns. Replay closes the gaps between tiny kernels,
+so the launch half shows up as the rise in GPU-busy-of-wall between the two traces.
+A fused kernel also keeps intermediates in registers instead of round-tripping
+HBM, which replay cannot touch, so the memory half is measured on the graph-ON
+trace and survives whatever replay did.
+
+`headroom_remains` means surviving traffic clears `--min-gain`, or replay left the
+gaps open. `intercepted` means both channels are spent. Two verdicts are input
+problems rather than results and exit 2: `not_comparable`, when the launch-bound
+share moved sharply between captures and so they did not record the same code path,
+since replay changes the gaps and never which kernels run; and
+`graphs_not_active`, when the graph-ON trace is no busier than its pair, which
+would otherwise read as "nothing was intercepted".
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--cgoff-trace <file>` | none | Decode kineto trace captured with CUDA graphs **disabled** — the one discovery reads. Required. |
+| `--cgon-trace <file>` | none | Decode kineto trace of the **same** workload captured with CUDA graphs **enabled**. Required. |
+| `--decode-batch <n>` | `16` | Decode batch the traces were captured at; the gain estimate shrinks at larger batch. |
+| `--min-gain <f>` | `0.03` | Acceptance bar for surviving gain, as a fraction. |
+| `--json` | off | Emit the full report as JSON instead of the two-column table. |
+
 ## gemm-tune
 
 Tunes vendor GEMM libraries for one model. It reads no knowledge base: every run
