@@ -2335,7 +2335,9 @@ def test_single_server_reuse_exception_recorded_as_failed(
     failed = [p for p in all_points if p["status"] == "failed"]
     # Each arm: boot(conc16) ok, reuse(conc4) raises → at least 2 failed points.
     assert len(failed) >= 2
-    assert any((p.get("error_class") or "").startswith("single_server_reuse") for p in failed)
+    # The exception's own type survives; the round it broke in is the message.
+    assert any(p.get("error_class") == "RuntimeError" for p in failed)
+    assert any((p.get("error") or "").startswith("single_server_reuse: ") for p in failed)
 
 
 def test_single_server_reuse_loop_budget_exhausted(
@@ -2405,7 +2407,8 @@ def test_single_server_boot_exception_falls_back(
     # conc64 boot exception → recorded as failed; conc16 boots and succeeds.
     failed = [p for p in all_points if p["status"] == "failed" and p["conc"] == 64]
     assert len(failed) >= 1
-    assert any((p.get("error_class") or "").startswith("single_server_boot") for p in failed)
+    assert any(p.get("error_class") == "RuntimeError" for p in failed)
+    assert any((p.get("error") or "").startswith("single_server_boot: ") for p in failed)
 
 
 def test_single_server_pre_arm_skip_on_closing_phase(

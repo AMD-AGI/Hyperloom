@@ -769,7 +769,7 @@ class RooflineEventRecorder:
             payload={
                 "failed_substep": SUBSTEP_ANALYSIS if analysis else SUBSTEP_PROFILE,
                 "failure": _failure_row(
-                    phase=phase,
+                    stage=phase,
                     error_class=error_class or f"{phase}_failed",
                     message=message,
                 ),

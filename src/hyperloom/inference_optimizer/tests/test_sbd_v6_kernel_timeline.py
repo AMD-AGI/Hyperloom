@@ -812,7 +812,7 @@ def test_a_phase_crash_closes_the_event_naming_the_stage(tmp_path):
     event = _kernel_events(tmp_path)[0]
     assert event["status"] == "failed"
     assert event["end_time"]
-    assert event["ext"]["failure"]["phase"] == "forge_fusion"
+    assert event["ext"]["failure"]["stage"] == "forge_fusion"
     assert event["ext"]["failure"]["error_class"] == "RuntimeError"
 
 

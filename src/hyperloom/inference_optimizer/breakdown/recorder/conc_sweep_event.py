@@ -29,7 +29,7 @@ from typing import Any
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
-    clip as _clip,
+    failure_row as _failure_row,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
@@ -210,6 +210,9 @@ class ConcSweepEventRecorder:
         # The pair table is rebuilt on every flush, so keeping the measurements
         # here avoids reading rows back to say why a rung had no partner.
         self._points: dict[str, dict[int, dict[str, Any]]] = {ARM_BASELINE: {}, ARM_OPTIMIZED: {}}
+        # One row per sweep, so a second fault has to be written alongside the
+        # first rather than over it.
+        self._faults: list[dict[str, Any]] = []
         given = _as_dict(params)
         self._sink.record(
             SECTION_ACTION,
@@ -274,7 +277,7 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the shape the ladder is swept over. Which axis pair the points
         are drawn on follows from ``benchmark_mode``, so a reader never infers
-        it from whether ``intvty_p90`` happens to be null."""
+        it from whether ``e2e_norm_intvty_p90`` happens to be null."""
         self._record_action(
             {
                 "workload": {
@@ -541,6 +544,31 @@ class ConcSweepEventRecorder:
         """Record that one arm has finished its ladder."""
         self._record_arm(arm, {"status": _text(status), "end_time": _now_iso()})
 
+    def fail_arm(self, arm: str, exc: BaseException) -> None:
+        """Record that one arm's ladder raised instead of ending on its own.
+
+        Such an arm never reports ``succeeded``: whatever it measured is short
+        of the ladder it was asked for. Whether it measured anything is read off
+        the rungs recorded here rather than taken from the caller, since a
+        ladder that raised never handed its results back.
+        """
+        measured = any(
+            _text(point.get("status")).strip().lower() in _OK_POINT_STATUSES
+            for point in self._points.get(_text(arm), {}).values()
+        )
+        self._record_arm(
+            arm,
+            {
+                "status": "degraded" if measured else "failed",
+                "end_time": _now_iso(),
+                "failure": _failure_row(
+                    stage="arm_ladder",
+                    error_class=type(exc).__name__,
+                    message=exc,
+                ),
+            },
+        )
+
     # ---- rungs -----------------------------------------------------------
 
     def record_variant(
@@ -665,22 +693,45 @@ class ConcSweepEventRecorder:
     def record_declined(self, payload: Mapping[str, Any] | None) -> None:
         """Close a sweep that declined before it ran anything. The reason -- no
         baseline to compare against, a missing workload shape, no optimization
-        yet -- is what a reader wants of a phase that produced no curve."""
+        yet -- is what a reader wants of a phase that produced no curve.
+
+        Nearly every refusal is a pre-flight condition rather than an error, so
+        the failure block is written only when one actually broke: an empty one
+        on ``no_baseline_tput`` would claim something went wrong."""
         envelope = _as_dict(payload)
-        self._close(
-            "skipped",
-            {
-                "result": {
-                    "status": "skipped",
-                    "skip_reason": _text(envelope.get("skip_reason")),
-                    "declined": True,
-                },
-                "failure": {
-                    "error_class": _text(envelope.get("error_class")),
-                    "message": _clip(envelope.get("error"), 2000),
-                },
+        action: dict[str, Any] = {
+            "result": {
+                "status": "skipped",
+                "skip_reason": _text(envelope.get("skip_reason")),
+                "declined": True,
             },
-        )
+        }
+        if envelope.get("error_class") or envelope.get("error"):
+            action["failure"] = _failure_row(
+                stage="decline",
+                error_class=_text(envelope.get("error_class")),
+                message=envelope.get("error"),
+            )
+        self._close("skipped", action)
+
+    def record_fault(
+        self,
+        *,
+        stage: str,
+        exc: BaseException | None = None,
+        error_class: str = "",
+        message: Any = "",
+    ) -> None:
+        """Record a step that raised while the sweep carried on.
+
+        A sweep that could not resolve a lifecycle, write its report, or clean
+        up after itself is not a failed sweep, so none of this belongs in
+        ``failure``. It does not belong only in a log either: the step that
+        broke is exactly what the report has no field for, and what makes an
+        otherwise clean sweep readable when its artifacts are missing.
+        """
+        self._faults.append(_failure_row(stage=stage, exc=exc, error_class=error_class, message=message))
+        self._record_action({"faults": list(self._faults)})
 
     def finish(self, payload: Mapping[str, Any] | None, *, stop_reason: Any = None) -> None:
         """Close the sweep on the report it produced.
@@ -688,7 +739,11 @@ class ConcSweepEventRecorder:
         The payload is the sweep's own final document, so the fields taken off
         it here are the ones it settles only at the end: the ceiling, the
         roll-up over the pairs, and the budget state after both arms have run.
-        ``stop_reason`` is set when the session's end cut the sweep short.
+
+        ``stop_reason`` is set when the session's end cut the sweep short, and
+        belongs beside the rest of how the run went rather than in ``failure``:
+        a sweep the session stopped measured what it got to, and nothing about
+        it failed.
         """
         final = _as_dict(payload)
         status = _text(final.get("status")) or "failed"
@@ -714,13 +769,10 @@ class ConcSweepEventRecorder:
                 "elapsed_sec": _float_or_none(final.get("elapsed_sec")),
                 "budget_remaining_sec": _float_or_none(final.get("budget_remaining_sec")),
                 "budget_skip_reason": _text(final.get("budget_skip_reason")),
+                "stop_reason": _text(stop_reason),
             },
             "roofline_ceiling": _as_dict(final.get("roofline_ceiling")) or None,
             "schema_version": _text(final.get("schema_version")),
-            "failure": {
-                "stop_reason": _text(stop_reason),
-                "message": _text(final.get("budget_skip_reason")) or _text(final.get("skip_reason")),
-            },
         }
         report_path = _text_or_none(final.get("report_json_path"))
         if report_path:
@@ -736,10 +788,11 @@ class ConcSweepEventRecorder:
             "failed",
             {
                 "result": {"status": "failed", "declined": False},
-                "failure": {
-                    "error_class": type(exc).__name__,
-                    "message": _clip(exc, 2000),
-                },
+                "failure": _failure_row(
+                    stage=EVENT_TYPE,
+                    error_class=type(exc).__name__,
+                    message=exc,
+                ),
             },
         )
 
@@ -825,6 +878,7 @@ def _assemble_arm(
         "lifecycle": _as_dict(row.get("lifecycle")),
         "serving_lease_held": row.get("serving_lease_held"),
         "refused": _as_dict(row.get("refused")) or None,
+        "failure": _as_dict(row.get("failure")) or None,
         "grid": _as_list(row.get("grid")),
         "boot": boot,
         "points": points,
@@ -883,7 +937,11 @@ def assemble_conc_sweep_ext(
             "duration_sec": row.get("duration_sec"),
         },
         "artifacts": _as_dict(row.get("artifacts")),
-        "failure": _as_dict(row.get("failure")),
+        # Steps that raised and were recovered from, in the order they broke.
+        # Empty on a sweep where nothing did.
+        "faults": _as_list(row.get("faults")),
+        # Absent on a sweep that did not fail, the way every other event reads.
+        "failure": _as_dict(row.get("failure")) or None,
     }
     if len(action_rows) > 1:
         # One phase and cycle enqueue one sweep, so this cannot happen through
@@ -895,6 +953,12 @@ def assemble_conc_sweep_ext(
     if status == "succeeded" and result.get("budget_exhausted"):
         # A curve cut short by the time budget still produced usable pairs,
         # but not the ladder that was asked for.
+        status = "degraded"
+    ladders_run = [arm for arm in ext["arms"].values() if _text(arm.get("start_time"))]
+    if status == "succeeded" and any(_text(arm.get("status")) != "succeeded" for arm in ladders_run):
+        # A ladder that lost rungs is the same shortfall one level down, and
+        # the sweep cannot read as whole while an arm under it does not. An arm
+        # with no row never ran, which is not the same as falling short.
         status = "degraded"
     return ext, status
 

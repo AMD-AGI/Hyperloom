@@ -264,13 +264,13 @@ def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _failure(result: Mapping[str, Any], *, phase: str) -> dict[str, Any] | None:
+def _failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] | None:
     """Project a failed result's failure row, or ``None`` when it succeeded."""
     if str(result.get("status") or "") == "succeeded":
         return None
     return {
         **_failure_row(
-            phase=phase,
+            stage=stage,
             error_class=str(result.get("error_class") or ""),
             message=result.get("error") or "",
         ),
@@ -473,7 +473,7 @@ class BaselineEventRecorder:
                 # to it; the declared half is on the run that decided it.
                 "invocation": _observed_invocation(payload),
                 "warnings": _warnings(payload),
-                "failure": _failure(payload, phase=f"round_{label}"),
+                "failure": _failure(payload, stage=f"round_{label}"),
             },
             row_type=ROW_ROUND,
             natural_ids=(self._action_id, str(int(run_index)), str(label)),
@@ -504,7 +504,7 @@ class BaselineEventRecorder:
                 "convergence": _as_dict(payload.get("baseline_convergence")) or None,
                 "accuracy_stage": _as_dict(payload.get("accuracy_stage")) or None,
                 "cold_anchor": dropped or None,
-                "failure": _failure(payload, phase=EVENT_TYPE),
+                "failure": _failure(payload, stage=EVENT_TYPE),
             },
         )
 
@@ -533,7 +533,7 @@ class BaselineEventRecorder:
             status="failed",
             action={
                 "failure": _failure_row(
-                    phase=EVENT_TYPE,
+                    stage=EVENT_TYPE,
                     error_class=type(exc).__name__,
                     message=f"baseline action raised: {exc!r}",
                 )

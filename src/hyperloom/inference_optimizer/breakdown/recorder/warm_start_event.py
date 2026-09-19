@@ -28,6 +28,7 @@ from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
+    failure_row as _failure_row,
     float_or_none as _float_or_none,
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
@@ -242,11 +243,14 @@ class WarmStartEventRecorder:
         match_status: str,
         matched: Mapping[str, Any] | None = None,
         error: str = "",
+        exc: BaseException | None = None,
     ) -> None:
         """Settle the lookup on one of ``hit`` / ``seed_only`` / ``miss``.
 
-        ``error`` carries the exception class name when the lookup itself
-        failed, which is not the same as having looked and found nothing.
+        ``exc`` (or ``error`` as a bare class name) carries the exception when
+        the lookup itself failed, which is not the same as having looked and
+        found nothing. The failure block is the canonical
+        ``{stage, error_class, message}`` shape every other event uses.
         """
         if self._closed:
             return
@@ -254,7 +258,8 @@ class WarmStartEventRecorder:
         self._release()
         end_time = _now()
         found = str(match_status or "").strip().lower()
-        status = _status_for(found, error=error)
+        failed = exc is not None or bool(error)
+        status = _status_for(found, error="failed" if failed else "")
         payload: dict[str, Any] = {
             "status": status,
             "match_status": found,
@@ -263,8 +268,10 @@ class WarmStartEventRecorder:
         }
         if matched:
             payload["matched"] = dict(matched)
-        if error:
-            payload["failure"] = {"error_class": str(error)}
+        if exc is not None:
+            payload["failure"] = _failure_row(stage="lookup", exc=exc)
+        elif error:
+            payload["failure"] = _failure_row(stage="lookup", error_class=str(error))
         self._sink.record(SECTION_EVENT, payload)
 
         from .assembler import warm_start_event_parts
@@ -351,10 +358,8 @@ def assemble_warm_start_ext(
         "match_status": str(header.get("match_status") or ""),
         "matched": _as_dict(header.get("matched")) or None,
         "reads": _reads_block(reads),
+        "failure": _as_dict(header.get("failure")) or None,
     }
-    failure = _as_dict(header.get("failure"))
-    if failure:
-        ext["failure"] = failure
     return ext, str(header.get("status") or "")
 
 
