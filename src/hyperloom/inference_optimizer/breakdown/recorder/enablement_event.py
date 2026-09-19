@@ -42,7 +42,6 @@ from .event_timeline import finish_event, open_event
 # Every section an enablement event assembles from. Named from the leaf module
 # the assembler shares, so this writer reads its parts without an import cycle.
 from .sections import ENABLEMENT_EVENT_SECTIONS
-from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -116,16 +115,17 @@ def enablement_event_id() -> str:
 
 
 def _sink() -> EventSink | None:
-    """The sink rows are written through; ``None`` when no session is bound."""
-    try:
-        from ...session.session_binding import bound_session_or_none
+    """The sink rows are written through; ``None`` when no session is bound.
 
-        if bound_session_or_none() is None:
-            return None
-        return make_sink(enablement_event_id(), producer=PRODUCER)
-    except Exception as exc:  # noqa: BLE001 — the lane outranks its own record
-        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot resolve a sink")
+    The rows themselves are written best-effort by the sink, so nothing below
+    guards its own writes: a spool that cannot be written drops the row there
+    and the lane carries on.
+    """
+    from ...session.session_binding import bound_session_or_none
+
+    if bound_session_or_none() is None:
         return None
+    return make_sink(enablement_event_id(), producer=PRODUCER)
 
 
 def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | None:
@@ -179,37 +179,34 @@ def record_trigger(
     ``accuracy_below_floor`` to an empty ``accuracy_unavailable``. The accuracy
     fields are eval-origin only.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open(mode=mode, origin=origin)
-        if _recorded_trigger():
-            # Keyed rows deep-merge, so a second trigger would overwrite the
-            # first field by field; mode and origin are already on the shell.
-            return
-        trigger: dict[str, Any] = {
-            "kind": str(kind or ""),
-            "recorded_at": _now(),
-            "evidence_excerpt": _tail(evidence),
-            "observed_accuracy": _float_or_none(observed_accuracy),
-            "accuracy_floor": _float_or_none(accuracy_floor),
-            "observed_task": _text_or_none(observed_task),
-            "observed_metric": _text_or_none(observed_metric),
-            "eval_contract_fingerprint": _text_or_none(eval_contract_fingerprint),
-            "probe_config_path": _text_or_none(probe_config_path),
-        }
-        sink.record(
-            SECTION_EVENT,
-            {
-                "mode": str(mode or ""),
-                "origin": str(origin or ""),
-                # Under its own key so a later write cannot flatten it.
-                "trigger": trigger,
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 — the lane outranks its own record
-        note_failure(section="enablement_event", error=exc, detail="enablement event: trigger record failed")
+    sink = _sink()
+    if sink is None:
+        return
+    _open(mode=mode, origin=origin)
+    if _recorded_trigger():
+        # Keyed rows deep-merge, so a second trigger would overwrite the
+        # first field by field; mode and origin are already on the shell.
+        return
+    trigger: dict[str, Any] = {
+        "kind": str(kind or ""),
+        "recorded_at": _now(),
+        "evidence_excerpt": _tail(evidence),
+        "observed_accuracy": _float_or_none(observed_accuracy),
+        "accuracy_floor": _float_or_none(accuracy_floor),
+        "observed_task": _text_or_none(observed_task),
+        "observed_metric": _text_or_none(observed_metric),
+        "eval_contract_fingerprint": _text_or_none(eval_contract_fingerprint),
+        "probe_config_path": _text_or_none(probe_config_path),
+    }
+    sink.record(
+        SECTION_EVENT,
+        {
+            "mode": str(mode or ""),
+            "origin": str(origin or ""),
+            # Under its own key so a later write cannot flatten it.
+            "trigger": trigger,
+        },
+    )
 
 
 def record_dispatch(
@@ -229,26 +226,23 @@ def record_dispatch(
     by every advance, and the classified kind only ever existed in the params
     this dispatch built.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open(mode=mode, origin=origin)
-        sink.record(
-            SECTION_ATTEMPT,
-            {
-                "attempt": int(attempt or 0),
-                "task_id": str(task_id or ""),
-                "failure_kind": str(failure_kind or ""),
-                "dispatched_at": _now(),
-                "launch_log_excerpt": _tail(launch_log),
-                "candidate_refs": [str(ref) for ref in _as_list(candidate_refs)],
-            },
-            row_type="attempt",
-            natural_ids=_row_id(task_id, attempt),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: dispatch record failed")
+    sink = _sink()
+    if sink is None:
+        return
+    _open(mode=mode, origin=origin)
+    sink.record(
+        SECTION_ATTEMPT,
+        {
+            "attempt": int(attempt or 0),
+            "task_id": str(task_id or ""),
+            "failure_kind": str(failure_kind or ""),
+            "dispatched_at": _now(),
+            "launch_log_excerpt": _tail(launch_log),
+            "candidate_refs": [str(ref) for ref in _as_list(candidate_refs)],
+        },
+        row_type="attempt",
+        natural_ids=_row_id(task_id, attempt),
+    )
 
 
 def record_archive(*, task_id: str, attempt: int, files: Sequence[Mapping[str, str]]) -> None:
@@ -263,25 +257,22 @@ def record_archive(*, task_id: str, attempt: int, files: Sequence[Mapping[str, s
     Upserts onto the row the dispatch opened, so it wants the same
     ``(task_id, attempt)``.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open()
-        archived = _archived_files(files)
-        sink.record(
-            SECTION_ATTEMPT,
-            {
-                "attempt": int(attempt or 0),
-                "task_id": str(task_id or ""),
-                "files": archived,
-                "accepted_config_path": _text_or_none(_archived_path(archived, ROLE_LAUNCH_CONFIG)),
-            },
-            row_type="attempt",
-            natural_ids=_row_id(task_id, attempt),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: archive record failed")
+    sink = _sink()
+    if sink is None:
+        return
+    _open()
+    archived = _archived_files(files)
+    sink.record(
+        SECTION_ATTEMPT,
+        {
+            "attempt": int(attempt or 0),
+            "task_id": str(task_id or ""),
+            "files": archived,
+            "accepted_config_path": _text_or_none(_archived_path(archived, ROLE_LAUNCH_CONFIG)),
+        },
+        row_type="attempt",
+        natural_ids=_row_id(task_id, attempt),
+    )
 
 
 def record_round(
@@ -303,109 +294,98 @@ def record_round(
     What the archive took is :func:`record_archive`'s to write, not a field of
     the verdict.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open()
-        res = _as_dict(result)
-        status = str(res.get("status") or "")
-        advanced = status == ROUND_ADVANCED or bool(res.get("advanced"))
-        row: dict[str, Any] = {
-            "attempt": int(attempt or 0),
-            "task_id": str(task_id or ""),
-            "settled_at": _now(),
-            "status": status,
-            "advanced": advanced,
-            "reason": str(res.get("reason") or ""),
-            "landed": bool(succeeded),
-            "validation_pending": bool(validation_pending),
-            "stall_streak_after": int(stall_streak or 0),
-            "patches_applied": [str(p) for p in _as_list(res.get("patches_applied")) if str(p)],
-            "artifacts_applied": [
-                _artifact_row(a) for a in _as_list(res.get("artifacts_applied")) if isinstance(a, dict)
-            ],
-            "setup_commands_applied": [str(c) for c in _as_list(res.get("setup_commands_applied")) if str(c)],
-            "patches_dropped_by_grounding": [str(d) for d in _as_list(res.get("patches_dropped_by_grounding"))[:8]],
-            "patches_span_multiple_roots": bool(res.get("patches_span_multiple_roots")),
-            "framework_root": _text_or_none(res.get("framework_root")),
-            "effective_config": _config_row(res.get("enablement_effective_config")),
-            "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
-            "runtime": _runtime_row(res.get("enablement_active_runtime")),
-            "localization_manifest": _as_dict(res.get("enablement_localization_manifest")) or None,
-            # The next round's gap, on the round that revealed it.
-            "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
-        }
-        sink.record(SECTION_ATTEMPT, row, row_type="attempt", natural_ids=_row_id(task_id, attempt))
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: round record failed")
+    sink = _sink()
+    if sink is None:
+        return
+    _open()
+    res = _as_dict(result)
+    status = str(res.get("status") or "")
+    advanced = status == ROUND_ADVANCED or bool(res.get("advanced"))
+    row: dict[str, Any] = {
+        "attempt": int(attempt or 0),
+        "task_id": str(task_id or ""),
+        "settled_at": _now(),
+        "status": status,
+        "advanced": advanced,
+        "reason": str(res.get("reason") or ""),
+        "landed": bool(succeeded),
+        "validation_pending": bool(validation_pending),
+        "stall_streak_after": int(stall_streak or 0),
+        "patches_applied": [str(p) for p in _as_list(res.get("patches_applied")) if str(p)],
+        "artifacts_applied": [_artifact_row(a) for a in _as_list(res.get("artifacts_applied")) if isinstance(a, dict)],
+        "setup_commands_applied": [str(c) for c in _as_list(res.get("setup_commands_applied")) if str(c)],
+        "patches_dropped_by_grounding": [str(d) for d in _as_list(res.get("patches_dropped_by_grounding"))[:8]],
+        "patches_span_multiple_roots": bool(res.get("patches_span_multiple_roots")),
+        "framework_root": _text_or_none(res.get("framework_root")),
+        "effective_config": _config_row(res.get("enablement_effective_config")),
+        "stack_action": _stack_action_row(res.get("enablement_kept_stack_action")),
+        "runtime": _runtime_row(res.get("enablement_active_runtime")),
+        "localization_manifest": _as_dict(res.get("enablement_localization_manifest")) or None,
+        # The next round's gap, on the round that revealed it.
+        "next_launch_log_excerpt": _tail(res.get("enablement_launch_log")),
+    }
+    sink.record(SECTION_ATTEMPT, row, row_type="attempt", natural_ids=_row_id(task_id, attempt))
 
 
 def record_human_review(*, digest: str, failure_kind: str, reason: str = "", signature: Any = None) -> None:
     """Record a launch failure the lane could not act on, keyed by ``digest``.
 
-    Never raises. Such a log dispatches nothing, so it leaves no round behind.
+    Such a log dispatches nothing, so it leaves no round behind.
     """
-    try:
-        sink = _sink()
-        if sink is None or not str(digest or "").strip():
-            return
-        _open()
-        sink.record(
-            SECTION_HUMAN_REVIEW,
-            {
-                "digest": str(digest),
-                "failure_kind": str(failure_kind or ""),
-                "reason": _clip(reason, 400),
-                "signature": _as_dict(signature) or None,
-                "recorded_at": _now(),
-            },
-            row_type="human_review",
-            natural_ids=str(digest),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: human-review record failed")
+    sink = _sink()
+    if sink is None or not str(digest or "").strip():
+        return
+    _open()
+    sink.record(
+        SECTION_HUMAN_REVIEW,
+        {
+            "digest": str(digest),
+            "failure_kind": str(failure_kind or ""),
+            "reason": _clip(reason, 400),
+            "signature": _as_dict(signature) or None,
+            "recorded_at": _now(),
+        },
+        row_type="human_review",
+        natural_ids=str(digest),
+    )
 
 
 def record_build(*, task_id: str, entry: Mapping[str, Any] | None = None, novelty_key: str = "") -> None:
-    """Record one ``BuildResult.to_state()`` entry, keyed by ``task_id``. Never raises."""
-    try:
-        sink = _sink()
-        if sink is None or not str(task_id or "").strip():
-            return
-        _open()
-        manifest = _as_dict(entry)
-        action = _as_dict(manifest.get("action"))
-        installed = _as_dict(manifest.get("installed_versions"))
-        row: dict[str, Any] = {
-            "task_id": str(task_id),
-            "recorded_at": _now(),
-            "component": str(action.get("component") or manifest.get("component") or ""),
-            "ref": str(
-                installed.get("aiter_ref")
-                or installed.get("vllm_ref")
-                or installed.get("sgl_kernel_ref")
-                or action.get("ref")
-                or ""
-            ),
-            "gpu_arch": str(installed.get("arch") or action.get("gpu_arch") or ""),
-            "max_jobs": int(action.get("max_jobs") or 0),
-            "installed_versions": {str(k): str(v) for k, v in installed.items()},
-            "build_probes": [str(p) for p in _as_list(manifest.get("build_probes"))[:8]],
-            "build_log_path": _text_or_none(manifest.get("build_log_path")),
-            "attempt_root": _text_or_none(manifest.get("attempt_root")),
-        }
-        if novelty_key:
-            row["novelty_key"] = str(novelty_key)
-        # ``ok`` separates a build that ran from a verdict-less sentinel,
-        # whose row still belongs on the timeline.
-        if manifest.get("ok") is not None:
-            row["ok"] = bool(manifest.get("ok"))
-            row["failure_class"] = str(manifest.get("failure_class") or "ok")
-            row["failure_summary"] = _clip(manifest.get("failure_summary"), 1000)
-        sink.record(SECTION_BUILD, row, row_type="build", natural_ids=str(task_id))
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: build record failed")
+    """Record one ``BuildResult.to_state()`` entry, keyed by ``task_id``."""
+    sink = _sink()
+    if sink is None or not str(task_id or "").strip():
+        return
+    _open()
+    manifest = _as_dict(entry)
+    action = _as_dict(manifest.get("action"))
+    installed = _as_dict(manifest.get("installed_versions"))
+    row: dict[str, Any] = {
+        "task_id": str(task_id),
+        "recorded_at": _now(),
+        "component": str(action.get("component") or manifest.get("component") or ""),
+        "ref": str(
+            installed.get("aiter_ref")
+            or installed.get("vllm_ref")
+            or installed.get("sgl_kernel_ref")
+            or action.get("ref")
+            or ""
+        ),
+        "gpu_arch": str(installed.get("arch") or action.get("gpu_arch") or ""),
+        "max_jobs": int(action.get("max_jobs") or 0),
+        "installed_versions": {str(k): str(v) for k, v in installed.items()},
+        "build_probes": [str(p) for p in _as_list(manifest.get("build_probes"))[:8]],
+        "build_log_path": _text_or_none(manifest.get("build_log_path")),
+        "attempt_root": _text_or_none(manifest.get("attempt_root")),
+    }
+    if novelty_key:
+        row["novelty_key"] = str(novelty_key)
+    # ``ok`` separates a build that ran from a verdict-less sentinel,
+    # whose row still belongs on the timeline.
+    if manifest.get("ok") is not None:
+        row["ok"] = bool(manifest.get("ok"))
+        row["failure_class"] = str(manifest.get("failure_class") or "ok")
+        row["failure_summary"] = _clip(manifest.get("failure_summary"), 1000)
+    sink.record(SECTION_BUILD, row, row_type="build", natural_ids=str(task_id))
 
 
 def record_revalidation(
@@ -415,27 +395,24 @@ def record_revalidation(
     config_path: str = "",
     reason: str = "",
 ) -> None:
-    """Record a revalidation window opening, keyed by ``generation``. Never raises."""
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open()
-        row: dict[str, Any] = {"generation": int(generation or 0), "opened_at": _now()}
-        if task_id:
-            row["task_id"] = str(task_id)
-        if config_path:
-            row["config_path"] = str(config_path)
-        if reason:
-            row["reason"] = str(reason)
-        sink.record(
-            SECTION_REVALIDATION,
-            row,
-            row_type="revalidation",
-            natural_ids=str(int(generation or 0)),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: revalidation record failed")
+    """Record a revalidation window opening, keyed by ``generation``."""
+    sink = _sink()
+    if sink is None:
+        return
+    _open()
+    row: dict[str, Any] = {"generation": int(generation or 0), "opened_at": _now()}
+    if task_id:
+        row["task_id"] = str(task_id)
+    if config_path:
+        row["config_path"] = str(config_path)
+    if reason:
+        row["reason"] = str(reason)
+    sink.record(
+        SECTION_REVALIDATION,
+        row,
+        row_type="revalidation",
+        natural_ids=str(int(generation or 0)),
+    )
 
 
 def record_revalidation_outcome(
@@ -448,39 +425,34 @@ def record_revalidation_outcome(
     error_class: str = "",
     reason: str = "",
 ) -> None:
-    """Record how a revalidation window closed. Never raises.
+    """Record how a revalidation window closed.
 
     ``error_class`` is set only when the baseline failed rather than measuring
     under the floor; a window the run stopped is not a window that failed.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        _open()
-        row: dict[str, Any] = {
-            "generation": int(generation or 0),
-            "closed_at": _now(),
-            "promoted": bool(promoted),
-            "accuracy": _float_or_none(accuracy),
-            "accuracy_floor": _float_or_none(accuracy_floor),
-        }
-        if task_id:
-            row["task_id"] = str(task_id)
-        if error_class:
-            row["error_class"] = str(error_class)
-        if reason:
-            row["reason"] = str(reason)
-        sink.record(
-            SECTION_REVALIDATION,
-            row,
-            row_type="revalidation",
-            natural_ids=str(int(generation or 0)),
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(
-            section="enablement_event", error=exc, detail="enablement event: revalidation outcome record failed"
-        )
+    sink = _sink()
+    if sink is None:
+        return
+    _open()
+    row: dict[str, Any] = {
+        "generation": int(generation or 0),
+        "closed_at": _now(),
+        "promoted": bool(promoted),
+        "accuracy": _float_or_none(accuracy),
+        "accuracy_floor": _float_or_none(accuracy_floor),
+    }
+    if task_id:
+        row["task_id"] = str(task_id)
+    if error_class:
+        row["error_class"] = str(error_class)
+    if reason:
+        row["reason"] = str(reason)
+    sink.record(
+        SECTION_REVALIDATION,
+        row,
+        row_type="revalidation",
+        natural_ids=str(int(generation or 0)),
+    )
 
 
 def finish(
@@ -498,60 +470,57 @@ def finish(
     framework_root: str = "",
     stall_streak: int = 0,
 ) -> None:
-    """Close the lane on the terminal it reached. Never raises.
+    """Close the lane on the terminal it reached.
 
     Called where the terminal is *set*, not where it is later observed. A lane
     still working when the session ended is not closed here at all: finalize
     recovers it as ``interrupted``, because nothing judged it. ``outcome`` is
     :data:`OUTCOME_SUCCEEDED` or :data:`OUTCOME_STALLED`.
     """
-    try:
-        sink = _sink()
-        if sink is None:
-            return
-        sequence = _open()
-        end_time = _now()
-        settled = str(outcome or "").strip().lower() or OUTCOME_PENDING
-        active = _runtime_row(active_runtime)
-        active_root = str(active.get("venv_root") or "") if active else ""
-        result: dict[str, Any] = {
-            "outcome": settled,
-            "reason": str(reason or ""),
-            "stall_streak": int(stall_streak or 0),
-            "kept_patches": [str(p) for p in _as_list(kept_patches) if str(p)],
-            "kept_artifacts": [_artifact_row(a) for a in _as_list(kept_artifacts) if isinstance(a, dict)],
-            "setup_commands": [str(c) for c in _as_list(setup_commands) if str(c)],
-            "accepted_config": _config_row(accepted_config),
-            "accepted_config_path": _text_or_none(accepted_config_path),
-            "setting_script": _text_or_none(setting_script),
-            "framework_root": _text_or_none(framework_root),
-            "active_runtime": active or None,
-            "attempt_runtimes": [
-                _runtime_row(runtime, promoted=str(_as_dict(runtime).get("venv_root") or "") == active_root)
-                for runtime in _as_list(attempt_runtimes)[-MAX_RUNTIME_RECORDS:]
-                if isinstance(runtime, Mapping)
-            ],
-        }
-        sink.record(SECTION_EVENT, {"result": result, "end_time": end_time})
+    sink = _sink()
+    if sink is None:
+        return
+    sequence = _open()
+    end_time = _now()
+    settled = str(outcome or "").strip().lower() or OUTCOME_PENDING
+    active = _runtime_row(active_runtime)
+    active_root = str(active.get("venv_root") or "") if active else ""
+    result: dict[str, Any] = {
+        "outcome": settled,
+        "reason": str(reason or ""),
+        "stall_streak": int(stall_streak or 0),
+        "kept_patches": [str(p) for p in _as_list(kept_patches) if str(p)],
+        "kept_artifacts": [_artifact_row(a) for a in _as_list(kept_artifacts) if isinstance(a, dict)],
+        "setup_commands": [str(c) for c in _as_list(setup_commands) if str(c)],
+        "accepted_config": _config_row(accepted_config),
+        "accepted_config_path": _text_or_none(accepted_config_path),
+        "setting_script": _text_or_none(setting_script),
+        "framework_root": _text_or_none(framework_root),
+        "active_runtime": active or None,
+        "attempt_runtimes": [
+            _runtime_row(runtime, promoted=str(_as_dict(runtime).get("venv_root") or "") == active_root)
+            for runtime in _as_list(attempt_runtimes)[-MAX_RUNTIME_RECORDS:]
+            if isinstance(runtime, Mapping)
+        ],
+    }
+    sink.record(SECTION_EVENT, {"result": result, "end_time": end_time})
 
-        from .assembler import event_parts
+    from .assembler import event_parts
 
-        ext, derived = assemble_enablement_ext(
-            event_parts(ENABLEMENT_EVENT_SECTIONS, event=enablement_event_id()),
-            event=enablement_event_id(),
-        )
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=enablement_event_id(),
-            sequence=sequence,
-            status=derived or _status_for(settled, attempts=0),
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=_start_time(),
-            end_time=end_time,
-        )
-    except Exception as exc:  # noqa: BLE001
-        note_failure(section="enablement_event", error=exc, detail="enablement event: finish failed")
+    ext, derived = assemble_enablement_ext(
+        event_parts(ENABLEMENT_EVENT_SECTIONS, event=enablement_event_id()),
+        event=enablement_event_id(),
+    )
+    finish_event(
+        event_type=EVENT_TYPE,
+        event=enablement_event_id(),
+        sequence=sequence,
+        status=derived or _status_for(settled, attempts=0),
+        ext=ext,
+        kind=EVENT_KIND,
+        start_time=_start_time(),
+        end_time=end_time,
+    )
 
 
 #: Every section the enablement event assembles from. Duplicated from the
@@ -636,35 +605,29 @@ def _header(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return header
 
 
-def _recorded_trigger() -> bool:
-    """Whether the lane already recorded what opened it.
+def _event_rows() -> list[dict[str, Any]]:
+    """The lane's own event-level fragments, read back from the spool.
 
-    Read from the spool, not memory: the trigger and the failure that would
-    overwrite it come from different ticks and, on resume, different processes.
+    Read from the spool rather than memory because nothing here holds the lane:
+    its facts are written by six modules on different ticks and, on resume, by
+    different processes.
     """
-    try:
-        from .assembler import event_parts
+    from .assembler import recorded_rows
 
-        rows = rows_for_event(event_parts((SECTION_EVENT,)).get(SECTION_EVENT) or [], enablement_event_id())
-        return any(_as_dict(row.get("trigger")) for row in rows)
-    except Exception as exc:  # noqa: BLE001 — a spool we cannot read is not a trigger we have
-        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot read back the trigger")
-        return False
+    return recorded_rows(SECTION_EVENT, event=enablement_event_id())
+
+
+def _recorded_trigger() -> bool:
+    """Whether the lane already recorded what opened it."""
+    return any(_as_dict(row.get("trigger")) for row in _event_rows())
 
 
 def _start_time() -> str:
-    """The start time the open write stored, read back for the close: nothing
-    here holds the lane, so the fragment is its only durable identity."""
-    try:
-        from .assembler import event_parts
-
-        rows = rows_for_event(event_parts((SECTION_EVENT,)).get(SECTION_EVENT) or [], enablement_event_id())
-        for row in rows:
-            recorded = str(row.get("start_time") or "")
-            if recorded:
-                return recorded
-    except Exception as exc:  # noqa: BLE001 — a missing start time is not worth failing the close
-        note_failure(section="enablement_event", error=exc, detail="enablement event: cannot read back the start time")
+    """The start time the open write stored, read back for the close."""
+    for row in _event_rows():
+        recorded = str(row.get("start_time") or "")
+        if recorded:
+            return recorded
     return ""
 
 

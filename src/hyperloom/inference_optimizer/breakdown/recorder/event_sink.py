@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Where an executor's rows land, decided by its caller rather than by itself."""
+"""Where an executor's rows land, decided by its caller rather than by itself.
+
+This is the write side's boundary: a row that cannot be written is dropped with
+a warning rather than taken out on the phase that produced it. What counts as
+"cannot be written" is :data:`~.recorder_warnings.RECORDING_ERRORS` -- the
+spool failing, or no session being bound. A recorder that raises anything else
+is broken, and is left to say so.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from typing import Any, Protocol
 
 from .event_ids import fragment_key, parse_event_id
 from .event_rows import EVENT_ID_FIELD
+from .recorder_warnings import RECORDING_ERRORS
 
 __all__ = ["EventSink", "RecordSink", "make_sink"]
 
@@ -83,7 +91,7 @@ class EventSink:
             key = fragment_key(self._event_id, row_type, *ids)
             row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
             return get_recorder(producer=self._producer).record_upsert_item(section, row, key=key)
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except RECORDING_ERRORS:
             log.warning(
                 "recorder: dropped a %s row of event %s (key %s, producer %s); "
                 "the assembled event will be missing this fact",
@@ -118,7 +126,7 @@ class EventSink:
                 section,
                 key=fragment_key(self._event_id, row_type, *ids),
             )
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except RECORDING_ERRORS:
             log.warning(
                 "recorder: could not tell whether event %s holds a %s row; treating it as absent",
                 self._event_id,
@@ -149,7 +157,7 @@ class EventSink:
                 )
             row = {EVENT_ID_FIELD: self._event_id, **dict(payload)}
             return get_recorder(producer=self._producer).record_item(section, row)
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except RECORDING_ERRORS:
             log.warning(
                 "recorder: dropped an appended %s row of event %s (producer %s); "
                 "the assembled event will be missing this fact",

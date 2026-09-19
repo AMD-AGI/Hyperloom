@@ -213,10 +213,29 @@ def worst_status(statuses: Iterable[Any]) -> str:
     return present[0] if present else "skipped"
 
 
-def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict[str, Any]:
-    """Build the canonical failure row used on runs and on the event."""
+def failure_row(
+    *,
+    stage: str,
+    error_class: str = "",
+    message: Any = "",
+    exc: BaseException | None = None,
+) -> dict[str, Any]:
+    """Build the canonical failure row used on runs and on the event.
+
+    ``stage`` names the step it died at, not the phase it died in: every caller
+    passes a step -- a profiling substep, a baseline round, a phase entry -- and
+    the one consumer that surfaces the field reads it as a stage.
+
+    Pass ``exc`` when the caller has the exception in hand; ``error_class`` and
+    ``message`` fill in only what ``exc`` does not already provide. Every
+    recorder's ``record_fault`` and crash close goes through this one shape.
+    """
+    if exc is not None:
+        error_class = error_class or type(exc).__name__
+        if message in ("", None):
+            message = exc
     return {
-        "phase": str(phase or ""),
+        "stage": str(stage or ""),
         "error_class": str(error_class or ""),
         "message": clip(message, 2000),
     }
