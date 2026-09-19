@@ -20,6 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Inline MCP actions no longer block the coordinator's event loop.** The
+  `run_action_now` context tool awaits the action's result without blocking the
+  loop or occupying the thread pool needed by database operations. Action
+  execution, timers and caller cancellation can proceed concurrently. Direct
+  calls to the synchronous bridge on the coordinator loop now fail immediately
+  without scheduling work. Existing inline wait limits and registered-action
+  completion after a caller timeout remain unchanged.
+
 - **A Slurm row declaring a workload shape was benchmarked at the defaults.**
   The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
   flag > persisted state > default and deliberately never reads them from the
