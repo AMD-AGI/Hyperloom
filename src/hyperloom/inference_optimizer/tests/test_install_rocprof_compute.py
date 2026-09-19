@@ -49,6 +49,14 @@ def _extract_fn(name: str) -> str:
     return m.group(0)
 
 
+def _extract_fn_optional(name: str) -> str:
+    """Same, but tolerates absence so a missing helper fails the behaviour test
+    that needs it rather than every test sharing this harness."""
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    m = re.search(rf"^{name}\(\) \{{.*?^\}}", text, re.S | re.M)
+    return m.group(0) if m else ""
+
+
 def _curated_bindir(tmp_path: Path, *, with_apt: bool, apt_stub: Path | None) -> Path:
     """A PATH dir with only the tools we allow — lets us toggle apt-get presence."""
     bindir = tmp_path / "bin"
@@ -73,7 +81,14 @@ if [ "${{1:-}}" = "-m" ] && [ "${{2:-}}" = "pip" ]; then
   exit ${{PIP_RC:-0}}
 fi
 if [ "${{1:-}}" = "-" ]; then
-  cat >/dev/null 2>&1 || true   # consume the heredoc script
+  _script="$(cat)"                # the heredoc; three callers share this stub
+  case "$_script" in
+    *_rocm_profiler*)             # wheel-package discovery
+      [ -n "${{ROCPC_WHEEL_LIBEXEC:-}}" ] && printf '%s\\n' "$ROCPC_WHEEL_LIBEXEC"
+      exit 0 ;;
+    *importlib.metadata*)         # "is this a pip-wheel ROCm stack" gate
+      exit $([ "${{ROCM_WHEEL:-0}}" = "1" ] && echo 0 || echo 1) ;;
+  esac
   if grep -q pandas "{pip_marker}" 2>/dev/null && [ "${{PIP_FIXES:-0}}" = "1" ]; then
     echo "2.3.3"; exit 0
   fi
@@ -132,6 +147,8 @@ def _run(
     check_only: int = 0,
     dry_run: int = 0,
     skip_forge_profiling: str | None = None,
+    rocm_wheel: bool = False,
+    wheel_tool_present: bool = False,
 ) -> dict:
     """Run the extracted rocprof-compute functions under set -euo pipefail."""
     rocm_root = tmp_path / "rocm"
@@ -139,6 +156,13 @@ def _run(
     if tool_present:
         tool_base.parent.mkdir(parents=True, exist_ok=True)
         tool_base.write_text("", encoding="utf-8")
+
+    # TheRock's pip ROCm ships the profiler in its own `_rocm_profiler` wheel,
+    # NOT under $ROCM_PATH, which points at the separate `_rocm_sdk_devel` package.
+    wheel_libexec = tmp_path / "site" / "_rocm_profiler" / "libexec" / "rocprofiler-compute"
+    if wheel_tool_present:
+        wheel_libexec.mkdir(parents=True, exist_ok=True)
+        (wheel_libexec / "rocprof_compute_base.py").write_text("", encoding="utf-8")
 
     # $FORGE_PATH is no longer read by this function at all; the tests set it only to prove that.
     forge_line = f'export FORGE_PATH="{forge_path}"' if forge_path is not None else "unset FORGE_PATH || true"
@@ -170,10 +194,16 @@ export PIP_FIXES="{1 if pip_fixes else 0}"
 export APT_CREATES_TOOL="{1 if apt_creates_tool else 0}"
 export APT_RC="{apt_rc}"
 export PROBE_RC="{probe_rc}"
+export ROCM_WHEEL="{1 if rocm_wheel else 0}"
+export ROCPC_WHEEL_LIBEXEC="{wheel_libexec if wheel_tool_present else ""}"
 {f'export TMPDIR="{tmpdir}"' if tmpdir is not None else "true"}
 {backend_line}
 {forge_line}
 {f'export SKIP_FORGE_PROFILING="{skip_forge_profiling}"' if skip_forge_profiling is not None else "unset SKIP_FORGE_PROFILING || true"}
+
+{_extract_fn_optional("_rocpc_libexec_dir")}
+
+{_extract_fn_optional("_rocm_is_pip_wheel")}
 
 {_extract_fn("_rocpc_effective_python")}
 
@@ -318,6 +348,39 @@ def test_installs_tool_when_absent(tmp_path: Path) -> None:
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["apt_called"] and r["tool_exists"], r["out"]
     assert "rocprof-compute installed OK" in r["out"]
+
+
+def test_finds_the_tool_in_the_rocm_profiler_wheel(tmp_path: Path) -> None:
+    """TheRock's pip ROCm ships the profiler in `_rocm_profiler`, not under $ROCM_PATH.
+
+    $ROCM_PATH points at `_rocm_sdk_devel` there, so a $ROCM_PATH-only lookup
+    never sees an installed tool and every run degrades to PMC.
+    """
+    r = _run(tmp_path, tool_present=False, wheel_tool_present=True, rocm_wheel=True, pandas_state="v2")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert "already present" in r["out"], f"the wheel-packaged tool must be found:\n{r['out']}"
+    assert not r["apt_called"], f"nothing to install; apt must not run:\n{r['out']}"
+
+
+def test_installs_the_profiler_wheel_on_a_pip_rocm_stack(tmp_path: Path) -> None:
+    """apt carries no profiler package on a wheel-ROCm image; pip does."""
+    r = _run(tmp_path, tool_present=False, rocm_wheel=True, pandas_state="v2")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert not r["apt_called"], f"apt has no such package on this stack:\n{r['out']}"
+    wheel_calls = [c for c in r["pip_calls"] if "rocm[profiler]" in c]
+    assert wheel_calls, f"the profiler wheel must be installed via pip:\n{r['pip_calls']}"
+    for call in wheel_calls:
+        assert "repo.amd.com/rocm/whl-multi-arch" in call, f"must resolve from AMD's index: {call}"
+
+
+def test_keeps_apt_on_a_classic_rocm_image(tmp_path: Path) -> None:
+    """A /opt/rocm image has no `rocm` distribution; the apt path stays its route."""
+    r = _run(tmp_path, tool_present=False, rocm_wheel=False, apt_creates_tool=True, pandas_state="v2")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert r["apt_called"], f"the classic image must still use apt:\n{r['out']}"
+    assert not any("rocm[profiler]" in c for c in r["pip_calls"]), (
+        f"pip must not pull the whole ROCm SDK on a non-wheel stack:\n{r['pip_calls']}"
+    )
 
 
 def test_idempotent_when_tool_present(tmp_path: Path) -> None:
@@ -480,7 +543,19 @@ def test_static_effective_python_probe_mirrors_resolve_rocpc() -> None:
 def test_static_installs_rocprofiler_compute_and_verifies_resolve_path() -> None:
     body = _extract_fn("ensure_rocprof_compute")
     assert "rocprofiler-compute" in body, "apt package name must stay wired"
-    assert "libexec/rocprofiler-compute/rocprof_compute_base.py" in body
+
+
+def test_static_layout_helpers_exist() -> None:
+    # The behaviour tests run these through a tolerant extractor; assert here that they are really in install.sh.
+    for name in ("_rocpc_libexec_dir", "_rocm_is_pip_wheel"):
+        assert _extract_fn(name).strip(), f"{name}() must stay defined in install.sh"
+
+
+def test_static_discovery_covers_both_rocm_layouts() -> None:
+    body = _extract_fn("_rocpc_libexec_dir")
+    assert "libexec/rocprofiler-compute" in body, "classic /opt/rocm tree must stay covered"
+    assert "_rocm_profiler" in body, "TheRock's pip wheel package must be covered"
+    assert "rocprof_compute_base.py" in body, "presence must be proven by the tool's entry module"
 
 
 def test_static_pins_pandas_lt3() -> None:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import glob
+import importlib.util
 import os
 import shutil
 import signal
@@ -13,9 +14,21 @@ import subprocess
 import sys
 
 
+def _rocm_profiler_wheel_roots() -> list[str]:
+    """Roots of TheRock's `_rocm_profiler` wheel, which carries the profiler on
+    pip-packaged ROCm; there ROCM_PATH points at the separate `_rocm_sdk_devel`."""
+    try:
+        spec = importlib.util.find_spec("_rocm_profiler")
+    except Exception:  # noqa: BLE001
+        return []
+    return list(getattr(spec, "submodule_search_locations", None) or [])
+
+
 def _resolve_libexec() -> str | None:
     """Locate the rocprofiler-compute install dir (holds rocprof_compute_base.py)."""
-    for root in (os.environ.get("ROCM_PATH", "").strip(), "/opt/rocm"):
+    roots = [os.environ.get("ROCM_PATH", "").strip(), "/opt/rocm"]
+    roots.extend(_rocm_profiler_wheel_roots())
+    for root in roots:
         if not root:
             continue
         d = os.path.join(root, "libexec", "rocprofiler-compute")
