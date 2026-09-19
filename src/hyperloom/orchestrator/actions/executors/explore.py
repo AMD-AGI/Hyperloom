@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import os
 import time
@@ -17,6 +18,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
+from hyperloom.common.launch_log_evidence import split_launch_flags
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
@@ -53,7 +55,7 @@ from ._accuracy_gate import (
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
-from ._canonical_fingerprint import workload_signature
+from ._canonical_fingerprint import _args_pairs, workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
@@ -74,7 +76,8 @@ from ._grid_runner import (
     sanitize_script_name,
     session_grid_bounds,
 )
-from ._grid_server_args import compose_server_args, server_args_env_name
+from ._grid_server_args import _shell_safe_dedupe, compose_server_args, server_args_env_name
+from ._launch_evidence import read_launch_config, server_env_subset
 from ._ray_serving import maybe_serving_lease
 
 from ._server_lifecycle import (
@@ -412,6 +415,244 @@ def filter_operator_pinned_envs(
     return kept, dropped
 
 
+def _normalize_launch_envs(envs: dict[str, Any]) -> dict[str, str]:
+    """Case-normalize env keys for stable launch-state comparison."""
+    return {str(k).strip().upper(): str(v) for k, v in envs.items() if str(k).strip()}
+
+
+def _explore_launch_signature(
+    *,
+    framework: str,
+    yaml_envs: dict[str, Any],
+    inherited_args: str,
+    base_extra_args: str,
+    base_extra_envs: dict[str, str],
+    base_remove_args: list[str],
+    base_unset_envs: list[str],
+    base_args_mode: str,
+    variant: GridVariant,
+) -> tuple[str, dict[str, str]]:
+    """Mirror grid-runner env/CLI merge for baseline-noop detection."""
+    extra_args_env = server_args_env_name(framework)
+    replacing = str(base_args_mode or "append").strip().lower() == "replace"
+    variant_remove = to_str_list(getattr(variant, "remove_args", []))
+    effective_remove = (
+        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
+    )
+    composed = compose_server_args(
+        inherited_args="" if replacing else inherited_args,
+        base_extra_args=base_extra_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=effective_remove,
+        args_mode=str(getattr(variant, "args_mode", "append") or "append"),
+    )
+    if composed:
+        composed = _shell_safe_dedupe(composed)
+    args_sig = json.dumps(_args_pairs(composed), separators=(",", ":"))
+
+    envs = {str(k): str(v) for k, v in (yaml_envs or {}).items()}
+    for key in list(envs):
+        if key.upper() == extra_args_env.upper():
+            envs.pop(key, None)
+    for key in to_str_list(base_unset_envs):
+        envs.pop(str(key), None)
+    for key, value in (base_extra_envs or {}).items():
+        envs[str(key)] = str(value)
+    for key in to_str_list(getattr(variant, "unset_envs", [])):
+        envs.pop(str(key), None)
+    for key, value in (variant.extra_envs or {}).items():
+        envs[str(key)] = str(value)
+    return args_sig, _normalize_launch_envs(envs)
+
+
+# --- Observed-launch no-op detection ---------------------------------------
+#
+# The baseline-noop filter compares a proposed variant against the *observed*
+# launch state (from ``launch_config.json``) so a
+# variant that merely restates a recipe default -- a CLI flag or ``SGLANG_*``
+# env the server was already launched with -- is dropped before it costs a GPU
+# measurement. 
+
+
+def _canonical_launch_fingerprint(*, launch_flags: str, env: dict[str, str]) -> dict[str, Any]:
+    """Canonical, order-independent fingerprint of a server launch state."""
+    cleaned = split_launch_flags(str(launch_flags or ""))
+    if cleaned:
+        cleaned = _shell_safe_dedupe(cleaned)
+    return {
+        "args": _args_pairs(cleaned),
+        "env": dict(sorted(server_env_subset(env).items())),
+    }
+
+
+def _variant_launch_fingerprint(*, framework: str, base_flags: str, base_env: dict[str, str], variant: Any) -> dict[str, Any]:
+    """Fingerprint of the observed launch after applying one variant's delta.
+
+    ``base_flags`` / ``base_env`` already include every recipe default, so the
+    variant is stacked incrementally -- the same merge a KEEP performs.
+    """
+    replacing = str(getattr(variant, "args_mode", "append") or "append").strip().lower() == "replace"
+    composed = compose_server_args(
+        inherited_args="" if replacing else str(base_flags or ""),
+        base_extra_args="",
+        variant_extra_args=getattr(variant, "extra_server_args", "") or "",
+        remove_args=to_str_list(getattr(variant, "remove_args", [])),
+        args_mode="replace" if replacing else "append",
+    )
+    env = server_env_subset(base_env)
+    for key in to_str_list(getattr(variant, "unset_envs", [])):
+        env.pop(str(key).strip().upper(), None)
+    for key, value in (getattr(variant, "extra_envs", {}) or {}).items():
+        norm = str(key).strip().upper()
+        # Server-args are carried on the CLI side, never as an env key.
+        if norm == server_args_env_name(framework).upper():
+            continue
+        env[norm] = str(value)
+    return _canonical_launch_fingerprint(launch_flags=composed, env=env)
+
+
+def _variant_touches_untracked_env(*, framework: str, variant: Any) -> bool:
+    """True when a variant sets/unsets an env key outside the tracked prefixes.
+
+    Such a key is dropped by ``server_env_subset`` and is therefore invisible to
+    the fingerprint comparison, so we cannot prove the variant is a no-op and the
+    caller must keep it.
+    """
+    args_env = server_args_env_name(framework).upper()
+    keys = list((getattr(variant, "extra_envs", {}) or {}).keys())
+    keys += to_str_list(getattr(variant, "unset_envs", []))
+    for key in keys:
+        norm = str(key).strip().upper()
+        if not norm or norm == args_env:
+            continue
+        # A key that survives server_env_subset is tracked; anything else is not.
+        if not server_env_subset({norm: ""}):
+            return True
+    return False
+
+
+def variant_is_launch_noop(*, framework: str, base_flags: str, base_env: dict[str, str], variant: Any) -> bool:
+    """True when a variant's delta leaves the observed launch state unchanged."""
+    if _variant_touches_untracked_env(framework=framework, variant=variant):
+        return False
+    base_fp = _canonical_launch_fingerprint(launch_flags=base_flags, env=base_env)
+    variant_fp = _variant_launch_fingerprint(
+        framework=framework, base_flags=base_flags, base_env=base_env, variant=variant
+    )
+    return base_fp == variant_fp
+
+
+def _measurement_search_dirs(measurement: dict[str, Any]) -> list[str]:
+    """Workspace directories on a measurement that may hold launch_config.json."""
+    dirs = [str(measurement.get(key) or "").strip() for key in ("benchmark_workspace", "workspace", "result_dir")]
+    return list(dict.fromkeys(d for d in dirs if d))  # de-duplicate, preserve order
+
+
+def live_launch_state_from_state(state: Any) -> tuple[str, dict[str, str], str]:
+    """Resolve the live launch (observed flags, effective env, source label).
+
+    Reads the most-recently-promoted measurement first (``current_best``, which a
+    KEEP advances, so the fingerprint tracks the latest kept launch), then the
+    session baseline. Both resolve solely from their ``launch_config.json``
+    snapshot.
+    """
+    if state is None:
+        return "", {}, ""
+    candidates = (
+        ("current_best", getattr(state, "current_best_measurement", None)),
+        ("baseline", getattr(state, "last_baseline", None)),
+    )
+    for label, measurement in candidates:
+        if not isinstance(measurement, dict):
+            continue
+        config = read_launch_config(_measurement_search_dirs(measurement))
+        if config is not None and (config[0] or config[1]):
+            return config[0], config[1], label
+    return "", {}, ""
+
+
+def filter_baseline_noop_variants(
+    grid: list[GridVariant],
+    *,
+    framework: str,
+    yaml_envs: dict[str, Any],
+    inherited_args: str,
+    base_extra_args: str,
+    base_extra_envs: dict[str, str],
+    base_remove_args: list[str],
+    base_unset_envs: list[str],
+    base_args_mode: str,
+    live_launch_flags: str = "",
+    live_launch_env: dict[str, str] | None = None,
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    #Drop variants whose effective launch state matches the opening stack.
+
+    if is_truthy(os.environ.get("HYPERLOOM_EXPLORE_SKIP_BASELINE_NOOP_FILTER")):
+        return list(grid), []
+
+    fw = str(framework or "").strip().lower()
+    if not fw or not grid:
+        return list(grid), []
+
+    live_flags = str(live_launch_flags or "").strip()
+    live_env = dict(live_launch_env or {})
+    have_live = bool(live_flags or live_env)
+
+    baseline = GridVariant(name="__baseline__")
+    baseline_sig = _explore_launch_signature(
+        framework=fw,
+        yaml_envs=yaml_envs,
+        inherited_args=inherited_args,
+        base_extra_args=base_extra_args,
+        base_extra_envs=base_extra_envs,
+        base_remove_args=base_remove_args,
+        base_unset_envs=base_unset_envs,
+        base_args_mode=base_args_mode,
+        variant=baseline,
+    )
+
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    for gv in grid:
+        if _is_config_replay_variant(gv):
+            kept.append(gv)
+            continue
+        if have_live and variant_is_launch_noop(
+            framework=fw,
+            base_flags=live_flags,
+            base_env=live_env,
+            variant=gv,
+        ):
+            dropped.append(
+                (
+                    str(getattr(gv, "name", "?")),
+                    "delta already active in the observed server launch (baseline noop)",
+                )
+            )
+            continue
+        variant_sig = _explore_launch_signature(
+            framework=fw,
+            yaml_envs=yaml_envs,
+            inherited_args=inherited_args,
+            base_extra_args=base_extra_args,
+            base_extra_envs=base_extra_envs,
+            base_remove_args=base_remove_args,
+            base_unset_envs=base_unset_envs,
+            base_args_mode=base_args_mode,
+            variant=gv,
+        )
+        if variant_sig == baseline_sig:
+            dropped.append(
+                (
+                    str(getattr(gv, "name", "?")),
+                    "effective launch state matches the opening explore stack (baseline noop)",
+                )
+            )
+            continue
+        kept.append(gv)
+    return kept, dropped
+
+
 def _default_grid_for_framework(
     framework: str,
     *,
@@ -673,6 +914,30 @@ class ExploreExecutor:
             for _nm, _reason in _mc_dropped:
                 log.warning("explore: dropping variant %s (%s)", _nm, _reason)
 
+        _live_flags, _live_env, _live_src = live_launch_state_from_state(shared_state)
+        grid, _noop_dropped = filter_baseline_noop_variants(
+            grid,
+            framework=framework,
+            yaml_envs=_yaml_envs,
+            inherited_args=_effective_inherited_args,
+            base_extra_args=base_extra_args,
+            base_extra_envs=base_extra_envs,
+            base_remove_args=base_remove_args,
+            base_unset_envs=base_unset_envs,
+            base_args_mode=base_args_mode,
+            live_launch_flags=_live_flags,
+            live_launch_env=_live_env,
+        )
+        if _noop_dropped and (_live_flags or _live_env):
+            log.info(
+                "explore: baseline-noop filter using observed launch from %s (%d flag(s), %d env key(s))",
+                _live_src or "?",
+                len(_live_flags.split()),
+                len(_live_env),
+            )
+        for _nm, _reason in _noop_dropped:
+            log.info("explore: skipping baseline-noop variant %s (%s)", _nm, _reason)
+
         if not grid:
             return {
                 "status": "failed",
@@ -732,11 +997,12 @@ class ExploreExecutor:
         re_proposed = sum(1 for fp in unique_in_round if isinstance(tested_dict.get(fp), dict))
 
         log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d)",
-            len(grid),
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d re_proposed=%d baseline_noop=%d)",
+            len(grid_payload),
             len(runnable),
             len(skipped_dup),
             re_proposed,
+            len(_noop_dropped),
         )
 
         # Multi-node grid shaping.

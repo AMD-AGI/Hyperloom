@@ -265,6 +265,47 @@ PYMERGE
     exit 3
   fi
   log "server up (pid=${SERVER_PID}) on port ${PORT}"
+
+  # Hyperloom explore baseline-noop needs launch_config.json beside Magpie
+  # artifacts. Capture from /proc here while the server is still alive
+  # (best-effort; never fail the measure).
+  if [ "${HYPERLOOM_CAPTURE_LAUNCH_CONFIG:-1}" != "0" ]; then
+    AGENTX_CAPTURE_SERVER_PID="$SERVER_PID" RESULT_DIR="$RESULT_DIR" \
+      FRAMEWORK="${FRAMEWORK:-sglang}" \
+      "${PYTHON:-python3}" - <<'PY' || true
+import os
+import sys
+from pathlib import Path
+
+pid = int(os.environ["AGENTX_CAPTURE_SERVER_PID"])
+out = Path(os.environ["RESULT_DIR"])
+framework = (os.environ.get("FRAMEWORK") or "sglang").strip().lower() or "sglang"
+try:
+    from hyperloom.orchestrator.actions.executors._launch_evidence import (
+        LAUNCH_CONFIG_FILENAME,
+        capture_launch_config_via_proc,
+        write_launch_config,
+    )
+except ImportError:
+    sys.exit(0)
+if (out / LAUNCH_CONFIG_FILENAME).exists():
+    sys.exit(0)
+snapshot = capture_launch_config_via_proc(pid, framework)
+if not snapshot:
+    sys.exit(0)
+flags, env = snapshot
+if flags or env:
+    written = write_launch_config(
+        out,
+        framework=framework,
+        launch_flags=flags,
+        env=env,
+        source="proc",
+    )
+    if written:
+        print(f"[aiperf_client] wrote launch_config.json ({len(env)} env key(s)) -> {written}")
+PY
+  fi
 fi
 
 # ── Resolve served model name (a reused server may expose a different id) ─────
