@@ -29,6 +29,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
 def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
+        "ENABLEMENT",
         "FRAMEWORK_AGENT",
         "KERNEL_AGENT",
         "SWEEP",
@@ -40,12 +41,17 @@ def test_phase_names_are_monotonic():
 
 
 def test_allowed_actions_disjoint_phases():
-    # recover is in every phase; kernel_agent-owned actions only in KERNEL (Inv-2.1).
+    # Kernel-agent-owned actions only run in KERNEL (Inv-2.1).
     for phase in phase_state.PHASE_NAMES:
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
-        assert "recover" in allowed
+        assert "recover" not in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    # ENABLEMENT carries baseline so the Coordinator's revalidation survives the
+    # phase sweep, but reserves it so no agent can propose one.
+    assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["ENABLEMENT"]
+    assert "baseline" not in phase_state.allowed_actions_for("ENABLEMENT")
+    assert "baseline" in phase_state.allowed_actions_for("PRELUDE")
     # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL entry from a lane budget, so they
     # are proposable in no phase at all.
     assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
@@ -57,57 +63,14 @@ def test_allowed_actions_disjoint_phases():
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
-def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
-    """The closed vocabulary must actually close over what the rules emit."""
-    import itertools
-
-    rules = (
-        phase_state.exit_normal_prelude,
-        phase_state.exit_normal_optimize,
-        phase_state.exit_normal_kernel,
-        phase_state.exit_normal_sweep,
-    )
-    # A spread of states wide enough to reach each rule's branches.
-    states = [
-        SharedState(),
-        SharedState(baseline_tput=1234.5),
-        SharedState(baseline_tput=1234.5, framework_agent_phase_done=True),
-        SharedState(baseline_tput=1234.5, phase_budget_pct={p: 0.01 for p in phase_state.PHASE_NAMES}),
-    ]
-    seen = set()
-    for rule, state in itertools.product(rules, states):
-        try:
-            out = rule(state)
-        except TypeError:
-            continue  # rule needs kwargs this sweep does not supply
-        if out is None:
-            continue
-        reason = out[0]
-        seen.add(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason), reason
-    assert seen, "no exit rule fired; this guard would pass vacuously"
-
-
-def test_phase_exit_reason_vocabulary_is_closed():
-    assert not phase_state.is_valid_phase_exit_reason("totally_invented")
-    assert not phase_state.is_valid_phase_exit_reason("")
-    # Stripped before comparison, so a stray newline in a history row still matches.
-    assert phase_state.is_valid_phase_exit_reason("  prelude_done \n")
-
-
 def test_stop_reason_vocab_includes_v06_and_v08():
     for reason in (
         "target_reached",
         "time_exhausted",
         "max_ticks",
-        "policy_loop",
         "baseline_failed",
         "emergency",
         "coordinator_exception",
-        "crash_threshold_exceeded",
-        "user_stop_requested",
-        "recipe_kb_drain_failed",
-        "plateau_explore",
         "sweep_failed",
         "baseline_arg_error",
     ):
@@ -297,7 +260,6 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
         assert phase_state.is_valid_stop_reason(reason)
-        assert phase_state.is_valid_phase_exit_reason(reason)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""
@@ -666,7 +628,6 @@ def coordinator_with_mocks(session_dir):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -681,7 +642,6 @@ def coordinator_with_mocks(session_dir):
     backends = {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     return Coordinator(session_dir, backends=backends)
 
@@ -748,3 +708,52 @@ async def test_coordinator_phase_idempotent_within_same_tick(
         assert c.shared_state.phase_history == first_history
     finally:
         await c.stop()
+
+
+# ENABLEMENT phase predicate tests
+
+
+def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False):
+    """A state the enablement entry and exit branches read."""
+    return SimpleNamespace(
+        phase=phase,
+        stop_reason="",
+        closing_phase=False,
+        baseline_tput=tput,
+        baseline_failure_streak=streak,
+        enablement=SimpleNamespace(validation_pending=validation_pending),
+    )
+
+
+def test_prelude_enters_enablement_on_a_baseline_failure_streak():
+    """A failed baseline routes PRELUDE to ENABLEMENT when the lane is admitted."""
+    state = _enablement_state("PRELUDE")
+    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert phase == phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_entered"
+
+
+def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
+    """An unadmitted lane leaves PRELUDE waiting for a baseline rather than entering the phase."""
+    state = _enablement_state("PRELUDE")
+    assert phase_state.compute_next_phase(state, enablement_enabled=False) is None
+
+
+def test_enablement_exits_once_the_baseline_lands_and_work_drains():
+    """All three conjuncts satisfied is the only way out through the normal exit."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    assert phase != phase_state.PHASE_ENABLEMENT
+    assert reason == "enablement_done"
+
+
+def test_enablement_holds_while_work_is_in_flight():
+    """A build outliving its round must not let a later phase reopen validation."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
+
+
+def test_enablement_holds_while_revalidation_is_pending():
+    """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
+    state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
+    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None

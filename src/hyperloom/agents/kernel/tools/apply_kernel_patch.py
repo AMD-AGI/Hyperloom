@@ -893,6 +893,12 @@ _AITER_CSRC_MARKERS = ("/aiter/csrc/", "/aiter_meta/csrc/")
 _REBUILD_MODE_COMMAND = "command"
 _REBUILD_MODE_NONE = "none"
 _REBUILD_MODE_RUNTIME_JIT = "runtime_jit"
+_REBUILD_MODE_CONTENT_ADDRESSED_JIT = "content_addressed_jit"
+
+# SGLang's in-tree JIT kernels are compiled by tvm-ffi on first import into a
+# cache directory keyed on a hash of the source closure, so a patched source
+# builds under a new key instead of colliding with the baseline module.
+_SGLANG_JIT_SOURCE_MARKER = "/sglang/kernels/jit/"
 
 
 def _isolated_aiter_pkg_root() -> Path | None:
@@ -981,6 +987,23 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     """
     norm = str(target_file).replace(os.sep, "/")
     return any(marker in norm for marker in _AITER_CSRC_MARKERS)
+
+
+def _target_is_sglang_jit_source(target_file: Path) -> bool:
+    """Report whether a file lives under SGLang's in-tree JIT source tree.
+
+    Matches both the editable checkout
+    (``/sgl-workspace/sglang/python/sglang/kernels/jit/...``) and an installed
+    wheel (``.../site-packages/sglang/kernels/jit/...``).
+
+    Args:
+        target_file: The file path to test.
+
+    Returns:
+        ``True`` if the path is under a ``sglang/kernels/jit/`` directory.
+    """
+    norm = str(target_file).replace(os.sep, "/").lower()
+    return _SGLANG_JIT_SOURCE_MARKER in norm
 
 
 def _target_uses_aiter_jit(target_file: Path) -> bool:
@@ -1492,7 +1515,9 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     Matches the target against the known framework roots (aiter / sglang /
     vllm) to pick the rebuild command and artifact roots, and decides whether
     the target feeds a compiled runtime. Python codegen under AITER ``csrc``
-    requires the same rebuild/JIT invalidation as a native source.
+    requires the same rebuild/JIT invalidation as a native source. Native
+    sources under SGLang's ``kernels/jit`` tree are compiled by the runtime
+    under a source-hashed cache key, so they defer instead of rebuilding.
 
     Args:
         target_file (Path): The file being patched.
@@ -1501,7 +1526,9 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         dict[str, Any]: A strategy dict with ``compiled`` (bool), ``root``
             (str), ``rebuild_mode`` (str), ``rebuild_command`` (list[str]) and
             ``artifact_roots`` (list[Path]). Runtime-JIT strategies also carry
-            the authoritative ``jit_build_dir``.
+            the authoritative ``jit_build_dir``; strategies whose rebuild
+            reinstalls the framework carry the ``import_probes`` that must
+            still resolve afterwards.
     """
     lower = str(target_file).lower()
     suffix = target_file.suffix.lower()
@@ -1512,6 +1539,7 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     artifact_roots: list[Path] = []
     deploy_roots: list[Path] = []
     jit_build_dir = ""
+    import_probes: list[str] = []
     installed_kernel = _installed_kernel_package(target_file)
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
 
@@ -1522,24 +1550,31 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         jit_build_dir = str(_EDITABLE_AITER_ROOT / "aiter" / "jit" / "build")
         rebuild_command = ["/opt/venv/bin/python", "setup.py", "develop"]
         artifact_roots = [root]
+        import_probes = ["aiter"]
     elif "/sgl-workspace/sglang/sgl-kernel/" in lower:
         root = Path("/sgl-workspace/sglang/sgl-kernel")
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+        import_probes = ["sgl_kernel"]
     elif "/sgl-workspace/sglang/" in lower:
         root = Path("/sgl-workspace/sglang")
         deploy_roots = _editable_kernel_deploy_roots()
-        rebuild_mode = _REBUILD_MODE_COMMAND
-        rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
-        artifact_roots = [root]
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
+        else:
+            rebuild_mode = _REBUILD_MODE_COMMAND
+            rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "python"]
+            artifact_roots = [root]
+            import_probes = ["sglang", "sglang.srt.server_args"]
     elif "/sgl-workspace/vllm/" in lower:
         root = Path("/sgl-workspace/vllm")
         deploy_roots = _editable_kernel_deploy_roots()
         rebuild_mode = _REBUILD_MODE_COMMAND
         rebuild_command = ["/opt/venv/bin/python", "-m", "pip", "install", "-e", "."]
         artifact_roots = [root]
+        import_probes = ["vllm"]
     elif flydsl_root := _flydsl_root_for(target_file):
         # FlyDSL compiles at import time, so there is nothing to rebuild; the
         # root only has to be right for cache invalidation and rebuild cwd.
@@ -1556,6 +1591,8 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
+        if _target_is_sglang_jit_source(target_file):
+            rebuild_mode = _REBUILD_MODE_CONTENT_ADDRESSED_JIT
     # An unrecognised layout leaves ``root`` unset: snapshot mode resolves
     # repo-relative descriptors against it, so a guessed parent writes the
     # optimized bytes beside the target instead of into it.
@@ -1568,6 +1605,7 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         rebuild_command = []
         artifact_roots = []
         jit_build_dir = ""
+        import_probes = []
     if not deploy_roots and root is not None:
         deploy_roots = [root]
 
@@ -1579,6 +1617,7 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         "artifact_roots": artifact_roots,
         "deploy_roots": deploy_roots,
         "jit_build_dir": jit_build_dir,
+        "import_probes": import_probes,
     }
 
 
@@ -1656,6 +1695,111 @@ def _run_rebuild(command: list[str], cwd: Path, timeout_sec: int) -> dict[str, A
     }
 
 
+_IMPORT_PROBE_TIMEOUT_SEC = 600
+
+_IMPORT_PROBE_SCRIPT = """\
+import importlib.util
+import json
+import sys
+
+report = {}
+for name in sys.argv[1:]:
+    try:
+        spec = importlib.util.find_spec(name)
+    except BaseException as exc:  # noqa: BLE001 - a half-installed parent raises anything
+        report[name] = {"importable": False, "error": f"{type(exc).__name__}: {exc}"}
+        continue
+    if spec is None:
+        report[name] = {"importable": False, "error": "no module spec"}
+    else:
+        report[name] = {"importable": True, "origin": spec.origin or ""}
+json.dump({"modules": report, "sys_path": sys.path}, sys.stdout)
+"""
+
+
+def _verify_rebuild_imports(
+    probes: list[str],
+    interpreter: str,
+    *,
+    timeout_sec: int = _IMPORT_PROBE_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Prove the rebuilt framework is still importable before benchmarking it.
+
+    An eager rebuild is a package (re)install: pip drops the old distribution
+    and writes fresh metadata plus a new editable import hook, so a returncode
+    of ``0`` says nothing about whether a new interpreter can still resolve the
+    modules the server loads first. Resolving the probes in a fresh interpreter
+    (the one that ran the rebuild, so the probe sees the install that was just
+    written) turns that into a checked precondition, and records each resolved
+    ``origin`` + ``sys.path`` so a later disagreement between baseline and
+    candidate has the import metadata to explain it.
+
+    Args:
+        probes: Module names that must resolve after the rebuild.
+        interpreter: The rebuild command's interpreter, whose install the
+            probes must observe.
+        timeout_sec: Probe subprocess timeout in seconds.
+
+    Returns:
+        A dict with ``status`` (``ok`` / ``failed`` / ``skipped``), the
+        per-module ``modules`` report and the probed ``sys_path``.
+    """
+    if not probes:
+        return {"status": "skipped", "reason": "strategy declares no import probes"}
+    if not Path(interpreter).name.lower().startswith("python"):
+        # An override can rebuild via make/cmake/sh; probing the wrong
+        # interpreter would report on an unrelated environment.
+        return {
+            "status": "skipped",
+            "reason": f"rebuild command is not interpreter-led: {interpreter}",
+        }
+    # Probe from a neutral cwd: `python -c` puts the working directory on
+    # sys.path, and a framework checkout root can shadow its own package.
+    try:
+        proc = subprocess.run(
+            [interpreter, "-c", _IMPORT_PROBE_SCRIPT, *probes],
+            cwd=tempfile.gettempdir(),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env={**os.environ, "PATH": f"/opt/venv/bin:{os.environ.get('PATH', '')}"},
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "status": "failed",
+            "error": f"import probe could not run: {type(exc).__name__}: {exc}",
+            "probes": probes,
+        }
+    if proc.returncode != 0:
+        return {
+            "status": "failed",
+            "error": f"import probe exited {proc.returncode}",
+            "probes": probes,
+            "stderr_tail": (proc.stderr or "")[-4000:],
+        }
+    try:
+        report = json.loads(proc.stdout or "{}")
+    except ValueError as exc:
+        return {
+            "status": "failed",
+            "error": f"unparseable import probe output: {exc}",
+            "probes": probes,
+            "stdout_tail": (proc.stdout or "")[-4000:],
+        }
+    modules = dict(report.get("modules") or {})
+    broken = {name: entry for name, entry in modules.items() if not entry.get("importable")}
+    result: dict[str, Any] = {
+        "status": "failed" if broken else "ok",
+        "probes": probes,
+        "modules": modules,
+        "sys_path": list(report.get("sys_path") or []),
+        "interpreter": interpreter,
+    }
+    if broken:
+        result["error"] = "; ".join(f"{name}: {entry.get('error')}" for name, entry in sorted(broken.items()))
+    return result
+
+
 def _run_strategy_rebuild(
     strategy: dict[str, Any],
     *,
@@ -1668,12 +1812,30 @@ def _run_strategy_rebuild(
     strategy_root = str(strategy.get("root") or "").strip()
     cwd = Path(strategy_root) if strategy_root else fallback_cwd
     if command:
-        return _run_rebuild(command, cwd, timeout_sec)
+        result = _run_rebuild(command, cwd, timeout_sec)
+        if result.get("status") != "ok":
+            return result
+        import_check = _verify_rebuild_imports(
+            [str(name) for name in strategy.get("import_probes") or []],
+            command[0],
+        )
+        result["import_check"] = import_check
+        if import_check.get("status") == "failed":
+            result["status"] = "failed"
+            result["error"] = f"rebuild returned 0 but the framework is not importable: {import_check.get('error')}"
+        return result
     if strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT:
         return {
             "status": "deferred",
             "mode": _REBUILD_MODE_RUNTIME_JIT,
             "reason": ("installed AITER sources compile on runtime import after JIT cache invalidation"),
+            "cwd": str(cwd),
+        }
+    if strategy.get("rebuild_mode") == _REBUILD_MODE_CONTENT_ADDRESSED_JIT:
+        return {
+            "status": "deferred",
+            "mode": _REBUILD_MODE_CONTENT_ADDRESSED_JIT,
+            "reason": ("SGLang in-tree JIT sources compile on runtime import under a source-hashed cache key"),
             "cwd": str(cwd),
         }
     return _run_rebuild([], cwd, timeout_sec)
@@ -1995,15 +2157,21 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     primary target alone would skip compilation for companion compiled files, so
     derive ``compiled``/rebuild from the **whole** edited set.
 
+    One root can yield several rebuild modes -- SGLang's ``kernels/jit``
+    sources defer to the runtime while its ``kernels/aot/csrc`` sources still
+    need the editable install -- so the identity of a rebuild is the root
+    *and* the mode. Deduplicating on the root alone would keep whichever file
+    the patch happened to list first and silently skip the other's rebuild.
+
     Args:
         live_paths (Iterable[Path]): The live target paths the patch writes.
 
     Returns:
-        list[dict[str, Any]]: One strategy dict per distinct root that needs a
-            rebuild (compiled roots only), each as returned by
-            :func:`_detect_strategy`.
+        list[dict[str, Any]]: One strategy dict per distinct root and rebuild
+            mode that needs a rebuild (compiled roots only), each as returned
+            by :func:`_detect_strategy`.
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     strategies: list[dict[str, Any]] = []
     for p in live_paths:
         try:
@@ -2012,7 +2180,7 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
             continue
         if not strat["compiled"]:
             continue
-        key = strat["root"] or str(p.parent)
+        key = (strat["root"] or str(p.parent), strat["rebuild_mode"])
         if key in seen:
             continue
         seen.add(key)

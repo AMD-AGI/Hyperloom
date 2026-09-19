@@ -61,7 +61,7 @@ _PHASE_HEADERS: dict[str, str] = {
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
 _EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
-_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
+_BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE", "ENABLEMENT"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
 _PHASE_TAG_RE = re.compile(r"^<!--\s*phase:\s*(?P<phases>[A-Za-z_,\s]+?)\s*-->$")
@@ -236,9 +236,11 @@ def _section_phase_semantics(
             "of any action lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
-            "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
-            "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "are: `baseline_tput > 0` (+ revalidation settled + build drain)",
+            "exits ENABLEMENT; `baseline_tput > 0` exits PRELUDE; the per-phase",
+            "budget cap or a terminal stop_reason exits FRAMEWORK_AGENT /",
+            "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
+            "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep'}` directly when you judge the",
             "current phase exhausted; the Coordinator validates the hint vocab",
@@ -246,8 +248,8 @@ def _section_phase_semantics(
             "in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it stamps `robustness_escalated`, so emitting it on a normal finish",
-            "mislabels the run. Running low on budget is not abandonment — the",
+            "it closes the run instead of advancing a phase. Running low on",
+            "budget is not abandonment — the",
             "Coordinator prices the remaining budget itself and exits with an",
             "honest terminal stop_reason (`sweep_done` / `global_converged` /",
             "`time_exhausted`) once a further cycle cannot be funded.",
@@ -567,6 +569,20 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     Returns:
         list[str]: Markdown lines for the decision framework.
     """
+    from ..phases.machine_state import allowed_actions_for
+
+    # An empty phase renders every phase-scoped block, so it keeps the proposal form.
+    phase_key = (phase or "").strip().upper()
+    if not phase_key or "baseline" in allowed_actions_for(phase_key):
+        measure_lines = [
+            "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
+            "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        ]
+    else:
+        measure_lines = [
+            "2. **Measure**: `baseline` is Coordinator-dispatched in this phase, so do",
+            "   not propose it; `baseline_tput` is set when that run promotes.",
+        ]
     lines = [
         "## 5. DECISION FRAMEWORK (heuristics + facts — the next action is your call)",
         "",
@@ -575,8 +591,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
         "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
-        "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
-        "   delegated_result; do NOT re-baseline on a positive result with warnings.",
+        *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
@@ -632,8 +647,8 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
-            "`send_message{topic='observation', body_md='blocked: <reason>'}` and let",
-            "Robustness escalate. NEVER stay silent.",
+            "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
+            "NEVER stay silent.",
         ]
     )
     lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
@@ -692,8 +707,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     lines.extend(
         [
             "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …' and let Robustness"
-            " intervene. Explore variants may be re-proposed; read the failure log first.",
+            " → stop retrying baseline; send observation 'blocked: …'."
+            " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
@@ -739,7 +754,7 @@ def _idea_generation_lines() -> list[str]:
         "(hard maximum 6) once the queue is drained of anything worth running.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
-        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",
     ]
 
 

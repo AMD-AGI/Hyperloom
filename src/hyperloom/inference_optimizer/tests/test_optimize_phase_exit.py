@@ -97,16 +97,6 @@ def test_with_kernel_disabled_it_winds_down_to_sweep_carrying_its_reason():
     assert evidence["passed_through_reason"] == "optimize_no_more_leverage"
 
 
-def test_every_reason_it_emits_is_in_the_exit_vocabulary():
-    """A reason absent from the vocab is one the report cannot explain."""
-    emitted = {
-        "optimize_no_more_leverage",
-        "optimize_phase_budget_exhausted",
-        "optimize_budget_cap",
-    }
-    assert emitted <= ps.PHASE_EXIT_REASONS
-
-
 def test_the_config_arm_needs_specialist_evidence_to_report_dry():
     """The streak counts rounds; a variant count is a different quantity."""
     state = SimpleNamespace(

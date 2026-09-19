@@ -142,12 +142,11 @@ def test_bounded_explore_does_not_hit_absolute_cap():
     assert ps.exit_normal_optimize(st, now_unix=now) is None
 
 
-# Vocab: renamed reasons are phase-exit only, never terminal stop reasons
-def test_renamed_leverage_reasons_are_phase_exit_not_stop_reason():
-    assert ps.is_valid_phase_exit_reason("optimize_no_more_leverage")
-    assert ps.is_valid_phase_exit_reason("kernel_no_more_leverage")
+# Vocab: the leverage reasons close a phase, they never stop the run
+def test_leverage_reasons_are_not_stop_reasons():
     assert not ps.is_valid_stop_reason("no_more_leverage")
     assert not ps.is_valid_stop_reason("optimize_no_more_leverage")
+    assert not ps.is_valid_stop_reason("kernel_no_more_leverage")
 
 
 # Trailing-window crash rate

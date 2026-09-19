@@ -21,6 +21,7 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.sub_agent_runner import (
     PROGRESS_OWNER_AGENT,
+    ExecutionCleanupUnconfirmed,
     SubAgentRunner,
     _format_progress,
 )
@@ -151,8 +152,8 @@ async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(tmp_path, monkeypatch):
-    """The R6 watchdog is a runtime budget, not an inactivity timeout."""
+async def test_an_old_running_task_keeps_its_budget_without_an_age_reclaimer(tmp_path, monkeypatch):
+    """Elapsed admission budget is not evidence that an executor has stopped."""
     sub = _runner(tmp_path, monkeypatch)
     task = await sub.tasks.create(
         kind="roofline",
@@ -168,10 +169,124 @@ async def test_a_task_that_heartbeats_all_along_is_still_reclaimed_at_its_lease(
     for unit in range(3):
         await sub.tasks.record_progress(task.task_id, {"unit": "roofline_step", "index": unit})
 
-    reclaimed = await sub.tasks.reclaim_expired_running(reason="test_watchdog")
+    assert not hasattr(sub.tasks, "reclaim_expired_running")
+    assert await sub.tasks.reclaim_dead_running() == []
+    running = await sub.tasks.get(task.task_id)
+    assert running.state == "running"
+    assert running.lease_ttl_sec == 2700
+    assert await sub.tasks.extend_lease(task.task_id, 60) == 2760
 
-    assert reclaimed == [task.task_id]
-    assert (await sub.tasks.get(task.task_id)).state == "failed"
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner_scope,dead", [("test-node", True), ("test-node", False), ("", True), ("other", True)])
+async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, owner_scope, dead):
+    from hyperloom.orchestrator.bus import resource_lock
+
+    monkeypatch.setattr(resource_lock, "local_owner_scope", lambda: "test-node")
+    monkeypatch.setattr(SqliteLeaseBackend, "_pid_alive", staticmethod(lambda pid: not dead))
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="explore", params={}, idempotency_key="dead-owner")
+    await sub.tasks.transition(task.task_id, "running")
+    await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=-1
+    )
+    await sub.tasks.db.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
+    reclaimed = await sub.tasks.reclaim_dead_running(reason="test_dead")
+    if owner_scope == "test-node" and dead:
+        assert reclaimed == [task.task_id]
+        row = await sub.tasks.get(task.task_id)
+        assert row.history[-1]["evidence"] == {"reason": "test_dead", "dead_pid": 12345}
+    else:
+        assert reclaimed == []
+        assert (await sub.tasks.get(task.task_id)).state == "running"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+@pytest.mark.parametrize("fails", [True, False])
+async def test_worker_cleanup_precedes_lane_release(tmp_path, monkeypatch, confirmed, fails):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="explore", params={}, idempotency_key="cleanup", requires_lanes=["research_lane"]
+    )
+    lease = await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
+    )
+
+    async def execute(_ctx):
+        if fails:
+            raise ValueError("executor failed")
+        return {"ok": True}
+
+    async def cleanup():
+        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        return confirmed
+
+    sub.register_executor("explore", execute)
+    try:
+        execution = sub.run_task(task, prebound_lease=lease, release_resources=cleanup)
+        if confirmed:
+            result = await execution
+            assert result.state == ("failed" if fails else "succeeded")
+        else:
+            with pytest.raises(ExecutionCleanupUnconfirmed, match=task.task_id):
+                await execution
+        row = await sub.tasks.get(task.task_id)
+        assert row.state == ("failed" if fails else "succeeded")
+        if fails:
+            assert "executor failed" in row.history[-1]["evidence"]["error"]
+        assert bool(await sub.locks.lane_holders()) is not confirmed
+        retained = await sub.tasks.db.fetchone("SELECT task_id FROM leases WHERE task_id=?", (task.task_id,))
+        assert (retained is not None) is not confirmed
+    finally:
+        sub.tasks.db.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypatch, caplog):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(
+        kind="explore", params={}, idempotency_key="cancel-cleanup", requires_lanes=["research_lane"]
+    )
+    lease = await sub.locks.acquire_many(
+        ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=1
+    )
+    entered = threading.Event()
+    finish = threading.Event()
+
+    def close():
+        entered.set()
+        finish.wait(5)
+        return True
+
+    async def cleanup():
+        return await asyncio.to_thread(close)
+
+    async def execute(_ctx):
+        return {}
+
+    sub.register_executor("explore", execute)
+    running = asyncio.create_task(sub.run_task(task, prebound_lease=lease, release_resources=cleanup))
+    await asyncio.to_thread(entered.wait, 2)
+    try:
+        running.cancel()
+        await _await_cancelled(running)
+        assert (await sub.locks.lane_holders())["research_lane"] == 1
+        assert "cleanup cancelled" in caplog.text
+    finally:
+        finish.set()
+
+
+@pytest.mark.asyncio
+async def test_retired_recover_is_cancelled_without_running(tmp_path, monkeypatch):
+    sub = _runner(tmp_path, monkeypatch)
+    task = await sub.tasks.create(kind="recover", params={}, idempotency_key="legacy-recover")
+    result = await sub.run_task(task)
+    assert result.state == "cancelled"
+    row = await sub.tasks.get(task.task_id)
+    assert row.state == "cancelled"
+    assert row.history[-1]["from"] == "queued"
+    assert row.history[-1]["evidence"]["reason"] == "unsupported_action"
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,6 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _patch_touched_paths,
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_apply,
     _git_apply_reverse,
     _git_restore_to_head,
 )
@@ -29,6 +28,10 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
+from .patch_conflict_merge import apply_patch_resolving_conflicts
+
+_CONTROLLER_SOURCE = "kernel_rewrite_controller"
+_CONTROLLER_BACKEND = "forge"
 
 
 @dataclass(frozen=True)
@@ -44,6 +47,9 @@ class PatchIntegrationResult:
     keep_commit: str = ""
     new_tput: float = 0.0
     gain_pct: float = 0.0
+    #: How the patch reached the worktree; anything but ``strict`` was rebuilt
+    #: against the KEEPs that landed ahead of it.
+    merge_strategy: str = ""
 
 
 @dataclass(frozen=True)
@@ -176,63 +182,10 @@ def _keep_result(
         "scope": "source_patch",
         "base_sha": publication.base_commit,
         "keep_commit": keep_commit,
-        "source": "kernel_rewrite_controller",
+        "source": _CONTROLLER_SOURCE,
+        "backend": _CONTROLLER_BACKEND,
+        "engine": _CONTROLLER_SOURCE,
     }
-
-
-def _record_keep(
-    shared_state: Any,
-    publication: ControllerPatchPublication,
-    validation: dict[str, Any],
-    keep_commit: str,
-    session_dir: Path,
-) -> None:
-    new_tput = float(validation.get("new_tput") or 0.0)
-    variant_name = f"kernel_rewrite_controller:{publication.operator_id}"
-    entry = {
-        "action": "integrate",
-        "scope": "source_patch",
-        "variant_name": variant_name,
-        "kernel_id": publication.operator_id,
-        "operator_id": publication.operator_id,
-        "source_file": str(publication.repo_root / publication.kernel_path),
-        "patch_path": str(publication.patch_path),
-        "base_sha": publication.base_commit,
-        "keep_commit": keep_commit,
-        "tput": new_tput,
-        "gain_pct": float(validation.get("gain_pct") or 0.0),
-        "source": "kernel_rewrite_controller",
-    }
-    shared_state.optimization_stack = [
-        *[
-            item
-            for item in (getattr(shared_state, "optimization_stack", None) or [])
-            if not (isinstance(item, dict) and str(item.get("operator_id") or "") == publication.operator_id)
-        ],
-        entry,
-    ]
-    current_best = (
-        dict(shared_state.current_best) if isinstance(getattr(shared_state, "current_best", None), dict) else {}
-    )
-    current_best.update(
-        {
-            "action": "integrate",
-            "variant_name": variant_name,
-            "tput": new_tput,
-            "source_file": entry["source_file"],
-            "patch_path": entry["patch_path"],
-            "keep_commit": keep_commit,
-        }
-    )
-    if validation.get("extra_server_args") is not None:
-        current_best["extra_server_args"] = validation.get("extra_server_args")
-    if isinstance(validation.get("extra_envs"), dict):
-        current_best["extra_envs"] = dict(validation["extra_envs"])
-    shared_state.current_best = current_best
-    baseline = float(getattr(shared_state, "baseline_tput", 0.0) or 0.0)
-    if baseline > 0 and new_tput > 0:
-        shared_state.cumulative_gain_validated = (new_tput / baseline - 1.0) * 100.0
-    shared_state.save(session_dir)
 
 
 async def _default_validator(
@@ -265,7 +218,7 @@ async def integrate_controller_patches(
     patches_root: str | Path,
     session_dir: Path,
     shared_state: Any,
-    record_keep: KeepRecorder | None = None,
+    record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate every complete Controller patch in filename order.
@@ -274,7 +227,8 @@ async def integrate_controller_patches(
         patches_root: The Controller's published patch directory.
         session_dir: The session whose state the KEEPs are recorded into.
         shared_state: The live session state, persisted after each recorded KEEP.
-        record_keep: Session-owned writeback for AgentX; other workloads use the local recorder.
+        record_keep: The session-owned writeback every KEEP is recorded through,
+            so a promotion also lands on the stack ledger.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
     """
@@ -292,6 +246,9 @@ async def integrate_controller_patches(
     pinned_bases: dict[Path, str] = {}
     pinned_heads: dict[Path, str] = {}
     pin_errors: dict[Path, str] = {}
+    # Patches already committed into each repository, so a merge can be held to
+    # keeping what they added.
+    landed: dict[Path, list[tuple[str, Path]]] = {}
 
     for index, patch_dir in enumerate(discover_controller_patch_dirs(patches_root)):
         try:
@@ -385,36 +342,21 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
-        applies, apply_error = _git_apply(
+        # Lanes all diff against the pinned base, so every KEEP committed above
+        # makes the diffs still queued stale on the files it touched.
+        merge = await apply_patch_resolving_conflicts(
             repo,
             publication.patch_path,
-            three_way=False,
-            check_only=True,
+            operator_id=publication.operator_id,
+            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
+            landed_patches=[patch for _, patch in landed.get(repo, [])],
+            intent=f"{publication.operator_name} in {publication.kernel_path}",
         )
-        if not applies:
+        if not merge.applied:
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
-                status="reverted_apply_conflict",
-                reason=apply_error or "git apply check failed",
-                base_commit=publication.base_commit,
-                best_commit=publication.best_commit,
-                repo_root=str(repo),
-                integration_head_before=head_before,
-            )
-            results.append(result)
-            _write_result(results_dir, index, result)
-            continue
-        applied, apply_error = _git_apply(
-            repo,
-            publication.patch_path,
-            three_way=False,
-            check_only=False,
-        )
-        if not applied:
-            result = PatchIntegrationResult(
-                operator_id=publication.operator_id,
-                status="reverted_apply_failed",
-                reason=(apply_error or "git apply failed") + _revert_note(repo, publication.patch_path),
+                status="reverted_apply_conflict" if merge.conflicted else "reverted_apply_failed",
+                reason=merge.error + merge.note(),
                 base_commit=publication.base_commit,
                 best_commit=publication.best_commit,
                 repo_root=str(repo),
@@ -487,19 +429,18 @@ async def integrate_controller_patches(
             continue
 
         try:
-            if record_keep is None:
-                _record_keep(shared_state, publication, validation, keep_commit, Path(session_dir))
-            else:
-                await record_keep(_keep_result(publication, validation, keep_commit))
-                shared_state.save(Path(session_dir))
+            await record_keep(_keep_result(publication, validation, keep_commit))
+            shared_state.save(Path(session_dir))
         except Exception as error:
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""
+        landed.setdefault(repo, []).append((publication.operator_id, publication.patch_path))
         result = PatchIntegrationResult(
             operator_id=publication.operator_id,
             status="kept",
-            reason=record_reason + _settle_apply_manifest(validation, kept=True),
+            merge_strategy=merge.strategy,
+            reason=record_reason + merge.note() + _settle_apply_manifest(validation, kept=True),
             base_commit=publication.base_commit,
             best_commit=publication.best_commit,
             repo_root=str(repo),

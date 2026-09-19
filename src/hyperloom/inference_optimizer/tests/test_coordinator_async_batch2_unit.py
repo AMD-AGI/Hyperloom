@@ -43,7 +43,7 @@ def test_stale_delegated_method_raises_attribute_error(monkeypatch: pytest.Monke
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 def test_delegated_missing_attr_raises_attribute_error_not_recursion(monkeypatch) -> None:
@@ -975,10 +975,9 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    for agent in ("orchestration", "robustness"):
-        out = await coord._compose_prompt(agent)
-        assert "Specialist health" not in out
-        assert "stale" not in out.lower()
+    out = await coord._compose_prompt("orchestration")
+    assert "Specialist health" not in out
+    assert "stale" not in out.lower()
 
 
 @pytest.mark.asyncio
@@ -1913,7 +1912,7 @@ async def test_pump_framework_agent_skips_when_task_inflight(coord: Coordinator)
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.framework import client as _fa_client
+    from hyperloom.orchestrator.phases import framework as _phase_framework
 
     _enter_framework(coord)
     # Arm disabled: discovery exhaustion falls back to the historical exit (the enabled arm pivots to local
@@ -1921,7 +1920,7 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     coord.shared_state.framework_local_explore_enabled = False
     coord.shared_state.framework_agent_discover_failures = 0
     # Discovery has spent its retry budget, so the upstream lane declines and the tick reaches the terminal rung.
-    coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    coord.shared_state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
     monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
     await coord._pump_framework_agent_phase()

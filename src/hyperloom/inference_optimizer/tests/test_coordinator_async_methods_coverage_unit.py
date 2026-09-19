@@ -30,7 +30,7 @@ def _silent_plan() -> ScriptedPlan:
 
 
 def _build_backends() -> dict[str, Backend]:
-    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic", "robustness")}
+    return {name: MockBackend(_silent_plan(), name=name) for name in ("orchestration", "critic")}
 
 
 @pytest.fixture
@@ -410,13 +410,11 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_robustness_and_kernel(coord: Coordinator) -> None:
+async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out_rob = await coord._compose_prompt("robustness")
     out_k = await coord._compose_prompt("kernel_agent")
-    assert "SESSION_DIR=" in out_rob
     assert "SESSION_DIR=" in out_k
 
 
@@ -511,24 +509,10 @@ async def test_escalate_skip_to_kernel_deferred(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinator) -> None:
-    """Q2: skip_to_close is dropped while a not-yet-enabled run is still enabling."""
-    coord.shared_state.phase = "PRELUDE"
-    coord.shared_state.baseline_tput = 0.0
-    coord.shared_state.enablement.succeeded = False
-    await coord._handle_escalate_strategy_change(
-        "orchestration",
-        _escalate("skip_to_close"),
-    )
-    assert coord.shared_state.pending_escalate_hint != "skip_to_close"
-
-
-@pytest.mark.asyncio
-async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
-    """skip_to_close is honored once a baseline exists (guard no longer active)."""
+async def test_escalate_skip_to_close_sets_pending_hint(coord: Coordinator) -> None:
+    """skip_to_close reaches pending_escalate_hint (no suppression guard any more)."""
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
-    coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
         "orchestration",
         _escalate("skip_to_close"),

@@ -26,11 +26,10 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
-    DEFAULT_VARIANT_TIMEOUT_SEC,
     _build_arm_grid,
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
-    _granted_cap_sec,
+    _grading_of,
     _has_optimization,
     _order_concs_desc,
     _point_from_variant,
@@ -366,8 +365,8 @@ def test_build_comparison_mismatched_concs_outer_join():
     ]
     rows, summary = _build_comparison(baseline, optimized)
     assert [r["conc"] for r in rows] == [1, 4, 16]
-    assert rows[0]["optimized_tput"] is None
-    assert rows[2]["baseline_tput"] is None
+    assert rows[0]["optimized_value"] is None
+    assert rows[2]["baseline_value"] is None
     assert summary["successful_pairs"] == 1
 
 
@@ -838,21 +837,6 @@ class TestTheAgentXLadderIsDefaultOn:
         assert not hasattr(cb, "_flag_explicitly_set")
 
 
-def test_the_agentx_budget_funds_the_whole_ladder():
-    """Seven rungs on each arm; a smaller default would truncate every run."""
-    from hyperloom.inference_optimizer.cli import (
-        _AGENTX_CONC_SWEEP_TIMEOUT_SEC,
-        _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC,
-    )
-    from hyperloom.orchestrator.kernel.conc_sweep import AGENTX_DEFAULT_CONCS
-
-    rungs = len(AGENTX_DEFAULT_CONCS) * 2
-    assert rungs == 14
-    measured_round_sec = 111 * 60
-    assert _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC >= rungs * measured_round_sec
-    assert _AGENTX_CONC_SWEEP_TIMEOUT_SEC < _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
-
-
 def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
     """`concs=None` reaches the engine from the SDK and from a bare task alike."""
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
@@ -873,55 +857,6 @@ def test_default_total_budget_is_two_and_half_hours():
 
 
 # Total wall-clock budget
-def test_run_conc_sweep_budget_exhausted_marks_remaining_skipped(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """When remaining budget cannot cover another variant, the tail is skipped."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    calls = {"n": 0}
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        import time as _t
-
-        _t.sleep(1.2)
-        calls["n"] += 1
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1, 4, 16, 64],
-                variant_timeout_sec=1,
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    statuses = [p["status"] for p in all_points]
-    assert "succeeded" in statuses
-    assert "skipped" in statuses
-    skipped_pts = [p for p in all_points if p["status"] == "skipped"]
-    for p in skipped_pts:
-        assert p["error_class"] == "budget_exhausted"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    assert payload["budget_remaining_sec"] < 1
-    assert payload["total_budget_sec"] == 2
-    assert calls["n"] < 8
-
-
 def test_run_conc_sweep_none_budget_disables_gate(
     session_dir: Path,
     baseline_yaml: Path,
@@ -993,48 +928,6 @@ def test_run_conc_sweep_zero_budget_skips_without_running(
     assert conc_sweep_declined_to_run({**payload, "was_skipped": True}) is True
 
 
-def test_run_conc_sweep_skips_when_initial_budget_below_variant_timeout(
-    session_dir: Path,
-    baseline_yaml: Path,
-):
-    """A too-small budget is reported as skipped instead of a timeout-prone run."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
-            side_effect=_fake_run_grid,
-        ),
-        patch(
-            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
-            side_effect=_fake_materialize,
-        ),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[1],
-                variant_timeout_sec=3600,
-                total_budget_sec=120,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert {p["status"] for p in all_points} == {"skipped"}
-    assert {p["error_class"] for p in all_points} == {"budget_exhausted"}
-    assert payload["status"] == "skipped"
-    assert payload["was_skipped"] is True
-    assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
-    assert payload["budget_exhausted"] is True
-    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
-    # This sweep started; only the pre-flight envelope means "declined to run".
-    assert conc_sweep_declined_to_run(payload) is False
-
-
 # ActionExecutor integration (SWEEP-phase dispatch)
 def test_conc_sweep_executor_loads_state_and_dispatches(
     session_dir: Path,
@@ -1049,7 +942,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
     state.conc_sweep_enabled = True
     state.conc_sweep_concs = [1, 4]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
@@ -1061,9 +953,8 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {
             "status": "succeeded",
@@ -1078,7 +969,6 @@ def test_conc_sweep_executor_loads_state_and_dispatches(
 
     assert result["status"] == "succeeded"
     assert captured["concs"] == [1, 4]
-    assert captured["timeout"] == 30
     assert captured["budget"] == 60
 
 
@@ -1136,13 +1026,11 @@ def test_conc_sweep_executor_task_params_override_state(
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.conc_sweep_concs = [1]
     state.conc_sweep_total_budget_sec = 60
-    state.conc_sweep_variant_timeout_sec = 30
     state.save(session_dir)
 
     class _Task:
         params = {
             "concs": ["2", "8"],
-            "variant_timeout_sec": "45",
             "total_budget_sec": "120",
         }
 
@@ -1152,9 +1040,8 @@ def test_conc_sweep_executor_task_params_override_state(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["concs"] = list(concs)
-        captured["timeout"] = variant_timeout_sec
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -1165,7 +1052,7 @@ def test_conc_sweep_executor_task_params_override_state(
         result = asyncio.run(ConcSweepExecutor()(_Ctx()))
 
     assert result["status"] == "succeeded"
-    assert captured == {"concs": [2, 8], "timeout": 45, "budget": 120}
+    assert captured == {"concs": [2, 8], "budget": 120}
 
 
 def test_conc_sweep_executor_keeps_none_budget_unbounded(
@@ -1190,7 +1077,7 @@ def test_conc_sweep_executor_keeps_none_budget_unbounded(
 
     captured: dict = {}
 
-    async def _fake_run(state_arg, sd, *, concs, variant_timeout_sec, total_budget_sec, **_kw):
+    async def _fake_run(state_arg, sd, *, concs, total_budget_sec, **_kw):
         captured["budget"] = total_budget_sec
         return {"status": "succeeded", "summary": {"successful_pairs": 1}}
 
@@ -1563,7 +1450,6 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert graded_metric_key(benchmark_mode="") == "output_throughput"
 
     def test_an_explicit_grading_override_wins_over_the_mode(self, monkeypatch):
-        """The summary follows the axis the KEEP verdicts were taken on."""
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
         assert graded_metric_key(benchmark_mode="agentx") == "output_throughput"
         from hyperloom.common.perf_metric import INTVTY_V1
@@ -1576,6 +1462,112 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
         monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
         assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
+
+
+class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
+    """A curve drawn on one axis beside promotions decided on another is two answers to one question."""
+
+    @pytest.fixture(autouse=True)
+    def _no_ambient_grading(self, monkeypatch):
+        for name in ("HYPERLOOM_PERF_METRIC", "HYPERLOOM_PERF_NOISE_PCT", "HYPERLOOM_AGENTX"):
+            monkeypatch.delenv(name, raising=False)
+
+    def _state(self, **fields: Any) -> SharedState:
+        state = SharedState()
+        for key, value in fields.items():
+            setattr(state, key, value)
+        return state
+
+    def test_the_recorded_axis_beats_the_environment(self, monkeypatch):
+        """A resume is a new process, and the shell it landed in is not evidence about the axis."""
+        monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state) == ("e2e_norm_intvty_p90", 3.5)
+
+    def test_the_recorded_band_travels_with_the_axis(self):
+        """A lost band silently widens a 3.5% guard back to the 5% default."""
+        state = self._state(benchmark_mode="agentx", grading={"objective": "e2e_norm_intvty_p90", "noise_pct": 3.5})
+        assert _grading_of(state)[1] == 3.5
+
+    def test_a_session_with_nothing_recorded_falls_back_to_its_mode(self):
+        assert _grading_of(self._state(benchmark_mode="agentx"))[0] == "e2e_norm_intvty_p90"
+        assert _grading_of(self._state(benchmark_mode="synthetic"))[0] == "output_throughput"
+
+    def test_a_scriptable_framework_is_carved_out(self):
+        """An image framework reports no interactivity axis, so ranking every rung on it fails the whole sweep."""
+        state = self._state(benchmark_mode="agentx", framework="xdit")
+        assert _grading_of(state)[0] == "output_throughput"
+
+
+class TestTheGuardAxisIsReportedNotEnforced:
+    """A sweep exists to draw the frontier, so a rung that moved along it is a result and not a failure."""
+
+    def _pts(self, arm: str, *, intvty: float, total: float) -> list[dict[str, Any]]:
+        return [
+            {
+                "arm": arm,
+                "conc": 8,
+                "status": "succeeded",
+                "e2e_norm_intvty_p90": intvty,
+                "total_token_throughput": total,
+            }
+        ]
+
+    def test_a_rung_that_bought_interactivity_with_throughput_still_pairs(self):
+        """It ranks on the objective it gained on, and carries the throughput it gave up beside it."""
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=30.0, total=10000.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        row = comparison[0]
+        assert row["speedup"] == pytest.approx(1.5)
+        assert summary["successful_pairs"] == 1
+        assert summary["best_conc"] == 8
+        # Halving throughput is far outside any band, and that is visible without having dropped the rung.
+        assert row["guard_holds"] is False
+        assert summary["best_conc_guard_holds"] is False
+        assert row["baseline_guard"] == 20000.0
+        assert row["optimized_guard"] == 10000.0
+
+    def test_a_rung_that_held_throughput_says_so(self):
+        comparison, summary = _build_comparison(
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19800.0),
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is True
+        assert summary["guard_axis"] == "total_throughput"
+
+    def test_the_recorded_band_decides_the_verdict(self):
+        """The same pair holds under the default band and fails under a tighter one."""
+        arms = (
+            self._pts("baseline", intvty=20.0, total=20000.0),
+            self._pts("optimized", intvty=24.0, total=19200.0),
+        )
+        assert _build_comparison(*arms, metric_key="e2e_norm_intvty_p90")[0][0]["guard_holds"] is True
+        tight, _ = _build_comparison(*arms, metric_key="e2e_norm_intvty_p90", guard_noise_pct=1.0)
+        assert tight[0]["guard_holds"] is False
+
+    def test_the_output_objective_has_no_second_axis_to_hold(self):
+        comparison, summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "output_throughput": 100.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "output_throughput": 130.0}],
+            metric_key="output_throughput",
+        )
+        assert summary["guard_axis"] == ""
+        assert summary["best_conc_guard_holds"] is None
+        assert comparison[0]["guard_holds"] is None
+
+    def test_an_unmeasured_guard_axis_is_null_not_a_failure(self):
+        """Null says the axis was never measured; False would say it was, and fell outside."""
+        comparison, _summary = _build_comparison(
+            [{"arm": "baseline", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 20.0}],
+            [{"arm": "optimized", "conc": 8, "status": "succeeded", "e2e_norm_intvty_p90": 30.0}],
+            metric_key="e2e_norm_intvty_p90",
+        )
+        assert comparison[0]["guard_holds"] is None
+        assert comparison[0]["baseline_guard"] is None
 
 
 class TestAnUnreportedTotalComesFromItsHalves:
@@ -2340,45 +2332,6 @@ def test_single_server_reuse_exception_recorded_as_failed(
     assert any((p.get("error") or "").startswith("single_server_reuse: ") for p in failed)
 
 
-def test_single_server_reuse_loop_budget_exhausted(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Task budget exhausted mid-arm skips remaining reuse points."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        import time as _t
-
-        # Boot round consumes the whole budget so reuse points get skipped.
-        if kw.get("server_already_ready") is False:
-            _t.sleep(1.2)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(
-            run_conc_sweep(
-                state,
-                session_dir,
-                concs=[4, 16, 64],
-                variant_timeout_sec=1,
-                total_budget_sec=2,
-            )
-        )
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    skipped = [p for p in all_points if p["status"] == "skipped"]
-    assert len(skipped) > 0
-    assert payload["budget_exhausted"] is True
-
-
 def test_single_server_boot_exception_falls_back(
     session_dir: Path,
     baseline_yaml: Path,
@@ -2442,43 +2395,6 @@ def test_single_server_pre_arm_skip_on_closing_phase(
 
 
 # --- budget arithmetic must price a variant at the cap it will be granted -------
-
-
-def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Zero regression: with AgentX off the sweep prices variants exactly as before."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    assert _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC) == float(DEFAULT_VARIANT_TIMEOUT_SEC)
-
-
-def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
-    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for."""
-    from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
-
-    for k in (
-        "AGENTX_BASELINE_TIMEOUT_SEC",
-        "AGENTX_BASELINE_OVERHEAD_SEC",
-        "AGENTX_WARMUP_GRACE_PERIOD",
-        "CONC",
-    ):
-        monkeypatch.delenv(k, raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    raised = _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC)
-    assert raised == float(agentx_baseline_timeout_sec())
-    assert raised > float(DEFAULT_VARIANT_TIMEOUT_SEC)
-
-
-def test_the_admission_price_never_lowers_an_operator_raised_cap(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """An operator who asked for longer than AgentX derives keeps what they asked for."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert _granted_cap_sec(99_999) == 99_999.0
-
-
-# ───────────────────────────────────────────────────────────────────────────── Post-run orphan reap
-# (AMD-AGI/Hyperloom#1354) ─────────────────────────────────────────────────────────────────────────────
 
 
 def test_run_conc_sweep_reaps_stale_servers_after_both_arms(

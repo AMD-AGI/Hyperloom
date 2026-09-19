@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import signal
 import time
 import traceback
 from collections.abc import Mapping
@@ -39,11 +38,6 @@ DEFAULT_CYCLE_HOURS: float = 24.0
 _CRASH_EMERGENCY_WINDOW_SEC: float = 24.0 * 3600.0
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
-# Enablement attempt cap: consecutive settled rounds that made no progress
-# before the lane stops dispatching. Advancing rounds (outcome ADVANCED or
-# BOOTED) reset the streak; abandoned and expired rounds are skipped.
-# The wall clock is the outer bound for a bring-up still making progress.
-_ENABLEMENT_MAX_ATTEMPTS: int = 8
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 # Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
@@ -87,7 +81,6 @@ from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
-from hyperloom.orchestrator.supervisor.watch import SUPERVISOR_RESTART_REASON
 from ..trace.orchestration_trace import (
     write_mcp_setup_once,
 )
@@ -671,7 +664,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self._backend_error_streak_threshold = 5
 
         # Stable tick order from the live role_registry.
-        _CANONICAL_ORDER = ("orchestration", "critic", "robustness")
+        _CANONICAL_ORDER = ("orchestration", "critic")
         self._tick_roles: tuple[str, ...] = tuple(r for r in _CANONICAL_ORDER if r in self.role_registry)
 
         # Inline fast-action execution: run cheap lane-light action in-turn. Default ON.
@@ -724,7 +717,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_handle_single_verdict": "router",
         "_handle_delegate": "router",
         "_handle_request": "router",
-        "_handle_response": "router",
         "_handle_extend_lease": "router",
         "_deliver_specialist_inbox": "router",
         "_handle_prune_branch": "router",
@@ -865,6 +857,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_read_enablement_source_context": "enablement_params",
         "_derive_checkpoint_weight_facts": "enablement_params",
         "_discover_enablement_candidate_refs": "enablement_params",
+        "_enablement_admitted": "enablement_lane",
         "_maybe_enqueue_enablement_specialist": "enablement_lane",
         "_maybe_record_enablement_human_review": "enablement_lane",
         "_enablement_in_flight": "enablement_lane",
@@ -960,6 +953,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_reap_dispatched_task": "dispatcher",
         "_account_dead_holder_failures": "dispatcher",
         "_lanes_fit": "dispatcher",
+        "_phase_denial_for_action": "dispatcher",
         "_sequence_denial_for_action": "dispatcher",
         "_time_budget_denial_for_action": "dispatcher",
         "_admission_denial_for_action": "dispatcher",
@@ -1279,7 +1273,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 pass
             except Exception:  # noqa: BLE001
                 log.exception("reactor task raised on shutdown")
-        self.db.close()
+        await self.dispatcher.close_db_after_executions()
 
     def _bind_session_deadline(
         self,
@@ -1476,14 +1470,9 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     def _classify_stop(self, received: AbstractSet[int], *, pending: str = "") -> str:
         """Classify final state from terminal outcome and captured signals."""
-        if signal.SIGINT in received or signal.SIGTERM in received:
+        if received:
             return "signal"
-        terminal = pending or self.shared_state.stop_reason
-        if terminal:
-            return terminal
-        if received == {signal.SIGHUP}:
-            return SUPERVISOR_RESTART_REASON
-        return "signal" if received else ""
+        return pending or self.shared_state.stop_reason
 
     @property
     def stop_classification(self) -> str:
@@ -1502,8 +1491,6 @@ class Coordinator(metaclass=_CoordinatorMeta):
             log.warning("Coordinator: skipping %s; session bound already elapsed", stage)
             return
         stage_timeout = self._stage_timeout_sec(stage)
-        if stage_timeout is not None:
-            await self.reconciler.stamp_progress(time.time())
         timeout = (
             min(remaining, stage_timeout)
             if remaining is not None and stage_timeout is not None
@@ -1523,13 +1510,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 timeout,
             )
             if stage_timeout is not None and timeout == stage_timeout:
-                # Cancelling the turn lets the tick advance, which reads as a
-                # healthy loop to the supervisor; the crash count is the only
-                # channel left that can end a session wedged on one role.
                 self._record_coordinator_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
-        finally:
-            if stage_timeout is not None:
-                await self.reconciler.stamp_progress(time.time())
 
     # Long-run interface
     async def run(
@@ -1717,27 +1698,20 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 self._signals = None
             stop_reason = self._classify_stop(final_signals, pending=stop_reason)
             self._stop_classification = stop_reason
-            resumable_stop = stop_reason == SUPERVISOR_RESTART_REASON
             if self.shared_state.closing_phase:
                 self.shared_state.closing_phase = False
-            if resumable_stop:
-                self.shared_state.stop_reason = ""
-                self.shared_state.stop_ts = ""
-                self.shared_state.leg_ended_ts = now_iso()
-            else:
-                # Resuming a terminal session can break out before stop_reason is set.
-                self.shared_state.set_stop_reason(
-                    stop_reason
-                    or self.shared_state.stop_reason
-                    or ("coordinator_exception" if last_tick_exc is not None else "unknown")
-                )
+            # Resuming a terminal session can break out before stop_reason is set.
+            self.shared_state.set_stop_reason(
+                stop_reason
+                or self.shared_state.stop_reason
+                or ("coordinator_exception" if last_tick_exc is not None else "unknown")
+            )
             self.shared_state.save(self.session_dir)
-            if not resumable_stop:
-                try:
-                    await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    log.exception("Coordinator: terminal close sequence did not finish")
-                await self._recipe_kb_t4_hook()
+            try:
+                await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                log.exception("Coordinator: terminal close sequence did not finish")
+            await self._recipe_kb_t4_hook()
             log.info(
                 "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
                 "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
@@ -1949,7 +1923,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     "hint": (
                         "subprocess backend has failed >= threshold times "
                         "consecutively; consider switching to a mock "
-                        "backend (e.g. --robustness-mock / --critic-mock) "
+                        "backend (e.g. --critic-mock) "
                         "while the underlying transport is repaired"
                     ),
                 },

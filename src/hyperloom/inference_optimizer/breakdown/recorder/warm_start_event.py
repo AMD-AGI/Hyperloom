@@ -28,6 +28,7 @@ from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
+    bool_or_none as _bool_or_none,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
     now_iso_seconds as _now,
@@ -438,11 +439,6 @@ def _origin(recipe: Mapping[str, Any]) -> dict[str, Any] | None:
     if not session_id and gain is None:
         return None
     return {"session_id": session_id, "gain_pct": gain}
-
-
-def _bool_or_none(value: Any) -> bool | None:
-    """``bool(value)`` when a value was recorded, else ``None``."""
-    return None if value is None else bool(value)
 
 
 __all__ = [

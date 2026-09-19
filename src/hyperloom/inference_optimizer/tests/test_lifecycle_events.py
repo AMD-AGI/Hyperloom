@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 from hyperloom.orchestrator.phases.machine_state import (
-    LIFECYCLE_STATUSES,
     PHASE_KERNEL_AGENT,
     lifecycle_label,
     make_lifecycle_event,
@@ -76,11 +75,6 @@ def test_make_lifecycle_event_omits_duration_when_none():
     assert "duration_s" not in event
     assert event["artifacts"] == {}
     assert event["label"] == "Report"
-
-
-def test_lifecycle_statuses_enum():
-    # ENTER is the phase-boundary marker; START / END / ERROR are step-level.
-    assert LIFECYCLE_STATUSES == frozenset({"START", "END", "ERROR", "ENTER"})
 
 
 def test_record_lifecycle_event_appends_and_defaults_phase():

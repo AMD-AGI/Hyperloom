@@ -407,7 +407,6 @@ def test_a_rung_carries_the_agentic_axis_the_projection_dropped(_bound_session):
     point = _ext(_bound_session)["arms"][ARM_OPTIMIZED]["points"][0]
     assert point["arm"] == ARM_OPTIMIZED
     assert point["total_token_throughput"] == 12800.0
-    # The name the sweep's own flattening writes, not the VariantResult attribute it reads.
     assert point["e2e_norm_intvty_p90"] == 42.0
     assert point["tpot_p90_ms"] == 13.5
     assert point["request_throughput"] == 96.0
@@ -550,8 +549,8 @@ def test_the_pair_table_keeps_the_gain_columns_the_projection_dropped(_bound_ses
         comparison=[
             {
                 "conc": 32,
-                "baseline_tput": 1000.0,
-                "optimized_tput": 1350.0,
+                "baseline_value": 1000.0,
+                "optimized_value": 1350.0,
                 "speedup": 1.35,
                 "delta_pct": 35.0,
                 "baseline_status": "succeeded",
@@ -572,13 +571,18 @@ def test_the_pair_table_keeps_the_gain_columns_the_projection_dropped(_bound_ses
 
     pair = _ext(_bound_session)["comparison"][0]
     assert pair["conc"] == 32
-    assert pair["baseline_throughput"] == 1000.0
-    assert pair["optimized_throughput"] == 1350.0
+    assert pair["baseline_value"] == 1000.0
+    assert pair["optimized_value"] == 1350.0
     assert pair["speedup"] == 1.35
     assert pair["delta_pct"] == 35.0
     assert pair["baseline_status"] == "succeeded"
     assert pair["optimized_status"] == "succeeded"
     assert pair["error"] is None
+    # The output objective has no second axis to hold, so the guard columns stay null rather than reading as a
+    # rung whose throughput was measured and fell outside the band.
+    assert pair["baseline_guard"] is None
+    assert pair["optimized_guard"] is None
+    assert pair["guard_holds"] is None
 
 
 def test_a_failed_pair_is_explained_by_the_arm_that_broke(_bound_session):

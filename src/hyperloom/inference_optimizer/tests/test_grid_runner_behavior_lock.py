@@ -30,7 +30,7 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 )
 from hyperloom.orchestrator.trace.task_progress import progress_scope
 
-from .conftest import chatty_child, suppression_window_s
+from .conftest import chatty_child
 
 
 @pytest.fixture(autouse=True)
@@ -55,7 +55,7 @@ def _write_base_yaml(path: Path, *, framework: str = "sglang") -> None:
             "precision": "bf16",
             "run_mode": "local",
             "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
-            "benchmark_script": "sglang_mi300x.sh",
+            "benchmark_script": f"{framework}_mi300x.sh",
             "timeout_seconds": 600,
             "profiler": {
                 "torch_profiler": {"enabled": False},
@@ -139,7 +139,6 @@ def _run_capturing_variant_notes(
                 grid=grid,
                 output_root=out,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
                 keep_going_on_failure=True,
             )
@@ -219,7 +218,6 @@ class TestKeepGoingAsymmetry:
                     grid=[GridVariant(name="c0"), GridVariant(name="c1")],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                     keep_going_on_failure=False,
                 )
@@ -333,13 +331,13 @@ class TestAutoWarmupTeardown:
                     grid=[GridVariant(name="cand")],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                 )
             )
         return results, teardown_calls
 
-    def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("framework", ["vllm", "sglang", "atom"])
+    def test_warmup_success_measured_success_tears_down_once(self, tmp_path, monkeypatch, framework):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
         # Pin the free-port picker so the teardown-port assertion is deterministic (baseline uses a per-session free
         # port).
@@ -348,7 +346,7 @@ class TestAutoWarmupTeardown:
             lambda: 8888,
         )
         base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
+        _write_base_yaml(base, framework=framework)
         state = {"n": 0}
 
         def _run(cmd, *a, **k):
@@ -364,7 +362,7 @@ class TestAutoWarmupTeardown:
         assert state["n"] == 2
         # Exactly one teardown: the measured-round ``finally`` block.
         assert len(teardown_calls) == 1
-        assert teardown_calls[0]["framework"] == "sglang"
+        assert teardown_calls[0]["framework"] == framework
         assert teardown_calls[0]["port"] == 8888
         assert "run_grid_warmup_discarded_first" in results[0].nonfatal_warnings
 
@@ -546,7 +544,6 @@ class TestVariantHeartbeat:
                     grid=[GridVariant(name=f"c{i}") for i in range(grid_n)],
                     output_root=out,
                     magpie_python=sys.executable,
-                    variant_timeout_sec=10,
                     gpu_type="mi300x",
                 )
             )
@@ -664,4 +661,7 @@ class TestVariantHeartbeat:
         )
 
         assert [r.status for r in results] == ["succeeded"]
-        assert progress_cadence.widest_silence() < suppression_window_s()
+        running = [note for note in progress_cadence.notes if note["status"] == "running"]
+        assert len(running) >= 3
+        assert all(note["output_lines"] > 0 for note in running)
+        assert progress_cadence.widest_silence() <= 150.0

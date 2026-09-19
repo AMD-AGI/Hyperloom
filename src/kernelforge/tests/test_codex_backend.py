@@ -1026,10 +1026,13 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
         program_md="Optimize VALUE.",
         agent_backend="codex",
         driver_script=str(driver),
+        commit_new_paths=["kernels/*.s"],
     )
     asyncio.run(agent_fn(str(kernel), ""))
 
     assert captured["spec"].allow_dirty_baseline is True
+    assert captured["spec"].commit_new_paths == ["kernels/*.s"]
+    assert captured["spec"].allow_untracked is False
 
 
 def test_outer_gate_counts_only_incremental_resume_target_edits(

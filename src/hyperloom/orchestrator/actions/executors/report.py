@@ -239,15 +239,12 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "custom": "A caller-supplied stop condition (stop_when) fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     # Policy / robustness governor.
-    "policy_loop": "The policy gate detected a decision loop and stopped to avoid spinning on the same transition.",
-    "crash_threshold_exceeded": "Too many recoverable crashes accumulated; the run stopped to preserve the validated result.",
     "robustness_escalated": (
         "Robustness escalated: the run closed early with budget still on the clock (not a target hit). "
         "Common triggers are a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
         "A close driven by the remaining budget reports time_exhausted instead. "
         "The best validated result was locked in before exit."
     ),
-    "user_stop_requested": "Stopped on an explicit operator request.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
         "The installed framework's own argument parser refused the composed server argv before any "
@@ -262,7 +259,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     # PRELUDE-phase early exits (before optimization begins).
     "prelude_baseline_failed": "PRELUDE baseline failed before optimization could start; see the baseline failure summary.",
-    "prelude_policy_loop": "The policy gate detected a decision loop during PRELUDE and stopped.",
     "time_exhausted_during_prelude": (
         "The session's wall-clock budget ran out during preparation, before optimization began. Whatever PRELUDE "
         "was doing when the clock reached zero — measuring the baseline, bringing up the framework agent, taking "
@@ -276,9 +272,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "marked. Resume with more budget to measure a comparable baseline."
     ),
     # Recipe KB knowledge-plane bootstrap failures.
-    "recipe_kb_t0_failed": "Recipe KB knowledge-plane bootstrap (t0) failed; the run stopped early.",
-    "recipe_kb_drain_failed": "Recipe KB knowledge-plane drain failed; the run stopped early.",
-    "recipe_kb_commit_failed": "Recipe KB knowledge-plane commit failed; the run stopped early.",
     "warm_replay_rollback_failed": (
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
         "the run stopped to avoid continuing from an uncertain code state."
@@ -288,7 +281,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the concurrency ladder.",
     "sweep_failed": "The concurrency sweep reached a failed terminal result.",
@@ -297,11 +289,13 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
     "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
-    # Retired reason names, kept so a report over an archived session still explains what it is reading.
-    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
+    # Retired reason names, kept so a report over an archived session still explains what it is reading. Some no longer
+    # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
+    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).
     "model_context_window_too_small": "Preflight gate: the model's max context window cannot hold the requested ISL + OSL.",
     "unsupported_model_arch": "Preflight gate: the model architecture (e.g. multimodal / vision) is unsupported.",
@@ -310,7 +304,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "which would crash engine init."
     ),
     "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
-    "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
@@ -393,8 +386,8 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
 
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
         INTVTY_V1,
-        intvty_grading_enabled,
         intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
@@ -419,10 +412,21 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         tput_gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
         if tput_gain is not None:
             lines.append(f"- total tput change   : `{tput_gain:+.2f}%` (guard axis, not the objective)")
-    if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
-        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
+    grading = summary.get("grading") if isinstance(summary.get("grading"), dict) else {}
+    objective = str(grading.get("objective") or "").strip()
+    if objective == GRADED_INTVTY:
+        noise_pct = grading.get("noise_pct")
+        band = float(noise_pct) if isinstance(noise_pct, (int, float)) else parse_intvty_noise_pct()
+        lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{band:.1f}%`)")
+    elif objective:
+        lines.append(f"- grading mode        : `{objective}`")
     else:
-        lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+        from hyperloom.common.perf_metric import intvty_grading_enabled
+
+        if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
+            lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
+        else:
+            lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
 
 
 def _cumulative_validation_status(summary: dict[str, Any]) -> str:
@@ -481,6 +485,7 @@ def _build_summary_dict(
         # Read back by the graded-axes section: the persisted AgentX marker outlives the shell, so a report rendered
         # from a resumed session still names the mode the run was graded under.
         "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
+        "grading": dict(getattr(state, "grading", None) or {}),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
         "performance_comparison": {

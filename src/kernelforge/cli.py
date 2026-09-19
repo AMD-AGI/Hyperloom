@@ -1036,6 +1036,8 @@ def forge_loop(
     import dataclasses as _dataclasses
     import hashlib as _hashlib
 
+    if return_after_read_kb and kernel_backend == "assembly":
+        raise click.UsageError("--return-after-read-kb is incompatible with assembly preparation")
     if return_after_read_kb and not experience_kb:
         raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:
@@ -1450,6 +1452,38 @@ def forge_loop(
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
+    assembly_preparation = None
+    if kernel_backend == "assembly":
+        from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
+
+        try:
+            assembly_preparation = asyncio.run(
+                prepare_assembly(
+                    config=config,
+                    kernel=kernel,
+                    driver=driver,
+                    sources=source_files_list,
+                    base_commit=campaign.base_commit,
+                    threshold=snr_threshold,
+                    deadline=deadline_unix - finalize_reserve_sec,
+                    resume=resume,
+                )
+            )
+            if not resume:
+                seed_source_baseline(iter_config, assembly_preparation)
+        except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
+            raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
+        source_files_list = [str(workspace / assembly_preparation["assembly"])]
+        iter_config.source_files = source_files_list
+        iter_config.commit_new_paths = []
+        # A cached whole-implementation patch could replace the launcher preparation just verified.
+        kb_warmstart_enabled = False
+        program_md += (
+            "\n\nAssembly preparation is complete. Optimize only "
+            + source_files_list[0]
+            + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
+        )
+
     # Construct the loop only after task preparation has resolved the profiling contract; IterationLoop snapshots that
     # readiness in its runtime state.
     loop_runner = IterationLoop(iter_config, tracker, config, resume=resume)
@@ -1720,6 +1754,7 @@ def forge_loop(
         target_functions=target_functions_list,
         profiling_enabled=profiling_enabled,
         agent_backend=selected_runtime.provider,
+        commit_new_paths=iter_config.commit_new_paths,
         usage=usage,
     )
     effective_implementer = getattr(
@@ -1758,6 +1793,7 @@ def forge_loop(
             "bench_repeat": bench_repeat,
             "permission_mode": permission_mode,
             "task_type": task_type,
+            "commit_new_paths": iter_config.commit_new_paths,
             # Function names, not paths: nothing to rebind onto a lane.
             "target_functions": target_functions_list,
             "agent_backend": selected_runtime.provider,
@@ -1907,6 +1943,10 @@ def forge_loop(
             "agent_model": effective_implementer_model,
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
+        if assembly_preparation is not None:
+            from kernelforge.assembly.prepare import select_result
+
+            select_result(result, assembly_preparation)
         if exp_id:
             try:
                 completed_experiment = tracker.get(exp_id)
@@ -1935,6 +1975,8 @@ def forge_loop(
         snr_db_override: float | None = None,
     ) -> dict:
         """Publish the current durable best idempotently within this process."""
+        if assembly_preparation is not None and not _build_result(None)["improved"]:
+            return {"written": False, "reason": "no_assembly_source_win"}
         if not experience_kb:
             return {"written": False, "reason": "disabled"}
         if _warm_start_publication_covers(remote_publication, commit):

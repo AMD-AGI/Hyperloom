@@ -42,7 +42,7 @@ Before installing Hyperloom, ensure the following requirements are met.
 From the agent terminal in that workspace, install the published release wheel:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.0 --target .
+pip install hyperloom-inference-optimizer==1.1.1 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -418,7 +418,7 @@ Optimize inference for this workload:
 
 Requirements:
 1. Report the session ID, log path, PID, and initial health check result.
-2. Monitor the process every 300s until the optimization is complete or failed.
+2. Read persisted state on requested status checks; report completion or failure. Do not start a watchdog or automatic resume loop.
 ```
 
 ### Docker (source)

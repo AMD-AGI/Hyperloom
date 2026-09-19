@@ -658,7 +658,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
         self._record_phase_entry_evidence(
@@ -1138,7 +1137,10 @@ class KernelPhase(PhaseHandler):
         # decision, so they resolve through one helper: a handoff that named a
         # different axis than the one KEEP is decided on would have GEAK searching
         # against a reference it was never measured against.
-        e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+        e2e_metric, _ = geak_metric_axis(
+            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+            grading=getattr(state, "grading", None),
+        )
         handoff = {
             # v2 adds baseline_env_spec; v3 adds actual GPU-pinning metadata.
             "schema_version": 3,
@@ -1548,7 +1550,10 @@ class KernelPhase(PhaseHandler):
         # corpus the two run ~140x apart, and a kernel that helps the decode-side
         # output figure need not help the prefill-dominated total by the same
         # margin. Synthetic runs resolve to "output" and are unaffected.
-        _geak_e2e_metric, _ = geak_metric_axis(benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""))
+        _geak_e2e_metric, _ = geak_metric_axis(
+            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+            grading=getattr(state, "grading", None),
+        )
 
         def _run() -> subprocess.CompletedProcess:
             runner_env = dict(os.environ)
@@ -1751,7 +1756,6 @@ class KernelPhase(PhaseHandler):
                     "speedup": result.get("throughput_speedup"),
                     "result_path": str(result_path),
                 },
-                priority=1,
             )
         )
         # KERNEL is a one-shot under GEAK: wind down to SWEEP (persist the hint).
@@ -3364,15 +3368,9 @@ class KernelPhase(PhaseHandler):
         accepted_measurement: dict[str, Any] = {}
         # Set by the last KEEP; the attempt row claims this exact string.
         adopted_tuned_file = ""
-        try:
-            from ..actions.executors.explore import _compute_explore_variant_timeout
+        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-            per_tuner_timeout_sec = _compute_explore_variant_timeout(
-                baseline_runtime_sec=float(getattr(self.shared_state, "baseline_runtime_sec", 0.0) or 0.0),
-                kill_ratio=float(getattr(self.shared_state, "explore_overtime_kill_ratio", 1.5) or 1.5),
-            )
-        except Exception:  # noqa: BLE001 - conservative fallback
-            per_tuner_timeout_sec = 15 * 60
+        per_tuner_timeout_sec = resolve_benchmark_timeouts()[1]
         per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
 
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
@@ -3902,7 +3900,6 @@ class KernelPhase(PhaseHandler):
                 log.exception("KERNEL entry: reclaiming the campaign repositories failed")
             if int(result.get("patch_count") or 0) > 0:
                 try:
-                    from ..actions.executors._workload_envs import agentx_active
                     from ..kernel.controller_patch_integration import (
                         integrate_controller_patches,
                     )
@@ -3911,7 +3908,7 @@ class KernelPhase(PhaseHandler):
                         patches_root=str(result.get("patches_root") or output_dir / "result" / "patches"),
                         session_dir=self.session_dir,
                         shared_state=self.shared_state,
-                        record_keep=(self._record_integrate_keep if agentx_active(self.shared_state) else None),
+                        record_keep=self._record_integrate_keep,
                     )
                     result["integration"] = integration.to_dict()
                 except Exception as error:  # noqa: BLE001
@@ -3966,7 +3963,6 @@ class KernelPhase(PhaseHandler):
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
-                priority=1,
             )
         )
 
@@ -4084,7 +4080,6 @@ class KernelPhase(PhaseHandler):
                         "result": result,
                         "source": "kernel_entry_auto",
                     },
-                    priority=1,
                 )
             )
         except Exception:  # noqa: BLE001

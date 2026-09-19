@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from hyperloom.orchestrator.bringup.argv_preflight import ARGV_INVALID
 from hyperloom.orchestrator.bringup.env_preflight import ENV_FAULT
-from hyperloom.orchestrator.supervisor.watch import DIED_STOP_REASON, WEDGED_STOP_REASON
+
+# Historical reports retain these terminal reasons after the producer is retired.
+DIED_STOP_REASON = "supervisor_coordinator_died"
+WEDGED_STOP_REASON = "supervisor_tick_stalled"
+SUPERVISOR_RESTART_REASON = "supervisor_restart_requested"
 
 #: Terminals that mean the run optimized and closed normally.
 SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
@@ -18,15 +22,15 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "max_ticks",
         "sweep_done",
         # The model asking to close early. A run whose infrastructure actually
-        # failed carries baseline_failed, crash_threshold_exceeded, policy_loop
-        # or signal instead, so this value marks a normal closeout; the close
-        # collector keeps the escalation flag either way.
+        # failed carries baseline_failed or signal instead, so this value marks
+        # a normal closeout; the close collector keeps the escalation flag
+        # either way.
         "robustness_escalated",
     }
 )
 
 #: Terminals where something outside the optimization ended the run.
-ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal", "user_stop_requested"})
+ABORTED_STOP_REASONS: frozenset[str] = frozenset({"signal"})
 
 #: Terminals about the machine or the harness rather than the model: a host
 #: that cannot run the combo, an argv the installed parser refuses, a bring-up
