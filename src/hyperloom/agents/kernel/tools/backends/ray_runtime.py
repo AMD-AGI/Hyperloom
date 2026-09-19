@@ -18,6 +18,9 @@ DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
 
+# Tail of a failed `ray start` carried in the exception, bounding its length.
+_RAY_START_OUTPUT_TAIL_CHARS = 1500
+
 # Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
 # gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
 RAY_SERVING_SLOT = "serving_slot"
@@ -165,6 +168,15 @@ def _stop_ray_force(log_path: Optional[Path] = None, *, reason: str = "") -> Non
         pass
 
 
+def _ray_start_evidence(log_path: Optional[Path], captured: str) -> str:
+    """Name the log sink, or carry the output itself when there is no sink."""
+    if log_path is not None:
+        return f"see {log_path}"
+    if captured:
+        return f"ray start output: {captured[-_RAY_START_OUTPUT_TAIL_CHARS:]}"
+    return "ray start produced no output"
+
+
 def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] = None) -> None:
     """Ensure a Ray cluster is reachable, starting a head node if needed."""
     if ray_status_ok():
@@ -179,6 +191,7 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
     cmd.extend(iso_args)
     # serving_slot: whole-machine mutex so serving-family tasks serialise GPU access.
     cmd.extend(_resources_start_args())
+    captured = ""
     if log_path is not None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as log:
@@ -186,11 +199,15 @@ def ensure_ray_cluster(num_gpus: Optional[int] = None, log_path: Optional[Path] 
             proc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, text=True)
             log.write(f"\n[ray_start_exit_code] {proc.returncode}\n")
     else:
-        proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT, text=True)
+        # Without a log sink to name, this output is the only evidence a failure leaves.
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        captured = f"{proc.stdout or ''}{proc.stderr or ''}".strip()
     if proc.returncode != 0:
-        raise RuntimeError(f"failed to start Ray; see {log_path}")
+        raise RuntimeError(f"failed to start Ray (rc={proc.returncode}); {_ray_start_evidence(log_path, captured)}")
     if not ray_status_ok():
-        raise RuntimeError(f"ray start exited 0 but cluster is not reachable; see {log_path}")
+        raise RuntimeError(
+            f"ray start exited 0 but cluster is not reachable; {_ray_start_evidence(log_path, captured)}"
+        )
 
 
 def _is_ray_version_mismatch(text: str) -> bool:

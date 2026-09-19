@@ -1252,6 +1252,9 @@ def materialize_config_with_envs(
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
     envs = bench.setdefault("envs", {})
+    runtime_path = os.environ.get("PATH", "").strip()
+    if "PATH" in envs and runtime_path:
+        envs["PATH"] = runtime_path
     apply_scriptable_runtime_defaults(
         bench,
         envs,
