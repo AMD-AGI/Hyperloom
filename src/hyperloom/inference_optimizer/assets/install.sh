@@ -968,13 +968,13 @@ PY
   printf '%s\n' "$dir"
 }
 
-# True when ROCm comes from TheRock's pip wheels rather than a distro package.
-# There the profiler is a wheel (`rocm[profiler]`) and apt carries no such
-# package at all, so the apt route below can only ever fail.
-_rocm_is_pip_wheel() {
-  "$PYTHON" - <<'PY' >/dev/null 2>&1
+# Echo the installed `rocm` distribution version, or non-zero when ROCm is not
+# pip-packaged. Non-empty means TheRock's wheels, where the profiler is itself a
+# wheel and apt carries no such package at all, so apt can only ever fail there.
+_rocm_wheel_version() {
+  "$PYTHON" - <<'PY' 2>/dev/null
 import importlib.metadata
-importlib.metadata.version("rocm")
+print(importlib.metadata.version("rocm"))
 PY
 }
 
@@ -1067,7 +1067,7 @@ ensure_rocprof_compute() {
   # permanent skip: roofline profiling silently uninstalled on every pod.
   log "rocprof-compute: ensuring roofline profiling deps (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}')"
 
-  local rocm_root libexec
+  local rocm_root libexec rocm_ver
   rocm_root="${ROCM_PATH:-/opt/rocm}"
   libexec="$(_rocpc_libexec_dir)" || libexec=""
 
@@ -1139,13 +1139,17 @@ for spec in specs:
     warn "rocprof-compute not found under ${rocm_root} or the _rocm_profiler wheel (check-only; would install rocprofiler-compute). Forge profiling would degrade to the PMC path."
   elif [ "$DRY_RUN" -eq 1 ]; then
     log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
-  elif _rocm_is_pip_wheel; then
-    # Wheel-ROCm stack: the profiler is the `profiler` extra of the installed
-    # `rocm` distribution, so pip pins it to the SDK version already present.
-    log "installing rocprofiler-compute (forge profiling backend) via pip: rocm[profiler]"
+  elif rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+    # Wheel-ROCm stack. Pin the profiler to the SDK version already installed:
+    # asking for the `rocm` metapackage instead lets pip re-resolve the whole
+    # SDK and, on the py3.12 images, silently reinstall rocm-sdk-core at an
+    # older version than the one torch is built against. --extra-index-url,
+    # never --index-url: that would replace the image's own configuration,
+    # which on some images is the only route to this package.
+    log "installing rocprofiler-compute (forge profiling backend) via pip: rocm-profiler==${rocm_ver}"
     "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
-      --index-url https://repo.amd.com/rocm/whl-multi-arch/ "rocm[profiler]" \
-      || warn "rocprof-compute: pip install 'rocm[profiler]' failed; forge profiling will degrade to the PMC path. Check pip/network access to repo.amd.com."
+      --extra-index-url https://stable.repo.amd.com/rocm/whl-next "rocm-profiler==${rocm_ver}" \
+      || warn "rocprof-compute: pip install 'rocm-profiler==${rocm_ver}' failed; forge profiling will degrade to the PMC path. Check pip/network access to the ROCm index."
     libexec="$(_rocpc_libexec_dir)" || libexec=""
     if [ -n "$libexec" ]; then
       log "rocprof-compute installed OK: ${libexec} present"

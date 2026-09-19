@@ -86,8 +86,9 @@ if [ "${{1:-}}" = "-" ]; then
     *_rocm_profiler*)             # wheel-package discovery
       [ -n "${{ROCPC_WHEEL_LIBEXEC:-}}" ] && printf '%s\\n' "$ROCPC_WHEEL_LIBEXEC"
       exit 0 ;;
-    *importlib.metadata*)         # "is this a pip-wheel ROCm stack" gate
-      exit $([ "${{ROCM_WHEEL:-0}}" = "1" ] && echo 0 || echo 1) ;;
+    *importlib.metadata*)         # installed `rocm` version; empty on a classic stack
+      [ "${{ROCM_WHEEL:-0}}" = "1" ] || exit 1
+      printf '%s\\n' "${{ROCM_VERSION:-10.0.0}}"; exit 0 ;;
   esac
   if grep -q pandas "{pip_marker}" 2>/dev/null && [ "${{PIP_FIXES:-0}}" = "1" ]; then
     echo "2.3.3"; exit 0
@@ -148,6 +149,7 @@ def _run(
     dry_run: int = 0,
     skip_forge_profiling: str | None = None,
     rocm_wheel: bool = False,
+    rocm_version: str = "10.0.0",
     wheel_tool_present: bool = False,
 ) -> dict:
     """Run the extracted rocprof-compute functions under set -euo pipefail."""
@@ -195,6 +197,7 @@ export APT_CREATES_TOOL="{1 if apt_creates_tool else 0}"
 export APT_RC="{apt_rc}"
 export PROBE_RC="{probe_rc}"
 export ROCM_WHEEL="{1 if rocm_wheel else 0}"
+export ROCM_VERSION="{rocm_version}"
 export ROCPC_WHEEL_LIBEXEC="{wheel_libexec if wheel_tool_present else ""}"
 {f'export TMPDIR="{tmpdir}"' if tmpdir is not None else "true"}
 {backend_line}
@@ -203,7 +206,7 @@ export ROCPC_WHEEL_LIBEXEC="{wheel_libexec if wheel_tool_present else ""}"
 
 {_extract_fn_optional("_rocpc_libexec_dir")}
 
-{_extract_fn_optional("_rocm_is_pip_wheel")}
+{_extract_fn_optional("_rocm_wheel_version")}
 
 {_extract_fn("_rocpc_effective_python")}
 
@@ -367,10 +370,39 @@ def test_installs_the_profiler_wheel_on_a_pip_rocm_stack(tmp_path: Path) -> None
     r = _run(tmp_path, tool_present=False, rocm_wheel=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert not r["apt_called"], f"apt has no such package on this stack:\n{r['out']}"
-    wheel_calls = [c for c in r["pip_calls"] if "rocm[profiler]" in c]
-    assert wheel_calls, f"the profiler wheel must be installed via pip:\n{r['pip_calls']}"
-    for call in wheel_calls:
-        assert "repo.amd.com/rocm/whl-multi-arch" in call, f"must resolve from AMD's index: {call}"
+    calls = [c for c in r["pip_calls"] if "rocm-profiler" in c]
+    assert calls, f"the profiler wheel must be installed via pip:\n{r['pip_calls']}"
+    for call in calls:
+        assert "stable.repo.amd.com/rocm/whl-next" in call, f"must reach AMD's ROCm index: {call}"
+
+
+def test_profiler_install_is_pinned_to_the_installed_rocm_version(tmp_path: Path) -> None:
+    """Asking for the `rocm` metapackage lets pip re-resolve the whole SDK.
+
+    Observed on the py3.12 leg images: `rocm[profiler]` backtracked to 7.14.1
+    and reinstalled rocm-sdk-core over the 10.0.0 one torch is built against.
+    Pinning the profiler to the version already installed removes the freedom
+    pip needs to move anything else.
+    """
+    r = _run(tmp_path, tool_present=False, rocm_wheel=True, rocm_version="10.0.0", pandas_state="v2")
+    calls = [c for c in r["pip_calls"] if "rocm-profiler" in c]
+    assert calls, r["pip_calls"]
+    for call in calls:
+        assert "rocm-profiler==10.0.0" in call, f"the profiler must be pinned to the SDK version: {call}"
+        assert "rocm[profiler]" not in call, f"the metapackage lets pip move the SDK: {call}"
+        # An --index-url REPLACES the image's own configuration; only whl-next
+        # carries 10.0.0, and some images reach it only through their own config.
+        assert "--index-url" not in call.replace("--extra-index-url", ""), (
+            f"must extend, not replace, the image's index configuration: {call}"
+        )
+
+
+def test_profiler_install_follows_the_reported_rocm_version(tmp_path: Path) -> None:
+    """The pin tracks whatever the image actually has, not a baked-in number."""
+    r = _run(tmp_path, tool_present=False, rocm_wheel=True, rocm_version="7.14.1", pandas_state="v2")
+    calls = [c for c in r["pip_calls"] if "rocm-profiler" in c]
+    assert calls, r["pip_calls"]
+    assert all("rocm-profiler==7.14.1" in c for c in calls), r["pip_calls"]
 
 
 def test_keeps_apt_on_a_classic_rocm_image(tmp_path: Path) -> None:
@@ -378,8 +410,8 @@ def test_keeps_apt_on_a_classic_rocm_image(tmp_path: Path) -> None:
     r = _run(tmp_path, tool_present=False, rocm_wheel=False, apt_creates_tool=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
     assert r["apt_called"], f"the classic image must still use apt:\n{r['out']}"
-    assert not any("rocm[profiler]" in c for c in r["pip_calls"]), (
-        f"pip must not pull the whole ROCm SDK on a non-wheel stack:\n{r['pip_calls']}"
+    assert not any("rocm-profiler" in c for c in r["pip_calls"]), (
+        f"pip must not be used for the profiler on a non-wheel stack:\n{r['pip_calls']}"
     )
 
 
@@ -547,7 +579,7 @@ def test_static_installs_rocprofiler_compute_and_verifies_resolve_path() -> None
 
 def test_static_layout_helpers_exist() -> None:
     # The behaviour tests run these through a tolerant extractor; assert here that they are really in install.sh.
-    for name in ("_rocpc_libexec_dir", "_rocm_is_pip_wheel"):
+    for name in ("_rocpc_libexec_dir", "_rocm_wheel_version"):
         assert _extract_fn(name).strip(), f"{name}() must stay defined in install.sh"
 
 
