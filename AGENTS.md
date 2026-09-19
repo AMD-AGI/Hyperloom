@@ -49,8 +49,17 @@ doc is the authority on where that boundary lives.
 
 - **One concern per change.** A PR fixes one issue or adds one capability. If you must
   bundle, say why in the description. Don't ride unrelated refactors in on a fix.
-- **Size budget.** Prefer reviewable diffs. A large diff is a signal to split, not to push
+- **Diff budget.** Prefer reviewable diffs. A large diff is a signal to split, not to push
   harder. Cleanup in an unrelated file is a separate PR.
+- **Size is a design signal.** A function that keeps growing, a branch tree you have to
+  scroll, a module that collects everything — that is the design telling you a boundary is
+  missing, and the answer is the split, not a bigger screen. For new or rewritten code, a
+  function past ~60 lines or cyclomatic complexity 10, or a module past ~800 lines, needs
+  a reason in the PR description or a split. These are review triggers, not gates: no
+  linter measures them today and the tree carries a backlog above all three — see the
+  style guide § *Size and complexity* for the numbers and how to measure. Maintainability,
+  readability, extensibility, and reliability are what the thresholds stand in for; when a
+  threshold and one of those disagree, say so and keep the clearer code.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering
@@ -62,6 +71,14 @@ doc is the authority on where that boundary lives.
   at all. Widen the selection when a change crosses a boundary, not by default. The full
   local run belongs at the end, before you open a PR; see the style guide's local
   development checklist.
+- **Test the contract, not the plumbing.** What you export — a CLI flag, a public
+  function, a persisted schema, an artifact layout — is pinned by unit tests that state
+  the contract and its failure modes, because someone outside this repo depends on it
+  holding. Internal functions that only thread a business flow together do not each need
+  one: per-function coverage there buys tests that assert the current implementation and
+  break on the next refactor. Cover those flows end to end instead, and unit-test an
+  internal helper when it carries real logic of its own. The coverage gate is a floor CI
+  enforces, not the target.
 - **Every change lands its changelog entry.** Anything an operator can observe — a
   behaviour, an interface, a default, a flag, an artifact — carries a `CHANGELOG.md` entry
   under `[Unreleased]` in the same PR. Not a follow-up, and not left for the release cut to
@@ -90,9 +107,12 @@ doc is the authority on where that boundary lives.
   slower path is the correct one. Never narrate the change itself: no step or plan
   numbering, no "previously this did X", nothing addressed to the reviewer. Module
   docstrings are a separate requirement; see the style guide.
-- **Clean design.** One boundary rule per concern, owned by one module. Derive over
-  hardcode — a single computed source beats duplicated constants. Minimal typed
-  interfaces.
+- **Clean design.** One boundary rule per concern, owned by one module. A module should
+  read as one job: cohesive inside, a minimal typed interface outward, and dependencies
+  pointing one way down the layers — no cycles, and no reaching around the layer that owns
+  a thing to touch what is behind it. Derive over hardcode — a single computed source
+  beats duplicated constants. A second copy of a behaviour is a bug you will later fix
+  once and miss elsewhere; extend the existing one, or lift the shared part out.
 - **Leave nothing behind.** Working notes, audit trails, and analysis write-ups are
   byproducts of doing the work, not deliverables — don't commit them, least of all at the
   repo root, unless they were asked for. The change is the artifact.
