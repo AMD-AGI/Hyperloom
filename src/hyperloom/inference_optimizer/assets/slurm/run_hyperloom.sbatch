@@ -196,6 +196,21 @@ hl_reclaim_orphan_gpus() {
 }
 hl_reclaim_orphan_gpus || true
 
+# --- drop the host's GPU mask ----------------------------------------------
+# Slurm both sets ROCR_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES for the allocation
+# and confines the job's cgroup to those cards, so the container already sees
+# exactly its GPUs, renumbered from 0. Passing the host indices in on top makes
+# the runtime select cards that do not exist in that restricted view: an
+# allocation of GPU 4-7 dies with `RuntimeError: No CUDA GPUs are available`
+# while an allocation of 0-3 survives, because those indices happen to be valid
+# either way. That makes the bug look like a flaky node rather than a mask.
+#
+# The pyxis branch below forwards the whole environment via `--export=ALL`, so
+# unsetting here is what keeps the mask out; the docker branch names the
+# variables it forwards, and these must stay off that list. CUDA_VISIBLE_DEVICES
+# goes too: HIP honours it as a third spelling of the same mask.
+unset ROCR_VISIBLE_DEVICES HIP_VISIBLE_DEVICES CUDA_VISIBLE_DEVICES
+
 # --- launch the container --------------------------------------------------
 # Runtime auto-detect: pyxis/enroot or docker.
 # Override with HL_CONTAINER_RUNTIME=pyxis|docker.
@@ -229,6 +244,9 @@ case "$RUNTIME" in
     # gateway headers: a header-authenticated gateway rejects the call without
     # them, and forwarding only some forms silently downgrades the container to
     # a credential the operator did not choose.
+    #
+    # ROCR_VISIBLE_DEVICES/HIP_VISIBLE_DEVICES deliberately do not appear here;
+    # see the mask note above the runtime detect.
     for v in CLAW_SESSION_ID USER_DATA_PATH HL_SHARED_MOUNT \
              OPENAI_BASE_URL OPENAI_API_KEY OPENAI_CUSTOM_HEADERS \
              ANTHROPIC_BASE_URL ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN \
