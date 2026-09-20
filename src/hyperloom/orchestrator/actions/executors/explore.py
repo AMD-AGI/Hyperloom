@@ -471,7 +471,7 @@ def _explore_launch_signature(
 # launch state (from ``launch_config.json``) so a
 # variant that merely restates a recipe default -- a CLI flag or ``SGLANG_*``
 # env the server was already launched with -- is dropped before it costs a GPU
-# measurement. 
+# measurement.
 
 
 def _canonical_launch_fingerprint(*, launch_flags: str, env: dict[str, str]) -> dict[str, Any]:
@@ -485,7 +485,9 @@ def _canonical_launch_fingerprint(*, launch_flags: str, env: dict[str, str]) -> 
     }
 
 
-def _variant_launch_fingerprint(*, framework: str, base_flags: str, base_env: dict[str, str], variant: Any) -> dict[str, Any]:
+def _variant_launch_fingerprint(
+    *, framework: str, base_flags: str, base_env: dict[str, str], variant: Any
+) -> dict[str, Any]:
     """Fingerprint of the observed launch after applying one variant's delta.
 
     ``base_flags`` / ``base_env`` already include every recipe default, so the
@@ -585,7 +587,7 @@ def filter_baseline_noop_variants(
     live_launch_flags: str = "",
     live_launch_env: dict[str, str] | None = None,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    #Drop variants whose effective launch state matches the opening stack.
+    # Drop variants whose effective launch state matches the opening stack.
 
     if is_truthy(os.environ.get("HYPERLOOM_EXPLORE_SKIP_BASELINE_NOOP_FILTER")):
         return list(grid), []

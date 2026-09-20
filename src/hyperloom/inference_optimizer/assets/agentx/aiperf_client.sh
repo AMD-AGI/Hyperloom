@@ -57,6 +57,94 @@ set -euo pipefail
 BENCH_DIR="$(cd "$(dirname "$0")" && pwd)"
 log() { echo "[aiperf_client] $*"; }
 
+# Snapshot the live server into launch_config.json for explore's baseline-noop
+# filter. Shell only: this script must not start python for capture. The managed
+# aiperf CLI is the only interpreter that is isolated; every other python3 must
+# still inherit the operator environment. Best-effort; never fail the measure.
+_json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  s=${s//$'\t'/\\t}
+  printf '%s' "$s"
+}
+
+_capture_launch_config_from_proc() {
+  local pid="$1" out_dir="$2" framework="$3"
+  local cmdline="/proc/${pid}/cmdline" environ="/proc/${pid}/environ"
+  [ -r "$cmdline" ] && [ -r "$environ" ] || return 0
+
+  local flags="" seen=0 tok
+  while IFS= read -r -d '' tok || [ -n "${tok:-}" ]; do
+    [ -n "${tok:-}" ] || continue
+    if [ "$seen" -eq 0 ]; then
+      case "$tok" in
+        --*) seen=1 ;;
+        *) continue ;;
+      esac
+    fi
+    if [ -z "$flags" ]; then
+      flags="$tok"
+    else
+      flags="${flags} ${tok}"
+    fi
+  done < "$cmdline"
+
+  local -A envmap=()
+  local ent key val
+  while IFS= read -r -d '' ent || [ -n "${ent:-}" ]; do
+    case "${ent:-}" in
+      *=*) ;;
+      *) continue ;;
+    esac
+    key="${ent%%=*}"
+    val="${ent#*=}"
+    key="$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
+    [ -n "$key" ] || continue
+    case "$key" in
+      SGLANG_*|SGL_*|VLLM_*|ATOM_*|AITER_*|USE_ROCM_*|ROCM_*|HIP_*|HSA_*|NCCL_*|RCCL_*|TORCH_*|PYTORCH_*) ;;
+      *) continue ;;
+    esac
+    envmap["$key"]="$val"
+  done < "$environ"
+
+  if [ -z "$flags" ] && [ "${#envmap[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  framework="$(printf '%s' "$framework" | tr '[:upper:]' '[:lower:]')"
+  framework="${framework#"${framework%%[![:space:]]*}"}"
+  framework="${framework%"${framework##*[![:space:]]}"}"
+  [ -n "$framework" ] || framework="sglang"
+
+  local dest="${out_dir}/launch_config.json" tmp first=1 k
+  [ -e "$dest" ] && return 0
+  tmp="$(mktemp "${out_dir}/.launch_config.XXXXXX")" || return 0
+  {
+    printf '{\n  "env": {'
+    if [ "${#envmap[@]}" -gt 0 ]; then
+      printf '\n'
+      while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        [ "$first" -eq 0 ] && printf ',\n'
+        first=0
+        printf '    "%s": "%s"' "$(_json_escape "$k")" "$(_json_escape "${envmap[$k]}")"
+      done < <(printf '%s\n' "${!envmap[@]}" | LC_ALL=C sort)
+      printf '\n  },\n'
+    else
+      printf '},\n'
+    fi
+    printf '  "framework": "%s",\n' "$(_json_escape "$framework")"
+    printf '  "launch_flags": "%s",\n' "$(_json_escape "$flags")"
+    printf '  "schema_version": 1,\n'
+    printf '  "source": "proc"\n}\n'
+  } > "$tmp" || { rm -f "$tmp"; return 0; }
+  mv "$tmp" "$dest" || { rm -f "$tmp"; return 0; }
+  log "wrote launch_config.json (${#envmap[@]} env key(s)) -> ${dest}"
+}
+
 : "${MODEL:?MODEL required}"
 PORT="${PORT:-8000}"
 # Concurrency is measurement-defining and upstream makes it a hard requirement
@@ -270,41 +358,7 @@ PYMERGE
   # artifacts. Capture from /proc here while the server is still alive
   # (best-effort; never fail the measure).
   if [ "${HYPERLOOM_CAPTURE_LAUNCH_CONFIG:-1}" != "0" ]; then
-    AGENTX_CAPTURE_SERVER_PID="$SERVER_PID" RESULT_DIR="$RESULT_DIR" \
-      FRAMEWORK="${FRAMEWORK:-sglang}" \
-      "${PYTHON:-python3}" - <<'PY' || true
-import os
-import sys
-from pathlib import Path
-
-pid = int(os.environ["AGENTX_CAPTURE_SERVER_PID"])
-out = Path(os.environ["RESULT_DIR"])
-framework = (os.environ.get("FRAMEWORK") or "sglang").strip().lower() or "sglang"
-try:
-    from hyperloom.orchestrator.actions.executors._launch_evidence import (
-        LAUNCH_CONFIG_FILENAME,
-        capture_launch_config_via_proc,
-        write_launch_config,
-    )
-except ImportError:
-    sys.exit(0)
-if (out / LAUNCH_CONFIG_FILENAME).exists():
-    sys.exit(0)
-snapshot = capture_launch_config_via_proc(pid, framework)
-if not snapshot:
-    sys.exit(0)
-flags, env = snapshot
-if flags or env:
-    written = write_launch_config(
-        out,
-        framework=framework,
-        launch_flags=flags,
-        env=env,
-        source="proc",
-    )
-    if written:
-        print(f"[aiperf_client] wrote launch_config.json ({len(env)} env key(s)) -> {written}")
-PY
+    _capture_launch_config_from_proc "$SERVER_PID" "$RESULT_DIR" "${FRAMEWORK:-sglang}" || true
   fi
 fi
 
