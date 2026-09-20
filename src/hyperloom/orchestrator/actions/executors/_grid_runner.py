@@ -60,6 +60,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
+    served_complete_protocol,
     snapshot_workspaces,
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
@@ -2056,7 +2057,26 @@ async def run_grid(
                 break
             continue
 
-        if rc != 0:
+        complete_protocol = served_complete_protocol(
+            measurement,
+            requested_requests=variant.extra_envs.get("NUM_PROMPTS"),
+        )
+        if rc != 0 and complete_protocol:
+            # The variant served every request it was asked for, so the exit
+            # code came from something the round had already finished with.
+            # Recorded on the result because a reader comparing this point to
+            # its neighbours is owed the reason it is not a clean zero.
+            warnings.append(f"nonzero_rc_after_complete_protocol:{rc}")
+            log.warning(
+                "grid_runner: variant %s exited %d after serving its whole protocol (%s requests); "
+                "keeping the measurement: %s",
+                variant.name,
+                rc,
+                measurement.get("completed_requests"),
+                redact_secret_values((stderr or stdout)[-200:]),
+            )
+
+        if rc != 0 and not complete_protocol:
             nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
             _write_variant_abort_marker(
                 slot,

@@ -800,6 +800,32 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     return completed is not None and completed > 0
 
 
+def served_complete_protocol(result: dict[str, Any] | None, *, requested_requests: Any) -> bool:
+    """Return whether the run served every request its protocol asked for.
+
+    This is what separates a benchmark that finished from one that stopped
+    early, and it is the question a non-zero exit code cannot answer on its
+    own. A server that died mid-run leaves fewer completed requests than were
+    requested; a wrapper that failed on its way out leaves the full count and a
+    measurement taken over the same protocol as a clean round.
+
+    An unknown request count is not a complete protocol: without it there is
+    nothing to compare the completed count against, and a run that stopped
+    early would be indistinguishable from one that did not.
+    """
+    if not is_valid_measurement(result) or not isinstance(result, dict):
+        return False
+    # A scriptable workload drives its own iteration count and has no request
+    # protocol to fall short of, so it cannot answer this question either.
+    if _is_scriptable_measurement(result):
+        return False
+    requested = to_int(requested_requests)
+    if requested is None or requested <= 0:
+        return False
+    completed = to_int(result.get("completed_requests"))
+    return completed is not None and completed >= requested
+
+
 # ── Approximate throughput for killed-overtime variants ──
 _SGLANG_GEN_TPUT_RE = re.compile(
     r"gen throughput \(token/s\):\s*([0-9]+(?:\.[0-9]+)?)",
@@ -908,5 +934,6 @@ __all__ = [
     "extract_benchmark_measurement",
     "harvest_leaked_artifacts",
     "is_valid_measurement",
+    "served_complete_protocol",
     "_materialize_rescue_into_workspace",
 ]

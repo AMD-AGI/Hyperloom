@@ -20,6 +20,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A benchmark that served its whole protocol was discarded on the wrapper's
+  exit code.** `run_grid` failed any variant whose subprocess exited non-zero,
+  however complete the measurement, because a non-zero code was the only thing
+  it asked about. That protects against a server that died mid-round and still
+  emitted a parseable report, but it does not distinguish that from a wrapper
+  that failed on its way out: with the InferenceX checkout on a network
+  filesystem, bash loses the handle on the benchmark script it is still reading
+  and exits non-zero after the benchmark has finished, parsed its result and
+  written its report. The question the exit code cannot answer is now asked
+  directly -- a variant that completed at least the `NUM_PROMPTS` it requested
+  keeps its measurement, carrying a `nonzero_rc_after_complete_protocol:<rc>`
+  warning and no abort marker. A run that served short still fails as
+  `magpie_nonzero_after_valid_measurement`, since fewer requests were served
+  than the protocol asked for and the throughput is not comparable. A variant
+  that declares no request count is unchanged: there is nothing to compare the
+  completed count against. Concurrency-sweep points and optimization-leg
+  variants were the ones being lost, as the baseline path already promotes on a
+  valid measurement regardless of status.
+
 - **A Slurm row declaring a workload shape was benchmarked at the defaults.**
   The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
   flag > persisted state > default and deliberately never reads them from the

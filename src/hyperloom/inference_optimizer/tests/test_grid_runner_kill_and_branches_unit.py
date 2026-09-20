@@ -559,6 +559,86 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
     assert json.loads(markers[0].read_text())["error_class"] == "magpie_nonzero_after_valid_measurement"
 
 
+def _valid_report_body(completed: int) -> str:
+    """A parseable Magpie report that completed ``completed`` requests."""
+    return json.dumps(
+        {
+            "success": True,
+            "framework": "sglang",
+            "throughput": {
+                "output_throughput": 1200.0,
+                "request_throughput": 120.0,
+                "completed_requests": completed,
+                "duration_seconds": 120.0,
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, monkeypatch):
+    """A wrapper that exits non-zero after serving the whole protocol keeps its measurement.
+
+    The bash wrapper reads its own script off the InferenceX checkout for the
+    whole round, so a mount flap at the tail exits non-zero on a benchmark that
+    already ran to completion. Nothing about that measurement is short.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _nonzero_after_full_protocol(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(_valid_report_body(192))
+        return 2, "", "benchmarks/sglang_mi355x.sh: error reading input file: Stale file handle"
+
+    monkeypatch.setattr(gr, "_run_magpie", _nonzero_after_full_protocol)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_envs={"NUM_PROMPTS": "192"})],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "succeeded"
+    assert r.error_class == ""
+    assert r.output_throughput == pytest.approx(1200.0)
+    assert r.completed_requests == 192
+    assert r.returncode == 2
+    assert "nonzero_rc_after_complete_protocol:2" in r.nonfatal_warnings
+    assert list((tmp_path / "out").rglob("abort_reason.json")) == []
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypatch):
+    """A server that died mid-protocol still fails, however parseable its report.
+
+    This is the case the nonzero-rc branch exists for: fewer requests were
+    served than were asked for, so the throughput is not the protocol's.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _nonzero_after_short_protocol(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(_valid_report_body(120))
+        return 1, "stdout tail", "server exited 1"
+
+    monkeypatch.setattr(gr, "_run_magpie", _nonzero_after_short_protocol)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_envs={"NUM_PROMPTS": "192"})],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "magpie_nonzero_after_valid_measurement"
+    markers = list((tmp_path / "out").rglob("abort_reason.json"))
+    assert len(markers) == 1
+
+
 @pytest.mark.asyncio
 async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     """server_log_death_excerpt is used when a seeded server.log exists."""
