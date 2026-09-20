@@ -543,24 +543,34 @@ def record_settle(
 def _finish(event: str, *, end_time: str) -> None:
     """Close ``event`` on the rows recorded against it so far. The sequence is
     re-derived through :func:`_open`, which hands back the one the first open
-    took: a phase exited twice in a cycle would otherwise publish twice."""
+    took: a phase exited twice in a cycle would otherwise publish twice.
+
+    A spool that cannot be read, or an event id the spool handed back that will
+    not parse, is noted and dropped: ``record_exit`` must not raise into the
+    phase transition that asked for this close, and finalize recovers an event
+    left open as interrupted.
+    """
     from .assembler import event_parts
     from .event_ids import parse_event_id
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    parsed = parse_event_id(event)
-    sequence = _open(event, phase=parsed.phase, macro_cycle=parsed.macro_cycle)
-    parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
-    ext, status = assemble_phase_ext(parts, event=event)
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=event,
-        sequence=sequence,
-        status=status or STATUS_SUCCEEDED,
-        ext=ext,
-        kind=EVENT_KIND,
-        start_time=str(ext.get("entered_at") or ""),
-        end_time=end_time,
-    )
+    try:
+        parsed = parse_event_id(event)
+        sequence = _open(event, phase=parsed.phase, macro_cycle=parsed.macro_cycle)
+        parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
+        ext, status = assemble_phase_ext(parts, event=event)
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=event,
+            sequence=sequence,
+            status=status or STATUS_SUCCEEDED,
+            ext=ext,
+            kind=EVENT_KIND,
+            start_time=str(ext.get("entered_at") or ""),
+            end_time=end_time,
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"closing phase event {event}")
 
 
 def _rows(section: str, event: str) -> list[dict[str, Any]]:
@@ -572,8 +582,14 @@ def _rows(section: str, event: str) -> list[dict[str, Any]]:
 
 def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     """The phase's most recent unclosed entry: its event id, sequence, and
-    entry epoch. ``None`` at a first transition or on an unreadable spool."""
+    entry epoch. ``None`` at a first transition or on an unreadable spool.
+
+    A segment whose ``event_id`` will not parse is skipped: handing it to
+    :func:`_sink` or :func:`_finish` would raise the same ``ValueError`` the
+    sink already swallows on write, and the exit must not surface it.
+    """
     from .assembler import recorded_section
+    from .event_ids import parse_event_id
 
     wanted = str(phase or "").strip().upper()
     best: tuple[str, int, float | None] | None = None
@@ -583,6 +599,10 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
             continue
         event = str(row.get("event_id") or "")
         if not event or str(event.split(":")[0]).upper() != wanted:
+            continue
+        try:
+            parse_event_id(event)
+        except ValueError:
             continue
         sequence = _int_or_none(row.get("sequence")) or 0
         if sequence >= best_sequence:
