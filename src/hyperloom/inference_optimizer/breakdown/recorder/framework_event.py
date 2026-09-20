@@ -744,7 +744,7 @@ class FrameworkEventRecorder:
             status="failed",
             payload={
                 "failure": _failure_row(
-                    phase=EVENT_TYPE,
+                    stage=EVENT_TYPE,
                     error_class=type(exc).__name__,
                     message=f"framework agent phase raised: {exc!r}",
                 )

@@ -176,10 +176,10 @@ async def _run_session_bounded_grid(
 def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
     """Flatten a ``VariantResult`` into one row of the curve."""
     envs = v.extra_envs or {}
-    try:
-        conc = int(envs.get("CONC", "0"))
-    except (TypeError, ValueError):
-        conc = 0
+    # The grid sets CONC from an int, and a curve is only readable if every
+    # rung names the concurrency it was measured at -- so a value that will not
+    # parse is a bug to surface, not a rung to file under zero.
+    conc = int(envs.get("CONC", "0"))
     # aiperf reports the total; the other parsers pass through whatever the framework named, leaving it null on a run
     # that measured both halves.
     total = v.total_token_throughput
@@ -377,6 +377,22 @@ def _arm_status(results: list[VariantResult]) -> str:
     return "failed"
 
 
+def _close_arm(recorder: Any, arm_name: str, results: list[VariantResult], *, exc: BaseException | None) -> None:
+    """Close one arm's row, whichever of its ladder's paths it leaves by.
+
+    An arm leaves by three: the restart ladder it was delegated to, the restart
+    retry after every boot failed, and the reuse ladder. Closing here means an
+    arm that raised mid-ladder says so once, rather than each path reporting a
+    ladder it never finished as the status its own results happen to add up to.
+    """
+    if recorder is None:
+        return
+    if exc is None:
+        recorder.finish_arm(arm_name, status=_arm_status(results))
+    else:
+        recorder.fail_arm(arm_name, exc)
+
+
 def _record_rung(
     recorder: Any,
     arm_name: str,
@@ -553,8 +569,12 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
         lc_reason = str(lc_params.get("reason") or "")
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
+        if recorder is not None:
+            # Named per arm: both arms resolve, and two faults reading alike
+            # would collapse into one row.
+            recorder.record_fault(stage=f"resolve_lifecycle_params:{arm_name}", exc=exc)
         lc_eligible = False
         port = 8888
         framework = ""
@@ -571,6 +591,52 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             serving_lease_held=arm_lease is not None,
         )
 
+    async def _sweep_ladder_by_restart() -> list[VariantResult]:
+        """Run the whole ladder with a server restart per rung.
+
+        The arm whose framework cannot hold a server across rungs and the arm
+        whose every boot failed both run the ladder this way, and it is the
+        same run for both.
+        """
+        arm_failure: BaseException | None = None
+        try:
+            arm_results.extend(
+                await _sweep_arm_option_b(
+                    arm_name=arm_name,
+                    grid=grid,
+                    base_yaml_path=base_yaml_path,
+                    workspace=workspace,
+                    model_path=model_path,
+                    gpu_type=gpu_type,
+                    benchmark_script=benchmark_script,
+                    benchmark_timeout_sec=benchmark_timeout_sec,
+                    session_deadline_sec=session_deadline_sec,
+                    variant_expected_sec=variant_expected_sec,
+                    deadline_stop=deadline_stop,
+                    state=state,
+                    session_dir=session_dir,
+                    json_path=json_path,
+                    csv_path=csv_path,
+                    started_at=started_at,
+                    total_budget_sec=total_budget_sec,
+                    has_budget=has_budget,
+                    opt_args=opt_args,
+                    opt_envs=opt_envs,
+                    _all_results_ref=_all_results_ref,
+                    _budget_state=_budget_state,
+                    serving_lease=arm_lease,
+                    recorder=recorder,
+                )
+            )
+        except BaseException as exc:
+            arm_failure = exc
+            raise
+        finally:
+            if arm_lease is not None:
+                arm_lease.close()
+            _close_arm(recorder, arm_name, arm_results, exc=arm_failure)
+        return arm_results
+
     if not lc_eligible:
         # Framework does not support server_lifecycle — fall through to Option B (per-variant server restart via
         # normal run_grid).
@@ -579,39 +645,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             arm_name,
             lc_reason,
         )
-        try:
-            arm_results = await _sweep_arm_option_b(
-                arm_name=arm_name,
-                grid=grid,
-                base_yaml_path=base_yaml_path,
-                workspace=workspace,
-                model_path=model_path,
-                gpu_type=gpu_type,
-                benchmark_script=benchmark_script,
-                benchmark_timeout_sec=benchmark_timeout_sec,
-                session_deadline_sec=session_deadline_sec,
-                variant_expected_sec=variant_expected_sec,
-                deadline_stop=deadline_stop,
-                state=state,
-                session_dir=session_dir,
-                json_path=json_path,
-                csv_path=csv_path,
-                started_at=started_at,
-                total_budget_sec=total_budget_sec,
-                has_budget=has_budget,
-                opt_args=opt_args,
-                opt_envs=opt_envs,
-                _all_results_ref=_all_results_ref,
-                _budget_state=_budget_state,
-                serving_lease=arm_lease,
-                recorder=recorder,
-            )
-            return arm_results
-        finally:
-            if arm_lease is not None:
-                arm_lease.close()
-            if recorder is not None:
-                recorder.finish_arm(arm_name, status=_arm_status(arm_results))
+        return await _sweep_ladder_by_restart()
 
     # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
     failed_boots: list[VariantResult] = []
@@ -665,8 +699,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     extra_server_args=boot_variant.extra_server_args,
                     extra_envs=dict(boot_variant.extra_envs),
                     status="failed",
-                    error=f"single_server_boot_exception: {exc}",
-                    error_class="single_server_boot_exception",
+                    error=f"single_server_boot: {exc}",
+                    error_class=type(exc).__name__,
                 )
             ]
 
@@ -821,40 +855,10 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 framework=framework,
                 serving_lease_held=arm_lease is not None,
             )
-        ob_results = await _sweep_arm_option_b(
-            arm_name=arm_name,
-            grid=grid,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=model_path,
-            gpu_type=gpu_type,
-            benchmark_script=benchmark_script,
-            benchmark_timeout_sec=benchmark_timeout_sec,
-            session_deadline_sec=session_deadline_sec,
-            variant_expected_sec=variant_expected_sec,
-            deadline_stop=deadline_stop,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=_all_results_ref,
-            _budget_state=_budget_state,
-            serving_lease=arm_lease,
-            recorder=recorder,
-        )
-        arm_results.extend(ob_results)
-        if arm_lease is not None:
-            arm_lease.close()
-        if recorder is not None:
-            recorder.finish_arm(arm_name, status=_arm_status(arm_results))
-        return arm_results
+        return await _sweep_ladder_by_restart()
 
     # Server is up: sweep remaining CONCs by reuse.
+    reuse_failure: BaseException | None = None
     try:
         reuse_grid = grid[boot_idx + 1 :]
         for r_idx, variant in enumerate(reuse_grid):
@@ -918,8 +922,8 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        error=f"single_server_reuse_exception: {exc}",
-                        error_class="single_server_reuse_exception",
+                        error=f"single_server_reuse: {exc}",
+                        error_class=type(exc).__name__,
                     )
                 ]
             reuse_elapsed = round(time.time() - reuse_started_at, 3)
@@ -961,16 +965,22 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 budget_remaining_sec=_budget_state.get("budget_remaining_sec"),
                 recorder=recorder,
             )
+    except BaseException as exc:
+        reuse_failure = exc
+        raise
     finally:
         # Safety teardown — idempotent, no-op if already torn down.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # The last word on this arm's server: a teardown that failed here
+            # leaves it alive past the arm that owned it.
+            log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
+            if recorder is not None:
+                recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
         if arm_lease is not None:
             arm_lease.close()
-        if recorder is not None:
-            recorder.finish_arm(arm_name, status=_arm_status(arm_results))
+        _close_arm(recorder, arm_name, arm_results, exc=reuse_failure)
 
     return arm_results
 
@@ -1054,8 +1064,8 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
                     extra_server_args=variant.extra_server_args,
                     extra_envs=dict(variant.extra_envs),
                     status="failed",
-                    error=f"option_b_exception: {exc}",
-                    error_class="option_b_exception",
+                    error=f"option_b: {exc}",
+                    error_class=type(exc).__name__,
                 )
             ]
         rung_elapsed = round(time.time() - rung_started_at, 3)
@@ -1148,8 +1158,12 @@ def _maybe_flush(  # noqa: PLR0913
     )
 
 
-def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None:
-    """Atomically write the conc-sweep summary JSON + CSV to the reports dir."""
+def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
+    """Atomically write the conc-sweep summary JSON + CSV to the reports dir.
+
+    Returns what stopped the write, so a caller that recorded the paths can say
+    they are where the report was meant to go rather than where it is.
+    """
     try:
         rdir = reports_dir(session_dir)
         rdir.mkdir(parents=True, exist_ok=True)
@@ -1163,8 +1177,10 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> None
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception:  # noqa: BLE001
-        log.debug("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
+        return exc
+    return None
 
 
 def _flush_partial_conc_sweep_report(  # noqa: PLR0913
@@ -1448,6 +1464,7 @@ async def run_conc_sweep(
         ("optimized", opt_args, dict(opt_envs)),
         ("baseline", "", {}),
     ]
+    cleanup_error: Exception | None = None
     if recorder is not None:
         recorder.record_plan(
             concs_requested=concs,
@@ -1530,7 +1547,10 @@ async def run_conc_sweep(
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 await asyncio.to_thread(_kill_stale_servers)
-            except Exception:  # noqa: BLE001 - best-effort safety net
+            except Exception as exc:  # noqa: BLE001 - best-effort safety net
+                # Recorded below rather than here: servers this sweep may have
+                # left alive outlive the sweep, and a log line does not.
+                cleanup_error = exc
                 log.warning(
                     "conc_sweep: post-run _kill_stale_servers failed",
                     exc_info=True,
@@ -1614,13 +1634,18 @@ async def run_conc_sweep(
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
 
+    report_error: Exception | None = None
     if write_reports:
         # Set self-referential paths before the dump so the JSON carries them.
         payload["report_json_path"] = json_path.as_posix()
         payload["report_csv_path"] = csv_path.as_posix()
-        _flush_conc_sweep_report(payload, session_dir)
+        report_error = _flush_conc_sweep_report(payload, session_dir)
 
     if recorder is not None:
+        if cleanup_error is not None:
+            recorder.record_fault(stage="kill_stale_servers", exc=cleanup_error)
+        if report_error is not None:
+            recorder.record_fault(stage="report_write", exc=report_error)
         recorder.record_progress(comparison=comparison, summary=summary)
         recorder.finish(payload, stop_reason=getattr(state, "stop_reason", ""))
 

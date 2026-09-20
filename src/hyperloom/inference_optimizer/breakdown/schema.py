@@ -362,11 +362,11 @@ class V6WarmStartExt(TypedDict, total=False):
     session for a workload matches the bare anchor row T0 stamped moments
     earlier and reports ``seed_only``, which is normal and not a fault."""
 
-    requested: dict[str, Any]
+    request: dict[str, Any]
     match_status: str
     matched: V6WarmStartMatched | None
     reads: V6WarmStartReads | None
-    failure: dict[str, Any]
+    failure: V6Failure | None
 
 
 class V6KBWriteBackExt(TypedDict, total=False):
@@ -571,6 +571,257 @@ class V6GeakCandidate(TypedDict, total=False):
     self_reported_basis: str
 
 
+class V6ConcSweepRequest(TypedDict, total=False):
+    """What the dispatch asked for, before the sweep resolved anything.
+
+    Kept apart from ``plan`` so a ladder the sweep chose is never mistaken for
+    one it was handed: a null ``requested_concs`` is the operator declining to
+    pick, not an empty ladder."""
+
+    task_id: str
+    task_kind: str
+    reason: str
+    requested_concs: list[int]
+    requested_variant_timeout_sec: int | None
+    requested_total_budget_sec: int | None
+
+
+class V6ConcSweepWorkload(TypedDict, total=False):
+    """The shape the ladder is swept over.
+
+    ``benchmark_mode`` names the axis pair the points are drawn on, so a reader
+    never infers it from whether a latency field happens to be null."""
+
+    session_id: str
+    isl: int | None
+    osl: int | None
+    tp: int | None
+    benchmark_mode: str
+
+
+class V6ConcSweepInputAnchor(TypedDict, total=False):
+    """The optimized configuration the sweep was asked to compare.
+
+    The optimized arm is whatever the session's current best was when the sweep
+    started, which is a moving target: a sweep two cycles later compares a
+    different configuration under the same event type. ``base_action`` is the
+    action kind that promoted it."""
+
+    base_variant_id: str | None
+    base_action: str | None
+    input_throughput_tok_s_per_gpu: float | None
+    anchor_tput: float | None
+    baseline_tput: float | None
+    extra_server_args: str
+    extra_envs: dict[str, str]
+
+
+class V6ConcSweepPlan(TypedDict, total=False):
+    """The ladder the sweep resolved and the order it will run it in.
+
+    ``arms_order`` matters to a reader of the budget: the optimized arm runs
+    first as the more informative of the two, so a budget that runs out takes
+    the baseline arm with it. ``concs_ordered`` is descending because a
+    single-server arm boots at the most demanding rung and reuses down."""
+
+    grid_source: str | None
+    concs_requested: list[int]
+    concs_ordered: list[int]
+    num_prompts_factor: int | None
+    variant_timeout_sec: int | None
+    arms_order: list[str]
+
+
+class V6ConcSweepBudget(TypedDict, total=False):
+    """The budget the ladder was admitted under.
+
+    Both totals are kept because they disagree: the sweep raises its own
+    default when that default cannot fund even one rung at the cap the grid
+    runner will actually grant. ``rung_cost_sec`` is that granted cap rather
+    than the declared timeout, since pricing at the smaller admits a rung the
+    budget cannot pay for. ``deadline`` is a wall-clock epoch."""
+
+    declared_total_sec: int | None
+    granted_total_sec: int | None
+    rung_cost_sec: float | None
+    raised: bool
+    gate_active: bool
+    deadline: float | None
+    session_soft_deadline_sec: float | None
+
+
+class V6ConcSweepEnvironment(TypedDict, total=False):
+    """What the sweep resolved to run against.
+
+    ``sweep_task_id`` is the sweep's own minted id, distinct from the dispatched
+    task id: it names the ``runs/conc_sweep/`` workspace the rung artifacts live
+    under, and nothing else ever wrote it down."""
+
+    sweep_task_id: str
+    workspace: str
+    model_path: str
+    gpu_type: str
+    base_config_path: str
+
+
+class V6ConcSweepArtifacts(TypedDict, total=False):
+    """Where the sweep's own report was written."""
+
+    report_json_path: str
+    report_csv_path: str
+
+
+class V6ConcSweepResult(TypedDict, total=False):
+    """The roll-up over the pairs, and the sweep's own word on how it ended.
+
+    ``status`` is the sweep's verdict rather than the event's: the event
+    degrades a budget-truncated success, and keeping both means the two cannot
+    be confused. ``declined`` separates a sweep that refused before running
+    anything from ``was_skipped``, which a ladder that ran and produced no
+    usable pair also sets. ``best_conc`` is the best rung on the objective
+    alone; ``best_conc_guard_holds`` says whether the session's KEEP rule would
+    also have accepted it, and ``guard_axis`` names the axis that verdict is
+    about. Both are empty off the interactivity objective, where there is no
+    second axis to hold."""
+
+    status: str
+    metric: str
+    guard_axis: str
+    best_conc: int | None
+    best_speedup: float | None
+    best_conc_guard_holds: bool | None
+    successful_pairs: int | None
+    failed_pairs: int | None
+    median_speedup: float | None
+    mean_speedup: float | None
+    skip_reason: str
+    was_skipped: bool
+    budget_exhausted: bool | None
+    declined: bool
+
+
+class V6ConcSweepRuntime(TypedDict, total=False):
+    """How the run went, as opposed to what it found.
+
+    ``stop_reason`` is the session's, set when its end cut the sweep short; a
+    sweep stopped that way measured what it got to and did not fail, which is
+    why it is here rather than in ``failure``. ``elapsed_sec`` is the sweep's
+    own accounting and ``duration_sec`` the event's."""
+
+    elapsed_sec: float | None
+    budget_remaining_sec: float | None
+    budget_skip_reason: str
+    stop_reason: str
+    workspace: str
+    duration_sec: float | None
+
+
+class V6ConcSweepCeilingModel(TypedDict, total=False):
+    """The model dimensions the ceiling was computed from.
+
+    Recorded because the ceiling is only auditable against them: the same
+    checkpoint served at a different weight precision yields a different
+    ceiling from the same curve."""
+
+    weight_bytes: int
+    active_weight_bytes: int
+    num_experts: int
+    experts_per_tok: int
+    expert_weight_bytes: int
+    num_layers: int
+    num_kv_heads: int
+    head_dim: int
+    weight_dtype_bytes: float
+
+
+class V6ConcSweepCeilingRow(TypedDict, total=False):
+    """One concurrency's theoretical ceiling, and how close each arm came.
+
+    ``bound_kind`` says which of the two limits ``t_peak_tok_s`` came from, so
+    a rung far below peak can be read as the memory wall or as headroom the
+    configuration is not using."""
+
+    conc: int
+    t_mem_tok_s: float
+    t_cmp_tok_s: float
+    t_peak_tok_s: float
+    bound_kind: str
+    mbu_baseline_pct: float | None
+    mbu_optimized_pct: float | None
+
+
+class V6ConcSweepCeiling(TypedDict, total=False):
+    """The decode roofline the curve is read against, one row per rung."""
+
+    schema_version: int
+    source: str
+    gpu_type: str
+    precision: str
+    tp: int
+    isl: int
+    osl: int
+    model_meta: V6ConcSweepCeilingModel
+    rows: list[V6ConcSweepCeilingRow]
+
+
+class V6ConcSweepLifecycle(TypedDict, total=False):
+    """Whether the framework can hold a server across rungs, and on what port.
+
+    ``eligible`` false is what forces the restart-per-rung path, so a curve
+    that cost a server start per point is explained rather than merely slow."""
+
+    eligible: bool | None
+    reason: str
+    port: int | None
+    framework: str
+
+
+class V6ConcSweepRefused(TypedDict, total=False):
+    """The gate that refused an arm before it built anything."""
+
+    reason: str
+    remaining_sec: float | None
+
+
+class V6ConcSweepRung(TypedDict, total=False):
+    """One planned rung and the load it carries.
+
+    A rung's ``num_prompts`` is derived from its CONC and never written down
+    elsewhere, so a run cannot be reproduced from the report alone."""
+
+    name: str
+    conc: int | None
+    num_prompts: int | None
+
+
+class V6ConcSweepBootAttempt(TypedDict, total=False):
+    """One rung the boot-retry-descend loop tried.
+
+    ``committed`` false is a concurrency the server would not come up at --
+    the capacity finding the sweep produces for free and the report discards."""
+
+    conc: int | None
+    committed: bool
+    status: str
+    error_class: str
+    error: str | None
+    start_time: str
+    wall_duration_sec: float | None
+
+
+class V6ConcSweepBoot(TypedDict, total=False):
+    """How the boot-retry-descend loop resolved.
+
+    ``attempted_concs`` is in the order tried. Absent on an arm refused before
+    it built anything."""
+
+    succeeded: bool
+    booted_conc: int | None
+    attempted_concs: list[int]
+    failed_concs: list[int]
+    attempts: list[V6ConcSweepBootAttempt]
+
+
 class V6ConcSweepPoint(TypedDict, total=False):
     """One rung of one arm's concurrency curve, as the sweep recorded it.
 
@@ -626,11 +877,12 @@ class V6ConcSweepArm(TypedDict, total=False):
     extra_envs: dict[str, str]
     strategy: str
     strategy_reason: str | None
-    lifecycle: dict[str, Any]
+    lifecycle: V6ConcSweepLifecycle
     serving_lease_held: bool | None
-    refused: dict[str, Any] | None
-    grid: list[dict[str, Any]]
-    boot: dict[str, Any]
+    refused: V6ConcSweepRefused | None
+    failure: V6Failure | None
+    grid: list[V6ConcSweepRung]
+    boot: V6ConcSweepBoot
     points: list[V6ConcSweepPoint]
 
 
@@ -659,6 +911,25 @@ class V6ConcSweepPair(TypedDict, total=False):
     error: str | None
 
 
+class V6Failure(TypedDict, total=False):
+    """The canonical failure row, shared by every event that records one.
+
+    One shape from one producer, so a reader that can parse one event's
+    failure can parse them all. ``stage`` names the step it died at -- a
+    profiling substep, a baseline round, a phase entry -- rather than the phase
+    it died in. Absent on anything that did not fail, which is not the same as
+    a block present and empty: an event stopped early by the session's end
+    reports that beside the rest of how it ran, because nothing about it
+    failed.
+
+    Some events carry their own additions beside these keys, the baseline's
+    ``returncode`` and ``stderr_log_path`` among them."""
+
+    stage: str
+    error_class: str
+    message: str
+
+
 class V6ConcSweepExt(TypedDict, total=False):
     """The ``conc_sweep`` timeline event's ``ext``, recorded as the sweep runs.
 
@@ -670,19 +941,20 @@ class V6ConcSweepExt(TypedDict, total=False):
     including the ones that were refused or would not boot."""
 
     schema_version: str
-    request: dict[str, Any]
-    input_anchor: dict[str, Any]
-    workload: dict[str, Any]
-    plan: dict[str, Any]
-    budget: dict[str, Any]
-    environment: dict[str, Any]
+    request: V6ConcSweepRequest
+    input_anchor: V6ConcSweepInputAnchor
+    workload: V6ConcSweepWorkload
+    plan: V6ConcSweepPlan
+    budget: V6ConcSweepBudget
+    environment: V6ConcSweepEnvironment
     arms: dict[str, V6ConcSweepArm]
     comparison: list[V6ConcSweepPair]
-    result: dict[str, Any]
-    roofline_ceiling: dict[str, Any] | None
-    runtime: dict[str, Any]
-    artifacts: dict[str, Any]
-    failure: dict[str, Any]
+    result: V6ConcSweepResult
+    roofline_ceiling: V6ConcSweepCeiling | None
+    runtime: V6ConcSweepRuntime
+    artifacts: V6ConcSweepArtifacts
+    faults: list[V6Failure]
+    failure: V6Failure | None
     superseded_sweeps: list[str]
 
 
@@ -1853,9 +2125,26 @@ __all__ = [
     "V6Close",
     "V6CloseRobustness",
     "V6ConcSweepArm",
+    "V6ConcSweepArtifacts",
+    "V6ConcSweepBoot",
+    "V6ConcSweepBootAttempt",
+    "V6ConcSweepBudget",
+    "V6ConcSweepCeiling",
+    "V6ConcSweepCeilingModel",
+    "V6ConcSweepCeilingRow",
+    "V6ConcSweepEnvironment",
     "V6ConcSweepExt",
+    "V6ConcSweepInputAnchor",
+    "V6ConcSweepLifecycle",
     "V6ConcSweepPair",
+    "V6ConcSweepPlan",
     "V6ConcSweepPoint",
+    "V6ConcSweepRefused",
+    "V6ConcSweepRequest",
+    "V6ConcSweepResult",
+    "V6ConcSweepRung",
+    "V6ConcSweepRuntime",
+    "V6ConcSweepWorkload",
     "V6Critic",
     "V6CriticReview",
     "V6CriticReviewVariant",
@@ -1863,6 +2152,7 @@ __all__ = [
     "V6EnablementBuild",
     "V6EnablementExt",
     "V6EnablementRevalidation",
+    "V6Failure",
     "V6GeakCandidate",
     "V6GradedAxes",
     "V6Grading",

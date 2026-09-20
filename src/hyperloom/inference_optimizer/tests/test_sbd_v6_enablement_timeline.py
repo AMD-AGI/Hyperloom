@@ -563,3 +563,18 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
     row = _ext(_bound_session)["attempts"]["rows"][0]
     assert row["files"] == []
     assert row["accepted_config_path"] is None
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):
+    """Lane teardown must not raise when the close-time spool read fails.
+
+    Callers (``_close_enablement_lane``, ``_settle_enablement_round``) do not
+    guard ``finish``, and a raise after ``stop_reason`` / ``state.save`` would
+    leave the lane half torn down.
+    """
+    _boot_trigger()
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_attempts_exhausted")
