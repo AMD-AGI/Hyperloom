@@ -2389,6 +2389,8 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    monkeypatch.setattr(krh.sys, "executable", "/task/deps/venv/bin/python")
+    monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2413,6 +2415,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
+    assert cmd[0] == "/task/deps/venv/bin/python"
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--tracelens-root" in cmd

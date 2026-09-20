@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Kernel tuning now uses a 1% default E2E KEEP threshold for GEMM integration
+  and fusion siblings, while preserving explicit fusion threshold overrides.
+  MoE tuning collects candidates from the producer's actual temporary directory,
+  persists valid tables, and reports missing artifacts instead of exporting
+  nonexistent paths. TraceLens analysis uses the coordinator's Python interpreter
+  without reinstalling dependencies on every call, and distinguishes dependency
+  and splitter failures from successful splits with no steady-state output.
+
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The
   `canonical_id` is a seven-tuple of model, hardware, framework name, model type,

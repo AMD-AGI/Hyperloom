@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -161,6 +162,11 @@ def gpu_healthy(gpu_ids: str = "") -> bool:
     return any(str(g.gpu_id) in wanted for g in gpus)
 
 
+def compare_temp_env() -> dict[str, str]:
+    """Pin producer and collector to one temp root, independent of tempfile's cache."""
+    return {"TMPDIR": str(Path(tempfile.gettempdir()).resolve())}
+
+
 def run_isolated(
     *,
     script: str,
@@ -173,6 +179,7 @@ def run_isolated(
     task_timeout_s: int,
     gpu_ids: str,
     blocklist: FaultBlocklist | None,
+    env_override: dict[str, str] | None = None,
 ) -> tuple[int, str, str, Path | None]:
     """Run the aiter tuner once per shape (process isolation), merge results."""
     header, rows = read_untuned_csv(input_csv)
@@ -191,7 +198,8 @@ def run_isolated(
     merged_candidate_rows: list[str] = []
     candidate_header: str | None = None
     n_ok = 0
-    compare_dir = Path("/tmp/aiter_compare")
+    env_override = {**compare_temp_env(), **(env_override or {})}
+    compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
 
     # ``base_args`` carries a single shared ``-o2`` profile path.
     try:
@@ -223,6 +231,7 @@ def run_isolated(
             cwd=aiter_root,
             timeout_s=outer_timeout_s,
             log_file=work_dir / f"_iso_{tuned_stem}_{idx}.log",
+            env_override=env_override,
         )
         merged_out.append(out)
         merged_err.append(err)
@@ -264,7 +273,7 @@ def run_isolated(
         if soft:
             log.info("shape %d/%d tuned with %d recovered candidate fault(s)", idx + 1, len(rows), soft)
         # Collect this shape's compare candidate (aiter writes it under compare_dir).
-        cand = _latest_candidate(compare_dir, tuned_stem, start)
+        cand = _latest_candidate(compare_dir, shape_out.stem, start)
         if cand is not None:
             try:
                 clines = cand.read_text(encoding="utf-8").splitlines()
@@ -302,7 +311,7 @@ def _latest_candidate(compare_dir: Path, tuned_stem: str, start: float) -> Path 
     """Newest ``*.candidate.csv`` under compare_dir for this stem, newer than start."""
     if not compare_dir.is_dir():
         return None
-    boundary = re.compile(re.escape(tuned_stem) + r"(?:\.|_\d)")
+    boundary = re.compile(r"^" + re.escape(tuned_stem) + r"(?:\.|_\d)")
     cands = [p for p in compare_dir.glob("*.candidate.csv") if boundary.search(p.name) and p.stat().st_mtime > start]
     if not cands:
         return None
