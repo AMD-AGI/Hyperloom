@@ -476,7 +476,14 @@ def finish(
     still working when the session ended is not closed here at all: finalize
     recovers it as ``interrupted``, because nothing judged it. ``outcome`` is
     :data:`OUTCOME_SUCCEEDED` or :data:`OUTCOME_STALLED`.
+
+    A spool that cannot be read at close is noted and dropped: the lane
+    teardown that asked for this close must not raise, and finalize recovers
+    an event left open as interrupted.
     """
+    from .assembler import event_parts
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
+
     sink = _sink()
     if sink is None:
         return
@@ -505,22 +512,23 @@ def finish(
     }
     sink.record(SECTION_EVENT, {"result": result, "end_time": end_time})
 
-    from .assembler import event_parts
-
-    ext, derived = assemble_enablement_ext(
-        event_parts(ENABLEMENT_EVENT_SECTIONS, event=enablement_event_id()),
-        event=enablement_event_id(),
-    )
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=enablement_event_id(),
-        sequence=sequence,
-        status=derived or _status_for(settled, attempts=0),
-        ext=ext,
-        kind=EVENT_KIND,
-        start_time=_start_time(),
-        end_time=end_time,
-    )
+    try:
+        ext, derived = assemble_enablement_ext(
+            event_parts(ENABLEMENT_EVENT_SECTIONS, event=enablement_event_id()),
+            event=enablement_event_id(),
+        )
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=enablement_event_id(),
+            sequence=sequence,
+            status=derived or _status_for(settled, attempts=0),
+            ext=ext,
+            kind=EVENT_KIND,
+            start_time=_start_time(),
+            end_time=end_time,
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"closing enablement event {enablement_event_id()}")
 
 
 #: Every section the enablement event assembles from. Duplicated from the
