@@ -377,7 +377,10 @@ def _xdit_default_grid(
     return variants
 
 
-_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate"})
+# Verbatim stack replays must always Magpie: they remeasure an already-chosen
+# launch, including empty ``args_mode=replace`` clears that fingerprint equal to
+# the opening YAML and would otherwise look like baseline noops.
+_CONFIG_REPLAY_PROVENANCE = frozenset({"geak_revalidate", "resume_stack_revalidate"})
 
 
 def _is_config_replay_variant(variant: Any) -> bool:
