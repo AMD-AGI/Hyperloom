@@ -92,6 +92,8 @@ chmod +x "$INCONTAINER"
 #
 # A container counts as ours-and-orphaned only when its CLAW_SESSION_ID has no
 # live `docker run` client, so a co-tenant job on the same node is never touched.
+# Getting that ownership question wrong is worse than never reclaiming at all:
+# the answer decides whether we SIGKILL a healthy neighbour's server mid-run.
 #
 # Every branch below is spelled as `if`, not `cmd && ...`: this file runs under
 # `set -e`, where a failing AND-list aborts the job.
@@ -112,11 +114,32 @@ hl_kill_container_cgroup() {
   return 0
 }
 
+# Is any live process the `docker run` client for this session id?
+#
+# `pgrep -f "docker run.*CLAW_SESSION_ID=$sid"` answered "no" for sessions whose
+# client was demonstrably alive, and the reclaim below then SIGKILLed two healthy
+# neighbour jobs seconds after a new job landed on their node. Two reasons it
+# cannot be trusted here: procps matches against a command line it truncates
+# (ours runs past 4 KiB of `-e` pairs long before the session id appears), and
+# the pattern is an ERE, so a session id is only accidentally a literal.
+# Walking /proc ourselves with `grep -qF` has neither problem.
+_hl_has_live_client() {
+  local sid="$1" p
+  [ -n "$sid" ] || return 1
+  for p in /proc/[0-9]*; do
+    [ -r "$p/cmdline" ] || continue
+    if tr '\0' ' ' < "$p/cmdline" 2>/dev/null | grep -qF "CLAW_SESSION_ID=$sid"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 hl_reclaim_orphan_gpus() {
   if ! command -v docker >/dev/null 2>&1; then
     return 0
   fi
-  local c full sid img found=0 i vram
+  local c full sid img started age found=0 i vram
   echo "[hl] preflight: vram%max=$(hl_vram_max) before reclaim"
   for c in $(docker ps -q 2>/dev/null); do
     sid="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null \
@@ -127,8 +150,23 @@ hl_reclaim_orphan_gpus() {
     if [ "$sid" = "${CLAW_SESSION_ID:-}" ]; then
       continue
     fi
-    if pgrep -f "docker run.*CLAW_SESSION_ID=$sid" >/dev/null 2>&1; then
+    if _hl_has_live_client "$sid"; then
       continue
+    fi
+    # Second guard, in case the ownership probe is wrong again: a container this
+    # young cannot be the residue of a job that already died, and reclaiming one
+    # is exactly how a healthy neighbour gets killed. Orphans outlive the window.
+    started="$(docker inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null || true)"
+    age=""
+    if [ -n "$started" ]; then
+      age="$(date -u -d "$started" +%s 2>/dev/null || true)"
+    fi
+    if [ -n "$age" ]; then
+      age=$(( $(date -u +%s) - age ))
+      if [ "$age" -lt "${HL_ORPHAN_MIN_AGE_S:-900}" ]; then
+        echo "[hl] preflight: container $c is only ${age}s old; not treating it as orphaned"
+        continue
+      fi
     fi
     full="$(docker inspect -f '{{.Id}}' "$c" 2>/dev/null || true)"
     img="$(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null || true)"
