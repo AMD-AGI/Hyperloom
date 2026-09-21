@@ -1147,3 +1147,32 @@ def test_benchmark_serving_legacy_layout_is_still_resolved(tmp_path: Path) -> No
     assert benchmark_serving_path_in(tmp_path) == legacy
     assert ensure_benchmark_serving_patched(tmp_path) is True
     assert "PROFILE_EXTRA_BODY" in legacy.read_text(encoding="utf-8")
+
+
+def test_gate_path_stays_inside_the_named_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A patched checkout elsewhere in the env cannot vouch for the one the run executes."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        benchmark_serving_path_in,
+    )
+
+    configured = tmp_path / "configured"
+    (configured / "utils" / "bench_serving").mkdir(parents=True)
+    unpatched = configured / "utils" / "bench_serving" / "benchmark_serving.py"
+    unpatched.write_text("extra_body=None,\n", encoding="utf-8")
+
+    other = tmp_path / "other"
+    _write_infx_layout(other)
+    assert ensure_benchmark_serving_patched(other) is True
+    monkeypatch.setenv("INFERENCEX_PATH", str(other))
+
+    assert benchmark_serving_path_in(configured) == unpatched
+    assert "PROFILE_EXTRA_BODY" not in unpatched.read_text(encoding="utf-8")
+
+
+def test_gate_path_falls_back_to_the_legacy_location(tmp_path: Path) -> None:
+    """A tree carrying neither layout still names where the patch belongs."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        benchmark_serving_path_in,
+    )
+
+    assert benchmark_serving_path_in(tmp_path) == tmp_path / "utils" / "bench_serving" / "benchmark_serving.py"

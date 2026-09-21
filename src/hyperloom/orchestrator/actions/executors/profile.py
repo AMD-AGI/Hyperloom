@@ -28,7 +28,7 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
-    benchmark_serving_paths,
+    benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
@@ -1006,7 +1006,8 @@ class ProfileExecutor(BaselineExecutor):
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
         # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
         # path as a forwarding shim, which never carries the sentinel however well the patch landed.
-        serving_paths = benchmark_serving_paths(ix_root)
+        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
+        serving_path = benchmark_serving_path_in(ix_root)
 
         def _contains(path: Path, needle: str) -> bool:
             """Check whether ``needle`` appears in ``path``'s text."""
@@ -1016,7 +1017,7 @@ class ProfileExecutor(BaselineExecutor):
                 return False
 
         lib_valid = _contains(lib_path, "${NUM_PROMPTS:-$max_concurrency}")
-        serving_valid = any(_contains(path, "PROFILE_EXTRA_BODY") for path in serving_paths)
+        serving_valid = _contains(serving_path, "PROFILE_EXTRA_BODY")
         # The sentinels are a separate fact from the patcher's return: a patcher can report success against a
         # checkout whose anchors have since moved, and only reading the file back tells them apart.
         patchers["benchmark_lib_sentinel"] = lib_valid
@@ -1036,7 +1037,7 @@ class ProfileExecutor(BaselineExecutor):
                 ),
                 "inferencex_path": str(ix_root),
                 "benchmark_lib": str(lib_path),
-                "benchmark_serving": ", ".join(str(path) for path in serving_paths),
+                "benchmark_serving": str(serving_path),
             }
         return None
 

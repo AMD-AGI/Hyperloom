@@ -606,20 +606,15 @@ def _pick_benchmark_serving(candidates: list[Path]) -> Path:
     return candidates[-1]
 
 
-def benchmark_serving_paths(
-    inferencex_path: Path | str | None = None,
-) -> list[Path]:
-    """Return the ``benchmark_serving.py`` this patch targets, one per discovered root.
+def benchmark_serving_path_in(root: Path | str) -> Path:
+    """Return the ``benchmark_serving.py`` this patch targets under exactly one checkout.
 
     Callers that read the file back to confirm the patch landed must resolve it the
-    same way the patcher wrote it; a fixed path reads the forwarding shim on a
-    post-#3022 checkout and concludes the patch is missing.
+    same way the patcher wrote it: a fixed path reads the forwarding shim on a
+    post-#3022 checkout and concludes the patch is missing. Scoped to one root
+    because a gate speaks for the tree the run will execute, not for whatever else
+    the environment can reach.
     """
-    return _resolve_benchmark_serving_paths(inferencex_path)
-
-
-def benchmark_serving_path_in(root: Path | str) -> Path:
-    """Return the ``benchmark_serving.py`` this patch targets under exactly one checkout."""
     base = Path(root)
     existing = [path for path in (base.joinpath(*rel) for rel in _BENCH_SERVING_REL_PARTS) if path.is_file()]
     if not existing:
@@ -973,7 +968,6 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
 __all__ = [
     "AnchorStatus",
     "benchmark_serving_path_in",
-    "benchmark_serving_paths",
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
