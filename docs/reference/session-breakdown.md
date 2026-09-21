@@ -371,8 +371,8 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
       "user_data_path": "/workspace",
       "tick_count": 89,
-      "image": "lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x-20260920",
-      "image_id": "sglang-rocm:v0.5.20-rocm724-mi30x-20260920",
+      "image": "lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x-20260919",
+      "image_id": "sglang-rocm:v0.5.20-rocm724-mi30x-20260919",
       "recovery": {
         "recovered": false,
         "crash_count": 0,

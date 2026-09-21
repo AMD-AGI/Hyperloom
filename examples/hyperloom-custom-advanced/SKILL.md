@@ -45,7 +45,7 @@ skip the user-approval step (#1314).
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x-20260920`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x-20260919`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm724-mi35x-20260920`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
