@@ -1,13 +1,13 @@
 ---
 name: review-pr
-description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review, or sanity-check a PR in this repository. Collects the PR into a scratch directory, derives from rules.md only the rules this diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English conclusion to the PR. The output has two parts only: what the PR does, and blocking issues."
+description: "Review a Hyperloom pull request. Invoke with a PR number whenever asked to review, re-review, or sanity-check a PR in this repository. Collects the PR into a scratch directory, selects from rules.md only the rules this diff can trigger, forces a semantic and core-file risk assessment before any finding is written, refutes every finding twice, and publishes an English conclusion to the PR. The output has two parts only: what the PR does, and blocking issues."
 ---
 
 # Hyperloom PR review
 
-Written for an agent to execute top to bottom. Every step writes an artifact into `$WORK` and is
-gated; a step that leaves nothing behind is one a review can skip without the skip being visible.
-`$WORK` defaults to `/tmp/hl-review-<PR>` and is printed by `fetch.sh`.
+Written for an agent to execute top to bottom. Every step writes an artifact into `$WORK`; a step
+that leaves nothing behind is one a review can skip without the skip being visible. `$WORK` defaults
+to `/tmp/hl-review-<PR>` and is printed by `fetch.sh`.
 
 ## Output contract
 
@@ -62,7 +62,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `title.txt` | the title, one line — Step 8 checks it against the diff |
 | `body.txt` | the description, checked the same way |
 | `diff.txt` | the full diff against the merge base |
-| `files.txt` | changed paths, one per line — the input to rule derivation |
+| `files.txt` | changed paths, one per line — the input to rule selection |
 | `numstat.txt` | added, deleted, path — size and shape of the change |
 | `commits.txt` | commit subjects, oldest first; a late commit is where a description goes stale |
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
@@ -71,24 +71,19 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
 
-## Step 1b — Derive the rules
+## Step 1b — Select the rules
 
-```bash
-python .claude/skills/review-pr/triage.py derive --work $WORK
-python .claude/skills/review-pr/triage.py expand --work $WORK
-```
-
-`derive` writes `rules.txt` from paths, added and deleted lines, and the title. `expand` prints the
-bodies of exactly those rules. **Read only the expanded output. Never read `rules.md` whole** — it
-holds 52 rules across 9 families and a reviewer told to attend to all of them attends to none. The
-derivation is conservative: a family it cannot decide structurally is included, never dropped.
-`triage.py mapping` prints the family-to-rule-id map; `triage.py rules --work $WORK` prints the
-derived ids alone. An empty `rules.txt` means derivation did not run and fails closed.
+Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
+`files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 52 rules across 9
+families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
+you are unsure about is taken, never dropped. V1-V6 are on every list.
 
 ## Step 2 — Semantic understanding
 
 Answer all five from the diff, not the description. One line each into `$WORK/answers.txt`,
-prefixed `Q1:` … `Q5:`.
+prefixed `Q1:` … `Q5:`. An answer that anchors in nothing — no path, symbol or condition — is not
+an answer; rewrite it before going on.
 
 - **Q1 — State the root cause in one sentence.** Not the symptom, not a list of mitigations. A body
   listing three improvements instead of one causal change is the tell that nobody found the cause.
@@ -103,10 +98,6 @@ prefixed `Q1:` … `Q5:`.
 - **Q5 — What would it take for this change to be wrong?** Name the input, configuration, phase or
   race that would make it produce a wrong answer. "Nothing" is not an answer.
 
-```bash
-python .claude/skills/review-pr/triage.py gate answers --work $WORK
-```
-
 ## Step 3 — Core-file risk
 
 Write one line per backbone file the diff touches into `$WORK/core_files.txt`:
@@ -115,27 +106,23 @@ Write one line per backbone file the diff touches into `$WORK/core_files.txt`:
 <path> TIER1|TIER2|TIER3 COVERED|GAP|N/A -- <reason naming what THIS PR changed>
 ```
 
-Every changed non-test file under `src/` gets a line, Tier 3 included — the gate counts them
-against `files.txt`. A tier written lower than `references/tiers.md` gives it is
-rejected: downgrading is not a route past the checks the real tier requires.
+Every changed non-test file under `src/` gets a line, Tier 3 included — check the list against
+`files.txt`. Writing a tier lower than `references/tiers.md` gives it is not a route past the checks
+the real tier requires.
 
 `COVERED` = the blast radius is exercised by this PR's tests or is unreachable from the change.
 `GAP` = it is not, and that goes on the card. `N/A` = the change cannot reach it. A reason that
-names no file or symbol this PR changes is rejected — "core file, large blast radius" is equally
+names no file or symbol this PR changes is worthless — "core file, large blast radius" is equally
 true of every PR ever opened against that file.
 
 A docs-, CI- or test-only diff touches nothing under `src/`: write one
-`NONE -- <reason naming what it does touch>` line, which is the only form the gate accepts there.
+`NONE -- <reason naming what it does touch>` line.
 
 Tiers come from [`references/tiers.md`](references/tiers.md): a table of the backbone files, and
 Q1–Q4 for anything not in it, including new files. Q1b is the one that bites — `Coordinator`
 resolves its 21 collaborators by string through a metaclass `__getattr__`, so a rename passes
 every import check, passes lint, passes collection, and fails only hours into a session when
 that phase is entered. Grep the string, not the symbol.
-
-```bash
-python .claude/skills/review-pr/triage.py gate corefiles --work $WORK
-```
 
 ## Step 4 — Rule checklist
 
@@ -146,14 +133,10 @@ Adjudicate every rule id in `$WORK/rules.txt`. One line each into `$WORK/verdict
 ```
 
 `CLEAR` is a claim that you looked and it does not apply *to this diff*; the reason is what makes
-it checkable. "ok", "n/a", "fine" are rejected. The derivation already cut the list to what this
-diff can trigger, so there is no rule here you may pass over because the list looked long. A `FIRE`
+it checkable. "ok", "n/a", "fine" are not reasons. Step 1b already cut the list to what this diff
+can trigger, so there is no rule here you may pass over because the list looked long. A `FIRE`
 must cite a file this PR changes; everything else — the header stating the contract, the prompt
 naming the flag, the doc that did not move — is evidence and welcome beside it.
-
-```bash
-python .claude/skills/review-pr/triage.py gate verdicts --work $WORK
-```
 
 ## Step 5 — AI-code diagnostic
 
@@ -164,7 +147,7 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 <check>: CLEAN|HIT -- <what you looked at and what you found>
 ```
 
-"clean" alone is not an answer; the gate rejects a reason that names nothing in the diff.
+"clean" alone is not an answer; a reason that names nothing in the diff is not one either.
 
 1. `wiring` — **both directions.** Every first-party import the diff adds resolves against the merge
    base. Every name-resolved entry (`_COLLAB_MODULES`, `KERNEL_REQUEST_HANDLERS`,
@@ -190,10 +173,6 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
    handle is not stored, an `await`-less blocking call inside `async def`, a subprocess with no
    timeout and no kill path.
 
-```bash
-python .claude/skills/review-pr/triage.py gate diagnostic --work $WORK
-```
-
 ## Step 6 — Free-form pass, then the blind-spot line
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any
@@ -203,9 +182,9 @@ number compared against one another measurement system produced?
 
 Then answer this in full, appended to `$WORK/answers.txt` as a `BLIND:` line: **"Is there any
 correctness risk, resource hazard, or behavioural edge case in this diff that none of Steps 1-5
-caught?"** A bare "no" is rejected — say what you looked for and did not find. Anything found after
-this point goes on the card marked `-- late finding`; never edit an artifact whose gate already
-passed, because the ledger hashes them and reports a backdated artifact.
+caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
+after this point goes on the card marked `-- late finding` rather than back into a finished
+artifact, so that the order the review ran in stays legible.
 
 ## Step 7 — Refutation
 
@@ -218,10 +197,10 @@ ATTEMPT: <what you opened, ran or compared to kill it -- must name a file, symbo
 OUTCOME: SURVIVES|DROPPED -- <what that showed>
 ```
 
-The key is the same one the card will use, and every `FIRE` in `verdicts.txt` needs a block. The
-gate rejects an `ATTEMPT` that names nothing openable: a refutation nobody can repeat is not one.
-With nothing to refute, write a single `FINDING: none -- <reason>` line; an empty file reads the
-same as a skipped step.
+The key is the same one the card will use, and every `FIRE` in `verdicts.txt` needs a block. An
+`ATTEMPT` that names nothing openable is not a refutation: nobody can repeat it. With nothing to
+refute, write a single `FINDING: none -- <reason>` line; an empty file reads the same as a skipped
+step.
 
 Attack in this order: is the line added by this PR or pre-existing context around an added line
 (compare against `base.txt`); does the symbol resolve somewhere the diff did not show; is the
@@ -232,36 +211,16 @@ agent or a person — with every finding false until defended. `$WORK/independen
 `FINDING` / `ATTEMPT` / `OUTCOME` blocks, one per finding that survived above. With no such reader,
 write `FINDING: none -- no independent reader available` and say so on the card.
 
-```bash
-python .claude/skills/review-pr/triage.py gate refutations --work $WORK
-python .claude/skills/review-pr/triage.py gate independent --work $WORK
-```
-
 ## Step 8 — Verdict
 
-Run every gate. A red gate means that step did not happen; go back to it rather than reporting.
-
-```bash
-for g in answers corefiles verdicts diagnostic refutations independent; do
-  python .claude/skills/review-pr/triage.py gate "$g" --work $WORK || exit 1
-done
-# write $WORK/card.md, then:
-python .claude/skills/review-pr/triage.py gate card --work $WORK
-python .claude/skills/review-pr/triage.py gate ledger --work $WORK
-```
-
-The card gate checks each finding in both directions: nothing on the card anchored in no changed
-file, and nothing marked `FIRE` in `verdicts.txt` quietly missing from it — report it, change the
-verdict, or write `-- not reported: <reason>`. The ledger gate hashes each artifact as its gate
-passed and rejects a later edit. Whether a finding is *correct* is not checked; that is what the
-author reads the card for.
+Before writing the card, walk `verdicts.txt` in both directions: nothing goes on the card that is
+anchored in no changed file, and nothing marked `FIRE` quietly vanishes from it — report it, change
+the verdict, or write `-- not reported: <reason>`.
 
 ### Card contract
 
-`triage.py gate card` parses this shape exactly. The bracketed key is load-bearing: it is how the
-gate joins the finding back to its `FIRE` line in `verdicts.txt` and to its surviving blocks in
-`refutations.txt` and `independent.txt`. A finding with no key cannot be cross-checked, so it is
-not accepted.
+The bracketed key joins the finding back to its `FIRE` line in `verdicts.txt` and to its surviving
+blocks in `refutations.txt` and `independent.txt`. A finding with no key cannot be cross-checked.
 
 ```
 ## PR #NNN -- <title>
@@ -284,14 +243,14 @@ Checked: <paths and symbols read> | Ran: <commands> | Base: <merge-base sha> | H
 
 At most 5 findings, ranked most-severe first by (severity, then blast radius). A sixth that
 survived both refutation passes is not dropped in silence — it goes on a `deferred:` line, which is
-the only thing the gate accepts in place of reporting it.
+the only thing that may stand in place of reporting it.
 
 Use `free:<slug>` as the key for a Step 6 free-form finding; it is held to the same two refutation
 passes as a rule finding.
 
-A clean review writes `Blocking issues: none` and no numbered findings. That passes the gate — but
-the surviving-but-unreported scan still runs, so `none` cannot be used to bury a `FIRE` that
-survived refutation.
+A clean review writes `Blocking issues: none` and no numbered findings — but the
+surviving-but-unreported scan still runs, so `none` cannot be used to bury a `FIRE` that survived
+refutation.
 
 ### Evidence threshold
 
@@ -319,7 +278,7 @@ Read `ci.txt` before blaming the PR:
 ### SKIPPED protocol
 
 When a step genuinely cannot run — no network for `openprs.txt`, no second reader for Step 7, a
-diff too large to expand — write `SKIPPED: <step> -- <why, and what is therefore unchecked>` into
+diff too large to read — write `SKIPPED: <step> -- <why, and what is therefore unchecked>` into
 that step's artifact and carry the same line onto the card. A `SKIPPED` artifact means that axis
 was **not checked**; silence there is never read as clean. Skipping a step without recording it is
 itself a review defect.
@@ -359,16 +318,15 @@ When a human reviewer catches something this skill missed:
 
 1. Add the rule body to `rules.md` under its family, with the real PR it was learned from quoted as
    evidence. A rule with no PR behind it is a hypothetical and does not go in.
-2. Give it a mechanical trigger: the path, added-line pattern or title shape a deriver matches. A
-   rule no derivation emits is never read, and `expand` fails on an id with no body in `rules.md`.
+2. Put its id on an index row whose trigger a reviewer can match against `files.txt` and the diff,
+   or add a row. A rule on no row is never read.
 3. Write the false-positive self-check into the body: the condition under which the shape is
    correct and the rule must stay silent.
-4. Regenerate `MAPPING.md` with `triage.py mapping` so the family map cannot drift from the code.
-5. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
+4. Commit as `review-pr: add <ID> from #<NNN> -- <one line>`.
 
-**Nothing new goes in this file.** SKILL.md is budgeted at 400 lines and holds only what every
+**Nothing new goes in this file.** SKILL.md is budgeted at 350 lines and holds only what every
 review needs. Past that length a skill stops being read in full, and an unread instruction is worth
 less than no instruction because it looks like coverage. Conditional content goes in `rules.md` and
-reaches the reviewer through `triage.py expand`; lookup tables go in `references/` and are opened at
-the step that needs them; executable content goes in a script and gets called. Raising the budget is
-a decision to make this file less likely to be read — make it in a commit that says why.
+reaches the reviewer through the index; lookup tables go in `references/` and are opened at the step
+that needs them; executable content goes in a script and gets called. Raising the budget is a
+decision to make this file less likely to be read — make it in a commit that says why.

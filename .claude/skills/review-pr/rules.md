@@ -1,7 +1,7 @@
 # Hyperloom review rules
 
-Rule bodies for the `review-pr` skill. Do not read this file top to bottom during a review:
-`triage.py expand --work $WORK` prints only the rules derived from the diff at hand.
+Rule bodies for the `review-pr` skill. Do not read this file top to bottom during a review: use the
+index below to pick the rules the diff at hand can actually break, then read only those bodies.
 
 Every rule here was clustered from real review history on this repository. `Seen in` cites the
 PR the rule was learned from.
@@ -15,6 +15,32 @@ Rules that duplicate a static gate (ruff, pylint, bandit, CodeQL, gitleaks, REUS
 [`AGENTS.md`](../../../AGENTS.md) are deliberately absent. See
 [`.github/copilot-instructions.md`](../../../.github/copilot-instructions.md) for the prose
 statement of the same review posture.
+
+---
+
+## Index
+
+Pick every row whose left column matches the changed files and a skim of the diff, then read only
+the rules listed. Rows overlap; a rule listed twice is read once.
+
+| The diff... | Read |
+|---|---|
+| changes any non-test file under `src/`, or carries more than one commit | X1 X2 |
+| adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
+| adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C4 S6 T4 X5 X7 D8 D9 |
+| removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
+| fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 |
+| touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
+| touches a prompt, `SKILL.md` or `docs/reference/**`, or changes a function body whose docstring or comments stay put | X3 X5 |
+| adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
+| touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
+| touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
+| touches a metric, score, speedup or gain denominator, or a threshold compared against a number this repo did not produce | M1 M2 M3 |
+| matches or selects by name: substring, `startswith`, `fnmatch`, a first-wins loop, a dedup/grouping/sort key, or an LLM backend, model or credential choice | D5 D6 D7 |
+| runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
+
+V1-V6 apply to every PR: they govern how the review is run and published, not what the diff
+contains.
 
 ---
 
