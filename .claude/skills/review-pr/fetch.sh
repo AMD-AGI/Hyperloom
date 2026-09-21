@@ -25,10 +25,18 @@ REPO="${HL_REPO:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/
 
 mkdir -p "$WORK"
 
-gh pr view "$PR" --repo "$REPO" \
-  --json number,title,author,state,headRefOid,baseRefName,url,mergeable \
-  --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .url .mergeable}}' \
-  > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
+# GitHub computes mergeability lazily: the first read of a cold PR returns UNKNOWN and only
+# starts the background job. Queried once, meta.txt says UNKNOWN for every PR nobody looked at
+# recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
+for attempt in 1 2 3 4 5; do
+  gh pr view "$PR" --repo "$REPO" \
+    --json number,title,author,state,headRefOid,baseRefName,url,mergeable \
+    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .url .mergeable}}' \
+    > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
+  grep -q '^mergeable: UNKNOWN$' "$WORK/meta.txt" || break
+  [ "$attempt" = 5 ] && die "GitHub did not settle mergeability for #$PR; rerun rather than review the conflict axis blind"
+  sleep 3
+done
 
 sed -n 's/^title: //p' "$WORK/meta.txt" > "$WORK/title.txt"
 HEAD_SHA=$(sed -n 's/^head: //p' "$WORK/meta.txt")
@@ -36,7 +44,6 @@ BASE_REF=$(sed -n 's/^base_ref: //p' "$WORK/meta.txt")
 [ -n "$HEAD_SHA" ] && [ -n "$BASE_REF" ] || die "PR metadata carries no head sha or base ref"
 
 gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$WORK/body.txt"
-gh pr view "$PR" --repo "$REPO" --json commits --jq '.commits[].messageHeadline' > "$WORK/commits.txt"
 
 # The merge base, never the base-branch tip. A diff taken against the tip attributes
 # every commit main gained since the branch point to this PR, which is how a
@@ -47,6 +54,21 @@ case "$BASE_SHA" in
   *) die "no merge base for $BASE_REF...$HEAD_SHA" ;;
 esac
 printf '%s\n' "$BASE_SHA" > "$WORK/base.txt"
+
+# Both endpoints that list a PR's commits return the OLDEST ones and stop: gh pr view at 100,
+# compare at 250. X2 cares about the newest commit, the one that pushed the description out of
+# date, so a silent stop would hide exactly the commit the rule is about. Say what was dropped
+# and name the head commit, which is the newest by definition.
+gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
+  --jq '.commits[].commit.message | split("\n")[0]' > "$WORK/commits.txt"
+TOTAL_COMMITS=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.total_commits')
+LISTED_COMMITS=$(wc -l < "$WORK/commits.txt" | tr -d ' ')
+if [ "$LISTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
+  printf '# TRUNCATED: %s of %s commits listed, oldest first. Head commit: %s\n' \
+    "$LISTED_COMMITS" "$TOTAL_COMMITS" \
+    "$(gh api "repos/$REPO/commits/$HEAD_SHA" --jq '.commit.message | split("\n")[0]')" \
+    >> "$WORK/commits.txt"
+fi
 
 gh api -H "Accept: application/vnd.github.v3.diff" \
   "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" > "$WORK/diff.txt"
@@ -108,12 +130,18 @@ gh api --paginate "repos/$REPO/commits/$HEAD_SHA/status" \
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather
 # than with one REST call per PR.
-gh pr list --repo "$REPO" --state open --limit 100 --json number,title,url,files \
-  --jq '.[] | {number, title, url, path: .files[].path} | [.number, .title, .url, .path] | @tsv' \
+# shellcheck disable=SC2016  # $p is a jq variable, not a shell one
+gh pr list --repo "$REPO" --state open --limit 100 --json number,title,url,files,changedFiles \
+  --jq '.[] | . as $p | $p.files[].path
+        | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
   > "$WORK/.openprs.tsv"
+# gh lists only the first 100 files of each PR. A larger PR overlapping this one on file 101
+# is then invisible here, and an empty openprs.txt reads as "no in-flight conflict" (rule V4),
+# so the PRs whose lists were cut are named rather than dropped.
 awk -v self="$PR" -F'\t' '
   NR == FNR { want[$0] = 1; next }
   $1 == self { next }
+  { if ($5 < $6) cut[$1] = $6 }
   ($4 in want) {
     key = $1
     if (!(key in seen)) { seen[key] = 1; order[++n] = key; title[key] = $2; url[key] = $3 }
@@ -125,6 +153,8 @@ awk -v self="$PR" -F'\t' '
       k = order[i]
       printf "#%s  %d overlapping file(s)  %s  %s\n%s", k, count[k], title[k], url[k], paths[k]
     }
+    for (k in cut)
+      printf "# PARTIAL: #%s changes %s files, only its first 100 were compared\n", k, cut[k]
   }
 ' "$WORK/files.txt" "$WORK/.openprs.tsv" > "$WORK/openprs.txt"
 rm -f "$WORK/.openprs.tsv"

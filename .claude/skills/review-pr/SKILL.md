@@ -59,7 +59,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | file | what it is for |
 |---|---|
 | `meta.txt` | number, title, author, state, head sha, base ref, url, mergeable |
-| `title.txt` | the title, one line — Step 8 checks it against the diff |
+| `title.txt` | the title, one line — rule X2 checks it against the diff |
 | `body.txt` | the description, checked the same way |
 | `diff.txt` | the full diff against the merge base |
 | `files.txt` | changed paths, one per line — the input to rule selection |
@@ -78,7 +78,7 @@ Open the index at the top of [`rules.md`](rules.md) and take every row whose tri
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
 per line, then read only those bodies. **Never read `rules.md` whole** — it holds 52 rules across 9
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
-you are unsure about is taken, never dropped. V1-V6 are on every list.
+you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
 
 ## Step 2 — Semantic understanding
 

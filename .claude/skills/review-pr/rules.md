@@ -25,9 +25,9 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/`, or carries more than one commit | X1 X2 X3 |
+| changes any non-test file under `src/` | X1 X3 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
-| adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C4 S6 T4 X5 X7 D8 D9 |
+| adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C3 C4 S6 T4 X5 X7 D8 D9 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
 | fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 |
 | adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 |
@@ -41,7 +41,9 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | runs a destructive or privileged command: `pkill`/`kill -9`/`scancel`/`docker rm`, `rmtree`/`unlink`/`move`, `git reset --hard`/`git checkout -- <path>`, `git apply`, `tar -x`/`extractall`, or a cleanup, teardown or self-heal step | R1 R2 R3 R5 |
 
 V1-V6 apply to every PR: they govern how the review is run and published, not what the diff
-contains.
+contains. X2 does too — it reads `title.txt`, `body.txt` and `commits.txt`, so no row can trigger
+it from the file list, and a docs- or CI-only PR whose description went stale is the case a
+file-shaped row would miss.
 
 ---
 
