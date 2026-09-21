@@ -3,6 +3,6 @@
 # with your own published models and container images before running.
 # ep_size is optional and trails target_gain so existing 13-column rows still
 # parse; an empty or absent value means expert parallelism stays at 1.
-deepseek_r1_sglang	deepseek-ai/DeepSeek-R1	sglang	MI300X	lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825	8	fp8	1024	1024	64	moe_mla	6	10	1
+deepseek_r1_sglang	deepseek-ai/DeepSeek-R1	sglang	MI300X	lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x-20260920	8	fp8	1024	1024	64	moe_mla	6	10	1
 deepseek_r1_vllm	deepseek-ai/DeepSeek-R1	vllm	MI300X	vllm/vllm-openai-rocm:v0.29.0	8	fp8	1024	1024	64	moe_mla	6	10	1
 gptoss_vllm	openai/gpt-oss-120b	vllm	MI300X	vllm/vllm-openai-rocm:v0.29.0	8	fp4	1024	1024	64	moe_swa	6	10	1

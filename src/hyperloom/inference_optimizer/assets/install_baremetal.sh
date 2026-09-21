@@ -48,22 +48,19 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang 0.5.18, ROCm 7.2.4).
-# SGLANG_REF is the 0.5.18 pre-release commit the lmsysorg ROCm images are built
-# from, not the v0.5.18 tag: upstream removed `detailed_annotations` from
-# io_struct.py between the two, and TraceLens' annotation patches need that field.
-# On the tag, three of the ten patches fail `git apply --check`, the atomic set
-# rolls back, and kernel-shape profiling is silently unavailable.
+# Framework versions track docs/compatibility.rst (SGLang 0.5.20, ROCm 7.2.4).
+# SGLANG_REF defaults to the v0.5.20 release commit, aligned with the
+# lmsysorg/sglang-rocm:v0.5.20-rocm724-* images. Profile kernel-shape discovery
+# for SGLang >= 0.5.18 uses TraceLens kernel_shape_tool (no git-apply patch).
 # vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index, matching the
 # vllm/vllm-openai-rocm:v0.29.0 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
-# The pin is an untagged commit, so setuptools_scm has nothing to derive from and
-# would fall back to 0.0.0.*, which the patch-set version gate refuses. Declare the
-# version the patch sets target; it moves together with SGLANG_REF.
-SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
+SGLANG_REF="${SGLANG_REF:-d158602ff1d2cb953196c95158c488d503d2470c}"
+# When the pin is a bare commit, setuptools_scm may not derive a release version;
+# declare the point release for editable/source installs. Moves with SGLANG_REF.
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.20}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 # Left unset so the wheel target is derived from the ROCm stack that is
@@ -183,7 +180,7 @@ log() { echo "[install-baremetal] $*"; }
 warn() { echo "[install-baremetal WARN] $*" >&2; }
 die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
-IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x|mi35x-*; \
+IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.20-rocm724-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
 vllm/vllm-openai-rocm:v0.29.0), then re-run."
 
