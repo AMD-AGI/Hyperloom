@@ -10,6 +10,7 @@ import os
 import resource
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -17,11 +18,30 @@ from typing import Optional, Tuple
 DEFAULT_MIN_NOFILE = 65536
 DEFAULT_RAY_STATUS_TIMEOUT_SEC = 5.0
 DEFAULT_RAY_STOP_TIMEOUT_SEC = 30.0
+#: Wall-clock bound on the ``ray.init`` connect handshake. Registration with the
+#: raylet has no timeout of its own, so a raylet that accepts the socket and then
+#: never replies blocks the caller forever. Observed: a coordinator sat in this
+#: call for 44 minutes, holding tick 1, until the container was torn down.
+DEFAULT_RAY_INIT_TIMEOUT_SEC = 300.0
 
 # Custom Ray resource declared on the single-node head so serving-family work (serving / benchmark / profile /
 # gpu_research) can hold a whole-machine ``serving_slot`` as the authoritative physical mutex.
 RAY_SERVING_SLOT = "serving_slot"
 _HEAD_CUSTOM_RESOURCES = {RAY_SERVING_SLOT: 1}
+
+
+#: Held for the whole life of a ``ray.init`` attempt and released by the thread that
+#: made it -- including an abandoned one, on whatever schedule it finishes. Only one
+#: connect may be outstanding in this process at a time, because ``ray.init`` is
+#: process-global and uncancellable: a second attempt overlapping an abandoned first
+#: is how a late connect lands between the new attempt's shutdown and its own init
+#: and hands it the OLD cluster, silently, through ``ignore_reinit_error=True`` --
+#: which is precisely what the version-mismatch retry exists to escape.
+_INIT_GATE = threading.Semaphore(1)
+
+#: Set when an attempt timed out, so the next one clears a session its runner may
+#: have created. Read only after the gate is held, i.e. after that runner is done.
+_STALE_CONNECT_POSSIBLE = threading.Event()
 
 
 def _resources_start_args() -> list[str]:
@@ -88,6 +108,11 @@ def _ray_status_timeout_sec() -> float:
 def _ray_stop_timeout_sec() -> float:
     """Return the ``ray stop --force`` timeout in seconds."""
     return _positive_float_env("HYPERLOOM_RAY_STOP_TIMEOUT_SEC", DEFAULT_RAY_STOP_TIMEOUT_SEC)
+
+
+def _ray_init_timeout_sec() -> float:
+    """Return the ``ray.init`` connect timeout in seconds."""
+    return _positive_float_env("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", DEFAULT_RAY_INIT_TIMEOUT_SEC)
 
 
 def ensure_fd_limit(
@@ -304,17 +329,109 @@ def quiet_ray_init(num_gpus: Optional[int] = None, log_path: Optional[Path] = No
 
     runtime_env = safe_runtime_env()
 
+    def _connect(address: str) -> None:
+        """Call ``ray.init`` with standard options.
+
+        Deliberately does NOT redirect stdout. ``sys.stdout`` is process-global and
+        this runs on a thread the caller abandons on timeout, so a redirection held
+        here would never be unwound -- every later write, from every thread, would
+        vanish into a buffer nobody reads. The caller suppresses the banner instead,
+        around a join it always completes.
+        """
+        ray.init(
+            address=address,
+            ignore_reinit_error=True,
+            log_to_driver=False,
+            logging_level="error",
+            runtime_env=runtime_env,
+        )
+
     def _init(address: str) -> None:
-        """Call ``ray.init`` with stdout suppressed and standard options."""
+        """Connect under a wall-clock bound.
+
+        ``ray.init`` takes no timeout: the driver registers with the raylet over a
+        socket and waits for a reply that a wedged raylet never sends, so the call
+        blocks indefinitely with nothing to observe -- no child process, no log, no
+        failure. A daemon thread makes that state reportable. The call itself cannot
+        be cancelled, so the thread is abandoned rather than joined; it cannot keep
+        the interpreter alive. What it could do is finish late and leave this
+        process connected after the caller was told the cluster is unusable, so an
+        abandoned runner shuts the session back down on its way out.
+        """
+        timeout = _ray_init_timeout_sec()
+        # Wait out any abandoned runner rather than racing it. It releases the
+        # gate when it finishes, so by the time this attempt holds it, every
+        # connect that could still land has landed and the cleanup below is
+        # deterministic. A runner that never returns leaves this reporting an
+        # unusable cluster, which is what it is, instead of a second connect
+        # interleaved with the first.
+        if not _INIT_GATE.acquire(timeout=timeout):
+            raise TimeoutError(
+                f"a previous ray.init(address={address!r}) is still outstanding after "
+                f"{timeout:g}s; the raylet never answered it and this process cannot "
+                "safely start a second connect while it is unresolved."
+            )
+        if _STALE_CONNECT_POSSIBLE.is_set():
+            # A previous attempt timed out and its runner has since finished; it
+            # may have connected. Clear what it left before taking the process.
+            _STALE_CONNECT_POSSIBLE.clear()
+            with contextlib.suppress(Exception):
+                ray.shutdown()
+        outcome: dict[str, BaseException] = {}
+        # One lock decides, for a connect that lands near the deadline, whether
+        # the caller got it or the runner has to undo it. Checking a flag and
+        # setting it on separate threads leaves the interleaving where the
+        # runner reads "not abandoned", returns, and the caller then declares
+        # abandonment -- the process connected and nobody responsible for it.
+        verdict_lock = threading.Lock()
+        verdict: dict[str, bool] = {"done": False, "landed": False, "abandoned": False}
+
+        def _runner() -> None:
+            try:
+                _connect(address)
+                landed = True
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+                outcome["error"] = exc
+                landed = False
+            with verdict_lock:
+                verdict["done"] = True
+                verdict["landed"] = landed
+                if landed and verdict["abandoned"]:
+                    # The caller gave up before this returned, so a session may
+                    # exist that nobody asked for. Recorded under the lock and
+                    # therefore BEFORE the gate is released: the next attempt
+                    # cannot start and find the marker missing.
+                    _STALE_CONNECT_POSSIBLE.set()
+            # Released last, and by this thread rather than the caller: the
+            # caller may already have given up, and no second connect may start
+            # while this one is unresolved.
+            _INIT_GATE.release()
+
+        thread = threading.Thread(target=_runner, name="ray-init", daemon=True)
+        # The banner suppression is held here, across a join that always returns, so
+        # stdout is restored whether the connect succeeded, failed or was abandoned.
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            ray.init(
-                address=address,
-                ignore_reinit_error=True,
-                log_to_driver=False,
-                logging_level="error",
-                runtime_env=runtime_env,
+            thread.start()
+            thread.join(timeout)
+        with verdict_lock:
+            # ``done`` rather than ``thread.is_alive()``: a runner that returned
+            # a microsecond ago is still alive to that check and has already
+            # connected. Claimed under the same lock the runner reports through,
+            # so exactly one of the two sides owns the outcome.
+            timed_out = not verdict["done"]
+            if timed_out:
+                verdict["abandoned"] = True
+                _STALE_CONNECT_POSSIBLE.set()
+        if timed_out:
+            raise TimeoutError(
+                f"ray.init(address={address!r}) did not complete within {timeout:g}s; "
+                "the raylet accepted the connection but never finished registration. "
+                "Raise HYPERLOOM_RAY_INIT_TIMEOUT_SEC if the cluster is merely slow to start."
             )
+        error = outcome.get("error")
+        if error is not None:
+            raise error
 
     try:
         _init(os.environ.get("RAY_ADDRESS", "auto"))
