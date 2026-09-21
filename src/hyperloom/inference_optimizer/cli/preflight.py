@@ -2062,17 +2062,6 @@ def _preflight(
         action=_prepare_kb_install_step,
     )
 
-    # --- Auth alias export (internal LLM aliases only) --- These aliases feed OpenAI-protocol consumers, so they are
-    # filled from the OpenAI-side key only and stay unset when that side is not configured.
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if openai_key:
-        for alias in (
-            "LLM_API_KEY",
-            "AMD_LLM_API_KEY",
-        ):
-            if not os.environ.get(alias):
-                os.environ[alias] = openai_key
-                print(f"Preflight: filled {alias} from OPENAI_API_KEY")
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (

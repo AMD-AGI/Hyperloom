@@ -326,11 +326,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   resolves its Anthropic bearer for OpenAI-protocol calls instead, which is the
   credential it was already using for everything else.
 
-  What this does not touch: `LLM_API_KEY`, `AMD_LLM_API_KEY` and `LLM_API_BASE`
-  are still filled from the OpenAI side by CLI preflight and mirrored into the
-  Ray runtime env, because they are how GEAK and the kernel tools receive that
-  credential rather than anything Hyperloom reads — retiring them is a change to
-  make in those components. All eight names also stay in the benchmark secret,
+  The OpenAI key also stops being copied into `LLM_API_KEY`, `AMD_LLM_API_KEY`,
+  `AMD_API_KEY` and `LLM_GATEWAY_KEY` — by CLI preflight into its own
+  environment, and by the kernel agent into the Ray runtime env — and the four
+  names leave the Ray allowlist, so an operator's own export no longer reaches a
+  worker either. That mirroring was kept on the reading that GEAK receives its
+  credential through those names. It does not: GEAK authenticates on
+  `GEAK_AMDKEY` or `OPENAI_API_KEY`, and of the four only `AMD_LLM_API_KEY`
+  appears in that tree at all, in a quick-start line invoking a script the
+  repository no longer carries. `LLM_API_BASE` stays — it addresses an endpoint
+  rather than authenticating to one, and preflight still derives it from the
+  resolved OpenAI-side URL. All eight names also stay in the benchmark secret,
   variant, external and specialist-redaction lists: membership there asserts
   that a name holds a secret worth scrubbing, not that anything consumes it, and
   an operator's stale export still needs stripping from child processes.
