@@ -57,6 +57,17 @@ class SingleTaskResult:
     reason: str = ""
 
 
+def _persist_forge_loop_output(task_dir: Path, outcome: ForgeLoopOutcome) -> None:
+    """Keep one forge-loop's console output beside its result."""
+    for name, text in (("forge-loop.stdout.log", outcome.stdout), ("forge-loop.stderr.log", outcome.stderr)):
+        if not (text or "").strip():
+            continue
+        try:
+            (Path(task_dir) / name).write_text(text, encoding="utf-8")
+        except OSError:
+            log.warning("could not persist %s for %s", name, task_dir, exc_info=True)
+
+
 def _failure_detail(outcome: ForgeLoopOutcome) -> str:
     if outcome.timed_out:
         return "forge-loop timed out"
@@ -212,6 +223,7 @@ def dispatch_single_task(
                 update_state=False,
             ),
         )
+        _persist_forge_loop_output(task_path, outcome)
         recovered = recover_task_result(
             layout,
             task_path,

@@ -20,7 +20,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors.baseline import (
-    BASELINE_DEFAULT_TIMEOUT_SEC,
     MEASURE_ROUND_DROPPED_WARNING,
     BaselineExecutor,
 )
@@ -32,7 +31,6 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
     GridVariant,
-    _SESSION_KILL_GRACE_SEC,
     run_grid,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -48,7 +46,6 @@ from .conftest import (
     chatty_child,
     enable_multi_node,
     launches_by_round_slot,
-    suppression_window_s,
 )
 
 
@@ -122,6 +119,7 @@ _HOT_TPUT = 4701.6
 def _cold_then_hot_fake_run(
     captured: list | None = None,
     *,
+    launches: list | None = None,
     clock: _AClockOnlyThePassesMove | None = None,
     boot_sec: float = 0.0,
     benchmark_sec: float = 0.0,
@@ -132,6 +130,8 @@ def _cold_then_hot_fake_run(
     def fake_run(cmd, *args, **kwargs):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
+        if launches is not None:
+            launches.append(kwargs)
         if captured is not None:
             cfg_idx = cmd.index("--benchmark-config")
             cfg = yaml.safe_load(Path(cmd[cfg_idx + 1]).read_text())
@@ -174,7 +174,8 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     output_dir = tmp_path / "ws"
 
     captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
+    launches: list = []
+    fake_run, state = _cold_then_hot_fake_run(captured, launches=launches)
     executor = _executor(base, tmp_path, baseline_double_run=True)
     ctx = _make_ctx(
         {
@@ -197,9 +198,12 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch,
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
     # The hot pass reuses the warmup server, so its identity evidence must be carried from the server-owning warmup
     # slot.
-    assert result["launch_evidence_path"].endswith("warmup_round/launch_evidence.json")
+    assert Path(result["launch_evidence_path"]).parts[-2:] == ("warmup_round", "launch_evidence.json")
     assert result["launch_evidence"]["warm_reuse"]["reused_ready_server"] is True
     assert result["launch_evidence"]["warm_reuse"]["provenance"] == "warmup_round"
+    assert [launch["server_already_ready"] for launch in launches] == [False, True]
+    assert [launch["timeout"] for launch in launches] == [7800, 7800]
+    assert [launch["silence_timeout_sec"] for launch in launches] == [600, 600]
 
     assert len(captured) == 2
     warmup_lc = captured[0]["benchmark"]["server_lifecycle"]
@@ -318,7 +322,10 @@ def test_a_round_keeps_reporting_while_its_benchmark_blocks(tmp_path, progress_c
         result = _run(executor(_cadence_ctx(tmp_path)))
 
     assert result["status"] == "succeeded"
-    assert progress_cadence.widest_silence() < suppression_window_s()
+    running = [note for note in progress_cadence.notes if note["status"] == "running"]
+    assert len(running) >= 3
+    assert all(note["output_lines"] > 0 for note in running)
+    assert progress_cadence.widest_silence() <= 150.0
 
 
 def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, progress_cadence):
@@ -340,7 +347,10 @@ def test_the_multi_node_warmup_pass_keeps_reporting_too(tmp_path, monkeypatch, p
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 2  # the discarded warmup pass, then the measured one
-    assert progress_cadence.widest_silence() < suppression_window_s()
+    running = [note for note in progress_cadence.notes if note["status"] == "running"]
+    assert len(running) >= 3
+    assert all(note["output_lines"] > 0 for note in running)
+    assert progress_cadence.widest_silence() <= 150.0
 
 
 def test_a_failing_warmup_round_still_reported_that_it_started(tmp_path):
@@ -533,7 +543,7 @@ def test_a_rebaseline_that_cannot_cover_its_hot_pass_keeps_the_cold_warmup(tmp_p
     assert result["measure_round_dropped"]["one_more_measurement_sec"] == pytest.approx(0.0)
 
 
-def test_a_rounds_boot_is_priced_even_though_no_cap_bounded_it(tmp_path):
+def test_a_rounds_boot_is_priced_from_elapsed_time_not_the_watchdog_policy(tmp_path):
     """The gate prices the round on what it spent, not on what its cap allowed."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
@@ -564,7 +574,8 @@ def test_a_rounds_boot_is_priced_even_though_no_cap_bounded_it(tmp_path):
     assert [c["round_slot"] for c in calls] == ["warmup_round"], (
         f"the measured round ran on a budget the round had already spent: {[c['round_slot'] for c in calls]}"
     )
-    assert float(calls[0]["timeout"]) <= 10.0, "the cap was not the small one this case rests on"
+    assert calls[0]["timeout"] == 7800
+    assert calls[0]["session_deadline_sec"] is not None
     assert result["status"] == "succeeded"
     assert MEASURE_ROUND_DROPPED_WARNING in result["nonfatal_warnings"]
     dropped = result["measure_round_dropped"]
@@ -900,9 +911,11 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
     captured: list = []
+    launches: list = []
     state = {"calls": 0}
 
     def fake_run(cmd, *args, **kwargs):
+        launches.append(kwargs)
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         cfg_idx = cmd.index("--benchmark-config")
@@ -944,6 +957,7 @@ def test_deferred_accuracy_reuses_hot_server_after_throughput_passes(
 
     assert result["status"] == "succeeded"
     assert state["calls"] == 3
+    assert [launch["server_already_ready"] for launch in launches] == [False, True, True]
     assert [cfg["benchmark"]["envs"]["RUN_EVAL"] for cfg in captured] == ["false", "false", "true"]
     assert [cfg["benchmark"]["server_lifecycle"]["cleanup"] for cfg in captured] == [False, False, True]
     assert result["accuracy"] == pytest.approx(0.9)
@@ -1494,7 +1508,6 @@ def test_run_grid_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
             )
         )
@@ -1535,7 +1548,6 @@ def test_run_grid_single_round_when_warmup_disabled(tmp_path, monkeypatch):
                 grid=[GridVariant(name="candidate")],
                 output_root=output_dir,
                 magpie_python=sys.executable,
-                variant_timeout_sec=10,
                 gpu_type="mi300x",
             )
         )
@@ -1684,41 +1696,6 @@ def test_baseline_classifies_vllm_engine_init_as_server_init_dead(
     assert result["status"] == "failed"
     assert result["error_class"] == "server_init_dead", result
     assert "Engine core initialization failed" in result["error"]
-
-
-def test_baseline_server_dead_returncode_classifies_server_init_dead(
-    tmp_path,
-    monkeypatch,
-):
-    """When the liveness watchdog reaps a hung server (``SERVER_DEAD_RETURNCODE``), baseline classifies it ``server_init_dead`` even when no server.log marker is independently visible."""
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
-        SERVER_DEAD_RETURNCODE,
-    )
-
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="sglang")
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):
-        return subprocess.CompletedProcess(cmd, SERVER_DEAD_RETURNCODE, "", "")
-
-    executor = _executor(base, tmp_path, baseline_double_run=False)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "failed"
-    assert result["error_class"] == "server_init_dead", result
 
 
 def test_baseline_invalid_measurement_with_server_death_marker_is_dead(
@@ -2115,7 +2092,7 @@ def test_atom_engages_double_run_like_vllm_sglang(tmp_path, monkeypatch):
 
 
 def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
-    """The overtime-kill anchor must reflect round 1's FULL run, not round 2's reuse time."""
+    """Runtime accounting keeps the full cold pass distinct from the reused hot pass."""
     base = tmp_path / "base.yaml"
     _write_yaml(base, framework="vllm")
     output_dir = tmp_path / "ws"
@@ -2544,37 +2521,6 @@ def _mn_warmup_cap_sec(calls: list[dict]) -> int | None:
     return None if launch is None else int(launch["timeout"])
 
 
-def _launch_one_grid_variant_under_budget(
-    tmp_path,
-    *,
-    remaining_sec: float,
-    variant_timeout_sec: int,
-    variant_expected_sec: float,
-) -> list[dict]:
-    """Run one grid variant against the same budget a baseline round would get."""
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    fake_run, calls = _capturing_fake_run()
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        _run(
-            run_grid(
-                base_yaml_path=base,
-                base_extra_args="",
-                grid=[GridVariant(name="candidate")],
-                output_root=tmp_path / "out",
-                magpie_python=sys.executable,
-                variant_timeout_sec=variant_timeout_sec,
-                session_deadline_sec=time.monotonic() + remaining_sec,
-                variant_expected_sec=variant_expected_sec,
-            )
-        )
-    return calls
-
-
 class TestTheSessionBudgetReachesTheBaselineRound:
     """The arm #1146 names as the largest hole, and the one that motivated it."""
 
@@ -2608,17 +2554,40 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         assert remaining is not None, f"the budget did not cross the process boundary: {sorted(launch)}"
         assert 0 < remaining <= 3600.0
 
-    def test_the_hang_backstop_is_clamped_to_what_is_left(self, tmp_path):
-        """A cap larger than the budget outlives the session it belongs to."""
+    def test_the_session_deadline_does_not_shrink_the_benchmark_watchdog(self, tmp_path):
+        """A short session retains its deadline without changing benchmark policy."""
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=120.0, timeout_sec=7200)
 
-        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
+        assert calls[0]["timeout"] == 7800
+        assert 0 < calls[0]["session_deadline_sec"] - time.monotonic() <= 120.0
+
+    @pytest.mark.parametrize("executor_cls", [BaselineExecutor, ProfileExecutor], ids=["benchmark", "profile"])
+    def test_benchmark_policy_does_not_override_profile_timeout(self, tmp_path, monkeypatch, executor_cls):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "1234.5")
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC", "17.5")
+        result, calls = _run_baseline_under_budget(
+            tmp_path,
+            remaining_sec=None,
+            timeout_sec=100,
+            executor_cls=executor_cls,
+        )
+
+        assert len(calls) == 1
+        if executor_cls is BaselineExecutor:
+            assert result["status"] == "succeeded"
+            assert calls[0]["timeout"] == 1234.5
+            assert calls[0]["silence_timeout_sec"] == 17.5
+        else:
+            assert result["status"] == "failed"
+            assert result["error_class"] == "no_trace_files"
+            assert calls[0]["timeout"] == 100
+            assert calls[0]["silence_timeout_sec"] is None
 
     def test_an_unbounded_budget_leaves_the_cap_alone(self, tmp_path):
         """No session context means no budget to respect, not a budget of zero."""
         _result, calls = _run_baseline_under_budget(tmp_path, remaining_sec=None, timeout_sec=7200)
 
-        assert calls[0]["timeout"] == 7200
+        assert calls[0]["timeout"] == 7800
         assert calls[0]["session_deadline_sec"] is None
 
     def test_a_budget_kill_is_not_recorded_as_a_broken_model(self, tmp_path):
@@ -2695,7 +2664,6 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         result, calls = _run_baseline_under_budget(
             tmp_path,
             remaining_sec=_DEFAULT_SESSION_MINUTES * 60.0,
-            timeout_sec=BASELINE_DEFAULT_TIMEOUT_SEC,
             pass_duration_sec=pass_sec,
         )
         launches = launches_by_round_slot(calls)
@@ -2753,7 +2721,9 @@ class TestTheSessionBudgetReachesTheBaselineRound:
         )
 
         assert calls[0]["session_deadline_sec"] is not None
-        assert 1 <= calls[0]["timeout"] <= 120 + _SESSION_KILL_GRACE_SEC
+        assert calls[0]["timeout"] == PROFILE_DEFAULT_TIMEOUT_SEC == 14400
+        assert calls[0]["silence_timeout_sec"] is None
+        assert 0 < calls[0]["session_deadline_sec"] - time.monotonic() <= 120.0
 
 
 # _classify_subprocess_error unit tests

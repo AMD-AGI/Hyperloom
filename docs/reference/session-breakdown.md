@@ -98,7 +98,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
   "critic":             { /* the critic agent's own run, iteration by iteration */ },
-  "robustness":         { /* what the robustness agent raised, turn by turn */ },
+  "robustness":         { "turns": [] /* historical turns remain readable */ },
 }
 ```
 
@@ -111,9 +111,9 @@ per-topic sections (`baseline`, `final`, `phase_timeline`,
 `telemetry`, `optimizations`, `source_files` and the optional tail) are gone:
 each was a projection of the run rather than a fact of it, and they now come
 out of `timeline`, whose events carry the same facts attached to the stage
-that produced them. `critic_robustness` is gone too, split into the `critic`
-and `robustness` keys above, because the two agents run independently and a
-session can have either without the other.
+that produced them. The old combined `critic_robustness` key is absent. Critic
+activity lives under `critic`; `robustness` is retained for V6 wire compatibility
+and historical artifact readers, not as a live agent surface.
 
 How the export itself went is reported once, on `metadata.warnings`. An
 earlier shape also carried a top-level `warnings`, taken partway through the
@@ -136,8 +136,8 @@ started, …).
 ## `metadata` — `V6Metadata`
 
 Task identity, recorded as each fact is decided rather than re-derived at
-export. Four blocks: `session`, `task_config`, `versions` and `langfuse`, plus
-the export's own `exported_at_utc` and `warnings`.
+export. Five blocks: `session`, `task_config`, `grading`, `versions` and
+`langfuse`, plus the export's own `exported_at_utc` and `warnings`.
 
 `metadata.session` — identity and lifecycle:
 
@@ -170,6 +170,26 @@ GPU type, shape, precision, launch overrides, and the optimization objective
 treat the `objective.kind` enum as the canonical optimisation goal. Its
 `architecture` sub-object is the structural model summary parsed from the
 model's own `config.json`, and is empty on non-transformers models.
+
+`metadata.grading` — which axis this session was configured to grade on:
+`benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
+that rides along with the interactivity objective (`enabled`, `noise_pct`).
+
+An AgentX replay is ranked on the slow-tail interactivity percentile
+(`e2e_norm_intvty_p90`) with total throughput held as a guard; a synthetic run
+is ranked on output throughput alone. Every throughput field elsewhere in this
+document is the output axis by construction, so without this block a consumer
+cannot tell the two kinds of session apart — and on the canonical corpus the
+two axes differ by roughly two orders of magnitude.
+
+This is the session-level *setting*. What a promotion was actually decided on
+is `outcome.validation.graded_on`, read off the promotion itself. On a session
+that promoted anything the two agree, because a comparison that cannot supply
+the configured axis pair fails rather than settling for another axis — nothing
+is ever promoted off-objective. Neither field resolves the other even so: a
+session can be configured for an axis and promote nothing on it.
+`tput_guard.noise_pct` is null on a session that predates the band being
+recorded.
 
 `metadata.versions` — the schema version, the Hyperloom revision, the framework
 and its version, and a `tools` map carrying `{tool, root_dir, commit, version}`
@@ -205,6 +225,14 @@ the exact baseline benchmark.
 `extra_envs` is allowlist-filtered to keep secrets out of the
 breakdown. Do not assume it contains every env var the session ran with.
 
+`baseline.perf` and `final.perf` carry the four AgentX axes the measurement
+reported — `e2e_norm_intvty_p90`, `total_throughput`, `input_throughput`,
+`tpot_p90_ms` — each an explicit `null` where nothing measured it. Absent would
+be indistinguishable from an axis the framework failed to report, and zero
+reads as "measured, and it was zero", so a synthetic run publishes four nulls.
+`final.graded_on` names the axis `final.gain_pct` is on, and always agrees with
+`outcome.validation.graded_on`: they are the same figure read twice.
+
 ---
 
 ## `outcome.final` — `Final` (SaFE contract core)
@@ -237,7 +265,12 @@ downstream consumers:
 
 `outcome` is the terminal result: `status`, `stop_reason`, `stage_reached`,
 the `baseline` and `final` blocks documented above, and the `validation`
-block that reconciles the optimization stack's parts against its total.
+block that reconciles the optimization stack's parts against its total. That
+reconciliation is single-axis and `validation.graded_on` names the axis: an
+attributed figure on one axis against an unattributed figure on another makes
+the gap meaningless. Every adoption in that sum is on the named axis by
+construction — a comparison that could not supply the configured axis pair
+failed instead of being graded on another one.
 
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its
@@ -246,7 +279,9 @@ records. This is where the facts the older flat sections projected now live,
 attached to the stage that produced them.
 
 `close` is what the session settled at close: the `steps` the close sequencer
-ran, the `artifacts` it published, and the robustness findings it collected.
+ran and the `artifacts` it published. Its `robustness` field retains the
+`escalated` verdict and recorded `stop_reason`. Historical findings remain
+readable; new sessions do not run a Robustness agent to produce them.
 
 `V6Outcome`, `V6TimelineEvent` and `V6Close` in
 `src/hyperloom/inference_optimizer/breakdown/schema.py` are the authority on
@@ -286,22 +321,17 @@ reporting either alone misreads the round.
 
 ## `robustness`
 
-What the robustness agent raised, turn by turn. The agent watches the session
-from outside the optimization loop, so its turns belong to no phase and no
-macro cycle and are reported here rather than on the timeline.
+New sessions emit `{"turns": []}`. No Robustness agent, runtime RCA, monitor, or
+supervisor runs, and new report UI omits this section. The V6 key and historical
+readers remain so archived sessions can still be inspected without inventing
+activity. `close.robustness` separately retains `escalated` and `stop_reason`,
+plus any findings recorded in historical sessions.
 
-| Field | Type | Meaning |
-|---|---|---|
-| `turns` | list | One row per turn the agent took, in turn order |
-
-Each turn carries `turn_idx`, `tick_index`, `ts`, the `intents` it raised, and
-any `parse_warnings` from reading its envelope.
-
-`outcome` is the field that distinguishes a turn the agent could not complete
-(`invalid_envelope`, `no_envelope`) from one that simply had nothing to raise
-(`intents` with an empty list). A bare intent count renders those
-identically, which is what made a mute agent and a quiet session
-indistinguishable in the section this replaces.
+Historical `turns` rows may contain `turn_idx`, `tick_index`, `ts`, `intents`,
+`parse_warnings`, and `outcome`. In those records, `invalid_envelope` or
+`no_envelope` indicates an incomplete turn, whereas `intents` with an empty list
+indicates a completed turn with nothing raised. These are archived facts, not
+live recovery instructions.
 
 ---
 
@@ -369,6 +399,11 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "launch_server_args": "",
       "architecture": { "model_class": "moe_mla_nsa", "model_type": "glm5", "is_moe": true }
     },
+    "grading": {
+      "benchmark_mode": "synthetic",
+      "objective": "output_throughput",
+      "tput_guard": { "enabled": false, "noise_pct": 5.0 }
+    },
     "langfuse": { "enabled": false, "disabled_reason": "no_credentials", "trace_url": null, "counts": {} },
     "warnings": []
   },
@@ -383,6 +418,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "accuracy": 0.812,
       "ttft_mean_ms": 0.0,
       "e2el_mean_ms": 0.0,
+      "perf": {
+        "e2e_norm_intvty_p90": null,
+        "total_throughput": null,
+        "input_throughput": null,
+        "tpot_p90_ms": null
+      },
       "ttft_e2el_source": "state_workspace",
       "config_path": "runs/baseline/baseline_config.with_envs.yaml",
       "benchmark_report_path": "runs/baseline/report.json",
@@ -407,6 +448,13 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
     "final": {
       "throughput_tok_s_per_gpu": 150.0,
+      "graded_on": "output_throughput",
+      "perf": {
+        "e2e_norm_intvty_p90": null,
+        "total_throughput": null,
+        "input_throughput": null,
+        "tpot_p90_ms": null
+      },
       "cumulative_gain_pct_validated": 50.0,
       "validated_at_stack_len": 4,
       "validated_ts": "2026-05-17T13:48:01Z",
@@ -455,7 +503,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "end_time": "2026-05-17T13:58:42Z",
     "steps": [],
     "artifacts": {},
-    "robustness": {}
+    "robustness": { "escalated": false, "stop_reason": "time_exhausted" }
   },
 
   "critic": {
@@ -487,20 +535,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     ]
   },
 
-  "robustness": {
-    "turns": [
-      {
-        "turn_idx": 12,
-        "tick_index": 61,
-        "ts": "2026-05-17T12:44:00Z",
-        "outcome": "intents",
-        "intents": [
-          { "type": "send_message", "severity": "warn", "topic": "disk", "payload": { "body_md": "workspace is 88% full" } }
-        ],
-        "parse_warnings": []
-      }
-    ]
-  }
+  "robustness": { "turns": [] }
 }
 ```
 

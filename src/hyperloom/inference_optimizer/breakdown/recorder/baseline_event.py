@@ -15,6 +15,7 @@ from .event_fields import (
     as_list as _as_list,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
+    graded_axes as _graded_axes,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
     worst_status as _worst_status,
@@ -217,6 +218,10 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
         # Separate because TPOT alone can be computed from the other two, and
         # a computed figure must not be read as a measured one.
         "tpot_source": str(result.get("tpot_source") or ""),
+        # The graded axes this round measured. Recorded here rather than read off ``state.baseline_perf`` at export
+        # because this block is already where ``outcome.baseline`` comes from, and a second source for one baseline
+        # is a second answer to the same question.
+        "perf": _graded_axes(result),
         "accuracy": _float_or_none(result.get("accuracy")),
         "accuracy_task": str(result.get("accuracy_task") or ""),
         "accuracy_metric": str(result.get("accuracy_metric") or ""),
@@ -264,13 +269,13 @@ def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _failure(result: Mapping[str, Any], *, phase: str) -> dict[str, Any] | None:
+def _failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] | None:
     """Project a failed result's failure row, or ``None`` when it succeeded."""
     if str(result.get("status") or "") == "succeeded":
         return None
     return {
         **_failure_row(
-            phase=phase,
+            stage=stage,
             error_class=str(result.get("error_class") or ""),
             message=result.get("error") or "",
         ),
@@ -473,7 +478,7 @@ class BaselineEventRecorder:
                 # to it; the declared half is on the run that decided it.
                 "invocation": _observed_invocation(payload),
                 "warnings": _warnings(payload),
-                "failure": _failure(payload, phase=f"round_{label}"),
+                "failure": _failure(payload, stage=f"round_{label}"),
             },
             row_type=ROW_ROUND,
             natural_ids=(self._action_id, str(int(run_index)), str(label)),
@@ -504,7 +509,7 @@ class BaselineEventRecorder:
                 "convergence": _as_dict(payload.get("baseline_convergence")) or None,
                 "accuracy_stage": _as_dict(payload.get("accuracy_stage")) or None,
                 "cold_anchor": dropped or None,
-                "failure": _failure(payload, phase=EVENT_TYPE),
+                "failure": _failure(payload, stage=EVENT_TYPE),
             },
         )
 
@@ -533,7 +538,7 @@ class BaselineEventRecorder:
             status="failed",
             action={
                 "failure": _failure_row(
-                    phase=EVENT_TYPE,
+                    stage=EVENT_TYPE,
                     error_class=type(exc).__name__,
                     message=f"baseline action raised: {exc!r}",
                 )

@@ -132,7 +132,6 @@ def _analyze(payload: dict, sweep_workspace: Path) -> bool:
 async def _run(
     session_dir: Path,
     concs: list[int],
-    variant_timeout_sec: int,
     *,
     isl: int = 0,
     osl: int = 0,
@@ -149,13 +148,12 @@ async def _run(
         state.isl = isl
     if osl > 0:
         state.osl = osl
-    # total_budget_sec=0 disables the wall-clock budget gate too.
+    # This isolated flow test is unbounded overall; shared per-process caps still apply.
     return await run_conc_sweep(
         state,
         session_dir,
         concs=concs,
-        variant_timeout_sec=variant_timeout_sec,
-        total_budget_sec=0,
+        total_budget_sec=None,
         write_reports=True,
     )
 
@@ -172,7 +170,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--concs", default="8,4,2", help="Descending CONC ladder (comma-separated).")
     ap.add_argument("--isl", type=int, default=0, help="Override input seq len (0 = keep session value).")
     ap.add_argument("--osl", type=int, default=0, help="Override output seq len (0 = keep session value).")
-    ap.add_argument("--variant-timeout-sec", type=int, default=1800)
     ap.add_argument(
         "--out-dir",
         type=Path,
@@ -200,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
     _prepare_test_session(source, out_dir)
 
     started = time.time()
-    payload = asyncio.run(_run(out_dir, concs, args.variant_timeout_sec, isl=args.isl, osl=args.osl))
+    payload = asyncio.run(_run(out_dir, concs, isl=args.isl, osl=args.osl))
     print(f"\n[flowtest] run_conc_sweep finished in {time.time() - started:.1f}s; status={payload.get('status')}")
 
     # Locate the sweep workspace (runs/conc_sweep/<task_id>) for boot counting.

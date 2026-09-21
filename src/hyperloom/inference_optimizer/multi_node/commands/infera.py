@@ -90,6 +90,17 @@ def _collect_forward_env() -> dict[str, str]:
     trace_dir = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
     if trace_dir and "SGLANG_TORCH_PROFILER_DIR" not in fwd:
         fwd["SGLANG_TORCH_PROFILER_DIR"] = trace_dir
+    # Forward no-patch shape-discovery config; the pod-side launcher sets
+    # PYTHONPATH itself (it is blocked from SSH forwarding).
+    for _shape_key in (
+        "TRACELENS_ROOT",
+        "TRACELENS_SHAPE_DISCOVERY",
+        "HYPERLOOM_SGLANG_SHAPE_MODE",
+        "HYPERLOOM_SGLANG_VERSION_PIN",
+    ):
+        _shape_val = os.environ.get(_shape_key, "").strip()
+        if _shape_val and _shape_key not in fwd:
+            fwd[_shape_key] = _shape_val
     unset_fwd = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV", "").strip()
     if unset_fwd:
         try:

@@ -99,10 +99,6 @@ def _validate_agent_runtime(root: Path, *, agent: str) -> None:
         sys.exit(2)
 
 
-# Robustness-agent runtime location resolution; mirrors the critic-agent env.
-_ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
-
-
 # Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.
 _GEAK_BASE_URL_RE = re.compile(r"(?m)^([ \t]*base_url[ \t]*:[ \t]*).*$")
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from contextlib import suppress
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from typing import Iterable
 
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
@@ -65,6 +67,15 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     f"reports/{BRINGUP_SEGMENT}/**",
     # ── reports/ ──────────────────────────────────────────────────────
     f"reports/{ENABLEMENT_SEGMENT}/**",
+    # ── the enablement KEEP's source overlay ──────────────────────────
+    # Every ``snapshot_ref`` in ``session_breakdown.json`` points in here. The
+    # replay-sufficiency verdict certifies that the accepted stack's files were
+    # captured; without the capture in the bundle the reference resolves to
+    # nothing on the consumer's side, so a "sufficient" recipe would ship with
+    # its own evidence missing. Scoped to ``enablement/`` rather than the whole
+    # directory: this is the only writer under it, and a broader glob would
+    # silently adopt whatever lands there next.
+    f"optimization_stack/{ENABLEMENT_SEGMENT}/**",
     "reports/final.md",
     "reports/optimization_journal.json",
     "reports/kernel_optimization_summary.json",
@@ -453,6 +464,62 @@ def _pack(
             reserved_bytes + optional_bytes,
         )
     return selected, truncated, reserved_overflow, dropped, reserved_bytes + optional_bytes
+
+
+def deliverable(session_dir: Path | str, expected: Iterable[tuple[str, str]]) -> set[tuple[str, str]]:
+    """Return which of ``expected``'s payloads this bundle would hand a consumer.
+
+    ``expected`` pairs each session-relative path with the sha256 its recorder
+    took of it, or ``""`` where none was taken; the same path may appear under
+    two digests, and at most one of them can be satisfied by what is on disk. A
+    payload is deliverable when the curated selection matches its path, the
+    session holds it as a regular file resolving inside itself, it alone fits
+    the byte cap, and -- where a digest was recorded -- the bytes still hash to
+    it.
+
+    Judged against what this session would actually ship, by running the same
+    selection and the same caps the packer runs. Each payload used to be judged
+    alone, against the per-file ceiling only, on the argument that charging it
+    for unrelated files sorted ahead of it would refuse a recipe over content it
+    does not name. But the budget is spent in selection order and those files do
+    consume it: a payload the cap drops is a payload the consumer will not have,
+    and reporting it deliverable is how a ``sufficient`` recipe came to ship
+    with its own evidence missing. A refusal here is not over content the recipe
+    does not name -- it is over bytes it names and will not get.
+    """
+    try:
+        sd = Path(session_dir).resolve()
+    except OSError:
+        log.debug("session package: deliverable scan failed for %s", session_dir, exc_info=True)
+        return set()
+    try:
+        matched, _unmatched, _refused = _select(sd)
+        packed, _truncated, _overflow, _dropped, _total = _pack(sd, matched)
+    except OSError:
+        log.debug("session package: deliverable pack simulation failed for %s", sd, exc_info=True)
+        return set()
+    shipping = {rel for _path, rel, _size in packed}
+    out: set[tuple[str, str]] = set()
+    for raw_path, raw_digest in expected:
+        rel = str(raw_path).strip("/")
+        if rel not in shipping:
+            continue
+        candidate = sd / rel
+        digest = str(raw_digest or "")
+        if _digest_matches(candidate, digest):
+            out.add((rel, digest))
+    return out
+
+
+def _digest_matches(path: Path, expected_sha256: str) -> bool:
+    """Whether ``path`` still hashes to the digest its recorder took, if any."""
+    if not expected_sha256:
+        return True
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest() == expected_sha256
+    except OSError:
+        log.debug("session package: could not re-read %s to verify its digest", path, exc_info=True)
+        return False
 
 
 def package_session_artifacts(

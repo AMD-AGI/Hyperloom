@@ -154,6 +154,134 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     return archive
 
 
+def _hunk_extent(header: str) -> tuple[int, int]:
+    """Return the old-side and new-side line counts a hunk header announces.
+
+    Kept as a pair rather than a sum: a context line belongs to both sides, so
+    adding them over-counts the body by the number of context lines, and the
+    hunk then swallows the next file section's headers.
+    """
+    import re as _re
+
+    match = _re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", header)
+    if match is None:
+        return 0, 0
+    return int(match.group(1) or 1), int(match.group(2) or 1)
+
+
+def _is_null_path(path: str) -> bool:
+    """Whether a diff header names no file, as a creation or deletion does."""
+    return path.strip().lstrip("ab/").strip("/") in ("dev/null", "") or path.strip().endswith("/dev/null")
+
+
+def _top_level_of(path: str) -> str:
+    """Return the first real directory a diff header names, or ``""``."""
+    parts = [p for p in path.split("/") if p not in ("", ".")]
+    # git's ``a/``, ``b/``, and the ``a2/``/``b3/`` forms it writes when one diff
+    # spans several trees, name no directory.
+    while (
+        parts and len(parts[0]) <= 2 and parts[0][0] in "ab" and parts[0][1:].isdigit() or parts[:1] in (["a"], ["b"])
+    ):
+        parts.pop(0)
+    return parts[0] if len(parts) > 1 else ""
+
+
+def _root_the_patches_name(patches_dest: Path, script_rounds: list[dict], framework_root: str) -> str:
+    """Return the root the archived patches actually target.
+
+    ``enablement.framework_root`` is the root of whichever round last set it, so
+    a run that patched a second tree at any point leaves it naming that tree.
+    The replay script is written from the accumulated rounds, and naming a root
+    the patches do not belong to makes every one of them fail to apply -- the
+    script is then unusable, and says nothing about why.
+
+    The patches name their own tree in their headers. When every one of them
+    agrees on a top-level directory and the recorded root's own name differs,
+    the siblings of the recorded root are searched for that name; the recorded
+    root is kept when they agree, when the patches disagree among themselves, or
+    when no sibling matches -- a guessed path is worse than a wrong one that at
+    least came from the run.
+    """
+    recorded = Path(framework_root) if framework_root else None
+    if recorded is None:
+        return framework_root
+    names: set[str] = set()
+    for rnd in script_rounds:
+        for rel in rnd.get("patches") or []:
+            source = patches_dest.parent / rel
+            try:
+                # Every file section, not only the first: one patch can touch
+                # two trees, and stopping at the head would redirect the root to
+                # whichever happened to come first.
+                pending_old = ""
+                old_left = new_left = 0
+                named_here = False
+                with source.open(encoding="utf-8", errors="ignore") as handle:
+                    for line in handle:
+                        if old_left > 0 or new_left > 0:
+                            # Inside a hunk. A removed line reading ``-- x`` and
+                            # an added one reading ``++ x`` render with exactly
+                            # the header prefixes, so payload is counted out by
+                            # side rather than pattern-matched.
+                            head = line[:1]
+                            if head == "\\":  # "\ No newline at end of file"
+                                continue
+                            if head == "-":
+                                old_left -= 1
+                                continue
+                            if head == "+":
+                                new_left -= 1
+                                continue
+                            if head in (" ", "\n", "\r"):
+                                old_left -= 1
+                                new_left -= 1
+                                continue
+                            old_left = new_left = 0
+                        if line.startswith("@@"):
+                            old_left, new_left = _hunk_extent(line)
+                            continue
+                        if line.startswith("diff --git "):
+                            # Rename-only, mode-only and some binary patches
+                            # carry no ``---``/``+++`` pair at all; this header
+                            # is the only place they name their tree.
+                            for token in line[len("diff --git ") :].split():
+                                top = _top_level_of(token)
+                                if top:
+                                    names.add(top)
+                                    named_here = True
+                            continue
+                        if line.startswith("--- "):
+                            pending_old = line[4:].strip().split("\t")[0]
+                            continue
+                        if not line.startswith("+++ "):
+                            continue
+                        new_path = line[4:].strip().split("\t")[0]
+                        # A creation's old side is /dev/null and a deletion's new
+                        # side is; the other side is the one that names the tree.
+                        chosen = new_path if _is_null_path(pending_old) else pending_old
+                        if _is_null_path(chosen):
+                            chosen = pending_old if _is_null_path(new_path) else new_path
+                        pending_old = ""
+                        top = _top_level_of(chosen)
+                        if top:
+                            names.add(top)
+                            named_here = True
+            except OSError:
+                return framework_root
+            if not named_here:
+                # A patch this could not classify may target another tree, and
+                # redirecting on the strength of the ones it could read would
+                # leave that one unreplayable.
+                return framework_root
+    if len(names) != 1:
+        return framework_root
+    wanted = names.pop()
+    if recorded.name == wanted:
+        return framework_root
+    sibling = recorded.parent / wanted
+    return str(sibling) if sibling.is_dir() else framework_root
+
+
 def write_setting_script(
     session_dir: str | Path,
     enablement: "EnablementRound",
@@ -176,6 +304,7 @@ def write_setting_script(
     patch_counter = 0
     artifact_counter = 0
     script_rounds: list[dict] = []
+    effective_framework_root = ""
 
     for rnd in enablement.kept_rounds or []:
         rnd_script_patches: list[str] = []
@@ -215,6 +344,9 @@ def write_setting_script(
     active = enablement.active_runtime or {}
     runtime_path = str(active.get("venv_root") or "").strip() if isinstance(active, dict) else ""
 
+    if any(r.get("patches") for r in script_rounds):
+        effective_framework_root = _root_the_patches_name(patches_dest, script_rounds, framework_root)
+
     text = render_reference_script(
         framework=framework,
         server_args=extra_server_args,
@@ -224,8 +356,11 @@ def write_setting_script(
         max_model_len=max_model_len,
         gpu_type=gpu_type,
         setup_commands=list(enablement.setup_commands or []) or None,
-        framework_root=framework_root if any(r.get("patches") for r in script_rounds) else None,
-        framework_root_vcs=tree_kind(framework_root) if framework_root else "",
+        framework_root=effective_framework_root or None,
+        # Derived from the root the script will actually name: correcting a git
+        # checkout to an installed package while still announcing "git" emits
+        # ``git -C "$FRAMEWORK_ROOT" apply`` against a tree with no repository.
+        framework_root_vcs=tree_kind(effective_framework_root) if effective_framework_root else "",
         runtime=runtime_path or None,
         rounds=script_rounds or None,
     )

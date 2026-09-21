@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -24,7 +25,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 
@@ -46,7 +46,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -111,6 +110,37 @@ def test_a_chain_of_real_lifts_reconciles_against_its_own_baseline(session_dir):
         assert status == stack_event.STATUS_SUCCEEDED
 
 
+def test_a_degraded_agentx_lift_is_refused(session_dir, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.grading = {"objective": GRADED_INTVTY, "noise_pct": 5.0}
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 1000.0,
+            "output_throughput": 1000.0,
+            "total_throughput": 20000.0,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert (
+            coord._lift_to_current_best(
+                "explore",
+                1100.0,
+                {
+                    "name": "degraded-winner",
+                    "output_throughput": 1100.0,
+                    "total_throughput": 22000.0,
+                    "e2e_norm_intvty_p90": 30.0,
+                },
+            )
+            is False
+        )
+        assert _rows() == []
+
+
 def test_a_refused_lift_records_nothing(session_dir):
     with session_scope(session_dir):
         coord = _coord(session_dir, baseline=1000.0, anchor=1200.0)
@@ -160,10 +190,22 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 
 
-def test_recording_failure_does_not_refuse_the_adoption(session_dir, monkeypatch):
+def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir, monkeypatch):
+    """The sink drops the row it could not write; the adoption still stands.
+
+    Failed at the write itself rather than by making the writer raise: the sink
+    is where recording is allowed to fail quietly, so a fault anywhere else is
+    a defect and is meant to surface.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import recorder as recorder_module
+
     with session_scope(session_dir):
         coord = _coord(session_dir)
-        monkeypatch.setattr(stack_event, "_sink", lambda: (_ for _ in ()).throw(RuntimeError("spool down")))
+        monkeypatch.setattr(
+            recorder_module.Recorder,
+            "record_upsert_item",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+        )
 
         assert coord._lift_to_current_best("explore", 1100.0, {"name": "kept"}) is True
         assert len(coord.shared_state.optimization_stack) == 1

@@ -336,13 +336,6 @@ def chatty_child(cadence: ProgressCadence, inner, *, blocks_for_s: float, line_e
     return _run
 
 
-def suppression_window_s() -> float:
-    """The silence past which robustness accuses an agent of stalling."""
-    from hyperloom.agents.robustness.signals.stall import StallConfig
-
-    return StallConfig().stall_timeout_s
-
-
 class _RayDoubleActorClass:
     """The ``@ray.remote`` class: ``.options(...)`` then ``.remote()`` for a handle."""
 
