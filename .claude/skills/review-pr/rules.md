@@ -7,9 +7,9 @@ Every rule here was clustered from real review history on this repository. `Seen
 PR the rule was learned from.
 
 Severity is `blocking` only when leaving the code unchanged means the current behaviour is wrong,
-or when something that had to move in the same PR did not (changelog, title, description,
-docstring). Everything else is `advisory` and is reported only if the reviewer was asked for more
-than blocking issues.
+or when something that had to move in the same PR did not (title, description, docstring).
+Everything else is `advisory` and is reported only if the reviewer was asked for more than
+blocking issues.
 
 Rules that duplicate a static gate (ruff, pylint, bandit, CodeQL, gitleaks, REUSE) or that restate
 [`AGENTS.md`](../../../AGENTS.md) are deliberately absent. See
@@ -146,24 +146,24 @@ statement of the same review posture.
 
 ## X -- Cross-artifact sync
 
-### X1 -- The CHANGELOG entry must cover every behaviour change in the diff
+### X1 -- The description must state every observable effect in the diff
 
 **Severity:** blocking
-**Fires when:** a non-test file under `src/**/*.py` changes and `CHANGELOG.md` is absent from `files.txt`, or `CHANGELOG.md` is present and its hunk names fewer behaviour changes than the diff carries.
-**The rule:** An entry describing only part of the diff counts as missing, in particular when it omits the step carrying the destructive or operator-visible side effect -- a forced full rebuild, a removed fallback, a renamed exported field, a newly populated report bucket, a new failure mode. The entry is verified against the diff, not against the PR title, and it states the new observable state rather than restating the change. `AGENTS.md` makes the entry mandatory; the completeness test is the reviewer's addition.
-**Seen in:** PR #1532 -- the entry omitted the KERNEL-entry audit, the one step that forces a full JIT rebuild for the operator.
+**Fires when:** a non-test file under `src/**/*.py` changes and `body.txt` names no operator-visible effect and claims no exemption, or it names one and the diff carries further effects it does not mention.
+**The rule:** A description covering only part of the diff counts as missing, in particular when it omits the step carrying the destructive or operator-visible side effect -- a forced full rebuild, a removed fallback, a renamed exported field, a newly populated report bucket, a new failure mode. It is verified against the diff, not against the PR title, and it states the new observable state and what the old behaviour cost, rather than restating the change. `AGENTS.md` makes the statement mandatory and the release cut aggregates these descriptions into the GitHub release, so an omission here is lost for good; the completeness test is the reviewer's addition.
+**Seen in:** PR #1532 -- the entry omitted the KERNEL-entry audit, the one step that forces a full JIT rebuild for the operator. Raised then against the `CHANGELOG.md` entry, which #1589 retired in favour of the description carrying the same obligation.
 **Not a finding when:** every changed path is under `docs/`, `*.md`, `*.rst` or a `tests/` directory, or the PR body names the exemption it claims (pure refactor, nothing operator-observable) and the diff supports that claim.
-**Evidence:** `$WORK/changelog.txt` and `$WORK/diff.txt` -- the entry against the behaviour set; `$WORK/files.txt` for the docs-only or test-only exemption; `$WORK/body.txt` for a claimed exemption.
-**Report as:** `X1 <file>:<line> -- "<what an operator now sees>" is not in the CHANGELOG entry`
+**Evidence:** `$WORK/body.txt` and `$WORK/diff.txt` -- the description against the behaviour set; `$WORK/files.txt` for the docs-only or test-only exemption.
+**Report as:** `X1 <file>:<line> -- "<what an operator now sees>" is stated nowhere in the description`
 
-### X2 -- Title, description and changelog prose must match the diff at the current head
+### X2 -- Title and description must match the diff at the current head
 
 **Severity:** blocking
-**Fires when:** `commits.txt` has more than one commit, or `title.txt` matches the branch-name shape `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/`, or `body.txt` still contains template markers (`<!--`, unchecked `- [ ]`) or is empty, or `body.txt`/`changelog.txt` states a number, percentage, config value or an "unchanged" claim.
-**The rule:** The title and body are read against the head commit, not the first commit: a follow-up commit that added a behaviour change, a file or a test count the description does not mention is a desync. A narrow title (`chore: pin ...`) over a diff touching unrelated modules is the same defect. Factual claims in the body or changelog -- tooling behaviour, config values, a percentage table, "strategies are unchanged" -- are verified by reading the referenced file and summing the numbers, not by trusting the prose.
+**Fires when:** `commits.txt` has more than one commit, or `title.txt` matches the branch-name shape `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/`, or `body.txt` still contains template markers (`<!--`, unchecked `- [ ]`) or is empty, or `body.txt` states a number, percentage, config value or an "unchanged" claim.
+**The rule:** The title and body are read against the head commit, not the first commit: a follow-up commit that added a behaviour change, a file or a test count the description does not mention is a desync. A narrow title (`chore: pin ...`) over a diff touching unrelated modules is the same defect. Factual claims in the body -- tooling behaviour, config values, a percentage table, "strategies are unchanged" -- are verified by reading the referenced file and summing the numbers, not by trusting the prose.
 **Seen in:** PR #1567 -- the description still described two changes after the branch had grown a third commit.
 **Not a finding when:** the extra commits are merges of the base branch, lint fixes or review-feedback edits inside code the description already covers, and no claim in the body contradicts the head tree.
-**Evidence:** `$WORK/title.txt`, `$WORK/body.txt`, `$WORK/commits.txt`, `$WORK/numstat.txt` -- prose against the commit list and the per-file counts; `$WORK/changelog.txt` for numeric claims.
+**Evidence:** `$WORK/title.txt`, `$WORK/body.txt`, `$WORK/commits.txt`, `$WORK/numstat.txt` -- prose against the commit list and the per-file counts.
 **Report as:** `X2 -- description says "<claim>"; at head <sha> the diff does <actual>`
 
 ### X3 -- Docstrings, comments and prompts must follow the behaviour they describe, in every copy
@@ -180,11 +180,11 @@ statement of the same review posture.
 
 **Severity:** blocking
 **Fires when:** deleted lines match `add_argument\(`, `\[project\.scripts\]`, `os\.environ`, an enum member `^\s*[A-Z][A-Z0-9_]*\s*=\s*['"]`, or a comparison is tightened (a deleted `<`/`<=` returning as `!=`/`==`, or a new `all\(`).
-**The rule:** The parser option set, console scripts, env vars read and enum members are diffed between the released version and the branch. Every removal needs a changelog and upgrade-note entry naming the failure mode -- argparse rejects the flag loudly, a dropped env var is silently ignored -- and the version chosen must match the declared compatibility policy; being a runtime no-op does not make a removal compatible. The removed name is then grepped across warning strings, docs and templates: a message pointing at a route that no longer exists turns a diagnostic into a dead end. A tightened comparison is the same class of break and must state what previously-accepted input is now rejected.
+**The rule:** The parser option set, console scripts, env vars read and enum members are diffed between the released version and the branch. Every removal needs an upgrade-note entry and a description naming the failure mode -- argparse rejects the flag loudly, a dropped env var is silently ignored -- and the version chosen must match the declared compatibility policy; being a runtime no-op does not make a removal compatible. The removed name is then grepped across warning strings, docs and templates: a message pointing at a route that no longer exists turns a diagnostic into a dead end. A tightened comparison is the same class of break and must state what previously-accepted input is now rejected.
 **Seen in:** PR #1519 -- removing a runtime no-op flag made every existing launch and resume command fail in argparse, and seven v1.1.0 environment variables disappeared with five of them silently ignored.
 **Not a finding when:** the removed name keeps a working alias or deprecation shim added in the same PR, or the symbol is private (leading underscore, not exported, no reference outside the changed module).
-**Evidence:** `$WORK/diff.txt` for the removals; `$WORK/changelog.txt` for the declared break; the head tree for surviving references in strings, docs and templates.
-**Report as:** `X4 <file>:<line> -- removing <name> breaks <caller/config>; not declared in the CHANGELOG`
+**Evidence:** `$WORK/diff.txt` for the removals; `$WORK/body.txt` for the declared break; the head tree for surviving references in strings, docs and templates.
+**Report as:** `X4 <file>:<line> -- removing <name> breaks <caller/config>; not declared in the description`
 
 ### X5 -- A new operator knob must land in the reference docs, the env template, the prompts and the launcher argv
 
@@ -210,10 +210,10 @@ statement of the same review posture.
 
 **Severity:** blocking
 **Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_deps.py`, `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
-**The rule:** A component pin lives in code, in `docs/compatibility.rst`, in the install scripts and in the CHANGELOG, and all four move together with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
+**The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
-**Evidence:** `$WORK/files.txt` -- which of the four locations moved; `$WORK/base.txt` to check any quoted previous value; `$WORK/changelog.txt` for the entry.
+**Evidence:** `$WORK/files.txt` -- which of the three locations moved; `$WORK/base.txt` to check any quoted previous value; `$WORK/body.txt` for the declared bump.
 **Report as:** `X7 -- <COMPONENT> pin moves in <files touched> but not in <files missing>`
 
 ## T -- Tests and coverage
@@ -232,7 +232,7 @@ statement of the same review posture.
 
 **Severity:** blocking
 **Fires when:** a deleted line matches `^\-\s*(async\s+)?def test_`, a test file is deleted, an existing test's `range\(\d+`, iteration count or timing constant changes, an `@pytest.mark.(critic_agent_e2e|targeted_build_e2e)` is removed, or `numstat.txt` shows a new `src/**` module over 300 added lines with no path in `testfiles.txt`.
-**The rule:** Edits to existing tests preserve the amount of work exercised: a loop rewrite that cuts iterations while the assertions stay unchanged is a silent loss -- the test still goes green while verifying much less. When a PR deletes tests along with the code they covered, the deleted test is named and something picks up its scenario at the same depth; a real end-to-end test replaced by tests that stub the expensive step is a coverage loss, not a migration. A large new module performing privileged or security-relevant actions needs at least a pure-function test for its decision logic, whatever the convention of its directory. `docs/contributing/style-guide.md` covers test location, markers and the 90% gate, not the depth of what a test exercises.
+**The rule:** Edits to existing tests preserve the amount of work exercised: a loop rewrite that cuts iterations while the assertions stay unchanged is a silent loss -- the test still goes green while verifying much less. When a PR deletes tests along with the code they covered, the deleted test is named and something picks up its scenario at the same depth; a real end-to-end test replaced by tests that stub the expensive step is a coverage loss, not a migration. A large new module performing privileged or security-relevant actions needs at least a pure-function test for its decision logic, whatever the convention of its directory. `docs/contributing/style-guide.md` requires a replacement test to carry the original's contract and failure-mode assertions across and to keep them in the default CI selection, from which the `*_e2e` markers are excluded; T2 is the check that the PR did so, because the 90% floor cannot show that a specific assertion survived.
 **Seen in:** PR #1475 -- a loop change cut the exercised work 12.5x with the assertions untouched, so the loss was invisible in a green run.
 **Not a finding when:** the deleted tests covered code deleted in the same PR and no surviving route reaches that scenario, or the iteration count moved because the production loop bound moved with it.
 **Evidence:** `$WORK/diff.txt` for the deleted or shrunk tests; `$WORK/numstat.txt` for new modules without a test file; `$WORK/testfiles.txt` for what was added in exchange.
@@ -331,7 +331,7 @@ statement of the same review posture.
 **The rule:** when a call becomes streaming, the existing timeout must still cover consumption of the body, not only the call that opens the stream -- a proxy that opens the stream then stalls hangs the caller forever. When a per-backend budget is raised and forwarded to a child, the wrapping subprocess timeout must use the same effective budget; a parent timeout derived from a different, smaller variable hard-kills the child before its own budget expires and defeats the change entirely.
 **Seen in:** PR #710 -- `asyncio.wait_for()` wrapped only `client.chat.completions.create(...)`, so `_score_one_model()` could hang indefinitely while the proxy stalled mid-stream. PR #768 -- the GEAK budget was raised to 180 min but the outer subprocess timeout still used `backend_budget_min` (default 60), killing the child early.
 **Not a finding when:** the stream is consumed inside the same `wait_for` scope, or the outer timeout is derived from the same variable the child receives (trace both to a single source before firing).
-**Evidence:** `$WORK/diff.txt` for the `wait_for` scope and both sides of the budget expression; `$WORK/changelog.txt` if the timeout value is operator-observable.
+**Evidence:** `$WORK/diff.txt` for the `wait_for` scope and both sides of the budget expression; `$WORK/body.txt` if the timeout value is operator-observable.
 **Report as:** `P2: <file>:<line> deadline covers <opening call> but not <body consumption>` / `outer timeout uses <var A> while the child receives <var B>`
 
 ### P3 -- Cost of work added to a locked, hot or per-iteration path not accounted for
@@ -415,7 +415,7 @@ port denominator, reintroducing the two-denominator defect the PR existed to rem
 PR #1527 left `record_workload`'s docstring naming the pre-rename `intvty_p90`.
 **Not a finding when:** the second computation writes a different key, or the fallback
 branch raises or returns no value instead of publishing.
-**Evidence:** `$WORK/diff.txt` for the branch and the rename; `$WORK/changelog.txt` when the
+**Evidence:** `$WORK/diff.txt` for the branch and the rename; `$WORK/body.txt` when the
 metric is operator-visible.
 **Report as:** `M2: <file>:<line> publishes <key> with <denominator A> when <input> is
 present and <denominator B> when it is not -- one key, one definition`
@@ -539,8 +539,8 @@ check (`ANTHROPIC_*`, `OPENAI_*`, `CODEX_*`, `CLAUDE_MODEL`, a direct SDK client
 **The rule:** backend selection defers to the existing helper and the model default that
 helper implies. A pinned provider means the feature does not exist on a deployment
 configured for the other one while sibling paths in the same component keep working -- two
-backend policies inside one component. A resolver called without `default=` yields an empty
-model id when the environment variable is unset. A retired key must not satisfy a credential
+backend policies inside one component. The model default lives with the resolver, so a caller
+must not reintroduce one of its own beside it. A retired key must not satisfy a credential
 check, and no same-provider silent model fallback may be reintroduced.
 **Seen in:** PR #1528 -- rung 4 hardcoded Anthropic instead of following
 `llm_config.preferred_agent_backend()`, so on a Codex-configured box that rung did not exist
@@ -548,7 +548,7 @@ while forge's rewrite lane ran normally, and `resolve_forge_llm_model("claude")`
 without `default=`.
 **Not a finding when:** the code path is provider-specific by contract (a backend adapter
 implementing one provider) rather than a feature that should run on any configured backend.
-**Evidence:** `$WORK/diff.txt` -- the added selection and whether `default=` is passed.
+**Evidence:** `$WORK/diff.txt` -- the added selection and whether the backend and model id come from the resolver.
 **Report as:** `D5: <file>:<line> pins <provider> instead of <resolver> -- <feature> is
 absent on a <other provider> deployment`
 
@@ -724,7 +724,7 @@ silently.
 **Seen in:** PR #1368 -- PR #1397 touched 19 files, 18 of them also touched here, and both
 rewrote the `record_kernel_discovery` call contract, so landing this one first would erase
 #1397's premise.
-**Not a finding when:** the overlapping files are only the changelog, lockfiles or test
+**Not a finding when:** the overlapping files are only lockfiles or test
 fixtures, or the other PR is a draft the author has already stacked on this one.
 **Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share.
 **Report as:** `V4: #<N> touches <K> of the same files and <how the premises conflict> --

@@ -49,8 +49,8 @@ note() {
 }
 
 # An artifact that could not be collected is still created, empty: the rules read the
-# emptiness of changelog.txt and openprs.txt as a signal, so "absent" and "empty" must
-# not be the same state, and the reason must be recorded rather than dropped.
+# emptiness of openprs.txt as a signal, so "absent" and "empty" must not be the same
+# state, and the reason must be recorded rather than dropped.
 soft_fail() {
   local artifact="$1" reason="$2"
   : > "$WORK/$artifact"
@@ -238,18 +238,6 @@ derive_file_lists() {
   return 0
 }
 
-# Empty when the PR does not touch CHANGELOG.md. That emptiness is read as a finding by
-# the cross-artifact rules, so the file is always created.
-derive_changelog() {
-  : > "$WORK/changelog.txt"
-  [ -s "$WORK/diff.txt" ] || return 0
-  awk '
-    /^diff --git / { keep = ($0 ~ / b\/CHANGELOG\.md$/) }
-    keep { print }
-  ' "$WORK/diff.txt" > "$WORK/changelog.txt"
-  return 0
-}
-
 derive_testfiles() {
   : > "$WORK/testfiles.txt"
   [ -s "$WORK/files.txt" ] || return 0
@@ -329,14 +317,13 @@ collect_commits
 collect_base
 collect_diff
 derive_file_lists
-derive_changelog
 derive_testfiles
 collect_ci
 collect_comments
 collect_openprs
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
-  base.txt ci.txt comments.txt changelog.txt testfiles.txt openprs.txt; do
+  base.txt ci.txt comments.txt testfiles.txt openprs.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

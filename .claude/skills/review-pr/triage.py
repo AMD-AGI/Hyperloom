@@ -24,7 +24,7 @@ from pathlib import Path
 # `rules` is the checklist that shape earns in Step 4. MAPPING.md is generated from this
 # table by `triage.py mapping` -- edit here, never there.
 # Detection reads only the Step 1 artifacts: files.txt, numstat.txt, diff.txt, title.txt,
-# body.txt, changelog.txt, testfiles.txt, commits.txt, base.txt. ADD means a line starting
+# body.txt, testfiles.txt, commits.txt, base.txt. ADD means a line starting
 # with "+", DEL a line starting with "-", both outside the hunk headers.
 FAMILIES = [
     {
@@ -112,12 +112,12 @@ FAMILIES = [
         ),
     },
     {
-        "name": "changelog-missing",
+        "name": "observable-effect-unstated",
         "rules": ["X1", "X2"],
         "why": (
-            "files.txt has a src/**/*.py path outside **/tests/** and CHANGELOG.md is not in files.txt; also "
-            "fires when changelog.txt is non-empty, to check the entry against the whole diff rather than the "
-            "title."
+            "files.txt has a src/**/*.py path outside **/tests/**, so the diff can carry an operator-visible "
+            "effect the description has to state. Whether it does is read from body.txt at Step 4; no diff "
+            "shape can settle it."
         ),
     },
     {
@@ -126,8 +126,8 @@ FAMILIES = [
         "why": (
             "commits.txt has more than one line; or title.txt is shaped like a branch name (two or more "
             "slash-separated segments); or body.txt is empty, still holds a template comment, or has an "
-            "unchecked '- [ ]'; or body.txt or changelog.txt states a percentage, a numeric default, or the "
-            "word 'unchanged'."
+            "unchecked '- [ ]'; or body.txt states a percentage, a numeric default, or the word "
+            "'unchanged'."
         ),
     },
     {
@@ -444,7 +444,7 @@ QUESTIONS = {
 DIAGNOSTIC_CHECKS = {
     "wiring": "an added symbol nothing consumes, or a removed caller whose helper survives",
     "twins": "mirrored code half-adapted: sibling executors, per-framework patchers, sync and async variants",
-    "claims": "description, CHANGELOG, docstring, comment or prompt asserting what the code does not enforce",
+    "claims": "description, docstring, comment or prompt asserting what the code does not enforce",
     "silent-failure": "a guard, try or default converting a failed measurement, apply or write into a plausible value",
     "test-falsifies": "a test that restates the implementation or would pass unchanged on the merge base",
     "constants": "an underived timeout, budget or threshold, or an unbounded task, blocking await or subprocess",
@@ -546,7 +546,6 @@ class Artifacts:
         self.diff = _read(work, "diff.txt")
         self.title = _read(work, "title.txt").strip()
         self.body = _read(work, "body.txt")
-        self.changelog = _read(work, "changelog.txt")
         self.commits = _lines(_read(work, "commits.txt"))
         self.files = _lines(_read(work, "files.txt"))
         self.testfiles = _lines(_read(work, "testfiles.txt"))
@@ -718,10 +717,8 @@ def d_removal_or_tightening(a):
     return bool(re.search(r"[<]=?[^=]", a.dele)) and bool(re.search(r"[=!]=|\ball\(", a.add))
 
 
-def d_changelog_missing(a):
-    if a.changelog.strip():
-        return True
-    return bool(a.src_files()) and not any(p.endswith("CHANGELOG.md") for p in a.files)
+def d_observable_effect_unstated(a):
+    return bool(a.src_files())
 
 
 def d_description_drift(a):
@@ -731,7 +728,7 @@ def d_description_drift(a):
         return True
     if not a.body.strip() or "<!--" in a.body or "- [ ]" in a.body:
         return True
-    return bool(re.search(r"\d+\s*%|default[^\n]*\b\d|\bunchanged\b", a.body + "\n" + a.changelog, re.I))
+    return bool(re.search(r"\d+\s*%|default[^\n]*\b\d|\bunchanged\b", a.body, re.I))
 
 
 def d_prompt_surface(a):
@@ -1126,7 +1123,7 @@ DETECT = {
     "executor-change": d_executor_change,
     "default-changed": d_default_changed,
     "removal-or-tightening": d_removal_or_tightening,
-    "changelog-missing": d_changelog_missing,
+    "observable-effect-unstated": d_observable_effect_unstated,
     "description-drift": d_description_drift,
     "prompt-surface": d_prompt_surface,
     "persisted-schema": d_persisted_schema,

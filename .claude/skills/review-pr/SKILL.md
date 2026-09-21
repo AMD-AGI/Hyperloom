@@ -24,7 +24,7 @@ Blocking means one of two things, and the repo treats them as equal:
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
-| Desync | CHANGELOG entry missing for an operator-observable change; PR title or description does not match the diff at the current head |
+| Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
 
 If there are no blocking issues, say so explicitly. Do not manufacture small ones to fill space.
 
@@ -68,7 +68,6 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `base.txt` | merge-base sha — every "is this pre-existing" question is answered against it |
 | `ci.txt` | check runs at the current head: name, conclusion, url |
 | `comments.txt` | existing review and issue comments — do not repeat a point already made |
-| `changelog.txt` | the CHANGELOG hunk of the diff, empty if untouched |
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
 
@@ -97,7 +96,7 @@ prefixed `Q1:` … `Q5:`.
   and why there rather than at the layer above or below.
 - **Q3 — What does this make observable to an operator?** A behaviour, an interface, a default, a
   flag, an artifact path, a metric, a log line. If the answer is "nothing", say what makes that
-  true — that claim is what the CHANGELOG exemption rests on.
+  true — that claim is what the exemption in `AGENTS.md` rests on.
 - **Q4 — Name every consumer of a changed value.** For each new or changed status string, enum
   member, field, keyword argument or return shape: the membership tests, the call sites, the
   readers of the persisted document, the prompt that names it. Grep, do not guess.
@@ -175,10 +174,10 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
 2. `twins` — **Twin divergence.** Mirrored code half-adapted: sibling executors, per-framework patchers
    (vllm / sglang / atom / xdit), sync and async variants, the duplicated frozensets in
    `protocol/intent.py` and `agents/critic`. The defect is the asymmetry, not the copy.
-3. `claims` — **Claim against code.** Does the code enforce what the description, the CHANGELOG entry, the
-   docstring, the comment and the prompt assert? Every number, flag name, path and default in the
-   CHANGELOG entry must be greppable in the head tree. A number you cannot trace to an output is
-   `[unverified]` and is never repeated as fact.
+3. `claims` — **Claim against code.** Does the code enforce what the description, the docstring, the
+   comment and the prompt assert? Every number, flag name, path and default in the description must
+   be greppable in the head tree. A number you cannot trace to an output is `[unverified]` and is
+   never repeated as fact.
 4. `silent-failure` — **Safety theater and silent failure.** For each new guard, `try`, `except` or default: is it
    reachable, will it ever fire, does it convert a failed measurement, a failed patch apply or a
    failed artifact write into a plausible-looking value? A fail-closed gate that coalesces a
