@@ -6,14 +6,19 @@ from __future__ import annotations
 
 import logging
 import os
+import select
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import scrub_benchmark_process_env
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
+
+from hyperloom.common.process_owner import TERM_GRACE_SEC
 
 from ._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 
@@ -36,7 +41,7 @@ _CANCEL_POLL_SEC: float = 0.25
 CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
 
 # How long releasing a lease waits for the actor to reap its served process before killing the actor anyway.
-CLOSE_STOP_TIMEOUT_SEC: float = 10.0
+CLOSE_STOP_TIMEOUT_SEC: float = 3 * TERM_GRACE_SEC + 2.0
 
 # Method slots the serving actor runs at once: the round, plus room for the cancel that has to reach it.
 _SERVING_ACTOR_CONCURRENCY: int = 2
@@ -89,13 +94,12 @@ def _pdeathsig_preexec() -> None:
 
 @dataclass
 class ManagedServerProcess:
-    """Supervise a single GPU/serving subprocess tied to this object's lifetime.
-
-    Launched in a new POSIX session (distinct pgid) so the tree can be reaped atomically; PR_SET_PDEATHSIG is armed so
-    an unexpected owner death still triggers the child's own cleanup (see :func:`_pdeathsig_preexec`).
-    """
+    """Hold a subprocess owner until it acknowledges reaping its whole tree."""
 
     _proc: subprocess.Popen | None = field(default=None, init=False, repr=False)
+    _cleanup_fd: int | None = field(default=None, init=False, repr=False)
+    _ready: bool = field(default=False, init=False, repr=False)
+    _cleanup_confirmed: bool = field(default=False, init=False, repr=False)
 
     def start(
         self,
@@ -109,6 +113,8 @@ class ManagedServerProcess:
         """Launch the subprocess and return its pid."""
         if self._proc is not None and self._proc.poll() is None:
             raise RuntimeError("ManagedServerProcess already running")
+        if self._proc is not None and not self.stop():
+            raise RuntimeError("previous subprocess ownership is still unconfirmed")
         stdin: Any = subprocess.DEVNULL
         stdout: Any = subprocess.DEVNULL
         stdin_fh: Any = None
@@ -122,18 +128,29 @@ class ManagedServerProcess:
                 stdout_fh = open(log_path, "w", encoding="utf-8")
                 stdout = stdout_fh
             if os.name == "posix":
-                # New session (distinct pgid) so the whole tree reaps atomically; PR_SET_PDEATHSIG so an unexpected
-                # owner death still kills the child.
-                self._proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
-                    cmd,
-                    env=env,
-                    cwd=cwd,
-                    stdin=stdin,
-                    stdout=stdout,
-                    stderr=subprocess.STDOUT,
-                    start_new_session=True,
-                    preexec_fn=_pdeathsig_preexec,
-                )
+                from hyperloom.common import process_owner
+
+                read_fd, write_fd = os.pipe()
+                os.set_blocking(read_fd, False)
+                self._ready = self._cleanup_confirmed = False
+                try:
+                    self._proc = subprocess.Popen(
+                        [sys.executable, str(Path(process_owner.__file__).resolve()), str(write_fd), *cmd],
+                        env=env,
+                        cwd=cwd,
+                        stdin=stdin,
+                        stdout=stdout,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        preexec_fn=_pdeathsig_preexec,
+                        pass_fds=(write_fd,),
+                    )
+                    self._cleanup_fd = read_fd
+                except OSError:
+                    os.close(read_fd)
+                    raise
+                finally:
+                    os.close(write_fd)
             else:  # pragma: no cover - non-posix fallback
                 self._proc = subprocess.Popen(  # noqa: S603
                     cmd,
@@ -169,29 +186,46 @@ class ManagedServerProcess:
             return None
         return self._proc.poll()
 
-    def stop(self, *, grace_seconds: float = 5.0) -> bool:
-        """Confirm teardown of the enumerated live tree before dropping its handle."""
-        from hyperloom.common.proctree import collect_tree, kill_tree
-        from ._subprocess_kill import kill_my_spawned_server
-
+    def stop(self, *, grace_seconds: float = TERM_GRACE_SEC) -> bool:
+        """Ask the owner to reap its children; retain it until cleanup is acknowledged."""
         proc = self._proc
         if proc is None:
             return True
-        if os.name != "posix":
-            kill_my_spawned_server(proc, grace_seconds=grace_seconds)
-            return False
-        if proc.poll() is not None:
-            # Detached descendants can outlive both the root and its old process group.
+        if self._cleanup_fd is None:
             return False
         try:
-            tree = collect_tree([proc.pid])
-            if not kill_tree(tree, grace_sec=grace_seconds, confirm_sec=grace_seconds):
+            self._read_cleanup_ack()
+            if proc.poll() is None and not self._ready:
+                select.select([self._cleanup_fd], [], [], grace_seconds)
+                self._read_cleanup_ack()
+            if proc.poll() is None:
+                if not self._ready:
+                    return False
+                proc.send_signal(signal.SIGTERM)
+                try:
+                    proc.wait(timeout=grace_seconds)
+                except subprocess.TimeoutExpired:
+                    proc.send_signal(signal.SIGUSR1)
+                    proc.wait(timeout=grace_seconds + 1.0)
+            self._read_cleanup_ack()
+            if not self._cleanup_confirmed:
                 return False
-            proc.wait(timeout=1.0)
         except (OSError, subprocess.TimeoutExpired):
             return False
+        os.close(self._cleanup_fd)
+        self._cleanup_fd = None
         self._proc = None
         return True
+
+    def _read_cleanup_ack(self) -> None:
+        if self._cleanup_fd is None:
+            return
+        try:
+            message = os.read(self._cleanup_fd, 64)
+        except BlockingIOError:
+            return
+        self._ready |= b"R" in message
+        self._cleanup_confirmed |= b"C" in message
 
 
 def _serving_actor_body() -> Any:

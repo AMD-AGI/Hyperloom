@@ -111,6 +111,21 @@ def coord(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("framework", ["custom", "xdit"])
+async def test_scriptable_workload_skips_sweep_and_can_close(coord, framework):
+    from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
+
+    coord.shared_state.framework = framework
+    await coord._on_enter_sweep(from_phase="KERNEL_AGENT")
+    assert coord.shared_state.last_conc_sweep["skip_reason"] == "non_serving_workload"
+    assert coord.shared_state.last_conc_sweep["was_skipped"] is True
+    assert not coord.tasks._tasks
+    reason, evidence = exit_normal_sweep(coord.shared_state)
+    assert reason == "sweep_done"
+    assert evidence["sweep_skip_reason"] == "non_serving_workload"
+
+
+@pytest.mark.asyncio
 async def test_drain_pending_keep_integrates_records_result_once(
     tmp_path: Path,
     monkeypatch,

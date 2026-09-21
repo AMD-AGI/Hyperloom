@@ -1464,6 +1464,17 @@ class TestTheSummaryIsTakenOnTheChartsAxis:
         assert graded_metric_key(benchmark_mode="") == "e2e_norm_intvty_p90"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("framework", ["custom", "xdit"])
+async def test_direct_scriptable_sweep_skips_before_setup(tmp_path, framework):
+    from hyperloom.orchestrator.kernel.conc_sweep import run_conc_sweep
+
+    result = await run_conc_sweep(SharedState(framework=framework), tmp_path, concs=[1, 8])
+    assert result["status"] == "skipped"
+    assert result["skip_reason"] == "non_serving_workload"
+    assert not list(tmp_path.iterdir())
+
+
 class TestTheSweepGradesOnTheAxisTheSessionKeepsOn:
     """A curve drawn on one axis beside promotions decided on another is two answers to one question."""
 

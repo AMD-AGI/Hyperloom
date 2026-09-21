@@ -1308,6 +1308,10 @@ async def run_conc_sweep(
     nothing, which is what a direct caller with no session bound wants.
     Returns a skip envelope when prerequisites are unmet.
     """
+    from hyperloom.inference_optimizer.framework_registry import is_scriptable
+
+    if is_scriptable(getattr(state, "framework", "")):
+        return _declined(recorder, "non_serving_workload")
     _, benchmark_timeout_sec = resolve_benchmark_timeouts()
     session_deadline_sec, variant_expected_sec = session_grid_bounds(state)
     session_dir = Path(session_dir)

@@ -321,6 +321,17 @@ class TaskRegistry:
             )
         return await self.get(task_id)
 
+    async def record_evidence(self, task_id: str, evidence: dict[str, Any]) -> None:
+        """Preserve an outcome or cleanup fact without declaring the task terminal."""
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=?", (task_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise TaskNotFound(task_id)
+            history = json.loads(row["history"])
+            history.append({"ts": _now_iso(), "evidence": evidence})
+            cur.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
+
     async def record_progress(
         self,
         task_id: str,

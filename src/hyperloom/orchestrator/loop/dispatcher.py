@@ -127,6 +127,8 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 #: its duration. Admission is unchanged — same budget, lane and lease gates.
 _NOT_JOINED_KINDS: frozenset[str] = frozenset({"targeted_build"})
 
+_CLEANUP_RETRY_INTERVAL_SEC = 1.0
+
 
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
@@ -947,10 +949,21 @@ class DispatcherCollaborator:
 
         async def release_resources() -> bool:
             if gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(gpu_specialist_lease.close)
-                if closed is not True:
-                    log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
-                    return False
+                attempts = 0
+                while True:
+                    try:
+                        if await asyncio.to_thread(gpu_specialist_lease.close) is True:
+                            break
+                    except OSError as exc:
+                        log.warning("dispatcher: task=%s cleanup attempt failed: %s", task.task_id, exc)
+                    attempts += 1
+                    if attempts == 1:
+                        log.warning(
+                            "dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity and retrying", task.task_id
+                        )
+                    await asyncio.sleep(_CLEANUP_RETRY_INTERVAL_SEC)
+                if attempts:
+                    log.info("dispatcher: task=%s GPU cleanup confirmed after %d retries", task.task_id, attempts)
             if gpu_lease is not None:
                 await self.gpu_specialist_pool.release(gpu_lease)
             return True

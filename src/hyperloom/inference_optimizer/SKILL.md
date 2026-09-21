@@ -884,6 +884,10 @@ profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
 Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX).
+Concurrency sweeps apply only to serving workloads. For server-less PyTorch
+workloads (`custom` and `xdit`), SWEEP records `non_serving_workload` and proceeds
+to CLOSE. Optimize the declared forward-pass workload; do not propose request
+concurrency as an optimization for these models.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may

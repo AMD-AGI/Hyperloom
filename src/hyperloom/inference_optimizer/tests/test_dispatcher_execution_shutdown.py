@@ -255,20 +255,36 @@ def test_cancelled_shutdown_drain_retains_live_execution(tmp_path, monkeypatch):
 
 
 def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypatch):
-    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-
     dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_COOPERATIVE_CANCEL_GRACE_SEC", 0)
+    monkeypatch.setattr(dispatcher_module, "_CLEANUP_RETRY_INTERVAL_SEC", 0.01)
+    attempted = threading.Event()
+
+    def close():
+        attempted.set()
+        return False
 
     async def run():
         dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
         task = await dispatcher.tasks.create(
             kind="shutdown_test", params={}, idempotency_key="physical-cleanup", requires_lanes=["research_lane"]
         )
-        with pytest.raises(ExecutionCleanupUnconfirmed):
-            await dispatcher.run_task_registered(task, gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+        caller = asyncio.create_task(
+            dispatcher.run_task_registered(task, gpu_specialist_lease=SimpleNamespace(close=close))
+        )
+        assert await asyncio.to_thread(attempted.wait, 5)
+        assert (await dispatcher.tasks.get(task.task_id)).state == "running"
         await _close(dispatcher)
         assert await dispatcher.locks.lane_holders()
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
+        for execution in dispatcher._executions:
+            execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        stored = await dispatcher.tasks.get(task.task_id)
+        assert stored.state == "running"
+        assert stored.history[-1]["evidence"]["cleanup_confirmed"] is False
+        assert await dispatcher.locks.lane_holders()
 
     try:
         asyncio.run(run())
@@ -278,15 +294,18 @@ def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypa
 
 @pytest.mark.parametrize("cleanup", ["false", "raises"])
 @pytest.mark.parametrize("outcome", ["succeeded", "failed", "cancelled"])
-def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, cleanup, outcome):
-    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-
+def test_cleanup_retry_preserves_outcome_and_completes_once(tmp_path, monkeypatch, cleanup, outcome):
     dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_CLEANUP_RETRY_INTERVAL_SEC", 0.01)
     payload = {"status": "ok", "decision": "KEEP", "nested": {"answer": [42]}}
     completed = AsyncMock()
     dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    attempted = threading.Event()
+    allow_cleanup = threading.Event()
+    execute = AsyncMock()
 
-    async def execute(_ctx):
+    async def work(_ctx):
+        await execute()
         if outcome == "failed":
             raise ValueError("executor failed")
         if outcome == "cancelled":
@@ -294,50 +313,50 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         return payload
 
     def close():
+        attempted.set()
+        if allow_cleanup.is_set():
+            return True
         if cleanup == "raises":
             raise OSError("cleanup failed")
         return False
 
     async def run():
-        dispatcher.sub.register_executor("shutdown_test", execute)
+        dispatcher.sub.register_executor("shutdown_test", work)
         task = await dispatcher.tasks.create(
             kind="shutdown_test", params={}, idempotency_key="outcome", requires_lanes=["research_lane"]
         )
-        with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
-            await dispatcher.run_task_registered(
+        caller = asyncio.create_task(
+            dispatcher.run_task_registered(
                 task,
                 gpu_specialist_lease=SimpleNamespace(close=close),
                 gpu_lease=object(),
                 on_complete=completed,
             )
-        result = caught.value.result
+        )
+        assert await asyncio.to_thread(attempted.wait, 5)
+        assert (await dispatcher.tasks.get(task.task_id)).state == "running"
+        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
+        assert completed.await_count == dispatcher.gpu_specialist_pool.release.await_count == 0
+        allow_cleanup.set()
+        result = await asyncio.wait_for(caller, 5)
         assert result.state == outcome
-        assert result.task_id == task.task_id
         if outcome == "succeeded":
             assert result.result == payload
         else:
             assert result.error and result.error_class
-        if cleanup == "raises":
-            assert isinstance(caught.value.__cause__, OSError)
-        for index in range(125):
-            await dispatcher.tasks.record_progress(task.task_id, {"index": index})
+        assert execute.await_count == completed.await_count == dispatcher.gpu_specialist_pool.release.await_count == 1
+        assert not await dispatcher.locks.lane_holders()
+        assert not dispatcher._executions
         stored = await dispatcher.tasks.get(task.task_id)
-        evidence = [entry["evidence"] for entry in stored.history if "evidence" in entry][-1]
-        assert evidence["outcome"] == asdict(result)
-        assert evidence["cleanup_confirmed"] is False
-        assert evidence["cleanup_error"]
-        assert completed.await_count == 0
-        assert dispatcher.gpu_specialist_pool.release.await_count == 0
-        assert dispatcher._promote_to_shared_state.await_count == 0
-        assert dispatcher._fact_write_hook.await_count == 0
-        assert await dispatcher.locks.lane_holders() == {"research_lane": 1}
-        assert not await dispatcher.bus.tail(topic="delegated_result")
+        assert stored.state == outcome
+        assert stored.history[-1]["evidence"]["cleanup_confirmed"] is True
+        assert stored.history[-1]["evidence"]["outcome"] == asdict(result)
         await _close(dispatcher)
-        assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
 
     try:
         asyncio.run(run())
     finally:
+        allow_cleanup.set()
         dispatcher.db.close()
 
 
@@ -469,10 +488,10 @@ def test_shutdown_drain_closes_after_clean_callback_failure(tmp_path, monkeypatc
         dispatcher.db.close()
 
 
-def test_terminal_race_preserves_unconfirmed_outcome(tmp_path):
-    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
-
+def test_terminal_race_preserves_outcome_after_cleanup_retry(tmp_path, monkeypatch):
     dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_CLEANUP_RETRY_INTERVAL_SEC", 0.01)
+    attempts = iter([False, True])
 
     async def execute(ctx):
         await dispatcher.tasks.transition(ctx.task.task_id, "cancelled", evidence={"reason": "external"})
@@ -481,16 +500,18 @@ def test_terminal_race_preserves_unconfirmed_outcome(tmp_path):
     async def run():
         dispatcher.sub.register_executor("shutdown_test", execute)
         task = await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="terminal-race")
-        with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
-            await dispatcher.run_task_registered(task, gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+        result = await dispatcher.run_task_registered(
+            task, gpu_specialist_lease=SimpleNamespace(close=lambda: next(attempts))
+        )
         for index in range(125):
             await dispatcher.tasks.record_progress(task.task_id, {"index": index})
         stored = await dispatcher.tasks.get(task.task_id)
         assert stored.state == "cancelled"
         outcomes = [entry["evidence"] for entry in stored.history if "outcome" in entry.get("evidence", {})]
         assert len(outcomes) == 1
-        assert outcomes[0]["outcome"] == asdict(caught.value.result)
-        assert outcomes[0]["cleanup_confirmed"] is False
+        assert outcomes[0]["outcome"] == asdict(result)
+        assert outcomes[0]["cleanup_confirmed"] is True
+        assert not await dispatcher.locks.lane_holders()
 
     try:
         asyncio.run(run())

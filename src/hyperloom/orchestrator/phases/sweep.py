@@ -6,6 +6,7 @@
 from __future__ import annotations
 import logging as _logging
 from typing import Any
+from hyperloom.inference_optimizer.framework_registry import is_scriptable
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -37,6 +38,12 @@ class SweepPhase(PhaseHandler):
             await self._drain_pending_keep_integrates()
         # Validate the stack for positive NEEDS_REVIEW kernels.
         await self._maybe_validate_positive_needs_review_stack()
+        if is_scriptable(getattr(state, "framework", "")):
+            self._record_terminal_conc_sweep_skip(
+                skip_reason="non_serving_workload",
+                auto_conc_sweep_skipped="non_serving_workload",
+            )
+            return
         if not getattr(state, "conc_sweep_enabled", False):
             log.info(
                 "SWEEP entry (from=%s): conc_sweep disabled; recording terminal skip.",

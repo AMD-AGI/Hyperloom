@@ -217,33 +217,23 @@ def test_specialist_close_can_confirm_on_same_actor_after_unconfirmed_stop(monke
 
 
 @pytest.mark.parametrize("confirmed", [False, True])
-def test_managed_live_root_uses_enumerated_tree_ack(monkeypatch, confirmed):
+def test_managed_exited_supervisor_requires_cleanup_ack(confirmed):
     from types import SimpleNamespace
-    from hyperloom.common import proctree
 
-    waited = []
-    proc = SimpleNamespace(pid=123456, poll=lambda: None, wait=lambda **kw: waited.append(kw))
-    tree = object()
-    calls = []
-
-    def collect(pids):
-        calls.append(("collect", pids))
-        return tree
-
-    def kill(collected, **kwargs):
-        calls.append(("kill", collected, kwargs))
-        return confirmed
-
-    monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
-    monkeypatch.setattr(proctree, "collect_tree", collect)
-    monkeypatch.setattr(proctree, "kill_tree", kill)
     mgr = ManagedServerProcess()
+    proc = SimpleNamespace(poll=lambda: 0)
     mgr._proc = proc
-
-    assert mgr.stop(grace_seconds=0.1) is confirmed
-    assert calls == [("collect", [proc.pid]), ("kill", tree, {"grace_sec": 0.1, "confirm_sec": 0.1})]
-    assert mgr._proc is (None if confirmed else proc)
-    assert waited == ([{"timeout": 1.0}] if confirmed else [])
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    mgr._cleanup_fd = read_fd
+    try:
+        os.write(write_fd, b"RC" if confirmed else b"R")
+        assert mgr.stop(grace_seconds=0.1) is confirmed
+        assert mgr._proc is (None if confirmed else proc)
+    finally:
+        os.close(write_fd)
+        if mgr._cleanup_fd is not None:
+            os.close(read_fd)
 
 
 def test_managed_never_started_can_confirm_stop():

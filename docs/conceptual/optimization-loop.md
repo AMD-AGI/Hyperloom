@@ -349,6 +349,23 @@ supervision are not roles in this loop. Stopped sessions require an explicit
 operator `--resume-from` decision; `recover-session` only reconstructs artifacts
 offline.
 
+## Specialist process cleanup
+
+On Linux, managed specialist commands run under a dedicated child subreaper.
+It retains ownership of detached and double-forked descendants and acknowledges
+cleanup only after all children have been reaped. The command exiting by itself
+is not evidence that its GPU workload has been cleaned up.
+
+When specialist cleanup fails, the dispatcher keeps its GPU lease and execution
+lanes and retries cleanup once per second after each attempt. It does not rerun
+the specialist. The task becomes terminal and its result is delivered only after
+cleanup is confirmed. An unconfirmed or unreachable owner retains capacity;
+shutdown does not treat cancellation as proof of cleanup.
+
+Scriptable forward-pass workloads (`custom` and `xdit`) skip the final request
+concurrency sweep with reason `non_serving_workload`. Serving workloads retain
+the sweep.
+
 ## Feedback loops
 
 The loop adapts through facts, not through retired score tables:
