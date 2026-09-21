@@ -18,13 +18,14 @@ blocked by the system, so no change is ever accepted without measured evidence.
    signal-to-noise threshold (default 30 dB) before it can be benchmarked.
 3. **Benchmark** — measure wall-clock and kernel time (median over iterations).
 4. **PMC analysis** — read hardware counters and classify the bottleneck.
-5. **Accept** — reproduce the arena's verdict on a candidate that would
-   otherwise be taken: the task's own `compile_command`, then its
-   `correctness_command`, stopping at the first failure. Keep the change only if
-   both pass, otherwise revert. The compile step matters on its own — the task
-   often builds a smaller shape than the one the loop measures. A knowledge-base
-   warm start is accepted by the same step before it can become the starting
-   point.
+5. **Accept** (assembly only) — run the task's own `compile_command`, then its
+   `correctness_command`, stopping at the first failure, and judge the
+   `numerical_validation` evidence the assembly backend's contract requires.
+   Keep the change only if all pass, otherwise revert. The compile step matters
+   on its own — the task often builds a smaller shape than the one the loop
+   measures. Every other backend was judged by the driver in step 2 and has been
+   measured through it since, so its keep rests on that verdict and nothing
+   re-reads the task's configuration.
 
 ## PMC-guided optimization
 

@@ -666,10 +666,10 @@ def _make_lane_agent_factory(
     "--snr-threshold",
     default=DEFAULT_SNR_THRESHOLD_DB,
     type=float,
-    help="Fresh campaign: SNR pre-filter threshold in dB (stored "
-    "immutably in the campaign config; ignored on --resume). A "
-    "KEEP is decided by the task's own correctness_command, not "
-    "by this value.",
+    help="Fresh campaign: threshold in dB the driver's correctness "
+    "suite must clear (stored immutably in the campaign config; "
+    "ignored on --resume). A KEEP needs this and a measured gain "
+    "over the incumbent; assembly adds the task's own suite.",
 )
 @click.option(
     "--max-hours",

@@ -45,9 +45,6 @@ from kernelforge.mcp_server.tools.bench import (
 # honest. The regression this answers measured 32% below the claim that had won the ranking.
 _WARMSTART_CLAIM_CONFIRMED_RATIO = 0.9
 
-# Ceiling on the task's declared correctness suite when a warm start runs it, used when no caller passes the loop's
-# own ``validate_stage_timeout_sec``.
-
 _KB_REFERENCES_REL = Path("forge_experiments") / "kb_references"
 
 
