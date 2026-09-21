@@ -16,7 +16,12 @@ from hyperloom.inference_optimizer.breakdown import exporter
 from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.tests.test_geak_gain_alignment import _journey_with_validated_keeps
-from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import promotion as promotion, rebench_task
+from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import (
+    integrated_count as _integrated,
+    promotion as promotion,
+    rebench_task,
+    settled_e2e as _settled_e2e,
+)
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.geak_rebench import geak_candidate_is_adjudicated
 from hyperloom.orchestrator.phases.machine_state import PHASE_KERNEL_AGENT, PHASE_SWEEP
@@ -49,7 +54,7 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
     )
     assert coord.phase_kernel._kernel_timeline() is None
     before = next(event for event in read_timeline_events(coord.session_dir) if event["id"] == recorder.event_id)
-    assert before["ext"]["geak"]["attempts"]["counts"]["integrated"] == 1
+    assert _integrated(before["ext"]) == 1
     header_before = kernel_event.event_parts((kernel_event.SECTION_EVENT,), event=recorder.event_id)
     Path(result["kernel_journey_path"]).unlink()
 
@@ -97,9 +102,8 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
         key: value for key, value in before.items() if key != "ext"
     }
     assert kernel_event.event_parts((kernel_event.SECTION_EVENT,), event=recorder.event_id) == header_before
-    attempts = settled["ext"]["geak"]["attempts"]
-    assert attempts["counts"]["integrated"] == 0
-    e2e = attempts["kernels"][0]["e2e"]
+    assert _integrated(settled["ext"]) == 0
+    e2e = _settled_e2e(settled["ext"])
     assert e2e["decision"] == "REVERT"
     assert e2e["integrated"] is False
     assert e2e["validated"] is False
@@ -122,11 +126,11 @@ async def test_late_rejection_after_kernel_transition(promotion, monkeypatch, li
     state.save(coord.session_dir)
     exported = exporter.build(coord.session_dir)
     exported_event = next(event for event in exported["timeline"] if event["id"] == recorder.event_id)
-    assert exported_event["ext"]["geak"]["attempts"]["counts"]["integrated"] == 0
-    assert exported_event["ext"]["geak"]["attempts"]["kernels"][0]["e2e"] == e2e
+    assert _integrated(exported_event["ext"]) == 0
+    assert _settled_e2e(exported_event["ext"]) == e2e
     if later is not None:
         other = next(event for event in exported["timeline"] if event["id"] == later.event_id)
-        assert other["ext"]["geak"]["attempts"]["counts"]["integrated"] == 1
+        assert _integrated(other["ext"]) == 1
 
 
 def test_rejection_annotations_do_not_reopen_an_adjudicated_candidate(promotion):

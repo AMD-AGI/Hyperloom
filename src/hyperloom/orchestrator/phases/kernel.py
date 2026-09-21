@@ -465,6 +465,15 @@ class KernelPhase(PhaseHandler):
                                 "status": status,
                                 "decision": decision,
                                 "micro_speedup": speedup,
+                                # The integration status *is* this route's failure
+                                # taxonomy -- ``reverted_apply_conflict``,
+                                # ``skipped_dirty_worktree`` -- and an integration
+                                # row carries no separate class. Stamping it here
+                                # is what makes ``error_class`` answerable on this
+                                # route: the GEAK and fusion lanes both fill it, so
+                                # a reader asking why a candidate did not land had
+                                # one field that was empty only for forge.
+                                "error_class": "" if status == "kept" else status,
                                 "error": str(row.get("reason") or ""),
                             }
                         ],
@@ -521,10 +530,11 @@ class KernelPhase(PhaseHandler):
                 graded_objective=str(result.get("graded_objective") or ""),
                 tuner=tuner,
                 micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                rebench_ref=str(result.get("rebench_ref") or ""),
+                integrate_ref=str(result.get("integration_id") or ""),
                 started_at=str(result.get("started_at") or ""),
                 ended_at=str(result.get("ended_at") or result.get("ts") or ""),
                 duration_sec=result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
                 failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
             )
             backend = str(result.get("backend") or result.get("engine") or "").lower()
@@ -548,10 +558,11 @@ class KernelPhase(PhaseHandler):
                 gain_pct=result.get("gain_pct"),
                 patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
                 micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                rebench_ref=str(result.get("rebench_ref") or result.get("integration_id") or ""),
+                integrate_ref=str(result.get("integration_id") or ""),
                 started_at=str(result.get("started_at") or ""),
                 ended_at=str(result.get("ended_at") or result.get("ts") or ""),
                 duration_sec=result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
                 failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
             )
             tool_versions.record_tool_version(self.session_dir, tool="forge")
@@ -561,7 +572,7 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
             log.debug("kernel timeline: fusion record failed", exc_info=True)
 
-    def _close_kernel_timeline(self, *, verdict: str = "", exit_reason: str = "") -> None:
+    def _close_kernel_timeline(self, *, exit_reason: str = "") -> None:
         """Close the kernel timeline event when the phase is left."""
         recorder = self._kernel_timeline()
         if recorder is None:
@@ -579,7 +590,6 @@ class KernelPhase(PhaseHandler):
             stack_removed = [item for item in stack_before if item not in stack_after]
         try:
             recorder.finish(
-                verdict=verdict,
                 exit_reason=exit_reason,
                 tput_after=current_best.get("tput"),
                 cumulative_gain_validated_out=getattr(state, "cumulative_gain_validated", None),

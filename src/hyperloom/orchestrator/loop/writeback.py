@@ -317,6 +317,45 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
 _NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
 
 
+def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
+    """Record the configuration arm's grid dispatch on the framework event.
+
+    The arm's dispatch is one ``explore`` task, and it earns a run row for the
+    same reason a specialist dispatch does: the event reduces its status over
+    what it dispatched, so an arm whose grid came back with nothing must not
+    read as an arm that was never tried. Recorded at completion, where the
+    outcome is known, with the dispatch time taken off the task row; a grid
+    that measured nothing still lands, which is the case
+    :func:`_record_config_attempts` never sees.
+    """
+    getter = getattr(coord, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.common.timeutil import now_iso
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ROLE_CONFIG
+
+    task_id = str(getattr(task, "task_id", "") or "")
+    if not task_id:
+        return
+    variants = result_dict.get("per_variant_outcomes")
+    measured = [row for row in variants if isinstance(row, dict)] if isinstance(variants, list) else []
+    status = str(result_dict.get("status") or "") or "succeeded"
+    recorder.record_run(
+        task_id,
+        role=ROLE_CONFIG,
+        arm=ARM_CONFIG,
+        status=status,
+        dispatched_at=str(getattr(task, "created_at", "") or ""),
+        completed_at=now_iso("seconds"),
+        reason=str(result_dict.get("error") or "")[:200],
+        # A grid the run stopped before it measured anything is not a grid
+        # whose variants were measured and lost.
+        empty=not measured,
+        workspace=str(result_dict.get("workspace") or ""),
+    )
+
+
 def _record_config_attempts(
     coord: Any,
     *,
@@ -355,6 +394,11 @@ def _record_config_attempts(
         attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
         if not attempt_id:
             continue
+        gates = [gate for gate in (row.get("gates") or []) if isinstance(gate, dict)]
+        # This arm gates accuracy rather than reporting it, so the block both
+        # arms carry is projected from the gate that ruled. No gate row means
+        # nothing gated the variant, which is not a gate that refused it.
+        accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
         try:
             recorder.record_attempt(
                 attempt_id,
@@ -383,6 +427,12 @@ def _record_config_attempts(
                     "extra_server_args": variant.get("extra_server_args"),
                     "extra_envs": variant.get("extra_envs"),
                 },
+                accuracy={
+                    "required": True if accuracy_gate else None,
+                    "value": accuracy_gate.get("observed"),
+                    "reference": accuracy_gate.get("threshold"),
+                    "passed": accuracy_gate.get("passed"),
+                },
                 failure={
                     "error_class": str(row.get("error_class") or ""),
                     "error_excerpt": str(row.get("error_excerpt") or ""),
@@ -406,8 +456,8 @@ def _record_config_attempts(
                     outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
                 ),
             )
-            for gate in row.get("gates") or []:
-                if not isinstance(gate, dict) or not str(gate.get("gate") or ""):
+            for gate in gates:
+                if not str(gate.get("gate") or ""):
                     continue
                 recorder.record_attempt_gate(
                     attempt_id,
@@ -1548,6 +1598,8 @@ class WritebackCollaborator:
             result_dict = {}
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
+        if task.kind == "explore":
+            _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
             for vo in per_variant:
