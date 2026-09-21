@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from importlib import metadata
 from typing import Callable, Mapping
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -397,7 +398,7 @@ register_agent_provider(
     AgentProvider(
         name="claude",
         factory=_create_claude_backend,
-        default_model="claude-opus-5",
+        default_model=DEFAULT_CLAUDE_MODEL,
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,
@@ -419,7 +420,7 @@ register_agent_provider(
     AgentProvider(
         name="codex",
         factory=_create_codex_backend,
-        default_model="gpt-5.6-sol",
+        default_model=DEFAULT_CODEX_MODEL,
         capabilities=AgentCapabilities(
             writable=True,
             resumable=True,

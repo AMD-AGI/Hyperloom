@@ -141,6 +141,13 @@ _ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
 
+# The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
+# every model ladder in both packages, so it lives beside the backend names it is keyed by.
+DEFAULT_CLAUDE_MODEL = "claude-opus-5"
+# The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
+# behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
     """True when an Anthropic-side endpoint or key is configured."""
@@ -346,17 +353,21 @@ def resolve_forge_llm_model(
     *,
     env: Mapping[str, str] | None = None,
     explicit: str | None = None,
-    default: str = "",
 ) -> str:
-    """Resolve the Forge LLM model id for a chosen agent backend."""
+    """Resolve the Forge LLM model id for a chosen agent backend.
+
+    The backend decides the last rung, so callers never have to: ``CLAUDE_MODEL``
+    is unset on every run that authenticates by OAuth token, and a caller that
+    forgot a default would post an empty model id.
+    """
     source = env if env is not None else os.environ
     explicit_model = (explicit or "").strip()
     if explicit_model:
         return explicit_model
     backend = (agent_backend or "").strip().lower()
-    if backend == "codex":
-        return str(source.get("CODEX_MODEL") or "").strip() or default
-    return str(source.get("CLAUDE_MODEL") or "").strip() or default
+    if backend == AGENT_BACKEND_CODEX:
+        return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
 def _expand_env_refs(raw: str, env: Mapping[str, str] | None = None) -> str:
@@ -1092,6 +1103,8 @@ __all__ = [
     "ChatCompletionResult",
     "DEFAULT_ANTHROPIC_BASE_URL",
     "DEFAULT_ANTHROPIC_VERSION",
+    "DEFAULT_CLAUDE_MODEL",
+    "DEFAULT_CODEX_MODEL",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",

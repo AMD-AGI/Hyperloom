@@ -58,15 +58,15 @@ def test_baremetal_defaults_match_compat_doc():
     # falls back to 0.0.0.* and the patch sets are refused on the version gate.
     # The declared version travels with the pin and must name the patch set.
     sglang_pretend = _default("SGLANG_PRETEND_VERSION", sh)
-    assert sglang_pretend == "0.5.18", (
+    assert sglang_pretend == "0.5.19", (
         "SGLANG_PRETEND_VERSION must name the patch set the pinned commit fits; got %s" % sglang_pretend
     )
     assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"' in sh, (
         "install_baremetal.sh must export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG from SGLANG_PRETEND_VERSION"
     )
-    assert "0.5.18 (%s)" % sglang_rocm_extra in doc, (
-        "docs/compatibility.rst must document SGLang '0.5.18 (%s)' to match "
-        "install_baremetal.sh defaults" % sglang_rocm_extra
+    assert "%s (%s)" % (sglang_pretend, sglang_rocm_extra) in doc, (
+        "docs/compatibility.rst must document SGLang '%s (%s)' to match "
+        "install_baremetal.sh defaults" % (sglang_pretend, sglang_rocm_extra)
     )
     assert "SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra in doc, (
         "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra

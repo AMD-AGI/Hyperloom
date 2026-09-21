@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 from hyperloom.common.llm_config import (
+    DEFAULT_CODEX_MODEL,
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
@@ -382,7 +383,7 @@ class CriticAgentBackend:
 
     critic_agent_root: Path
     session_dir: Path
-    codex_model: str = "gpt-5.6-sol"
+    codex_model: str = DEFAULT_CODEX_MODEL
     codex_client_factory: Callable[[], Any] | None = None
     kb_mode: Literal["inmemory", "live"] = "inmemory"
     kb_env: dict[str, str] | None = None

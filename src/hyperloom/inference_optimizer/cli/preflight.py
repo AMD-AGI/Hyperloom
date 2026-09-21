@@ -28,6 +28,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
+    DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
@@ -1295,17 +1296,19 @@ def _ensure_lm_eval_dep(
     }
 
 
-def _unset_hip_visible_devices() -> None:
-    """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §\"GPU Runner Type\")."""
-    if "HIP_VISIBLE_DEVICES" not in os.environ:
+def _normalize_hip_visible_devices() -> None:
+    """Re-index HIP within the device view selected by ROCR."""
+    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
+    if not visible:
         return
-    if "ROCR_VISIBLE_DEVICES" not in os.environ:
+    value = ",".join(str(index) for index in range(len(visible)))
+    previous = os.environ.get("HIP_VISIBLE_DEVICES")
+    if previous == value:
         return
-    value = os.environ.pop("HIP_VISIBLE_DEVICES")
+    os.environ["HIP_VISIBLE_DEVICES"] = value
     print(
-        f"Preflight: WARNING — unset HIP_VISIBLE_DEVICES={value!r} "
-        f"(ROCR_VISIBLE_DEVICES wins on ROCm; HIP_VISIBLE_DEVICES can "
-        f"make torch.cuda.is_available() false inside Magpie subprocess)"
+        f"Preflight: WARNING — normalized HIP_VISIBLE_DEVICES={previous!r} to {value!r} "
+        f"within ROCR_VISIBLE_DEVICES={os.environ['ROCR_VISIBLE_DEVICES']!r}"
     )
 
 
@@ -2116,7 +2119,7 @@ def _preflight(
         claude_primary_key = anthropic_synthesizable_key()
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
-            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
+            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
@@ -2154,7 +2157,7 @@ def _preflight(
         print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
-    _unset_hip_visible_devices()
+    _normalize_hip_visible_devices()
     _run_install_step(
         install_event,
         step_id="check_gpu_visibility",

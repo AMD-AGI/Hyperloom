@@ -38,6 +38,8 @@ from hyperloom.common.llm_config import (
     get_async_openai_client,
     get_openai_client,
     openai_client_kwargs,
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
     parse_custom_headers,
     provider_model_defaults,
     resolve_forge_llm_model,
@@ -541,7 +543,8 @@ def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
 
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():
     assert resolve_forge_llm_model("claude", env={"CLAUDE_MODEL": "claude-orch"}) == "claude-orch"
-    assert resolve_forge_llm_model("codex", env={}, default="gpt-default") == "gpt-default"
+    assert resolve_forge_llm_model("codex", env={}) == DEFAULT_CODEX_MODEL
+    assert resolve_forge_llm_model("claude", env={}) == DEFAULT_CLAUDE_MODEL
     assert (
         resolve_forge_llm_model(
             "claude",
