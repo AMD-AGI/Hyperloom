@@ -42,6 +42,12 @@ it.
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
 
+- **Drop the redundant Magpie `benchmarker.py` atomic-write patch.** The default
+  `MAGPIE_REF` already copies benchmark scripts atomically upstream; install-time
+  patching is limited to SGLang trust, eval-concurrency, and the client tokenizer
+  hook. `MAGPIE_PATCH_STRICT` no longer exists (setting it had no effect after the
+  atomic patcher was removed).
+
 ### Added
 
 - **An enablement session now ships an ordered replay recipe, and a verdict on
