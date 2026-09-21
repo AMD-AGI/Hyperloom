@@ -34,7 +34,7 @@ from hyperloom.orchestrator.actions.executors._accuracy_gate import (
 )
 from hyperloom.orchestrator.enablement.lane import EnablementLane
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS
+from hyperloom.orchestrator.phases.machine_state import ENABLEMENT_MAX_ATTEMPTS, PHASE_ENABLEMENT
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.round_store import FAILED, RoundStore
@@ -606,3 +606,43 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     assert task_id
     assert lane.shared_state.enablement.validation_pending is True
     assert lane.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_a_raising_pump_is_named_on_the_event(_bound_session):
+    """The pump must not take the tick down, but it cannot vanish either."""
+    enablement_event.record_trigger(
+        origin=enablement_event.ORIGIN_BOOT,
+        mode="all",
+        kind="import_error",
+        evidence="ImportError: cannot import name 'fused_moe'",
+    )
+
+    async def _boom() -> None:
+        raise RuntimeError("task store went away")
+
+    async def _ok() -> None:
+        return None
+
+    crashes: list[dict[str, Any]] = []
+
+    def _record(*, stage: str, exc: BaseException, **_kw: Any) -> None:
+        crashes.append({"stage": stage, "exc": exc})
+        enablement_event.record_fault(stage=stage, exc=exc)
+
+    fake = types.SimpleNamespace(
+        shared_state=types.SimpleNamespace(phase=PHASE_ENABLEMENT),
+        _maybe_route_build_outcomes=_boom,
+        _maybe_enqueue_enablement_baseline_revalidation=_ok,
+        _maybe_enqueue_enablement_specialist=_ok,
+        _record_coordinator_exception=_record,
+    )
+    await EnablementLane._pump_enablement_safely(fake, caller="tick")
+    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
+
+    event = _events(_bound_session)[0]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["stage"] == "enablement_pump:_boom:tick"
+    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
+    assert "task store went away" in event["ext"]["failure"]["message"]
+    assert len(crashes) == 1

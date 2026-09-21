@@ -178,6 +178,11 @@ def _record_source_attempt(
         return
     base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
     accuracy_pass = result.get("accuracy_pass")
+    # Only the executor knows the stack the patch was measured on, since it
+    # rebinds onto the live stack top before running; the task's params are the
+    # stack as of dispatch. Absent on a row that never reached a measurement.
+    stack = result.get("measured_against")
+    measured_against = {"measured_against": stack} if isinstance(stack, Mapping) and stack else {}
     try:
         recorder.record_attempt(
             task_id,
@@ -221,9 +226,18 @@ def _record_source_attempt(
             },
             decision=status,
             adopted=status == "kept",
+            # What stood behind the adoption, on the same rule the config arm
+            # writes it under: a KEEP no accuracy gate ruled on rests on
+            # throughput alone, a weaker claim that must not read alike. Only
+            # an adoption carries it -- on a reverted row "accuracy_pass"
+            # would name the gate that refused it.
+            validation_basis=(
+                ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if status == "kept" else ""
+            ),
             attribution_eligible=(
                 status == "kept" and base is not None and result.get("output_throughput") is not None
             ),
+            **measured_against,
         )
         if accuracy_pass is not None:
             recorder.record_attempt_gate(
@@ -2044,11 +2058,18 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
 
     async def _pump_framework_agent_phase_safely(self, *, caller: str) -> None:
-        """Best-effort FRAMEWORK pump wrapper shared by tick and run."""
+        """Best-effort FRAMEWORK pump wrapper shared by tick and run.
+
+        A pump that raises must not take the tick down -- the phase is driven
+        again on the next one -- but it is filed like any other coordinator-side
+        exception, because a pump that raises on every tick otherwise leaves a
+        phase that never dispatched anything closing clean.
+        """
         try:
             await self._pump_framework_agent_phase()
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — a raising pump must not end the tick
             log.exception("FRAMEWORK pump (%s) failed", caller)
+            self._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,

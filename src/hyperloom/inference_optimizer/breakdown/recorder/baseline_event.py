@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
+    clip as _clip,
     failure_row as _failure_row,
     float_or_none as _float_or_none,
     graded_axes as _graded_axes,
@@ -72,6 +73,24 @@ ARGS_UNAVAILABLE = "unavailable"
 # booted a round was refused rather than attempted: assembly says ``skipped``.
 _BUDGET_ERROR_CLASS = "session_time_exhausted"
 
+# Result-dict keys the baseline executor stamps on an eval-rooted failure.
+_KEY_BASELINE_EVAL_FAILED = "baseline_eval_failed"
+_KEY_BASELINE_EVAL_FAILURE_KIND = "baseline_eval_failure_kind"
+_KEY_BASELINE_EVAL_OBSERVED_ACCURACY = "baseline_eval_observed_accuracy"
+_KEY_BASELINE_EVAL_ACCURACY_FLOOR = "baseline_eval_accuracy_floor"
+_KEY_BASELINE_EVAL_EVIDENCE = "baseline_eval_evidence"
+_KEY_BASELINE_EVAL_CONTRACT_FINGERPRINT = "baseline_eval_contract_fingerprint"
+_DEFAULT_EVAL_ACCURACY_FLOOR = 0.5
+
+# Executor warnings that mean the accuracy eval did not produce a usable reference.
+_EVAL_FAILURE_WARNINGS = frozenset(
+    {
+        "eval_failed_no_fallback_baseline_requires_accuracy",
+        "post_measure_accuracy_failed",
+        "eval_failed_fallback_no_accuracy",
+    }
+)
+
 # Warnings are prose an operator reads, and a round can accumulate one per harvested artifact.
 _MAX_ROUND_WARNINGS = 12
 
@@ -98,6 +117,9 @@ __all__ = [
     "assemble_baseline_action",
     "assemble_baseline_actions",
     "assemble_baseline_ext",
+    "anchoring_eval_from_action",
+    "anchoring_eval_from_actions",
+    "anchoring_eval_from_timeline",
     "baseline_event_id",
     "make_baseline_recorder",
 ]
@@ -155,6 +177,18 @@ def record_action_decision(
         )
 
 
+def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> dict[str, Any]:
+    """The event-level fragment: its timeline sequence and its own start time.
+
+    An event holds every measurement of one phase and cycle, and the timeline
+    orders events by ``start_time``, so the event's start is the first action's
+    -- read from here -- and never the closing action's, which would file the
+    event at whichever measurement happened to finish last.
+    """
+    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+    return rows[0] if rows else {}
+
+
 def _republish_closed_event(event: str) -> None:
     """Re-assemble a closed event so a fragment written after it is published.
 
@@ -168,8 +202,7 @@ def _republish_closed_event(event: str) -> None:
     from .assembler import baseline_event_parts
 
     parts = baseline_event_parts(event)
-    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = rows[0] if rows else {}
+    header = _event_header(parts, event=event)
     action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
     ends = [str(row.get("end_time") or "") for row in action_rows]
     if not ends or not all(ends):
@@ -270,7 +303,7 @@ def _timing(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] | None:
-    """Project a failed result's failure row, or ``None`` when it succeeded."""
+    """Project a subprocess failure row, or ``None`` when the benchmark succeeded."""
     if str(result.get("status") or "") == "succeeded":
         return None
     return {
@@ -284,8 +317,166 @@ def _failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] | None:
     }
 
 
+def _eval_failure_kind(result: Mapping[str, Any], *, observed_accuracy: Any) -> str:
+    """Resolve the eval-failure kind stamped on the result or inferred from it."""
+    kind = str(result.get(_KEY_BASELINE_EVAL_FAILURE_KIND) or "").strip()
+    if kind:
+        return kind
+    acc = _float_or_none(observed_accuracy)
+    if acc is None:
+        return "accuracy_unavailable"
+    floor = _float_or_none(result.get(_KEY_BASELINE_EVAL_ACCURACY_FLOOR))
+    if floor is None:
+        floor = _DEFAULT_EVAL_ACCURACY_FLOOR
+    if acc <= 0.0 or acc < floor:
+        return "accuracy_below_floor"
+    return "accuracy_unavailable"
+
+
+def _looks_like_eval_failure(result: Mapping[str, Any]) -> bool:
+    """Whether a succeeded benchmark still failed the accuracy gate."""
+    if bool(result.get(_KEY_BASELINE_EVAL_FAILED)):
+        return True
+    if str(result.get("status") or "") != "succeeded":
+        return False
+    if bool(result.get("run_eval_disabled")):
+        return False
+    acc = _float_or_none(result.get("accuracy"))
+    floor = _float_or_none(result.get(_KEY_BASELINE_EVAL_ACCURACY_FLOOR))
+    if floor is None:
+        floor = _DEFAULT_EVAL_ACCURACY_FLOOR
+    if acc is not None and acc > 0.0 and acc >= floor:
+        return False
+    warnings = {str(row) for row in _as_list(result.get("nonfatal_warnings")) if str(row or "")}
+    if str(result.get("accuracy_source") or "") == "eval_unavailable":
+        return True
+    return bool(warnings & _EVAL_FAILURE_WARNINGS)
+
+
+def _eval_failure(result: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project an eval-rooted baseline failure, even when throughput succeeded."""
+    if not _looks_like_eval_failure(result):
+        return None
+    observed = result.get(_KEY_BASELINE_EVAL_OBSERVED_ACCURACY)
+    if observed is None:
+        observed = result.get("accuracy")
+    floor = _float_or_none(result.get(_KEY_BASELINE_EVAL_ACCURACY_FLOOR))
+    if floor is None:
+        floor = _DEFAULT_EVAL_ACCURACY_FLOOR
+    block: dict[str, Any] = {
+        "kind": _eval_failure_kind(result, observed_accuracy=observed),
+        "observed_accuracy": _float_or_none(observed),
+        "accuracy_floor": floor,
+        "contract_fingerprint": str(result.get(_KEY_BASELINE_EVAL_CONTRACT_FINGERPRINT) or ""),
+        "evidence": _clip(result.get(_KEY_BASELINE_EVAL_EVIDENCE) or "", 2000),
+        "accuracy_task": str(result.get("accuracy_task") or ""),
+        "accuracy_metric": str(result.get("accuracy_metric") or ""),
+        "accuracy_source": str(result.get("accuracy_source") or ""),
+    }
+    stage = _as_dict(result.get("accuracy_stage"))
+    if stage:
+        block["accuracy_stage"] = {
+            "status": str(stage.get("status") or ""),
+            "error_class": str(stage.get("error_class") or ""),
+            "workspace": str(stage.get("workspace") or ""),
+        }
+    return block
+
+
+def _action_failure(result: Mapping[str, Any], *, stage: str) -> dict[str, Any] | None:
+    """Project the failure row an operator reads first: boot failures or eval failures."""
+    eval_block = _eval_failure(result)
+    if eval_block is not None:
+        message = str(eval_block.get("evidence") or eval_block.get("accuracy_source") or "")
+        return {
+            **_failure_row(
+                stage=stage,
+                error_class=str(eval_block.get("kind") or "baseline_eval_failed"),
+                message=message,
+            ),
+            "returncode": _int_or_none(result.get("returncode")),
+            "stderr_log_path": str(result.get("stderr_log_path") or ""),
+        }
+    return _failure(result, stage=stage)
+
+
+def _latest_quality_ref_action(actions: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Return the latest action dispatched as a session quality reference."""
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for row in actions:
+        if not isinstance(row, Mapping):
+            continue
+        if not bool(_as_dict(row.get("request")).get("establishes_quality_ref")):
+            continue
+        stamp = str(row.get("end_time") or row.get("start_time") or "")
+        candidates.append((stamp, dict(row)))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
+
+
+def anchoring_eval_from_action(action: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Project one action's anchoring eval verdict for export-time lift."""
+    if not bool(_as_dict(action.get("request")).get("establishes_quality_ref")):
+        return None
+    measurement = _as_dict(action.get("measurement"))
+    eval_failure = _as_dict(action.get("eval_failure"))
+    block: dict[str, Any] = {
+        "task_id": str(action.get("task_id") or ""),
+        "action_status": str(action.get("status") or ""),
+        "decision": str(action.get("decision") or ""),
+    }
+    if bool(action.get("run_eval_disabled")):
+        block["status"] = "disabled"
+        return block
+    if eval_failure:
+        block["status"] = "failed"
+        for key, value in eval_failure.items():
+            if value not in (None, ""):
+                block[key] = value
+        block["accuracy"] = eval_failure.get("observed_accuracy")
+        return block
+    accuracy = _float_or_none(measurement.get("accuracy"))
+    floor = _DEFAULT_EVAL_ACCURACY_FLOOR
+    block["task"] = str(measurement.get("accuracy_task") or "")
+    block["metric"] = str(measurement.get("accuracy_metric") or "")
+    block["source_file"] = str(measurement.get("accuracy_source") or "")
+    block["accuracy"] = accuracy
+    if accuracy is not None and accuracy > 0.0 and accuracy >= floor:
+        block["status"] = "succeeded"
+        return block
+    block["status"] = "unavailable"
+    return block
+
+
+def anchoring_eval_from_actions(actions: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Project this event's anchoring eval from its actions, latest wins."""
+    action = _latest_quality_ref_action(actions)
+    if action is None:
+        return None
+    return anchoring_eval_from_action(action)
+
+
+def anchoring_eval_from_timeline(timeline: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Project the session's anchoring eval across baseline events, latest wins."""
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for event in timeline:
+        if not isinstance(event, Mapping) or str(event.get("type") or "") != EVENT_TYPE:
+            continue
+        action = _latest_quality_ref_action(_as_list(_as_dict(event.get("ext")).get("actions")))
+        if action is None:
+            continue
+        stamp = str(action.get("end_time") or action.get("start_time") or "")
+        candidates.append((stamp, action))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return anchoring_eval_from_action(candidates[-1][1])
+
+
 class BaselineEventRecorder:
-    """Records one baseline action's facts into the event it belongs to."""
+    """Records one baseline action's facts into whichever event owns it."""
 
     def __init__(
         self,
@@ -299,6 +490,7 @@ class BaselineEventRecorder:
         params: dict[str, Any] | None = None,
         failure_streak_before: Any = None,
         total_failures_before: Any = None,
+        owns_event: bool = True,
     ):
         """Bind a recorder to one action inside one event.
 
@@ -308,11 +500,14 @@ class BaselineEventRecorder:
         not is held to a different gate, and which gate applied is not
         recoverable from the numbers. The two ``*_before`` counts are read at
         the dispatch, because the write-back advances the session's counters
-        after this event has closed.
+        after this event has closed. ``owns_event`` is false for a measurement
+        a phase runs as a sub-step of its own event, whose shell and status
+        belong to that phase rather than to this action.
         """
         self._sink = sink
         self._t0 = time.monotonic()
         self._start_time = _now_iso()
+        self._owns_event = bool(owns_event)
         self._sequence: int | None = None
         self._closed = False
         self._run_index = 0
@@ -360,7 +555,9 @@ class BaselineEventRecorder:
     # ---- lifecycle -------------------------------------------------------
 
     def begin(self) -> None:
-        """Open the event this action belongs to."""
+        """Open the event this action belongs to, unless a host already owns it."""
+        if not self._owns_event:
+            return
         self._sequence = open_event(
             event_type=EVENT_TYPE,
             event=self.event_id,
@@ -508,8 +705,9 @@ class BaselineEventRecorder:
                 "warmup_round_tput": _float_or_none(payload.get("warmup_round_tput")),
                 "convergence": _as_dict(payload.get("baseline_convergence")) or None,
                 "accuracy_stage": _as_dict(payload.get("accuracy_stage")) or None,
+                "eval_failure": _eval_failure(payload) or None,
                 "cold_anchor": dropped or None,
-                "failure": _failure(payload, stage=EVENT_TYPE),
+                "failure": _action_failure(payload, stage=EVENT_TYPE),
             },
         )
 
@@ -520,6 +718,8 @@ class BaselineEventRecorder:
         budget would not hold the hot pass: usable and knowingly depressed.
         ``skipped`` is a measurement the run's clock refused before it booted.
         """
+        if _eval_failure(result) is not None:
+            return "failed"
         if str(result.get("status") or "") == "succeeded":
             return "degraded" if _as_dict(result.get("measure_round_dropped")) else "succeeded"
         if self._rounds == 0 and str(result.get("error_class") or "") == _BUDGET_ERROR_CLASS:
@@ -546,7 +746,7 @@ class BaselineEventRecorder:
         )
 
     def _close(self, *, status: str, action: Mapping[str, Any]) -> None:
-        """Record the action's terminal facts and close the event."""
+        """Record the action's terminal facts and, when it owns the event, close it."""
         if self._closed:
             return
         self._closed = True
@@ -560,19 +760,30 @@ class BaselineEventRecorder:
                 "duration_sec": round(time.monotonic() - self._t0, 3),
             }
         )
+        if not self._owns_event:
+            return
         from .assembler import baseline_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_baseline_ext(baseline_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            parts = baseline_event_parts(self.event_id)
+            ext, derived = assemble_baseline_ext(parts, event=self.event_id)
+            # This action's own start only dates the event when the shell write
+            # failed, leaving this close as the first thing to put it on the
+            # timeline.
+            opened_at = str(_event_header(parts, event=self.event_id).get("start_time") or "")
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=opened_at or self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing baseline event {self.event_id}")
 
 
 def _invocation_block(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -650,6 +861,7 @@ def assemble_baseline_actions(
                 "warmup_round_tput": row.get("warmup_round_tput"),
                 "convergence": row.get("convergence"),
                 "accuracy_stage": row.get("accuracy_stage"),
+                "eval_failure": row.get("eval_failure"),
                 "cold_anchor": row.get("cold_anchor"),
                 "runs": run_rows,
                 "failure": _as_dict(row.get("failure")) or None,
@@ -680,7 +892,11 @@ def assemble_baseline_ext(
     """Assemble one baseline event's ``ext`` -- one entry per action the event
     owns -- and the status derived from those actions."""
     actions = assemble_baseline_actions(parts, event=event)
-    return {"actions": actions}, _worst_status(action.get("status") for action in actions)
+    ext: dict[str, Any] = {"actions": actions}
+    anchoring = anchoring_eval_from_actions(actions)
+    if anchoring is not None:
+        ext["anchoring_eval"] = anchoring
+    return ext, _worst_status(action.get("status") for action in actions)
 
 
 def make_baseline_recorder(
@@ -694,6 +910,7 @@ def make_baseline_recorder(
     params: dict[str, Any] | None = None,
     failure_streak_before: Any = None,
     total_failures_before: Any = None,
+    owns_event: bool = True,
 ) -> BaselineEventRecorder | None:
     """Build a recorder, or ``None`` when one cannot be constructed.
 
@@ -714,6 +931,7 @@ def make_baseline_recorder(
             params=params,
             failure_streak_before=failure_streak_before,
             total_failures_before=total_failures_before,
+            owns_event=owns_event,
         )
     except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
         log.warning(

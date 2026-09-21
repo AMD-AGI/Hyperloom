@@ -18,7 +18,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
 
+### Changed
+
+- **Session breakdown timeline events now name what they used to lose.** A
+  KERNEL visit's verdict is derived from the instruments that ruled on each
+  candidate rather than from the phase's own exit story, so a visit that kept
+  nothing is no longer readable as a clean success. Sub-steps of a phase event
+  (baseline rounds, roofline probes) can be attributed back to the parent via
+  `sbd_event_id` instead of opening a standalone event that orphans the
+  measurement. Warm replay records each apply item's fate; baseline events
+  carry the anchoring eval that established quality; FRAMEWORK records
+  configuration-arm runs and mid-entry faults; ENABLEMENT and the coordinator
+  name phase-spanning exceptions that previously left those events closing
+  clean. Prelude marks dropped arms. The corresponding TypedDicts
+  (`V6Framework*`, `V6Kernel*`, `V6BaselineExt`, `V6WarmReplayExt`,
+  `V6RooflineExt`) and a schema-contract test pin the wire so a renamed key
+  cannot drift silently again.
+
 ### Fixed
+
+- **Timeline close paths can no longer raise into the loop on a broken spool.**
+  After the recorder boundary narrowing, several event `finish` / `_close`
+  helpers still called `event_parts` unguarded while callers (baseline
+  executor, warm-replay settle, conc-sweep, and the Never-raises stack ledger)
+  assumed close could not fail. An `OSError` from the spool at assembly time
+  therefore escaped into phase teardown or action return. Those closes now
+  catch `RECORDING_ERRORS`, note the loss, and leave finalize to recover an
+  open event as `interrupted` -- the same contract `phase_event` and
+  `enablement_event` already keep.
 
 - **A Slurm row declaring a workload shape was benchmarked at the defaults.**
   The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as

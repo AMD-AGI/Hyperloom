@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.inference_optimizer.tests.test_geak_gain_alignment import _journey_with_validated_keeps
+from hyperloom.inference_optimizer.tests.test_geak_promotion_retention import integrated_count, settled_e2e
 from hyperloom.inference_optimizer.tests.test_geak_revalidation_dispatch import coordinator as coordinator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import PHASE_KERNEL_AGENT, PHASE_SWEEP
@@ -77,7 +78,7 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
         )
         assert coord.phase_kernel._kernel_timeline() is None
         original = next(event for event in read_timeline_events(coord.session_dir) if event["id"] == origin)
-        assert original["ext"]["geak"]["attempts"]["counts"]["integrated"] == 1
+        assert integrated_count(original["ext"]) == 1
         state.save(coord.session_dir)
 
         resumed = Coordinator.__new__(Coordinator)
@@ -137,13 +138,11 @@ async def test_later_cycle_disk_recovery_settles_the_candidate_event(coordinator
         resumed.shared_state.save(coord.session_dir)
         exported = exporter.build(coord.session_dir)
         events = {event["id"]: event for event in exported["timeline"]}
-        earlier = events[origin]["ext"]["geak"]["attempts"]
-        later = events[kernel_event.kernel_event_id(1)]["ext"]["geak"].get("attempts") or {}
-        assert earlier["counts"]["integrated"] == (1 if new_candidate else 0)
-        assert later.get("counts", {}).get("integrated", 0) == 0
+        assert integrated_count(events[origin]["ext"]) == (1 if new_candidate else 0)
+        assert integrated_count(events[kernel_event.kernel_event_id(1)]["ext"]) == 0
         expected_origin = kernel_event.kernel_event_id(1) if new_candidate else origin
         assert recovered_origin == expected_origin
-        rejected = events[expected_origin]["ext"]["geak"]["attempts"]["kernels"][0]["e2e"]
+        rejected = settled_e2e(events[expected_origin]["ext"])
         assert rejected["decision"] == "REVERT"
         assert rejected["integrated"] is False
         assert rejected["validated"] is False

@@ -345,7 +345,9 @@ class KernelStackPhase(PhaseHandler):
         entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
-        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+        from ..actions.executors.baseline import BaselineExecutor
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
         from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
@@ -396,9 +398,9 @@ class KernelStackPhase(PhaseHandler):
                     # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
                     # on throughput alone.
                     "quality_ref_exempt": True,
-                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it leaves no
-                    # baseline event.
-                    SBD_INNER_STEP_PARAM: True,
+                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
+                    # that event rather than leaving a baseline event of its own.
+                    INLINE_EVENT_PARAM: kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0)),
                 },
                 idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
             )

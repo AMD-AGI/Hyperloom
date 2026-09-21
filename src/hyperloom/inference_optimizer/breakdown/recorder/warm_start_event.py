@@ -276,18 +276,22 @@ class WarmStartEventRecorder:
         self._sink.record(SECTION_EVENT, payload)
 
         from .assembler import warm_start_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing warm_start event {self.event_id}")
 
     def _release(self) -> None:
         """Stop claiming reads. Tolerant of a token set on another context."""

@@ -693,8 +693,12 @@ class EnablementLane(CoordinatorCollaborator):
         ):
             try:
                 await pump()
-            except Exception:  # noqa: BLE001 — a wedged pump must not strand the phase
+            except Exception as exc:  # noqa: BLE001 — a wedged pump must not strand the phase
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
+                self._record_coordinator_exception(
+                    stage=f"enablement_pump:{pump.__name__}:{caller}",
+                    exc=exc,
+                )
 
 
 def _round_task_id(state: Any, res: dict[str, Any]) -> str:

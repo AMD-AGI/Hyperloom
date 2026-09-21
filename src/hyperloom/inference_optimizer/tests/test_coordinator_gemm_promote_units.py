@@ -1638,6 +1638,7 @@ class TestKernelE2EMeasurementPromotion:
         from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
             ROUTE_FORGE,
+            SOURCE_GEMM_TUNING,
             assemble_kernel_ext,
         )
         from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -1672,8 +1673,8 @@ class TestKernelE2EMeasurementPromotion:
         assert coord.shared_state.cumulative_gain_validated == pytest.approx(gain)
         # The gain is graded on the session's own axis, and the run says which
         # one, so an interactivity gain is never read back as an output gain.
-        [run] = ext["forge"]["lanes"]["gemm_tuning_runs"]
-        assert run["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
+        [run] = [row for row in ext["attempts"] if row["source_kind"] == SOURCE_GEMM_TUNING]
+        assert run["detail"]["graded_objective"] == ("output_throughput" if explicit_output else "e2e_norm_intvty_p90")
 
     @pytest.mark.asyncio
     async def test_gemm_local_keep_without_baseline_axes_does_not_publish_prior_gain(self, coord, monkeypatch):

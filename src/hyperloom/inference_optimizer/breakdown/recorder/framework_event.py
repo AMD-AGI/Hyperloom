@@ -248,6 +248,7 @@ class FrameworkEventRecorder:
         self._start_time = _now()
         self._sequence: int | None = None
         self._closed = False
+        self._faulted = False
         # Only gates are counted: appended rows carry their order in the write
         # itself, while a keyed gate needs a number no other leg has spent.
         self._gate_ordinals = _resume_gate_ordinals(self.event_id)
@@ -707,6 +708,43 @@ class FrameworkEventRecorder:
 
     # ---- close -----------------------------------------------------------
 
+    def record_fault(
+        self,
+        *,
+        stage: str,
+        exc: BaseException | None = None,
+        error_class: str = "",
+        message: Any = "",
+    ) -> None:
+        """Name a fault that struck mid-entry, without ending the entry.
+
+        A raising tick does not end a FRAMEWORK entry: the coordinator files
+        the exception against its crash count and the loop carries on, so the
+        entry outlives the fault and is closed later on its own exit evidence.
+        Closing here would cut short an entry that survived, and recording
+        nothing left it closing clean -- an entry that had blown up reporting
+        a status drawn only from what it managed to dispatch.
+
+        Only the first fault is kept: what follows a crash is generally its
+        consequence, and the cause is the more useful of the two. What the
+        entry still adopted stays on its attempt rows, which this does not
+        touch.
+        """
+        if self._closed or self._faulted:
+            return
+        self._faulted = True
+        self._sink.record(
+            SECTION_EVENT,
+            {
+                "failure": _failure_row(
+                    stage=stage,
+                    exc=exc,
+                    error_class=error_class or ("" if exc is not None else f"{stage}_failed"),
+                    message=message,
+                )
+            },
+        )
+
     def finish(
         self,
         *,
@@ -714,27 +752,24 @@ class FrameworkEventRecorder:
         trigger: str = "",
         hint: str = "",
         switch_bottleneck: bool | None = None,
-        failure: Mapping[str, Any] | None = None,
     ) -> None:
-        """Close the event on the phase's own exit evidence. ``failure`` carries
-        ``failed_task_id`` / ``error_class`` / ``error`` when the entry
-        failed."""
-        failed = _as_dict(failure)
-        payload: dict[str, Any] = {
-            "exit": {
-                "reason": str(exit_reason or ""),
-                "trigger": str(trigger or ""),
-                "hint": str(hint or ""),
-                "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
+        """Close the event on the phase's own exit evidence.
+
+        Takes no failure of its own: a task that failed is on its run row, a
+        fault the entry survived came through :meth:`record_fault`, and an
+        entry that raised out closes through :meth:`finish_crashed`.
+        """
+        self._close(
+            status="",
+            payload={
+                "exit": {
+                    "reason": str(exit_reason or ""),
+                    "trigger": str(trigger or ""),
+                    "hint": str(hint or ""),
+                    "switch_bottleneck": None if switch_bottleneck is None else bool(switch_bottleneck),
+                },
             },
-        }
-        if failed:
-            payload["failure"] = {
-                "failed_task_id": str(failed.get("failed_task_id") or ""),
-                "error_class": str(failed.get("error_class") or ""),
-                "error": str(failed.get("error") or ""),
-            }
-        self._close(status="failed" if failed else "", payload=payload)
+        )
 
     def finish_crashed(self, exc: BaseException) -> None:
         """Close an event whose phase raised instead of exiting."""
@@ -767,18 +802,22 @@ class FrameworkEventRecorder:
             },
         )
         from .assembler import framework_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_framework_ext(framework_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status or "succeeded",
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_framework_ext(framework_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status or "succeeded",
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing framework event {self.event_id}")
 
 
 def assemble_framework_ext(
@@ -883,17 +922,27 @@ def _derived_status(
     proposals: list[dict[str, Any]],
     attempts: list[dict[str, Any]],
 ) -> str:
-    """Decide the status the event closes on: ``failed`` when the entry
-    recorded a failure, ``skipped`` when it did nothing at all, ``degraded``
-    when it worked but never closed, and otherwise the worst status its runs
-    reported -- an entry whose every run failed is not a success."""
+    """Decide the status the event closes on: ``failed`` when the entry itself
+    failed, ``skipped`` when it did nothing at all, and otherwise the worst
+    status its runs reported -- an entry whose dispatches failed is not a
+    success.
+
+    An entry that recorded work but dispatched nothing reads ``succeeded``
+    rather than reducing over an empty run list, which yields ``skipped`` and
+    would report a phase that proposed grids and left before any of them
+    completed as one that never ran.
+
+    A failed attempt is not a failed entry: a search that measured its variants
+    and rejected every one of them did the job it was dispatched for, and the
+    rejection is on the attempt row.
+    """
     if _as_dict(header.get("failure")):
         return "failed"
     if not (runs or proposals or attempts):
         return "skipped"
-    if not str(header.get("end_time") or ""):
-        return "degraded"
-    return _worst_status(row.get("status") for row in runs) or "succeeded"
+    if not runs:
+        return "succeeded"
+    return _worst_status(row.get("status") for row in runs)
 
 
 def _blocking_gate(gates: list[dict[str, Any]]) -> str:

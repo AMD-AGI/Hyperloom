@@ -690,3 +690,38 @@ def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
     from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
 
     assert harvest_realized_diff(tmp_path, [], tmp_path / "realized.patch") == ""
+
+
+def test_measured_against_reports_the_rebound_stack_not_the_dispatch_one():
+    """The anchor is the drift-resolved one the gate graded on, not params."""
+    stack = ip._measured_against(
+        {
+            "base_tput": 90.0,
+            "accuracy_baseline": 0.81,
+            "base_extra_args": "  --already-won 1  ",
+            "base_extra_envs": {"KEPT": "1"},
+            "base_remove_args": ["--drop-me"],
+            "base_unset_envs": ["STALE"],
+            "base_args_mode": "replace",
+        },
+        base_tput=100.0,
+    )
+
+    assert stack == {
+        "throughput": 100.0,
+        "accuracy": 0.81,
+        "extra_server_args": "--already-won 1",
+        "extra_envs": {"KEPT": "1"},
+        "remove_args": ["--drop-me"],
+        "unset_envs": ["STALE"],
+        "args_mode": "replace",
+    }
+
+
+def test_measured_against_leaves_an_unmeasured_anchor_null():
+    """A zero anchor is no anchor; reporting it as 0.0 would read as a measurement."""
+    stack = ip._measured_against({}, base_tput=0.0)
+
+    assert stack["throughput"] is None
+    assert stack["accuracy"] is None
+    assert stack["args_mode"] == "append"

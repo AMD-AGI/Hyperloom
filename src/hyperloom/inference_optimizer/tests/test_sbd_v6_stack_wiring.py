@@ -209,3 +209,22 @@ def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir
 
         assert coord._lift_to_current_best("explore", 1100.0, {"name": "kept"}) is True
         assert len(coord.shared_state.optimization_stack) == 1
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(session_dir, monkeypatch):
+    """``stack_event.finish`` claims Never raises; the close-time read must keep that."""
+    from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+    with session_scope(session_dir):
+        stack_event.record_adoption(
+            stack_index=0,
+            entry={"action": "explore", "variant_name": "kept"},
+            throughput_before=1000.0,
+            throughput_after=1100.0,
+            baseline_tput=1000.0,
+        )
+        monkeypatch.setattr(
+            "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+        )
+        stack_event.finish()

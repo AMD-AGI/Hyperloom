@@ -18,9 +18,9 @@ from .recorder_warnings import note_failure
 __all__ = [
     "EVENT_STATUS_INTERRUPTED",
     "EVENT_STATUS_RUNNING",
+    "OPEN_EVENT_STATUSES",
     "RESIDUAL_NO_EVENT",
     "RESIDUAL_RUNNING",
-    "TERMINAL_EVENT_STATUSES",
     "TIMELINE_SEQUENCE_FIELD",
     "ResidualEvent",
     "build_envelope",
@@ -42,17 +42,13 @@ EVENT_STATUS_RUNNING = "running"
 #: verdict was never reached.
 EVENT_STATUS_INTERRUPTED = "interrupted"
 
-#: Statuses that mean an event closed. Anything outside this set, including a
-#: missing status, leaves the event open as far as finalize is concerned.
-TERMINAL_EVENT_STATUSES: frozenset[str] = frozenset(
-    {
-        "succeeded",
-        "failed",
-        "degraded",
-        "skipped",
-        EVENT_STATUS_INTERRUPTED,
-    }
-)
+#: Statuses that mean an event is still open: the one :func:`open_event` writes,
+#: and the absence of an event behind the fragments. Every other status is one a
+#: closing write put there, so finalize leaves it alone. Stated this way round
+#: because the terminal vocabulary is each event type's own -- a warm replay
+#: closes ``rejected`` -- and an allowlist here would silently recover a status
+#: it had not been told about, overwriting a real verdict with ``interrupted``.
+OPEN_EVENT_STATUSES: frozenset[str] = frozenset({"", EVENT_STATUS_RUNNING})
 
 #: An event on disk as ``running`` whose closing write never ran. Its sequence
 #: is on the event-level fragment, so finalize updates that same entry.
@@ -227,7 +223,7 @@ def residual_events(
         if not event or event in seen:
             continue
         seen.add(event)
-        if on_disk.get(event, "") in TERMINAL_EVENT_STATUSES:
+        if on_disk.get(event, "") not in OPEN_EVENT_STATUSES:
             continue
         sequence = timeline_sequence(row)
         residual.append(
