@@ -20,6 +20,15 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.20 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.20-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. Kernel-shape profiling for SGLang >= 0.5.18 uses
+  TraceLens `kernel_shape_tool` rather than git-applying SGLang roofline
+  patches. **Upgrade note:** move off `v0.5.18-rocm724-*` images or bare-metal
+  0.5.19 pins to `v0.5.20-rocm10-mi30x|mi35x-20260920` (or match `SGLANG_REF`
+  on bare metal).
+
 - **Repair kernel-tuning promotion and analysis handoffs.** GEMM integration
   and fusion siblings now default to a 1% E2E KEEP threshold instead of 3%,
   preserving explicit fusion overrides. MoE tuning collects and persists valid
