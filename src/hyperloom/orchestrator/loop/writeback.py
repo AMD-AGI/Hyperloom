@@ -51,6 +51,7 @@ from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -360,6 +361,16 @@ def _record_config_attempts(
         attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
         if not attempt_id:
             continue
+        error_class = str(row.get("error_class") or "")
+        error_excerpt = str(row.get("error_excerpt") or "")
+        failure_attribution = ""
+        if outcome in UNMEASURED_OUTCOMES:
+            failure_attribution = classify_failure_attribution(
+                error_class=error_class,
+                error_excerpt=error_excerpt,
+                reason=row.get("reason"),
+                explicit=row.get("failure_attribution"),
+            )
         try:
             recorder.record_attempt(
                 attempt_id,
@@ -371,6 +382,7 @@ def _record_config_attempts(
                 outcome=outcome,
                 reason=str(row.get("reason") or ""),
                 reasoning=str(variant.get("note") or ""),
+                reasoning_origin=str(variant.get("reasoning_origin") or ""),
                 stage=str(row.get("stage") or ""),
                 fingerprint=fingerprint,
                 # The fingerprint is the join key; the name is what a reader
@@ -393,8 +405,9 @@ def _record_config_attempts(
                     "args_mode": variant.get("args_mode"),
                 },
                 failure={
-                    "error_class": str(row.get("error_class") or ""),
-                    "error_excerpt": str(row.get("error_excerpt") or ""),
+                    "error_class": error_class,
+                    "error_excerpt": error_excerpt,
+                    "attribution": failure_attribution,
                 },
                 accuracy=(
                     {

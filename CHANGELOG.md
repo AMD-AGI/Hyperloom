@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Experience publication now keeps runtime failures out of KB outcome
+  statistics and proves where decision reasoning came from.** Framework
+  attempts classify unmeasured failures as candidate-caused, environmental,
+  harness, or unknown; only candidate-caused failures become Experiences,
+  while every failure remains in SBD V6 with its evidence. Config and source
+  attempts also record the action-time reasoning field that supplied their
+  rationale and retain an action/proposal reference, so provenance labels,
+  gap summaries, and post-action text cannot impersonate original reasoning.
+
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
   the axis pair, explore, ``_lift_to_current_best``, and

@@ -23,10 +23,12 @@ A complete Experience is emitted only when the V6 record proves:
   and max-model-length dimensions retained when present;
 - an exact per-attempt measured baseline and measured-against runtime
   configuration;
-- a supported terminal outcome;
+- a measured keep/revert outcome, or a terminal failure deterministically
+  attributed to the candidate rather than the environment or benchmark
+  harness;
 - a concrete config delta or verifiable source-patch fingerprint;
-- non-generic decision reasoning recorded before publication;
-- a measured outcome or explicit failure class;
+- non-generic decision reasoning traceable to an action-time proposal field;
+- a measured outcome or candidate-specific failure class;
 - required accuracy success for a kept result;
 - valid Framework-event and attempt timestamps.
 
@@ -34,6 +36,11 @@ Attempts that fail any condition remain in the authoritative SBD V6 timeline
 and appear in `reports/experience_v1_publish.json` with an exact skip reason.
 The producer does not fill missing identity, measurements, reasoning, or patch
 content with placeholders.
+
+Failed attempts are classified as `candidate_caused`, `environment`,
+`harness`, or `unknown`. Only `candidate_caused` failures become Experiences.
+The other classes remain available as run evidence and rerun candidates
+without entering KB outcome statistics.
 
 The normalized measured-against configuration is preserved in Experience
 preconditions alongside its `baseline_fingerprint`. Map order and remove/unset
@@ -75,11 +82,14 @@ replace or invalidate `session_breakdown.json`.
 
 ## Reasoning provenance
 
-Configuration variants preserve their authored `note` on the measured attempt.
-Their materialized tasks retain the proposal message id so attempts join the
-right proposal. Source candidates preserve discovery reasoning, and local
-source exploration records its gap rationale before specialist dispatch. A
-provenance label such as `llm_direct` is not accepted as decision reasoning.
+Configuration variants preserve their authored action-time `reasoning` (and
+record which legacy payload field supplied it) on the measured attempt. Their
+materialized tasks retain the proposal message id so attempts join the right
+proposal; internally generated work retains its task as `action_ref`. Source
+candidates preserve discovery reasoning. Gap context and post-action result
+text are recorded in SBD when present but are not accepted as original
+decision reasoning. A provenance label such as `llm_direct` is not a
+substitute for reasoning.
 
 The current producer generates a deterministic factual reflection from the
 recorded outcome and marks its source in provenance. This does not impersonate

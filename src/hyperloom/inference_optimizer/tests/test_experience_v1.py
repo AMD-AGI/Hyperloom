@@ -141,8 +141,10 @@ def breakdown(*, benchmark_mode: str = "synthetic") -> dict:
                         {
                             "attempt_id": "attempt-keep",
                             "arm": "config",
+                            "task_id": "task-keep",
                             "proposal_ref": "proposal-1",
                             "reasoning": "Larger prefill chunks should reduce scheduler overhead.",
+                            "reasoning_origin": "action_payload.reasoning",
                             "variant_name": "chunk-8192",
                             "outcome": "KEEP",
                             "ts": "2026-09-17T12:10:00Z",
@@ -178,7 +180,9 @@ def breakdown(*, benchmark_mode: str = "synthetic") -> dict:
                         {
                             "attempt_id": "attempt-failed",
                             "arm": "config",
+                            "task_id": "task-failed",
                             "reasoning": "Test whether compilation removes repeated Python dispatch overhead.",
+                            "reasoning_origin": "action_payload.reasoning",
                             "variant_name": "compile",
                             "outcome": "FAILED",
                             "ts": "2026-09-17T12:20:00Z",
@@ -192,8 +196,9 @@ def breakdown(*, benchmark_mode: str = "synthetic") -> dict:
                                 "extra_envs": {},
                             },
                             "failure": {
-                                "error_class": "warmup_failed",
-                                "error_excerpt": "server failed during warmup",
+                                "error_class": "capability_unsupported",
+                                "error_excerpt": "the requested compile path is unsupported",
+                                "attribution": "candidate_caused",
                             },
                         },
                         {
@@ -252,6 +257,7 @@ def test_review_selects_only_fidelity_complete_attempts(tmp_path: Path) -> None:
     }
     assert len(keep["baseline_identity"]["baseline_fingerprint"]) == 64
     assert keep["outcome_value"] == 860.0
+    assert keep["reasoning_origin"] == "action_payload.reasoning"
     assert keep["constraints"] == [{"name": "accuracy", "passed": True, "value": 0.82}]
     projected, _ = experience_v1._project_all(tmp_path, breakdown())
     keep_projected = next(item for item in projected if item.attempt_id == "attempt-keep")
@@ -262,6 +268,40 @@ def test_review_selects_only_fidelity_complete_attempts(tmp_path: Path) -> None:
         "unset_envs": ["OLD_SCHEDULER_MODE"],
         "args_mode": "replace",
     }
+    failed = next(row for row in review["ready"] if row["attempt_id"] == "attempt-failed")
+    assert failed["failure_attribution"] == "candidate_caused"
+
+
+def test_review_keeps_runtime_failure_in_sbd_but_not_experience(tmp_path: Path) -> None:
+    value = breakdown()
+    attempt = value["timeline"][0]["ext"]["attempts"][1]
+    attempt["failure"] = {
+        "error_class": "magpie_nonzero_invalid_measurement",
+        "error_excerpt": "benchmark subprocess returned no valid measurement",
+        "attribution": "harness",
+    }
+
+    review = experience_v1.build_framework_experience_review(tmp_path, value)
+
+    assert {row["attempt_id"] for row in review["ready"]} == {"attempt-keep"}
+    assert {
+        "attempt_id": "attempt-failed",
+        "reason": "failed attempt is not candidate-attributed (failure_attribution=harness)",
+    } in review["skipped"]
+
+
+def test_review_rejects_reasoning_not_traceable_to_action_time(tmp_path: Path) -> None:
+    value = breakdown()
+    value["timeline"][0]["ext"]["proposals"] = []
+    attempt = value["timeline"][0]["ext"]["attempts"][0]
+    attempt["reasoning_origin"] = "post_action_result.reasoning"
+
+    review = experience_v1.build_framework_experience_review(tmp_path, value)
+
+    assert {
+        "attempt_id": "attempt-keep",
+        "reason": "decision reasoning is not traceable to the action-time proposal",
+    } in review["skipped"]
 
 
 def test_review_blocks_agentx_until_identity_is_real(tmp_path: Path) -> None:
@@ -395,6 +435,8 @@ def test_publish_maps_ready_attempts_and_writes_receipt(
     assert any(item.startswith("materialized_baseline_configuration=") for item in keep_begin["preconditions"])
     assert keep.decisions[0]["rendered_refs"] == ()
     assert keep.decisions[0]["change"].identity["change_family"] == "config_variant"
+    assert keep_begin["provenance"].extra["reasoning_origin"] == "action_payload.reasoning"
+    assert keep_begin["provenance"].extra["action_ref"] == "proposal-1"
     assert keep.completions[0]["outcome"].constraints == (FakeConstraint("accuracy", True, 0.82),)
     report = json.loads((tmp_path / "reports" / "experience_v1_publish.json").read_text())
     assert report["source"] == "session_breakdown.timeline[type=framework_agent].ext.attempts"

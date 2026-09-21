@@ -300,7 +300,11 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord._open_framework_timeline()
 
-    task = SimpleNamespace(task_id="t-exp-1", kind="explore", params={})
+    task = SimpleNamespace(
+        task_id="t-exp-1",
+        kind="explore",
+        params={"proposal_msg_id": "proposal-config-1"},
+    )
     result = {
         "round_id": "explore-001",
         "per_variant_outcomes": [
@@ -317,6 +321,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                     "unset_envs": ["OLD_ENV"],
                     "args_mode": "replace",
                     "note": "Increase the scheduler batch to reduce dispatch overhead.",
+                    "reasoning_origin": "action_payload.reasoning",
                 },
                 "gates": [
                     {
@@ -341,6 +346,22 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "metrics": {"base_tput": 112.0, "estimated_output_throughput": 40.0},
                 "variant": {},
             },
+            {
+                "variant_name": "v-unsupported",
+                "outcome": "FAILED",
+                "fingerprint": "fp4",
+                "provenance": "llm_direct",
+                "reason": "warmup_failed",
+                "error_class": "capability_unsupported",
+                "error_excerpt": "the requested attention backend is unsupported",
+                "metrics": {"base_tput": 112.0},
+                "variant": {
+                    "extra_server_args": "--attention-backend unsupported",
+                    "extra_envs": {},
+                    "note": "Test whether the alternate backend removes decode launch overhead.",
+                    "reasoning_origin": "action_payload.reasoning",
+                },
+            },
             {"variant_name": "v-dup", "outcome": "SKIPPED_DEDUP", "fingerprint": "fp3"},
         ],
     }
@@ -349,7 +370,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
 
     attempts = {row["fingerprint"]: row for row in _events(session_dir)[0]["ext"]["attempts"]}
     # The deduped variant was never measured, so it is not in the funnel.
-    assert set(attempts) == {"fp1", "fp2"}
+    assert set(attempts) == {"fp1", "fp2", "fp4"}
 
     keep = attempts["fp1"]
     assert keep["arm"] == "config"
@@ -369,6 +390,8 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
         "passed": True,
     }
     assert keep["reasoning"] == "Increase the scheduler batch to reduce dispatch overhead."
+    assert keep["reasoning_origin"] == "action_payload.reasoning"
+    assert keep["proposal_ref"] == "proposal-config-1"
 
     killed = attempts["fp2"]
     assert killed["outcome"] == "KILLED_OVERTIME"
@@ -377,6 +400,10 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert killed["measurement"]["before_tput"] == 112.0
     assert killed["measurement"]["after_tput"] is None
     assert killed["attribution_eligible"] is False
+    assert killed["failure"]["attribution"] == "unknown"
+
+    unsupported = attempts["fp4"]
+    assert unsupported["failure"]["attribution"] == "candidate_caused"
 
 
 def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Path):
@@ -440,6 +467,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
     assert attempt["accuracy"]["passed"] is True
     assert attempt["outcome"] == "KEEP"
     assert attempt["reasoning"] == "Profiling shows redundant attention setup on every request."
+    assert attempt["reasoning_origin"] == "action_params.reasoning"
     assert attempt["patch_path"] == str(patch)
     assert attempt["patches_applied"] == [str(patch)]
     assert attempt["measured_against"] == {
@@ -521,6 +549,7 @@ def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
     assert attempt["accuracy"]["passed"] is None
     assert attempt["accuracy"]["required"] is None
     assert attempt["reasoning"] == "Profile evidence suggests repeated scheduler setup."
+    assert attempt["reasoning_origin"] == "context.gap_symptom"
 
 
 def test_local_explore_records_proposal_reasoning_before_dispatch(

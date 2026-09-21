@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.shared_state import resolve_grading_anchor_tput
 
 if TYPE_CHECKING:
@@ -153,6 +154,25 @@ def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "")
         log.debug("framework timeline: settle record failed", exc_info=True)
 
 
+def _source_action_reasoning(
+    params: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    result: Mapping[str, Any],
+) -> tuple[str, str]:
+    """Resolve source-attempt reasoning without disguising fallback context as authored rationale."""
+    for owner, values, fields in (
+        ("action_params", params, ("reasoning", "rationale")),
+        ("candidate", candidate, ("reasoning", "rationale", "why")),
+        ("context", params, ("gap_symptom",)),
+        ("post_action_result", result, ("reasoning",)),
+    ):
+        for field in fields:
+            value = str(values.get(field) or "").strip()
+            if value:
+                return value, f"{owner}.{field}"
+    return "", ""
+
+
 def _record_source_attempt(
     coord: Any,
     *,
@@ -186,21 +206,22 @@ def _record_source_attempt(
     }.get(status, status)
     candidate = params.get("candidate")
     candidate_row = candidate if isinstance(candidate, Mapping) else {}
-    reasoning = str(
-        params.get("reasoning")
-        or params.get("rationale")
-        or candidate_row.get("reasoning")
-        or candidate_row.get("rationale")
-        or candidate_row.get("why")
-        or params.get("gap_symptom")
-        or result.get("reasoning")
-        or ""
-    )
+    reasoning, reasoning_origin = _source_action_reasoning(params, candidate_row, result)
     patches_applied = [str(path) for path in (result.get("patches_applied") or []) if str(path)]
     patches_reverted = [str(path) for path in (result.get("patches_reverted") or []) if str(path)]
     patch_path = str(result.get("source_realized_patch") or result.get("patch_path") or "")
     if not patch_path:
         patch_path = next(iter(patches_applied or patches_reverted), "")
+    error_class = str(result.get("error_class") or "")
+    error_excerpt = str(result.get("error") or "")[:600]
+    failure_attribution = ""
+    if normalized_status in UNMEASURED_OUTCOMES:
+        failure_attribution = classify_failure_attribution(
+            error_class=error_class,
+            error_excerpt=error_excerpt,
+            reason=result.get("reason"),
+            explicit=result.get("failure_attribution"),
+        )
     try:
         recorder.record_attempt(
             task_id,
@@ -212,6 +233,7 @@ def _record_source_attempt(
             outcome=normalized_status,
             reason=str(result.get("reason") or ""),
             reasoning=reasoning,
+            reasoning_origin=reasoning_origin,
             stage=str(result.get("stage") or ""),
             route=str(params.get("audit_step") or ""),
             patch_source=specialist_task_id,
@@ -251,8 +273,9 @@ def _record_source_attempt(
                 "passed": accuracy_pass,
             },
             failure={
-                "error_class": str(result.get("error_class") or ""),
-                "error_excerpt": str(result.get("error") or "")[:600],
+                "error_class": error_class,
+                "error_excerpt": error_excerpt,
+                "attribution": failure_attribution,
             },
             artifacts={
                 "workspace": str(result.get("workspace") or ""),

@@ -80,7 +80,8 @@ _TASK_KIND_BRIEFS: dict[str, str] = {
         "Propose a GRID of runtime config variants (server flags and/or env vars)"
         " that may raise throughput WITHOUT changing source. Return a"
         " ``proposal_set`` — each entry with ``name``, ``extra_args`` or"
-        " ``extra_envs``, and a one-line ``reason``. You do not benchmark."
+        " ``extra_envs``, and action-time ``reasoning`` that names the evidence,"
+        " mechanism, expected effect, and validation gate. You do not benchmark."
     ),
 }
 

@@ -30,8 +30,10 @@ from hyperloom.common.perf_metric import (
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
+    UNMEASURED_OUTCOMES,
     FAILURE_STAGE_DECISION,
     FAILURE_STAGE_WARMUP,
+    classify_failure_attribution,
     make_failure_id,
     tail_excerpt,
 )
@@ -113,6 +115,7 @@ def _initial_explore_search_state() -> dict[str, Any]:
 # Audit/provenance metadata stashed on a GridVariant that must survive being rebuilt into a derived variant.
 _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "provenance",
+    "reasoning_origin",
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
@@ -179,6 +182,15 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
+    """Return the action-authored rationale and the payload field that supplied it."""
+    for field in ("reasoning", "rationale", "reason", "note"):
+        value = str(raw.get(field) or "").strip()
+        if value:
+            return value, f"action_payload.{field}"
+    return "", ""
+
+
 def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
     """Convert the LLM/specialist grid payload into GridVariant objects."""
     out: list[GridVariant] = []
@@ -186,17 +198,19 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         if not isinstance(raw, dict) or not raw.get("name"):
             continue
         fields = normalize_proposal(raw)
+        reasoning, reasoning_origin = _action_reasoning(raw)
         gv = GridVariant(
             name=fields["name"],
             extra_server_args=fields["extra_args"],
             extra_envs=fields["extra_envs"],
-            note=str(raw.get("note") or raw.get("reason") or raw.get("rationale") or raw.get("provenance") or ""),
+            note=reasoning,
             remove_args=fields["remove_args"],
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
         # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
+        gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
         # Authored-kernel overlay dir (PYTHONPATH prefix); "" for env/flag variants.
         gv.overlay_pythonpath = str(raw.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
@@ -1045,6 +1059,7 @@ class ExploreExecutor:
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
                                 "note": gv.note,
+                                "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                                 "outcome": "FAILED",
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
@@ -1079,6 +1094,7 @@ class ExploreExecutor:
                                     "extra_envs": dict(gv.extra_envs),
                                     **control_fields,
                                     "note": gv.note,
+                                    "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                                     "reason": "warmup_failed",
                                     "gain_pct": None,
                                     "tput": None,
@@ -1156,6 +1172,7 @@ class ExploreExecutor:
                             "extra_envs": dict(gv.extra_envs),
                             **control_fields,
                             "note": gv.note,
+                            "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                             "outcome": "KILLED_OVERTIME",
                             "status": r.status,
                             "tput": None,
@@ -1197,6 +1214,7 @@ class ExploreExecutor:
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
                                 "note": gv.note,
+                                "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                                 "reason": "killed_overtime",
                                 "gain_pct": None,
                                 "tput": None,
@@ -1383,6 +1401,7 @@ class ExploreExecutor:
                         "extra_envs": dict(gv.extra_envs),
                         **control_fields,
                         "note": gv.note,
+                        "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                         "outcome": outcome,
                         "status": r.status,
                         "tput": decision_tput,
@@ -1484,6 +1503,7 @@ class ExploreExecutor:
                             "extra_envs": dict(next_envs),
                             **effective_control_fields,
                             "note": gv.note,
+                            "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                             "provenance": provenance,
                             # Names of the authored kernels this config carried, when an overlay was loaded.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
@@ -1546,6 +1566,7 @@ class ExploreExecutor:
                             "extra_envs": dict(gv.extra_envs),
                             **control_fields,
                             "note": gv.note,
+                            "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
                             "reason": reason or "not_keep",
                             "gain_pct": gain,
                             "tput": decision_tput,
@@ -1642,6 +1663,14 @@ class ExploreExecutor:
                 metrics["wall_clock_ratio_vs_baseline"] = te.get(
                     "wall_clock_ratio_vs_baseline",
                 )
+            failure_attribution = ""
+            if outcome in UNMEASURED_OUTCOMES:
+                failure_attribution = classify_failure_attribution(
+                    error_class=te.get("error_class"),
+                    error_excerpt=te.get("error_excerpt"),
+                    reason=reasons_by_fp.get(fp_key, ""),
+                    explicit=te.get("failure_attribution"),
+                )
             per_variant_outcomes.append(
                 {
                     "variant_name": str(te.get("name") or ""),
@@ -1659,6 +1688,7 @@ class ExploreExecutor:
                     "metrics": metrics,
                     "reason": reasons_by_fp.get(fp_key, ""),
                     "error_class": str(te.get("error_class") or ""),
+                    "failure_attribution": failure_attribution,
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),
@@ -1671,6 +1701,7 @@ class ExploreExecutor:
                         "unset_envs": list(te.get("unset_envs") or []),
                         "args_mode": str(te.get("args_mode") or "append"),
                         "note": str(te.get("note") or ""),
+                        "reasoning_origin": str(te.get("reasoning_origin") or ""),
                     },
                     # The verdicts and the stack behind them, as the round
                     # ruled. Absent keys mean the variant never got that far:
