@@ -222,6 +222,18 @@ def test_patch_status_remote_trust_fails(tmp_path):
     assert s.ok is False
 
 
+def test_patch_status_trust_without_benchmarker_py(tmp_path):
+    """SGLang trust must not be skipped merely because benchmarker.py is absent."""
+    _make_magpie(tmp_path, sglang=_SGLANG_LEGACY)
+    bench_py = tmp_path / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
+    if bench_py.exists():
+        bench_py.unlink()
+    s = mp.magpie_scripts_patch_status(tmp_path)
+    assert s.remote_trust_ok is True
+    text = (tmp_path / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh").read_text(encoding="utf-8")
+    assert "magpie_run_benchmark_serving_remote_direct trust" in text
+
+
 # ---- eval-concurrency fixes (--concurrent-requests) -----------------------
 _VLLM_LEGACY = (
     "#!/bin/bash\n"

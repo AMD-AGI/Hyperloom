@@ -216,7 +216,10 @@ EOF
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>.
+# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
+# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
+# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
 MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
@@ -340,7 +343,7 @@ die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
 # Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
 # string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
-# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# user writing MAGPIE_EVAL_FLAG_STRICT=false would get the OPPOSITE of intent. Accept
 # the common spellings case-insensitively; returns success (0) when falsy.
 is_falsy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -1515,7 +1518,7 @@ ensure_aiperf() {
   fi
 }
 
-# --- 2b. SGLang trust + eval-concurrency compatibility patches ---
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
 # Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
 # needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
 # (Magpie's client call sites never forward the `trust` flag upstream), and
@@ -1526,7 +1529,7 @@ ensure_aiperf() {
 # atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
 # Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_atomic_scripts_patch() {
+ensure_magpie_compat_patches() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
     log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
     return 0
@@ -1567,9 +1570,7 @@ if not status.remote_trust_ok:
 # install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
-# Defensive catch-all: a not-ok status with neither bit above set should
-# never happen, but exit non-zero so we never fall through to exit 0.
-sys.exit(3)
+sys.exit(1)
 PY
   then
     log "Magpie compatibility patches OK"
@@ -1592,7 +1593,7 @@ PY
         die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
       fi
     else
-      warn "Magpie compatibility patches failed in an unexpected way (rc=$rc); review _magpie_patcher.py."
+      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
     fi
   fi
 }
@@ -1604,12 +1605,10 @@ PY
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races behind the Hyperloom #C1 script-tearing race —
-# every fresh Magpie subprocess `shutil.copy2`'d its scripts on top of
-# the same shared files, while bash interpreters from neighbouring
-# installs were `source`-ing them. Cloning a per-install copy here
-# eliminates the cross-install fan-in (Magpie's in-place atomic-write patch then
-# closes the intra-install race window — both fixes are needed; this
-# one alone is not sufficient).
+# every fresh Magpie subprocess copied its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were `source`-ing
+# them. Cloning a per-install copy here eliminates the cross-install fan-in;
+# the pinned Magpie ref copies scripts atomically upstream.
 #
 # Policy:
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
@@ -1966,7 +1965,7 @@ acquire_install_lock
 # ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
+  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
 else
   ensure_magpie
 fi
@@ -1978,7 +1977,7 @@ ensure_inferencex
 # — running the patch before it silently skipped those targets and left
 # RUN_EVAL=true baselines aborting on 'Unknown parameter'.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_atomic_scripts_patch
+  ensure_magpie_compat_patches
 fi
 
 # aiperf (AgentX client) installs whenever this build ships the AgentX assets.

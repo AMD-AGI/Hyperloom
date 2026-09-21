@@ -114,6 +114,20 @@ def test_status_strips_eval_flag_and_reports_ok(tmp_path: Path):
     assert "--concurrent-requests" not in script.read_text(encoding="utf-8")
 
 
+def test_atomic_write_text_preserves_file_mode(tmp_path: Path):
+    target = tmp_path / "bench.sh"
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    target.chmod(0o755)
+    pre_mode = target.stat().st_mode
+    assert mp.atomic_write_text(
+        target,
+        "#!/bin/sh\npatched\n",
+        tmp_prefix=".bench.sh.hyperloom_",
+        log_prefix="_magpie_patcher",
+    )
+    assert target.stat().st_mode == pre_mode
+
+
 def test_status_eval_flag_false_on_unrecognised_shape(tmp_path: Path):
     _write_bench_script(
         tmp_path,
