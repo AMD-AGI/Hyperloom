@@ -200,7 +200,7 @@ def test_preflight_still_exports_an_explicit_url_for_a_subscription_token(
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
 
 
-def test_preflight_resolves_urls_and_fans_out_auth_aliases(
+def test_preflight_resolves_urls_and_fans_out_only_the_url_alias(
     monkeypatch,
     tmp_path,
     clean_url_env,
@@ -214,7 +214,7 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     )
     # ANTHROPIC_BASE_URL unset -> the Anthropic side stays disabled, never derived.
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    # Derived aliases start unset so the provider key fills them.
+    # Alias names start unset, so anything present afterwards was written here.
     for name in (
         "_".join(("ANTHROPIC", "AUTH", "TOKEN")),
         "_".join(("ANTHROPIC", "API", "KEY")),
@@ -240,13 +240,10 @@ def test_preflight_resolves_urls_and_fans_out_auth_aliases(
     assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
     assert "ANTHROPIC_BASE_URL" not in cli.os.environ
     assert cli.os.environ["OPENAI_BASE_URL"] == resolved[1]
-    # The OpenAI key fills its own name plus the internal LLM aliases.
-    for name in (
-        "_".join(("OPENAI", "API", "KEY")),
-        "_".join(("LLM", "API", "KEY")),
-        "_".join(("AMD_LLM", "API", "KEY")),
-    ):
-        assert cli.os.environ[name] == "new-gateway-key"
+    # The OpenAI key travels under its own name only; the retired aliases stay unset.
+    assert cli.os.environ["_".join(("OPENAI", "API", "KEY"))] == "new-gateway-key"
+    for name in ("_".join(("LLM", "API", "KEY")), "_".join(("AMD_LLM", "API", "KEY"))):
+        assert name not in cli.os.environ, name
     # The Anthropic-side keys are never cross-filled from the OpenAI key.
     assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
     assert "_".join(("ANTHROPIC", "AUTH", "TOKEN")) not in cli.os.environ
@@ -269,7 +266,7 @@ def test_preflight_keeps_explicit_provider_keys(
     clean_url_env,
     stub_install_steps,
 ):
-    """Explicit provider keys are preserved; only the internal GEAK/LLM aliases are gap-filled."""
+    """Explicit provider keys are preserved, and no alias is gap-filled from either of them."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
