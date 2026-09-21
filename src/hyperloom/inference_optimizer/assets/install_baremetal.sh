@@ -55,9 +55,9 @@ SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
 # below 2.11 and so cannot resolve against a ROCm 10 stack at all; 0.5.19 moved
 # that dependency into runtime_common unpinned, which leaves the installer's
 # ROCm torch constraint as the version pip solves for.
-# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index, matching the
-# vllm/vllm-openai-rocm:v0.29.0 Docker image. The rocm723 variant puts the
-# vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
+# vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index. The rocm723
+# variant puts the vLLM ROCm layer at 7.2.3; the docker route instead uses the
+# ROCm 10.0 rocm/vllm image, so the two paths no longer share a patch level. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
 SGLANG_REF="${SGLANG_REF:-94602c9c2b7cbdb8efd5c52802dac6a1c180089e}"
@@ -185,7 +185,7 @@ die() { echo "[install-baremetal ERROR] $*" >&2; exit 1; }
 
 IMAGE_HINT="Provision the ROCm framework base first (SGLang: lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x|mi35x-*; \
 vLLM bare-metal: Ubuntu 24.04+ host with ROCm torch, or use docker mode with \
-vllm/vllm-openai-rocm:v0.29.0), then re-run."
+rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0), then re-run."
 
 is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 
