@@ -37,8 +37,12 @@ class _Reconciler:
     holds. ``raises`` stands in for a report this pass could not produce.
     """
 
-    def __init__(self, reaped=0, raises=False):
-        self.last_report = None if raises else SimpleNamespace(leases_reaped=reaped, failed_tasks=["t1"])
+    def __init__(self, reaped=0, raises=False, unverifiable=0):
+        self.last_report = (
+            None
+            if raises
+            else SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
+        )
 
 
 class _Pool:
@@ -81,10 +85,28 @@ class TestReclaimReportsWhatEachStepDid:
 
         assert summary == {
             "leases_reaped": 2,
+            "leases_unverifiable": 0,
             "running_tasks_reclaimed": 1,
             "events_pruned": 5,
             "tasks_pruned": 2,
         }
+
+    @pytest.mark.asyncio
+    async def test_lanes_held_with_nothing_left_to_probe_are_counted_every_tick(self, monkeypatch: pytest.MonkeyPatch):
+        """The starvation signal an operator reads first, because no command reports it.
+
+        A lane whose ended holder left nothing verifiable is retained on
+        purpose and stays retained -- no age or TTL will ever take it back. The
+        only thing that surfaces it is this count sitting at a non-zero value
+        tick after tick while the queue does not drain; the sweep logs the
+        per-row remedy once alongside it.
+        """
+        _patch_retention(monkeypatch)
+        summary: dict = {}
+
+        await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(unverifiable=6)), summary, reason="r")
+
+        assert summary["leases_unverifiable"] == 6
 
     @pytest.mark.asyncio
     async def test_soft_restart_does_not_expire_running_work(self, monkeypatch: pytest.MonkeyPatch):
@@ -106,6 +128,7 @@ class TestNoSingleStepCanEndTheRun:
         await run_lease_and_db_reclaim(_host(reconciler=_Reconciler(raises=True)), summary, reason="r")
 
         assert "leases_reaped" not in summary
+        assert "leases_unverifiable" not in summary
         assert "running_tasks_reclaimed" not in summary
         assert summary["events_pruned"] == 5
 

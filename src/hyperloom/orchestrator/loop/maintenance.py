@@ -22,8 +22,14 @@ async def run_lease_and_db_reclaim(
 
     Shared by periodic maintenance and cycle soft-restart. Resource ownership
     is resolved by the reconciler: owners it proved dead, and lanes whose holder
-    task the registry already wrote terminal -- never inferred from elapsed
-    lease budgets.
+    both ended and proved nothing is still using them -- never inferred from
+    elapsed lease budgets.
+
+    ``leases_unverifiable`` rides the same summary because it is the other half
+    of that answer: lanes still held by an ended holder that left nothing any
+    probe can settle. They are retained on purpose, and a number that stays put
+    while the queue does not drain is where an operator starts; the remedy for
+    each one is logged once by the lane sweep.
 
     Args:
         host: Coordinator exposing ``reconciler`` and ``db``.
@@ -33,6 +39,7 @@ async def run_lease_and_db_reclaim(
     try:
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
+        summary["leases_unverifiable"] = report.leases_unverifiable
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
     except Exception:  # noqa: BLE001
         log.exception("%s: reading the reconciler's cleanup report failed", reason)

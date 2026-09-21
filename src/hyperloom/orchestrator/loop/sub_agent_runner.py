@@ -24,7 +24,12 @@ import logging
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import _RUNS_ACTIONS, runs_dir
 from ..actions.cancel_channel import current_cancel_scope
-from ..bus.resource_lock import Lease, ResourceLockManager
+from ..bus.resource_lock import (
+    CLEANUP_CONFIRMED_KEY,
+    CLEANUP_TREE_PGID_KEY,
+    Lease,
+    ResourceLockManager,
+)
 from ..policy.gate import PolicyDenied
 from ..state.task_registry import IllegalTransition, Task, TaskRegistry
 from ..trace.task_progress import ProgressReporter, progress_scope
@@ -115,11 +120,38 @@ class SubAgentResult:
 
 
 class ExecutionCleanupUnconfirmed(RuntimeError):
-    """Physical cleanup did not acknowledge release of an execution's resources."""
+    """Physical cleanup did not acknowledge release of an execution's resources.
 
-    def __init__(self, message: str, *, result: SubAgentResult | None = None) -> None:
+    Raising this is what keeps the task's lane held: processes may still be
+    running, and holding the lane is what stops conflicting work from starting.
+    That retention has to end the moment they do, and nothing observes that
+    moment -- so a raise site that knows which process GROUP it failed to
+    confirm passes ``tree_pgid``, which :meth:`SubAgentRunner.run_task` records
+    on the terminal row for a later reaper to probe. A group id is what is
+    carried rather than a pid because it outlives the root process: both launch
+    sites spawn with ``start_new_session=True``, so the root begins as its own
+    group leader and the number keeps naming the group after the root exits.
+    Without it the lane is held for good, since nothing then distinguishes a
+    finished execution from a working one.
+
+    Attributes:
+        result: The executor's own outcome, for the terminal row.
+        tree_pgid: Process group whose teardown went unconfirmed, or None when
+            the raise site has no local group to name -- a cleanup that failed
+            before any process existed, or a Ray actor whose ids belong to
+            another node.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        result: SubAgentResult | None = None,
+        tree_pgid: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.result = result
+        self.tree_pgid = tree_pgid
 
 
 class SubAgentRunner:
@@ -389,11 +421,20 @@ class SubAgentRunner:
                 finally:
                     cleanup_confirmed = released and cleanup_error is None
                     if outcome is not None:
-                        evidence.update(outcome=asdict(outcome), cleanup_confirmed=cleanup_confirmed)
+                        evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: cleanup_confirmed})
                         if not cleanup_confirmed:
                             evidence["cleanup_error"] = (
                                 repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
                             )
+                            # The lane this path deliberately retains can only
+                            # ever come back if a later reaper can show nothing
+                            # of the execution is left, and this row is the only
+                            # durable place its process group survives. Recorded
+                            # as a number rather than left to be dug back out of
+                            # the repr above.
+                            pgid = getattr(cleanup_error, "tree_pgid", None)
+                            if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 0:
+                                evidence[CLEANUP_TREE_PGID_KEY] = pgid
                         await self._write_terminal(
                             task.task_id,
                             terminal_state or outcome.state,

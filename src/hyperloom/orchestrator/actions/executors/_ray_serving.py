@@ -119,6 +119,18 @@ def _round_wait_timeout_sec(timeout: int | float | None) -> float:
     return float(timeout) + ROUND_WAIT_SLACK_SEC
 
 
+def _round_label(cmd: Any) -> str:
+    """Name a round in an operator log without pasting its whole argv."""
+    try:
+        parts = [str(tok) for tok in (cmd or [])]
+    except TypeError:
+        return "<unnamed>"
+    for tok in parts:
+        if tok.endswith(".sh") or "/" in tok:
+            return tok
+    return parts[0] if parts else "<unnamed>"
+
+
 def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
     """Explain a round abandoned at the wall-clock ceiling, and how to widen it."""
     return (
@@ -582,6 +594,21 @@ class ServingLease:
                 )
                 # Straight to the kill: an actor that has not answered is not going to answer a graceful stop either,
                 # and waiting for one would spend the rest of the window the caller is owed.
+                #
+                # What this does NOT do is account for the served process tree. ``ray.kill`` runs neither
+                # ``__ray_terminate__`` nor atexit, so if the round really was still running its subprocesses
+                # survive this call, on their GPUs, with nothing here to reap them. That is a worse outcome than a
+                # clean teardown and a better one than the alternative this replaced -- a thread parked on
+                # ``ray.wait`` forever, its task stuck 'running' and its lane lease never released, which is how
+                # 2026-09-21 wedged a whole session. Reaping a tree the actor would not give up belongs to the
+                # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
+                # operator can look.
+                log.warning(
+                    "ServingLease: killing the actor for round %s after it ignored the stop request; any "
+                    "subprocess tree that round still owned is NOT reaped by this kill and may still hold its "
+                    "GPUs -- check for surviving server processes if the next round cannot get its devices",
+                    _round_label(cmd),
+                )
                 if timed_out:
                     # Drop the round before the handle goes, so Ray stops holding a task nobody will ever collect.
                     self._abandon_ref(ref)

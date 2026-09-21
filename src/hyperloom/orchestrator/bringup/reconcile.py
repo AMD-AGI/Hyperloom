@@ -83,6 +83,11 @@ class ReconcileReport:
 
     Attributes:
         leases_reaped: Lease rows the pass swept.
+        leases_unverifiable: Lane rows still held after the sweep by a holder
+            that ended without leaving anything a probe can settle. Not a
+            failure count -- retaining them is the contract -- but the number an
+            operator needs to see climb, and the maintenance summary carries it
+            out of here.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
@@ -92,6 +97,7 @@ class ReconcileReport:
     """
 
     leases_reaped: int = 0
+    leases_unverifiable: int = 0
     settled: list[tuple[str, str]] = field(default_factory=list)
     handed_off: list[str] = field(default_factory=list)
     failed_tasks: list[str] = field(default_factory=list)
@@ -273,21 +279,29 @@ class Reconciler:
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
-        """Release confirmed-dead local owners, then lanes held by ended tasks.
+        """Release confirmed-dead local owners, then lanes nothing is using.
 
         Liveness alone cannot refute a coordinator-side holder that dropped its
-        work without releasing -- the pid answering the probe is this process.
+        work without releasing -- the pid on the lane row is this process.
         2026-09-21: six lanes were held that way for two hours, starving 19
-        queued tasks, by holders :meth:`SubAgentRunner._write_terminal`
-        (``loop/sub_agent_runner``) had already moved to a terminal state on the
-        cleanup-unconfirmed path. That state is the proof the lane row lacks: it
-        cannot be left behind by a holder that is still working, because a
-        terminal task never resumes.
+        queued tasks, by holders that had already ended and whose processes had
+        gone with them. Rows of that vintage are not healed here: the code that
+        wrote them recorded no process group, so they take the unverifiable path
+        and keep their lanes. What this pass ends is the RECURRENCE -- the same
+        failure under code that records a group id, which a probe can settle.
 
-        Note the deliberately lower bar than :func:`_terminal_by_observation`
-        below, which those same rows fail: it asks whether the holder ended
-        *cleanly* enough to move a round on, whereas a lane only asks whether
-        anybody is still using it.
+        What the second pass adds is not "the holder is terminal". A holder
+        that ended with its cleanup unconfirmed keeps its lane ON PURPOSE,
+        because its process tree may still be running and holding the lane is
+        what stops conflicting work from starting. The pass reclaims only a
+        holder that can show its lane is free -- the release ran, or the tree it
+        recorded no longer answers a probe. See
+        :func:`~hyperloom.orchestrator.bus.resource_lock._holder_stopped_using_the_lane`.
+
+        Note the deliberately different bar from :func:`_terminal_by_observation`
+        below: that asks whether a holder ended *cleanly* enough to move a round
+        on, whereas a lane only asks whether anybody is still using it, so a
+        holder can clear one and fail the other in either direction.
 
         Running here, ahead of :meth:`_resolve_open_rounds`, also changes what
         that rule sees, and does so deliberately.
@@ -302,15 +316,22 @@ class Reconciler:
 
         Two cases are deliberately left as they were, and they are the ones
         correctness rests on: a holder still on the cards keeps its lanes and so
-        its round, via the ``gpu_leases`` exemption in the sweep; and the
-        2026-09-21 rows themselves fail :func:`_terminal_by_observation`, so
-        their lanes come back while their round stays exactly where it was.
+        its round, via the ``gpu_leases`` exemption in the sweep; and a holder
+        that left nothing probeable keeps its lanes too, so its round stays
+        exactly where it was.
         ``test_a_round_wedged_by_lane_rows_alone_is_freed_in_the_same_pass``
         pins the timing.
+
+        Whatever the sweep leaves behind is then counted and, once per
+        ``(lane, holder)``, logged with the statement that releases it by hand:
+        the rows the incident actually left carry no process-group id, so they
+        stay held for good and an operator is the only way out of them.
         """
         report.leases_reaped = len(await self._locks.reap_dead_holders()) + len(
             await self._locks.reap_finished_holders()
         )
+        # After the sweep, so a row it just took back is not also reported stuck.
+        report.leases_unverifiable = len(await self._locks.diagnose_unverifiable_holders())
 
     async def _advance_or_expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Move a terminal-holder round forward, or end it once its cap passes."""

@@ -525,8 +525,9 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
         db: The session database.
         rounds: The round store to open the round in.
         tasks: The registry the holder and successor rows live in.
-        cleanup_confirmed: What the holder's terminal evidence claims, which is
-            what :func:`_terminal_by_observation` reads.
+        cleanup_confirmed: What the holder's terminal evidence claims. Both the
+            lane sweep and :func:`_terminal_by_observation` read it, for their
+            two different questions.
 
     Returns:
         str: The successor task's id.
@@ -573,21 +574,31 @@ async def test_a_round_wedged_by_lane_rows_alone_is_freed_in_the_same_pass(db):
 
 
 @pytest.mark.asyncio
-async def test_lanes_come_back_without_moving_a_round_whose_cleanup_never_confirmed(db):
-    """The bound on the rule above: the lanes are freed, the round is not advanced.
+async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db):
+    """The bound on the rule above: nothing is freed and nothing is advanced.
 
-    These are the 2026-09-21 rows themselves. They clear the lane sweep's bar --
-    nobody is using the lane -- and fail ``_terminal_by_observation``, which asks
-    the stricter question of whether the holder ended cleanly enough to move a
-    round on. Freeing the lanes must not answer that question by accident.
+    This is the shape of the 2026-09-21 rows, minus the one thing that resolves
+    them -- a tree root to probe. The holder ended without confirming its
+    cleanup and named no tree, so its lanes stay taken; and it fails
+    ``_terminal_by_observation`` as well, which asks the stricter question of
+    whether the holder ended cleanly enough to move a round on. A pass that
+    freed the lanes here would be freeing a lane whose work may still be
+    running.
     """
     rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
 
     report = await rec.run(_NOW + 10.0)
 
-    assert report.leases_reaped == 4
+    assert report.leases_reaped == 0
     assert (report.handed_off, report.settled) == ([], [])
+    assert {r["lane"] for r in await db.fetchall("SELECT lane FROM leases")} == {
+        BRINGUP_ROUND_LANE,
+        "server_lifecycle",
+        "benchmark_lane",
+        "profile_lane",
+        "gpu_research_lane",
+    }
     assert (await rounds.get("round-spec-1")).holder_task_id == "spec-1"
     assert (await rounds.get("round-spec-1")).state == OPEN
 
