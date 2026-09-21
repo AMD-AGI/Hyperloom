@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from hyperloom.common.timeutil import now_iso
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
 from .storage.schema import DEFAULT_LANE_CAPACITIES
@@ -195,10 +196,6 @@ def _reclaim_finished_holders(cur: sqlite3.Cursor, lanes: list[str], *, scope: s
     Returns:
         list[dict]: The rows reclaimed.
     """
-    # Deferred because ``task_registry`` imports this module; reading the state
-    # machine here keeps the terminal set single-sourced all the same.
-    from ..state.task_registry import TERMINAL_STATES
-
     # Same first act as :meth:`SqliteLeaseBackend.holder_is_dead`: with no
     # observable ownership domain, no row here is ours to judge.
     #
