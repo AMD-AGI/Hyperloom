@@ -528,6 +528,8 @@ def _merge_raw_result(
             raw.get("p99_e2el_ms"),
             raw.get("p99_latency_ms"),
         )
+    if measurement.get("requested_requests") is None:
+        measurement["requested_requests"] = first_int(raw.get("num_prompts"))
     if measurement.get("raw_result_path") is None:
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
@@ -643,6 +645,10 @@ def extract_benchmark_measurement(
             throughput.get("num_images"),
         ),
         "duration_seconds": to_float(throughput.get("duration_seconds")),
+        # What the client was asked to send, as the client recorded it. Read
+        # back rather than taken from the env stack: the env is what we asked
+        # for, this is what the run actually requested.
+        "requested_requests": first_int(throughput.get("num_prompts")),
         "ttft_mean_ms": to_float(ttft.get("mean_ms")),
         "ttft_p99_ms": to_float(ttft.get("p99_ms")),
         "tpot_mean_ms": to_float(tpot.get("mean_ms")),
@@ -800,7 +806,7 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     return completed is not None and completed > 0
 
 
-def served_complete_protocol(result: dict[str, Any] | None, *, requested_requests: Any) -> bool:
+def served_complete_protocol(result: dict[str, Any]) -> bool:
     """Return whether the run served every request its protocol asked for.
 
     This is what separates a benchmark that finished from one that stopped
@@ -809,18 +815,16 @@ def served_complete_protocol(result: dict[str, Any] | None, *, requested_request
     requested; a wrapper that failed on its way out leaves the full count and a
     measurement taken over the same protocol as a clean round.
 
-    An unknown request count is not a complete protocol: without it there is
-    nothing to compare the completed count against, and a run that stopped
-    early would be indistinguishable from one that did not.
+    Both counts come from the run's own result artifact, so this answers for
+    every caller of :func:`extract_benchmark_measurement` rather than only the
+    ones that happen to declare the request count in their own env layer.
+
+    A run that recorded no request count did not get far enough to state its
+    protocol, so it cannot be judged complete. Scriptable workloads drive their
+    own iteration count and never record one.
     """
-    if not is_valid_measurement(result) or not isinstance(result, dict):
-        return False
-    # A scriptable workload drives its own iteration count and has no request
-    # protocol to fall short of, so it cannot answer this question either.
-    if _is_scriptable_measurement(result):
-        return False
-    requested = to_int(requested_requests)
-    if requested is None or requested <= 0:
+    requested = to_int(result.get("requested_requests"))
+    if requested is None:
         return False
     completed = to_int(result.get("completed_requests"))
     return completed is not None and completed >= requested

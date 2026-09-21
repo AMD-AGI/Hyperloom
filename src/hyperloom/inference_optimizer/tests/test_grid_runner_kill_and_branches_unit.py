@@ -559,8 +559,8 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
     assert json.loads(markers[0].read_text())["error_class"] == "magpie_nonzero_after_valid_measurement"
 
 
-def _valid_report_body(completed: int) -> str:
-    """A parseable Magpie report that completed ``completed`` requests."""
+def _valid_report_body(completed: int, requested: int) -> str:
+    """A parseable Magpie report for ``completed`` of ``requested`` requests."""
     return json.dumps(
         {
             "success": True,
@@ -569,10 +569,26 @@ def _valid_report_body(completed: int) -> str:
                 "output_throughput": 1200.0,
                 "request_throughput": 120.0,
                 "completed_requests": completed,
+                "num_prompts": requested,
                 "duration_seconds": 120.0,
             },
         }
     )
+
+
+def _magpie_writing(completed: int, requested: int, rc: int, stderr: str):
+    """A fake ``_run_magpie`` that writes one report and exits ``rc``."""
+
+    def _run(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(_valid_report_body(completed, requested))
+        return rc, "", stderr
+
+    return _run
+
+
+_STALE_HANDLE = "benchmarks/sglang_mi355x.sh: error reading input file: Stale file handle"
 
 
 @pytest.mark.asyncio
@@ -582,21 +598,19 @@ async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, 
     The bash wrapper reads its own script off the InferenceX checkout for the
     whole round, so a mount flap at the tail exits non-zero on a benchmark that
     already ran to completion. Nothing about that measurement is short.
+
+    The variant carries no ``NUM_PROMPTS`` of its own, which is the shape every
+    caller but conc_sweep uses: the count is read back off the run's own
+    result, not off the variant's env layer.
     """
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(192, 192, 2, _STALE_HANDLE))
 
-    def _nonzero_after_full_protocol(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(_valid_report_body(192))
-        return 2, "", "benchmarks/sglang_mi355x.sh: error reading input file: Stale file handle"
-
-    monkeypatch.setattr(gr, "_run_magpie", _nonzero_after_full_protocol)
     results = await run_grid(
         base_yaml_path=base,
         base_extra_args="",
-        grid=[GridVariant("vA", extra_envs={"NUM_PROMPTS": "192"})],
+        grid=[GridVariant("vA", extra_server_args="--foo")],
         output_root=tmp_path / "out",
     )
     r = results[0]
@@ -606,6 +620,8 @@ async def test_run_grid_keeps_a_measurement_that_served_every_request(tmp_path, 
     assert r.completed_requests == 192
     assert r.returncode == 2
     assert "nonzero_rc_after_complete_protocol:2" in r.nonfatal_warnings
+    # The cause of the non-zero exit stays on the record, not only in the log.
+    assert "Stale file handle" in (r.error or "")
     assert list((tmp_path / "out").rglob("abort_reason.json")) == []
 
 
@@ -618,18 +634,12 @@ async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypa
     """
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
+    monkeypatch.setattr(gr, "_run_magpie", _magpie_writing(120, 192, 1, "server exited 1"))
 
-    def _nonzero_after_short_protocol(magpie_python, config_path, output_dir, **_k):
-        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
-        ws.mkdir(parents=True, exist_ok=True)
-        (ws / "benchmark_report.json").write_text(_valid_report_body(120))
-        return 1, "stdout tail", "server exited 1"
-
-    monkeypatch.setattr(gr, "_run_magpie", _nonzero_after_short_protocol)
     results = await run_grid(
         base_yaml_path=base,
         base_extra_args="",
-        grid=[GridVariant("vA", extra_envs={"NUM_PROMPTS": "192"})],
+        grid=[GridVariant("vA", extra_server_args="--foo")],
         output_root=tmp_path / "out",
     )
     r = results[0]
@@ -637,6 +647,45 @@ async def test_run_grid_fails_a_measurement_that_served_short(tmp_path, monkeypa
     assert r.error_class == "magpie_nonzero_after_valid_measurement"
     markers = list((tmp_path / "out").rglob("abort_reason.json"))
     assert len(markers) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_grid_fails_when_the_run_recorded_no_request_count(tmp_path, monkeypatch):
+    """A report with no ``num_prompts`` cannot be judged complete, so rc wins.
+
+    An unpatched InferenceX checkout serves ``max_concurrency`` prompts and may
+    record no requested count at all. That is not evidence of a whole protocol.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+
+    def _no_request_count(magpie_python, config_path, output_dir, **_k):
+        ws = Path(output_dir) / "benchmark_sglang_20260101_000000"
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "benchmark_report.json").write_text(
+            json.dumps(
+                {
+                    "success": True,
+                    "framework": "sglang",
+                    "throughput": {
+                        "output_throughput": 1200.0,
+                        "completed_requests": 192,
+                        "duration_seconds": 120.0,
+                    },
+                }
+            )
+        )
+        return 2, "", _STALE_HANDLE
+
+    monkeypatch.setattr(gr, "_run_magpie", _no_request_count)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA", extra_server_args="--foo")],
+        output_root=tmp_path / "out",
+    )
+    assert results[0].status == "failed"
+    assert results[0].error_class == "magpie_nonzero_after_valid_measurement"
 
 
 @pytest.mark.asyncio

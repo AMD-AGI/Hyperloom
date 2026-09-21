@@ -2381,13 +2381,14 @@ def _preflight(
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
     # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
-    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
-    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
+    # what tells that apart from a variant that genuinely cannot serve.
     inferencex_network_fs = is_network_fs(inferencex_path)
     if inferencex_network_fs:
         print(
             f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
-            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
+            f"protocol is kept, but one the flap cut short is recorded as "
             f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
             f"HYPERLOOM_CACHE_DIR on local disk.",
             file=sys.stderr,
