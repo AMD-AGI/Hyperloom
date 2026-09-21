@@ -289,13 +289,9 @@ SAFE_ENV_KEYS = (
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
     "LLM_API_BASE",
-    "LLM_PROXY_API_KEY",
-    "LLM_PROXY_BASE_URL",
-    # GEAK LLM connection (e2e runner reads these).
+    # Operator overrides that point GEAK at an endpoint other than the one preflight resolved; never derived here.
     "GEAK_API_KEY",
     "GEAK_BASE_URL",
-    # GEAK/Forge harness contract: patched candidate dir the generated harness prepends to sys.path.
-    "GEAK_WORK_DIR",
     # e2e optimizer runner path + repo root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
     # checkout.
     "GEAK_ROOT",

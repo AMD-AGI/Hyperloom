@@ -376,7 +376,18 @@ it.
   appears in that tree at all, in a quick-start line invoking a script the
   repository no longer carries. `LLM_API_BASE` stays — it addresses an endpoint
   rather than authenticating to one, and preflight still derives it from the
-  resolved OpenAI-side URL. All eight names also stay in the benchmark secret,
+  resolved OpenAI-side URL.
+
+  Surveying the rest of that allowlist against the same two trees retired three
+  more entries that no longer reach a reader. `LLM_PROXY_BASE_URL` and
+  `GEAK_WORK_DIR` each occurred exactly once in this repository — the allowlist
+  line itself — with nothing writing them and nothing consuming them, and
+  `GEAK_WORK_DIR` carried a comment describing a harness contract GEAK does not
+  have. `LLM_PROXY_API_KEY` was forwarded to every worker without anything
+  setting or reading it either; it keeps its redaction entry for the same reason
+  the retired credential names do. `GEAK_API_KEY` and `GEAK_BASE_URL` stay: both
+  are documented operator overrides, and preflight reads the URL to sync GEAK's
+  config file. All eight names also stay in the benchmark secret,
   variant, external and specialist-redaction lists: membership there asserts
   that a name holds a secret worth scrubbing, not that anything consumes it, and
   an operator's stale export still needs stripping from child processes.
