@@ -11,7 +11,646 @@ The current packaged version is 1.1.1 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
-summarizes the headline capabilities.
+summarizes the headline capabilities and carries the changes on `main` that no
+release has shipped yet.
+
+## Unreleased
+
+Merged to `main` and not yet carried by a tagged release. Each entry moves
+into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
+it.
+
+- **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
+  agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
+  supervision and resume, and task/lease age expiry. Each actual benchmark spawn
+  uses a 7800-second hard deadline (including boot and accuracy), plus a
+  600-second output-silence limit only after a ready marker is observed in this
+  round's logs; both are finite positive settings. A warm-reuse hint alone does
+  not arm silence, avoiding false kills when original Magpie buffers client
+  output and the reused server writes its previous round's log. Reuse rounds
+  without a current ready marker remain bounded by the hard deadline, session
+  budget, and cancellation. Output cannot extend the hard deadline. Session
+  cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
+  offline `recover-session`, process cleanup, and historical SBDv6 readers.
+
+### Added
+
+- **An enablement session now ships an ordered replay recipe, and a verdict on
+  whether it can be replayed at all.** The session's durable state said what was
+  kept and nothing about how to reproduce it: an operator holding a KEEP had a
+  list of patches, no order to apply them in, no record of which tree each was
+  written against, and no way to tell a complete stack from one whose evidence
+  was never captured.
+
+  `recipe_steps` projects the state onto an ordered array — setup, build, patch —
+  each step naming the root it applies to, the targets its own diff declares and
+  the identity of what each install consumed. `replay_sufficiency` judges that
+  array and reports `sufficient` or `insufficient` against a closed vocabulary of
+  reasons, each naming what it blocks: replay, assertion validation, or both. A
+  patch whose targets nobody recorded, a build nothing replayed, a root with no
+  base commit and a credential the recipe cannot supply are all refusals, not
+  assumptions. Both appear in `session_breakdown.json` under `enablement.recipe`,
+  and the session package now carries the KEEP's source overlay the steps
+  reference, so a `sufficient` recipe does not ship with its own evidence
+  missing.
+
+  The KEEP records what the two need: each root's identity and base commit taken
+  before the round's first mutation, byte-exact snapshots of every declared
+  target, the environment closure and installed versions read through the
+  interpreter the accepted bench launched, and an append-only ledger of the setup
+  commands as they ran. Credentials are classified and sanitised on emission.
+
+- **`ray.init`'s connect is bounded.** It had no timeout at all, so an
+  unreachable head node hung the leg until the session clock ran out instead of
+  failing it.
+
+### Fixed
+
+- **KernelForge results could be lost or integrated in the wrong order.** KB
+  warm-start commits now force only their approved pathspecs, so tracked files
+  matched by a repository's ignore rules cannot reject the whole commit. Task
+  preparation stages tracked edits and only newly created files, preventing
+  pre-existing JIT caches and generated artifacts from leaking into exported
+  patches. Forge-loop stdout and stderr are retained beside each task result,
+  and Controller patches are integrated by `task.json.priority` rather than
+  encoded directory-name order so cumulative E2E validation follows the
+  opportunity analyst's ordering.
+
+- **Inline MCP actions no longer block the coordinator's event loop.** The
+  `run_action_now` context tool awaits the action's result without blocking the
+  loop or occupying the thread pool needed by database operations. Action
+  execution, timers and caller cancellation can proceed concurrently. Direct
+  calls to the synchronous bridge on the coordinator loop now fail immediately
+  without scheduling work. Existing inline wait limits and registered-action
+  completion after a caller timeout remain unchanged.
+
+- **A Slurm row declaring a workload shape was benchmarked at the defaults.**
+  The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
+  flag > persisted state > default and deliberately never reads them from the
+  environment, but `_incontainer.sh.in` only exported them. A row declaring
+  `tp=4` therefore materialised a `tp=1` baseline, where sglang's rank math
+  divided by zero; a row declaring `isl=8192 osl=512` silently measured
+  1024/1024, and `precision` came from the checkpoint sniffer rather than the
+  row. The whole declared shape is now passed as flags in both the python and
+  claude backends. The exports stay, because the framework recipes downstream
+  do read them -- that split is now stated where the command is spelled out,
+  since the old wording pointed the carrier at the ignored mechanism. `ep_size`
+  also gains a producer: it is a new trailing `models.tsv` column, parsed and
+  exported by `run_hyperloom.sbatch` and added to the docker backend's `-e`
+  allowlist so enroot and docker agree on the shape. It trails `target_gain` so
+  existing 13-column rows still parse, and an absent value keeps expert
+  parallelism at 1.
+
+- **A cancelled job's container kept its GPUs and broke the next job on that
+  node.** `docker run --rm` cleans up when its client exits normally, but a
+  `scancel` or NODE_FAIL kills the client and leaves the container running, so
+  `--rm` never fires and the weights stay resident. The next job then failed in
+  whichever way its framework noticed first: sglang sat in
+  `wait_for_amd_gpu_clean` for the full fifteen minutes because that gate maxes
+  VRAM% over every GPU on the box, while vLLM was refused outright with
+  `Free memory on device cuda:N ... is less than desired GPU memory
+  utilization`. Observed on two nodes at once, where a container from a job
+  cancelled three hours earlier still held ~168 GiB on each of GPU 0-3 --
+  exactly where the next tp=4 server wanted to land, because the container gets
+  no ROCR mask and every framework starts from GPU 0. The launcher now reclaims
+  those containers first, deciding ownership by liveness rather than by name or
+  image: `docker run` carries `-e CLAW_SESSION_ID=`, so a container whose
+  session id has no live client is ours and orphaned, and a co-tenant job that
+  still has its client is left alone. `docker run` also gains `--init`, without
+  which the container's pid 1 becomes an unreapable zombie once the client is
+  killed and even the daemon refuses to remove it (`PID <n> is zombie and can
+  not be killed. Use the --init option ...`); the reclaim keeps a cgroup-level
+  SIGKILL fallback for containers already in that state. `--name
+  hl-<key>-<jobid>` makes a running container traceable back to its job.
+
+- **A vLLM profile round had its profiler bounds dropped before launch.** The
+  argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
+  `--profiler-config.profiler torch` and a trace directory of its own
+  afterwards. `ProfilerConfig` refuses the iteration bounds this layer injects
+  unless both are present in the same fragment, so the probe rejected an argv
+  that is valid once the launcher's flags are appended, and the round then ran
+  with no bound on the capture window. Both flags are now asserted alongside
+  the bounds so the probed fragment is self-consistent on its own. The trace
+  directory is a placeholder: the launcher's own value has to win vLLM's
+  last-wins dotted-flag merge, so the bypass backend now emits its profiler
+  flags after `EXTRA_VLLM_ARGS` the way Magpie's launcher already does, rather
+  than before it where the placeholder would have won and sent the trace
+  somewhere trace discovery never looks. An operator-set profiler flag is left
+  untouched.
+- **A campaign the host killed cost the next task in the same repository.**
+  Every in-place task is handed the same `forge_experiments` directory, and the
+  release archives it -- but a run that was killed never reaches the release.
+  The leftover then did two things: forge-loop refused the workspace outright
+  ("already contains a Forge campaign; pass --resume to continue it"), failing
+  the next task at dispatch, and recovery read the stale manifest as that
+  task's own best result, reporting the dead campaign's commit as a missing
+  base commit -- a reason with nothing to do with the task it lost. Measured: a
+  session lost a `chunk_gated_delta_rule` task to a fusion campaign left behind
+  at a timeout an hour earlier. A leftover is now archived on the way in as
+  well as on the way out, kept rather than deleted because it is the only
+  account of what that run did, and a trusted manifest has to name a commit the
+  repository still has before it is read as this task's result. An archive that
+  cannot be made says so, since the dispatch refusal that follows is otherwise
+  undiagnosable.
+- **A campaign killed mid-search lost a fusion it had already published.**
+  `run_campaign` publishes each winning iteration to the shadow repo's
+  `forge_experiments/best/` and points `forge_loop_<stem>.json` at it, but the
+  exported patch and the aggregate manifest only land once the campaign
+  returns. A wrapper timeout while it was still iterating therefore reported
+  REVERT with `patch: null` even though correctness had passed. Measured: a
+  session lost a 5.011x fusion of qkvgate split + QK norm + RoPE with its
+  experiment still running when the 5400s timeout fired. Salvage now falls back
+  to the per-campaign artifacts, and each salvaged row carries the env flag its
+  fused path is gated behind -- read back from the driver the campaign wrote,
+  since the patch does not carry it and without it the re-baseline server boots
+  un-gated, measures the eager path and rejects the win one stage later. A
+  campaign whose flag cannot be read is not salvaged at all, rather than queued
+  to fail that way. Artifacts a previous run left in the same output directory
+  are swept before the run starts, so they cannot be salvaged as its own.
+- **A KB recipe carrying code overlays could not be replayed into a framework
+  installed from a wheel.** A Recipe whose patch timeline is non-empty replays
+  as required, and that path refused any tree without a git HEAD -- which a
+  pip-installed framework never has. Every code-level optimization a session
+  published therefore became unreplayable the moment it reached the KB: warm
+  replay failed before booting a server, and the recorded gain could only be
+  re-earned from scratch. What promotion needs is a way to unwind the tree if
+  the replay is rejected, not a sha, so it now accepts either channel: a git
+  checkout's snapshot, or the backups a nogit apply records as it writes. An
+  overlay the tree already carried applies as a no-op and records neither,
+  which is not the same as an apply whose artifacts were lost, so each tree now
+  states whether the round wrote to it -- a no-op tree promotes and is skipped
+  by the rollback, a written-to tree still has to answer with a channel, and a
+  record persisted ahead of the apply reads as written-to so a resume restores
+  it. Framework-agnostic; the shape of the checkout decides the channel.
+- **A shipped aiter tuned CSV naming a kernel this host never compiled failed
+  every boot of the session.** aiter resolves its tuned tables two ways: a
+  pinned `AITER_CONFIG_*` env is taken as the exact `:`-joined list, and an
+  unset one falls back to the shipped default plus every `model_configs`
+  overlay whose name matches. A round that tunes one operator sets only that
+  operator's variable, so the others take the unset branch and pull in overlays
+  cut on another host -- tables whose `kernelName`s are absent from this
+  machine's compiled `module_*.so`. Serving then aborted at load with a
+  registry mismatch, and because the table is shipped rather than produced by
+  the run, every retry hit the same wall: the whole session failed at boot with
+  nothing to roll back. The CSV set a boot will actually load is now resolved
+  by aiter's own two-branch rule and checked against the compiled modules
+  before the config is materialized; an uncovered module is unlinked so the
+  next boot rebuilds it. On integrate, a registry mismatch also drops the
+  modules the error names, not only the ones the round's environment mapped.
+  Framework-agnostic; it is the aiter install that is repaired, not the server.
+- **An author whose transport died took the whole fusion lane with it.** A lane
+  costs hours and an authoring call costs minutes, but a provider that never
+  delivered an answer -- a stream stalled mid-response, a connection reset --
+  ended the lane on the first failure. The classification that tells "the model
+  never answered" apart from "the model answered nothing" already exists in
+  `llm_failure`, so authoring now consults it where the exception is still in
+  hand and retries only the transport, with backoff and against a deadline. A
+  provider safety stop is still never retried, because retrying one is the
+  anti-pattern the session-resume allowlist already refuses; neither is a
+  timeout, which has just spent a full attempt's budget. The deadline defaults
+  to what the configured attempts can legitimately cost, since the generic
+  1800s LLM default is shorter than a single 7200s authoring attempt and would
+  have made the retry unreachable.
+- **A fusion campaign killed before it returned reported REVERT while proven
+  work sat on disk.** `fusion_manifest.json` is the only artifact that points
+  at a keeper, and it was written once every campaign had returned. `on_keep`
+  exports the patch and smokes it the moment a recipe is kept, so a wrapper
+  killed between the last keeper and the aggregate reported `patch: null` even
+  though a sibling had already passed correctness and a serving smoke.
+  Measured: a session lost a 5.011x fusion of qkvgate split + QK norm + RoPE
+  this way, the iteration having published 44 minutes before the timeout fired.
+  The manifest is now published as each keeper is proved, so it is never
+  missing -- only as complete as the run got -- and the existing salvage path
+  reads it unchanged. The end-of-run write still overwrites it with the final
+  loop, compile-pass and error fields before any exit, and a sibling the smoke
+  rejected has its patch unlinked so no reader can find work the run refused.
+- **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
+  Missing AIPerf error-rate metrics are derived from profiling request counts;
+  zero errors are inferred only with successful requests and an explicitly empty
+  error summary. Warmup accounting is excluded, and invalid or unknown evidence
+  remains fail-closed. Valid zero-error baselines no longer lose their quality
+  signal merely because serving lm-eval is disabled.
+- **Honor concurrency-sweep budgets without treating the hard cap as a start cost.**
+  Admission uses the measured expected duration when available; unknown-duration
+  work may start while budget remains. Boot retries, reuse and fallback share
+  the earlier sweep/session deadline, and reports retain the actual stop source.
+  The manual sweep driver no longer passes or advertises the retired
+  `--variant-timeout-sec` option.
+- **Complete cooperative build and specialist cancellation without accepting
+  unconfirmed cleanup.** Cancellation reaches pending work and running workers;
+  confirmed cleanup records a cancelled outcome, while unknown cleanup retains
+  ownership. Completed outcomes remain in task history for diagnosis even when
+  cleanup fails, without publishing them for promotion or retry. Completion
+  callback failures after confirmed cleanup no longer retain execution entries,
+  and repeated inline calls return stored terminal results instead of rerunning.
+- **Refuse unsafe session resumes explicitly.** Legacy or foreign execution
+  ownership and unproven historical cancellations now produce bounded task/lane
+  diagnostics before resume writes or dispatch. Resume admission itself clears
+  no ownership. After independently verifying that a task's complete process tree,
+  remote workers and Ray actor have stopped, operators can use
+  `recover-session --confirm-stopped TASK_ID --confirmation-reason TEXT` to record
+  that confirmation, cancel an unfinished task, and release only its unattributed
+  execution/GPU records under the POSIX session lock. This explicit operation preserves rounds
+  and other tasks, rejects nonempty owner scopes, and neither stops workers nor
+  accepts old results or starts a resume. Existing `--force` remains report-only.
+  Resume admission and
+  round reconciliation honor the latest recorded cleanup outcome, including
+  results recorded after an earlier terminal transition. A Ray worker whose root
+  exited is not treated as proof that detached descendants exited, and a missing
+  stop acknowledgment no longer destroys the specialist actor's cleanup channel.
+  Specialist cleanup makes one bounded follow-up confirmation on the same lease
+  before retaining unconfirmed ownership; a late acknowledgment is consumed by
+  the existing completion path rather than requiring a new background reaper.
+- **Restore safe AITER lock cleanup at baseline startup.** Stale locks are cleaned
+  only when compiler absence is established. Unreadable live-process identity
+  leaves locks untouched; known zombies do not block cleanup.
+- **The AITER version in `stack_fingerprint` is now the AITER that is actually
+  installed.** Two independent faults made that field untrustworthy.
+
+  The env tuple read `AITER_COMMIT` and `AITER_VERSION`, neither of which
+  anything in this repo writes, so the env path never produced a value.
+  `install_baremetal.sh` already resolves the exact tag it installs, exports it,
+  and persists it to `.env` as `AITER_REF`, which the dotenv loader admits under
+  its `AITER_` prefix — so the value was sitting one key away the whole time.
+  `AITER_REF` joins the tuple, behind `AITER_COMMIT`. It also covers the default
+  isolated vLLM path, where aiter lives in the framework venv and no in-process
+  probe can see it under any name.
+
+  The probe then looked up a distribution named `aiter`, but AITER renamed itself
+  to `amd-aiter` at v0.1.8, so the lookup missed every host running v0.1.8 or
+  newer. Worse, on PyPI `aiter` is an unrelated 2019 async-iterator library, so
+  where that package happened to be installed the probe recorded its version —
+  `0.13.20191203` — as the AITER version. The old name is corrected rather than
+  kept as a fallback, precisely so that value can no longer be produced: nothing
+  recorded is better than something that looks like an answer. Hosts older than
+  v0.1.8 are covered by `AITER_REF`, which is exact.
+
+  Only what gets *written* changes. No read path compares `rocm` or `aiter`
+  against the pod today; that gap is tracked in #1507, and getting the recorded
+  value right is a prerequisite for it — a comparison fed `0.13.20191203` would
+  report a confident mismatch against every real AITER build.
+
+- **AgentX grading failures no longer fall back to throughput KEEP.** When an
+  AgentX session cannot grade on interactivity because either side is missing
+  the axis pair, explore, ``_lift_to_current_best``, and
+  ``resolve_graded_comparison`` fail closed instead of promoting on the
+  diagnostic output figure. The removed ``ANCHOR_DEGRADED`` round-local output
+  fallback is part of the same rule. ``degrade_reason`` still travels on the
+  explore, stack-validation and integrate rows that record a refused
+  comparison, so the breakdown can still name why a variant did not KEEP; an
+  *adoption* row can no longer carry one, because the resolver now returns
+  REVERT on a degraded pair and a REVERT never reaches the adoption writeback.
+
+- **A partitioned card is now a different machine in the KB key, so a warm-start
+  hit can no longer replay a config tuned on a differently shaped one.** The
+  `canonical_id` is a seven-tuple of model, hardware, framework name, model type,
+  architectures, framework version and precision. The compute-partition mode was
+  not among those dimensions, and neither was expert parallelism on a single
+  node, so `kb_hardware_slug` collapsed to the bare GPU type and a run in SPX and
+  a run in CPX landed on one identity — `inference:qwen3-32b:mi355x:...` either
+  way. The warm-start cascade only relaxes `conc`/`isl`/`osl`, so nothing
+  downstream caught it either: an `exact` tier hit at confidence 1.0 could hand
+  the auto-replay a config recorded with eight times the partitions, and the
+  `--warm-replay-min-reproduce-pct` backstop only noticed after spending the
+  verify round.
+
+  `kb_hardware_slug` now suffixes the partition mode and `ep` at any node count,
+  not just on a cluster: both are fixed at launch rather than explored, which is
+  the argument `_tp{tp}` already makes for itself. A CPX pod therefore cannot
+  read an SPX row because it is asking a different `canonical_id` — no flag, no
+  demotion, and no second comparison that could be applied to a different row
+  than the one that gets replayed, since `resolve_kb_topology` is the single call
+  both the reader and the writer build the key from. Every suffix is omitted at
+  its default value (`ep <= 1`, SPX, or a mode nobody published, including one
+  this build does not recognise), so existing keys stay byte-identical and
+  nothing in the corpus moves. `_TOPOLOGY_SUFFIX_RE` learned the single-node
+  forms too, so `_hardware_fallback_values` still offers the same-ISA SKUs for
+  exactly the rows these suffixes were added for.
+
+  `workload_shape` still publishes `ep` and `partitions` as a description of the
+  run, and `knowledge_to_warm_recipe` derives its projection allowlist from the
+  publisher rather than restating it, which is what had been silently dropping
+  keys the publisher emitted. Both are omitted at their default: `--ep` defaults
+  to 1, so publishing it would have every dense run claim a formation it never
+  chose, and one partition is the whole card. The count a launch published wins
+  over one re-derived from the mode name, so there is only ever one derivation to
+  keep in agreement.
+
+### Removed
+
+- **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
+  nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
+  with the pod — which was never the exposure, since framework version and
+  precision are already identity dimensions. Encoding the partition mode in the
+  key makes the mismatch it would have caught unrepresentable, so a read-side
+  comparison has nothing left to do. `rocm_version` and `aiter_commit` are still
+  written into every row's `stack_fingerprint` and compared nowhere at read time;
+  that is a real gap and is tracked in #1507 rather than under a flag whose name
+  says fingerprint and whose behaviour would have been workload shape.
+
+### Changed
+
+- **breaking: the SBD V6 concurrency-sweep comparison rows are named for the
+  axis they carry rather than for throughput.** `baseline_throughput` →
+  `baseline_value` and `optimized_throughput` → `optimized_value` in each
+  `conc_sweep` event's `comparison` rows. The old names were a lie on an AgentX
+  session: the figure they held is whatever `result.metric` names, which is the
+  slow-tail interactivity percentile (`e2e_norm_intvty_p90`, milliseconds)
+  whenever the session grades on one, so a consumer reading `*_throughput` was
+  plotting latencies as throughputs against rungs measured in tokens/s. No
+  alias is kept — an alias would preserve exactly the misreading the rename
+  exists to stop. External parsers of `reports/sbd_v6/` must be updated.
+
+  The rows also gained `baseline_guard`, `optimized_guard` and `guard_holds`,
+  and the roll-up gained `guard_axis` and `best_conc_guard_holds`: the throughput
+  the session would have held a promotion to, reported beside the ranked axis
+  rather than enforced, so a rung that bought interactivity by giving up
+  throughput is visible as such instead of reading as a clean win. All are null
+  off the interactivity objective. `guard_holds` is tri-state — `null` means the
+  framework never answered, which is not the same fact as `false`.
+
+- **SBD V6 publishes the axis a session graded on, at the session level and on
+  each settled figure.** Three additions to the wire shape, all of them facts no
+  consumer could previously recover:
+
+  - `metadata.grading` — `{benchmark_mode, objective, tput_guard: {enabled,
+    noise_pct}}`. An AgentX replay is ranked on `e2e_norm_intvty_p90` with total
+    throughput held as a guard; a synthetic run is ranked on output throughput
+    alone. Every throughput field elsewhere in the document is the output axis by
+    construction and `benchmark_mode` never reached the breakdown at all, so
+    without this block the two kinds of session are indistinguishable — and on
+    the canonical corpus the two axes differ by roughly two orders of magnitude,
+    which is enough for a consumer to sort one against the other and never
+    notice. Recorded from `SharedState.grading` rather than re-derived at export:
+    the axis is settled once at seed, where the run can still see its own
+    configuration, and re-deriving it here would read the exporting subprocess's
+    environment. `tput_guard.noise_pct` is `null` on a session seeded before the
+    band was recorded — the band that session applied is unknown, and today's
+    default is not evidence of it.
+  - `outcome.baseline.perf` and `outcome.final.perf` — the four graded axes the
+    measurement reported (`e2e_norm_intvty_p90`, `total_throughput`,
+    `input_throughput`, `tpot_p90_ms`), each an explicit `null` where nothing
+    measured it. All four keys are always present: absent would be
+    indistinguishable from an axis the framework failed to report, and zero reads
+    as "measured, and it was zero". A synthetic run publishes four nulls.
+  - `outcome.final.graded_on` and `outcome.validation.graded_on` — the axis the
+    gain beside them is on. The stack reconciliation has to be single-axis, since
+    an attributed figure on one axis against an unattributed figure on another
+    makes the gap meaningless, and `graded_on` is what names it.
+    `outcome.validation.perf` carries the settled measurement's own axes on the
+    same row as the gain they produced, because a revalidation moves the
+    cumulative figure without re-promoting the recipe.
+
+- **One definition of the agent default model ids, and the backend picks its own
+  last rung.** `DEFAULT_CLAUDE_MODEL` and `DEFAULT_CODEX_MODEL` lived in
+  `orchestrator/roles/agent_role.py` and again in
+  `kernelforge/agent_backends/{claude,codex}.py`, and the two values were also
+  spelled as bare literals in the Forge provider registry beside the module that
+  defined them, in the Claude allowlist head, in the GEAK model default, in the
+  TraceLens Claude path and in the Critic's Codex field. Eight copies of two
+  strings, each free to drift. They now live in `hyperloom/common/llm_config.py`
+  next to `AGENT_BACKEND_CLAUDE` / `AGENT_BACKEND_CODEX`, which is the pair they
+  are keyed by, following the `DEFAULT_REASONING_EFFORT` precedent that both
+  packages already import from `common`.
+
+  `resolve_forge_llm_model` lost its `default` parameter. Every caller passed the
+  chosen backend's own default, and `request_handlers` reimplemented the
+  per-backend branch the function already performs to work out what to pass;
+  `patch_conflict_merge` carried a comment at each call site explaining that a
+  default is mandatory because `CLAUDE_MODEL` is unset on OAuth-token runs and
+  the resolver would otherwise post an empty model id. The function knows the
+  backend, so it now answers that itself and the parameter that could be
+  forgotten is gone.
+
+  The test that asserted the allowlist head equals `DEFAULT_CLAUDE_MODEL` is
+  gone with it: the head is now that constant by construction, so the drift it
+  watched for is unrepresentable. Model knobs that merely share a value today
+  are deliberately untouched — the narrative report model, the RCA model, the KB
+  synthesis model and the quantization driver model each have their own
+  override and their own reason to move, and collapsing them onto one constant
+  would couple decisions that should stay free to diverge.
+
+- **Roofline CUDA graph capture failures are classified instead of retried in
+  eager mode.** When profiling cannot capture a graph, the executor records a
+  structured failure category and writes a diagnosis artifact rather than
+  rebooting the server in eager mode and retrying. Timeline rows now publish
+  ``graph_capture_disabled`` instead of ``eager_fallback_applied``. Blocking
+  filesystem and liveness probes run in ``asyncio.to_thread`` so the roofline
+  action no longer stalls the coordinator event loop.
+
+- **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
+  run inside FRAMEWORK_AGENT, which left it a lane with no lifecycle of its
+  own: it could not be entered, exited or reported on, and a phase that owned
+  optimisation work was also carrying the work of making the combo run at all.
+  It is now a phase of its own between PRELUDE and FRAMEWORK_AGENT, with entry
+  and exit predicates in `compute_next_phase`, its own `phase_history` rows and
+  a section in the Markdown session report. `PHASE_NAMES` is six long.
+
+  **No wall-clock budget is apportioned to it.** `DEFAULT_PHASE_BUDGET_PCT` has
+  no ENABLEMENT key, and an absent key means no cap rather than a zero one: a
+  budget apportions optimisation effort, and a combo that cannot run has
+  nothing to optimise yet. `PHASE_FRAMEWORK_AGENT` drops 0.40 → 0.38 and
+  `PHASE_KERNEL_AGENT` 0.50 → 0.47, so the table now sums to 0.95 and bring-up
+  is bounded by the run's wall clock and by `ENABLEMENT_MAX_ATTEMPTS` instead.
+  The phase's terminal exit is `enablement_attempts_exhausted`, which
+  `enablement/lane.py` sets.
+
+  **Runnability is decided from the measurement, not from a log scan.** A combo
+  counts as served once it has produced positive throughput and completed
+  requests, which is a signal the baseline already carries; the `booted`
+  property it replaces scanned the server log for bring-up milestones and could
+  not witness one past the head of a chatty log. Both enablement origins — a
+  boot failure and the accuracy gate — now open the same baseline revalidation
+  window, and the baseline is Coordinator-owned while the phase is ENABLEMENT.
+
+### Fixed
+
+- **A KernelForge Controller KEEP now reaches the stack ledger in every
+  benchmark mode, not only under AgentX.** `_run_kernel_rewrite_controller`
+  handed `integrate_controller_patches` the session-owned writeback only when
+  `agentx_active` held; every other mode fell back to a module-local recorder
+  that wrote `optimization_stack`, `current_best` and
+  `cumulative_gain_validated` directly. That writer bypassed
+  `_lift_to_current_best`, which is the only caller of
+  `stack_event.record_adoption`, so a controller KEEP in synthetic mode landed
+  in `state.json` and never produced an adoption row — `session_breakdown` sat
+  behind the state it was meant to describe.
+
+  This is visible in the document: for a non-AgentX run the kernel bucket and
+  its `by_backend.forge` split go from empty to populated, and
+  `validated_total_gain_pct` / `at_head` now account for controller KEEPs. The
+  KEEP result carries `backend: forge` / `engine: kernel_rewrite_controller`, so
+  the adoption is attributed rather than folded into `unattributed`. The local
+  recorder and the `record_keep is None` branch that selected it are gone and
+  `record_keep` is now required, so a caller cannot silently reacquire the
+  no-ledger path.
+
+- **A measured Controller patch was dropped because the patch kept before it
+  had moved its context.** Lanes run in parallel from one pinned base commit,
+  so two lanes touching the same file each ship a diff written against that
+  same base; integration applies them one at a time and commits every KEEP,
+  which leaves the later diff stale by the time its turn comes. Measured in the
+  Kimi-K3 session of 2026-09-13: `flydsl_moe_stage2` (1.1727x micro) was lost
+  to `error: patch failed: aiter/ops/flydsl/moe_kernels.py:14` once
+  `flydsl_moe_stage1` had landed, although the two touched disjoint functions
+  and defined disjoint module-level symbols -- they collided only because each
+  inserted its own sweep helpers at the same anchor. A refused diff is now
+  rebuilt in escalating steps: `git apply -3` for pure line drift, then keeping
+  both sides of every conflict region whose merge base is empty, then an LLM
+  for the regions where the lanes genuinely edited the same lines -- one region
+  at a time, carrying the surrounding source as context rather than the file to
+  rewrite. Whatever the last two steps reconstruct is discarded unless it still
+  contains every line the incoming patch and every landed KEEP added, parses,
+  carries no conflict marker and redefines no module-level name; a lane that
+  fails any of those is dropped exactly as it was before, with the worktree put
+  back to HEAD. Nothing here decides a KEEP: the E2E gate downstream still
+  measures and still reverts, so a bad merge costs what a dropped patch already
+  cost and can never produce an unmeasured KEEP. A lane that landed as a merge
+  rather than verbatim is reported as `merge_strategy` on the integration
+  result and in `summary.json`. A patch that applies cleanly takes the path it
+  always took, and the resolver runs on whichever backend
+  `preferred_agent_backend` picks for this deployment -- Claude through the
+  single-shot Anthropic transport, Codex through `achat_completion` -- and is
+  skipped entirely when neither side is credentialed.
+
+- **An accuracy eval that failed because the server was gone was read as a
+  missing framework capability.** `run_eval` reports a vanished server and a
+  model that scored badly the same way -- a non-zero exit -- so the eval-rooted
+  branch stamped both as an eval-failure contract and handed them to the
+  enablement lane. Measured: a baseline whose throughput pass had already
+  completed lost its server mid-eval, the client's next request was refused,
+  and the run then spent five specialist rounds hunting a capability gap the
+  evidence never supported before stopping on the stall cap with a terminal
+  reason that named enablement rather than the server. A refused connection is
+  now separated out: the baseline still fails, nothing is salvaged and the
+  accuracy gate is untouched, but it counts as an ordinary baseline failure so
+  the existing total-failure backstop ends the run on the cause it actually
+  had. Framework-agnostic; the eval path is shared by vLLM, SGLang and ATOM.
+
+- **`--framework atom` defaults the kernel backend to forge.** The kernel phase
+  runs on atom, but GEAK -- the backend every framework gets unless the
+  environment opts into forge -- is on weaker ground there: its extraction rules
+  forbid guessing a rewrite seam on a quantized, non-vLLM backend and require
+  resolving one from the live server, which is unproven on atom. The default phase split gives that phase half the session, so
+  defaulting to GEAK on atom meant defaulting to half a session of nothing,
+  while the CLI printed that kernel-agent was "wired for atom". On atom an unset
+  `KERNEL_OPT_BACKEND_ORDER` is now filled in with `forge` before the session
+  records its backend, and the choice is reported at launch. A value the
+  operator set is kept, so running GEAK on atom deliberately stays possible; the
+  CLI warns that its seam resolution is unproven there. `--no-kernel` skips the
+  defaulting entirely. Only the `framework == "atom"` branch is touched; SGLang
+  and vLLM keep GEAK.
+
+- **Recognize recorded ATOM servers during lifecycle teardown and recovery.**
+  The serving-process checks now accept `atom.entrypoints`. Recovery records
+  the members of a recognized ATOM process group before sending TERM, then
+  checks each recorded PID, group and start time before sending KILL. This
+  allows anonymous workers to be reaped after their leader exits without
+  treating a reused PID or a newly discovered process as an owned worker.
+  A rank that forked after the snapshot is in neither the recorded set nor any
+  cmdline that still reads as an owner, so a confirmed group also receives a
+  closing group KILL; measured on an 8-rank bring-up, those ranks otherwise
+  survived holding their cards. That kill reaches members this pass never
+  enumerated, so it is not treated as proof the group exited. Ownership must be
+  confirmed first: when the recorded leader is absent from the group, no longer
+  reads as an ATOM server, or no longer matches the group and start time
+  recorded for it, nothing is signalled at all and the pidfile is kept for a
+  later pass -- a recorded pgid the kernel has since recycled would otherwise
+  take the teardown meant for ours.
+  Recovery retains the pidfile while the group is still alive and reports the
+  worker PIDs actually signalled. Measured on one MI355X serving
+  Qwen3-14B-FP8: against a fully booted server recovery reaped the leader and
+  three anonymous workers and the card went from 87% to 0% VRAM; fired mid-boot
+  it left no engine process behind. Normal warmup/measure reuse and the existing
+  vLLM/SGLang recovery paths are unchanged. This does not recover ownership of
+  anonymous workers whose leader had already exited before recovery began;
+  the generic subprocess teardown and third-party benchmark scripts are unchanged.
+
+- **A bare `--resume-from` rebuilt the budget and the stop target from the
+  flags.** `--max-hours` carried an argparse default, so a resume passing no
+  flags at all was indistinguishable from one passing the default: a 24 h
+  session was shortened to 2 h and closed as `time_exhausted` before its first
+  action, and the objective was dropped on the way. This is the path
+  `robustness_monitor.sh` takes, which auto-resumes with no flags. The flag now
+  defaults to `None` and resolves to `DEFAULT_MAX_HOURS` only after the archive
+  has had its chance at the persisted budget, so an absent flag restores 8 h
+  while an explicit `--max-hours 2` wins over it.
+
+- **Argv preflight read every dotted vLLM flag as unrecognised.** It probed
+  through `parse_known_args`, which is not what vLLM's parser uses to expand
+  `--<group>-config.<field>`, so preflight spent its one repair dropping flags
+  the server would have accepted. One of them bounded the profiler, and the
+  roofline that followed recorded 25.7 GB of trace over the whole workload
+  instead of over a steady-state window. The probe goes through the entry point
+  that performs the expansion.
+
+- **The robustness monitor called a session over while it was still running.**
+  It read the presence of `reports/final.*` as terminal, but the crash path
+  writes one as a safety net and a resume clears `stop_reason` without removing
+  it. `state.json` decides now, and the artifacts stand in only when there is
+  no state to read.
+
+- **The IR-1 stale-process scan failed on an idle machine, and could not see an
+  ATOM server.** It excluded only `os.getpid()`, so the launcher shell — whose
+  argv quotes the whole command — matched the scan's own patterns and failed the
+  gate; it now excludes its ancestry. Separately, the pattern list named only
+  vLLM and SGLang, so a leftover ATOM server still holding every rank's VRAM
+  read as a clean machine. Matched on `atom.entrypoints` alone: the per-rank
+  workers are `multiprocessing.spawn` children carrying no identifying argv, so
+  only descent from the wrapper reaches them, which teardown already covers.
+
+### Removed
+
+- **The orchestrator drops five mechanisms nothing read: the `kernel_agent`
+  inbox subscription with `IntentType.RESPONSE`, `Message.priority`,
+  `IntentSpec.builder`, the `PHASE_EXIT_REASONS` vocabulary, and 11 stop
+  reasons no code path can produce.** Each had writers, or a schema column, or
+  a test suite holding it up — everything except a production reader.
+
+  `IntentType.RESPONSE` was dispatched, policy-gated and validated end to end
+  while the `kernel_agent` process that would consume it is never instantiated.
+  The `request` / `response` topics and `kernel_agent` as a routing target are
+  untouched; only the subscription and the intent type go. `Message.priority`
+  had 15 writers and no reader, no index and no `ORDER BY`.
+  `IntentSpec.builder` kept two unwired builders looking alive — their
+  validators stay, because the role may still emit both intent types, just not
+  through a builder. `PHASE_EXIT_REASONS` was a closed 37-member vocabulary
+  with no production reader at all, unlike its load-bearing twin
+  `STOP_REASON_VOCAB`, which gates `machine.py`, `close.py` and
+  `set_stop_reason`: a phase exit reason only reaches `phase_history` for a
+  human to read, so a typo there cannot misroute anything.
+
+  The 11 stop reasons were not "not yet triggered". The crash-threshold path
+  sets `emergency`, and `compute_plateau_explore` / `compute_plateau_kernel`
+  return booleans, so no exit rule ever named `plateau_explore` or
+  `plateau_kernel`. The comment calling these legacy sentinels kept for
+  resuming old sessions did not survive checking, and goes with them:
+  `SharedState.from_dict` restores `stop_reason` as a dataclass field,
+  bypassing `set_stop_reason`, and `_global_terminal` returns unrecognised
+  values verbatim under `vocab: "unknown"` — vocabulary membership was never
+  what let an old session report its terminal. `enablement_stalled` remains a
+  legal value in the enablement timeline event namespace, which is a different
+  vocabulary and is untouched.
+
+  **Resuming across the change needs nothing from the operator.**
+  `CREATE TABLE IF NOT EXISTS` leaves `priority INTEGER NOT NULL` on a
+  `coordinator.db` written before this release, where a column with no default
+  would refuse every append the new code writes, so `ensure_schema` drops it on
+  the way in. An in-flight session resumes with its event history intact.
+
+  The rewrite kernel lane is a **refactor, not a removal**. `allocate()` built
+  a `LaneAllocation` for a lane whose budget the rewrite route never read — it
+  sizes itself against the wall clock — but the `0.5` was load-bearing as a
+  divisor, holding the other two lanes down to 0.3 and 0.2 of the phase. It
+  becomes `REWRITE_RESERVE_SHARE`, taken off the top before the two real lanes
+  divide the rest, and each lane's share of the phase is unchanged.
+
+- **`--max-minutes-enablement-pct` / `--phase-budget-enablement-pct`.** The
+  flag parsed and reached `DEFAULT_PHASE_BUDGET_PCT`, but no ENABLEMENT branch
+  in `compute_next_phase` ever calls `phase_cap_exceeded`, so the cap it
+  advertised was never enforced against anything. Wiring it up would have
+  contradicted the phase having no budget by design. It was new in this
+  release and nothing depended on it.
 
 ## Hyperloom 1.1.1 release
 
