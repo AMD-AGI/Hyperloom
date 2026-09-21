@@ -2249,7 +2249,7 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
         assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
     event = next(row for row in read_timeline_events(coordinator.session_dir) if row["type"] == "kernel")
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["error_class"] == "invalid_env_spec"
+    assert event["ext"]["outcome"]["error_class"] == "invalid_env_spec"
     assert not await coordinator.tasks.queued()
 
 

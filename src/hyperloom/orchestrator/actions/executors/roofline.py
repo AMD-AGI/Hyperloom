@@ -21,6 +21,7 @@ from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
     ANALYSIS_ATTEMPT_INITIAL,
@@ -37,13 +38,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     make_roofline_recorder,
     roofline_event_id,
 )
-
-#: Task param naming the event an inline roofline's rows belong to. A phase
-#: that owns a timeline event puts its event id here when it dispatches the
-#: action, and that one string is the whole of the difference between the
-#: inline and standalone modes: with it the rows join the enclosing event, and
-#: without it the action leaves an event of its own.
-INLINE_EVENT_PARAM = "sbd_event_id"
 
 log = logging.getLogger(__name__)
 

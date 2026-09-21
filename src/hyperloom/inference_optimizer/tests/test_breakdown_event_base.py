@@ -354,10 +354,11 @@ def test_a_recovered_event_is_marked_interrupted_rather_than_guessed_complete(tm
             status=rec.EVENT_STATUS_INTERRUPTED,
             ext={"macro_cycle": 3},
         )
+        # Recovery is itself a close, so a second export must not recover it again.
+        assert rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel") == []
 
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
     assert event["status"] == rec.EVENT_STATUS_INTERRUPTED
-    assert rec.EVENT_STATUS_INTERRUPTED in rec.TERMINAL_EVENT_STATUSES
 
 
 def _killed_kernel_entry(session_dir: Path):
@@ -397,7 +398,7 @@ def test_finalize_keeps_the_rows_the_killed_phase_had_already_recorded(tmp_path)
 
     rec.finalize_events(tmp_path)
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
-    assert [row["kernel_id"] for row in event["ext"]["forge"]["lanes"]["kernel_rewrites"]] == ["k001"]
+    assert [row["kernel_id"] for row in event["ext"]["attempts"]] == ["k001"]
 
 
 def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
@@ -405,10 +406,11 @@ def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
         recorder = make_kernel_recorder(macro_cycle=3, route="forge")
         assert recorder is not None
         recorder.begin(tput_before=1000.0)
-        recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+        recorder.finish(tput_after=1000.0)
 
     assert rec.finalize_events(tmp_path) == []
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
+    # The status its own close derived, not the ``interrupted`` finalize writes.
     assert event["status"] == "succeeded"
 
 

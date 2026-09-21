@@ -327,8 +327,11 @@ class MachinePhase(PhaseHandler):
                 reason=reason or "",
                 evidence=evidence if isinstance(evidence, dict) else None,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
             log.exception("Coordinator: _on_phase_entered hook failed")
+            # This hook is also what closes the left phase's event, so a raise
+            # here is the case where that event never got its exit evidence.
+            self._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     async def _on_phase_entered(
         self,

@@ -35,13 +35,22 @@ __all__ = [
 FORGE_SOURCES = ("kernel_rewrite", "fusion", "gemm_tuning")
 GEAK_SOURCES = ("geak_authored_kernel", "geak_env_selection")
 
-#: Lane outcomes that say the candidate was ruled against rather than left
+#: Attempt outcomes that say the candidate was ruled against rather than left
 #: unsettled. ``needs_review`` is deliberately absent: nothing concluded.
-_REJECTED_OUTCOMES = frozenset({"rejected"})
+_REJECTED_OUTCOMES = frozenset({"rejected", "failed"})
 
-#: The counters ``source_counters`` sums. ``e2e_gain_pct`` is a maximum rather
-#: than a sum and is handled separately.
-_SUMMED = ("attempted", "adopted", "needs_review", "rejected", "keeps", "reverts", "micro_only_keeps")
+#: The counters ``source_counters`` reports. ``e2e_gain_pct`` is a maximum
+#: rather than a sum and is handled separately.
+_SUMMED = (
+    "attempted",
+    "adopted",
+    "needs_review",
+    "rejected",
+    "failed",
+    "keeps",
+    "reverts",
+    "micro_only_keeps",
+)
 
 
 def _visits(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
@@ -66,30 +75,49 @@ def _best(current: Any, candidate: Any) -> float | None:
     return max(values) if values else None
 
 
+def _attempts(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every candidate either route produced, across every visit."""
+    return [row for ext in _visits(breakdown) for row in dict_rows(ext.get("attempts"))]
+
+
 def source_counters(breakdown: dict[str, Any], sources: tuple[str, ...]) -> dict[str, Any]:
-    """Sum one route's per-source candidate tallies across every visit.
+    """Tally one route's candidates across every visit.
+
+    Counted off the attempts themselves rather than off a tally the recorder
+    also keeps: two counts of one population disagree the moment either side
+    is edited, and the attempts are the side that carries the evidence.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
         sources (tuple[str, ...]): The source kinds the route owns.
 
     Returns:
-        dict[str, Any]: The summed counters, plus ``e2e_gain_pct`` as the best
+        dict[str, Any]: The counts, plus ``e2e_gain_pct`` as the best
             end-to-end gain the gate measured for any of them -- a maximum,
             because the gains are measured against a moving stack and adding
             them would claim a total no measurement supports.
     """
     totals: dict[str, Any] = {key: 0 for key in _SUMMED}
     totals["e2e_gain_pct"] = None
-    for ext in _visits(breakdown):
-        by_source = as_dict(as_dict(ext.get("outcome")).get("by_source"))
-        for source in sources:
-            counters = as_dict(by_source.get(source))
-            for key in _SUMMED:
-                value = counters.get(key)
-                if isinstance(value, (int, float)):
-                    totals[key] += int(value)
-            totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], counters.get("e2e_gain_pct"))
+    for row in _attempts(breakdown):
+        if str(row.get("source_kind") or "") not in sources:
+            continue
+        totals["attempted"] += 1
+        outcome = str(row.get("outcome") or "")
+        if outcome in totals:
+            totals[outcome] += 1
+        e2e = as_dict(row.get("e2e"))
+        decision = str(e2e.get("decision") or "").upper()
+        if decision == "KEEP":
+            totals["keeps"] += 1
+        elif decision:
+            totals["reverts"] += 1
+        elif outcome == "adopted":
+            # Kept without the end-to-end gate ever ruling: either a rebench
+            # promoted it, or a forge lane kept it and the gate runs after the
+            # visit that produced it.
+            totals["micro_only_keeps"] += 1
+        totals["e2e_gain_pct"] = _best(totals["e2e_gain_pct"], e2e.get("e2e_gain_pct"))
     return totals
 
 
@@ -145,35 +173,31 @@ def _fold_discovered(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> No
             row["selected_for_optimization"] = True
 
 
-def _fold_lane(
-    rows: dict[str, dict[str, Any]],
-    entries: list[dict[str, Any]],
-    *,
-    lane: str,
-    speedup_field: str,
-) -> None:
-    """Fold one route's per-kernel candidate rows into the rollup.
+def _fold_attempts(rows: dict[str, dict[str, Any]], ext: dict[str, Any]) -> None:
+    """Fold one visit's candidate attempts into the rollup.
+
+    Both routes are read from the same array under the same field names, so
+    the two lane summaries are built by one pass rather than two that have to
+    agree about what a speedup is called.
 
     Args:
         rows (dict[str, dict[str, Any]]): The rollup, updated in place.
-        entries (list[dict[str, Any]]): The route's candidate rows.
-        lane (str): The rollup key the lane summary is stored under.
-        speedup_field (str): Which field carries the micro-benchmark speedup;
-            the two routes name it differently.
+        ext (dict[str, Any]): One kernel visit's ``ext``.
     """
-    for entry in entries:
+    for entry in dict_rows(ext.get("attempts")):
         kernel_id = str(entry.get("kernel_id") or "")
-        if not kernel_id:
+        lane = str(entry.get("route") or "")
+        if not kernel_id or lane not in {"forge", "geak"}:
             continue
         row = _seed(rows, kernel_id)
         if not row["name"]:
-            row["name"] = str(entry.get("name") or entry.get("kernel_name") or "")
+            row["name"] = str(entry.get("name") or "")
         # A route that dispatched against a kernel is a route that considered
         # it a target, whatever the discovery table said.
         row["selected_for_optimization"] = True
         summary = row.get(lane) or {"attempts": 0, "best_speedup": None, "decision": ""}
         summary["attempts"] = int(summary["attempts"]) + 1
-        summary["best_speedup"] = _best(summary["best_speedup"], entry.get(speedup_field))
+        summary["best_speedup"] = _best(summary["best_speedup"], entry.get("speedup"))
         decision = str(as_dict(entry.get("e2e")).get("decision") or "") or str(entry.get("micro_decision") or "")
         if decision:
             summary["decision"] = decision
@@ -237,18 +261,7 @@ def kernel_rows(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     for ext in _visits(breakdown):
         _fold_discovered(rows, ext)
-        _fold_lane(
-            rows,
-            dict_rows(as_dict(as_dict(ext.get("forge")).get("lanes")).get("kernel_rewrites")),
-            lane="forge",
-            speedup_field="speedup",
-        )
-        _fold_lane(
-            rows,
-            dict_rows(as_dict(as_dict(ext.get("geak")).get("attempts")).get("kernels")),
-            lane="geak",
-            speedup_field="micro_speedup",
-        )
+        _fold_attempts(rows, ext)
         _fold_integrate(rows, ext)
     _fold_adopted_by(rows)
     return sorted(rows.values(), key=lambda row: -(row.get("gpu_pct") or 0.0))

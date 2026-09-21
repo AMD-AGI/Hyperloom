@@ -29,6 +29,7 @@ from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
     clip as _clip,
+    failure_row as _failure_row,
     float_or_none as _float_or_none,
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
@@ -556,6 +557,44 @@ def record_revalidation_outcome(
     )
 
 
+def record_fault(
+    *,
+    stage: str,
+    exc: BaseException | None = None,
+    error_class: str = "",
+    message: Any = "",
+) -> None:
+    """Name a fault that struck mid-lane, without ending the lane.
+
+    The enablement pump is phase-independent and swallows its own exceptions so
+    a wedged enqueue cannot strand the run in PRELUDE. Without this row those
+    exceptions reached the timeline nowhere, and a lane that had blown up on
+    every tick still closed clean on its eventual terminal. Only the first
+    fault is kept, matching the KERNEL and FRAMEWORK phase-spanning events.
+
+    No-ops when the lane has not opened yet or has already finished: there is
+    then no event to attach to, and fabricating one would invent a lane the
+    session never engaged.
+    """
+    rows = _event_rows()
+    if not rows or any(_as_dict(row.get("result")) or _as_dict(row.get("failure")) for row in rows):
+        return
+    sink = _sink()
+    if sink is None:
+        return
+    sink.record(
+        SECTION_EVENT,
+        {
+            "failure": _failure_row(
+                stage=stage,
+                exc=exc,
+                error_class=error_class or ("" if exc is not None else f"{stage}_failed"),
+                message=message,
+            )
+        },
+    )
+
+
 def finish(
     *,
     outcome: str,
@@ -672,6 +711,7 @@ def assemble_enablement_ext(
         drop=("event_id",),
     )
     result = _as_dict(header.get("result"))
+    failure = _as_dict(header.get("failure")) or None
     ext: dict[str, Any] = {
         "mode": str(header.get("mode") or ""),
         "origin": str(header.get("origin") or ""),
@@ -698,11 +738,16 @@ def assemble_enablement_ext(
         },
         "human_review": {"count": len(human_review), "rows": human_review},
         "result": result or None,
+        "failure": failure,
         # ``None`` only for a lane that never reached a terminal; a closed one
         # always carries a verdict, including an explicitly insufficient one.
         "recipe": _as_dict(header.get("recipe")) or None,
     }
     status = _status_for(str(result.get("outcome") or ""), attempts=len(attempts)) if result else ""
+    # A fault the lane survived outranks a clean terminal: the exception is
+    # what says the outcome was not come by cleanly, matching KERNEL/FRAMEWORK.
+    if failure:
+        status = STATUS_FAILED
     return ext, status
 
 
@@ -872,6 +917,7 @@ __all__ = [
     "record_archive",
     "record_build",
     "record_dispatch",
+    "record_fault",
     "record_human_review",
     "record_revalidation",
     "record_revalidation_outcome",

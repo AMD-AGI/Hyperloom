@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller._collective_names import (
     carries_parallelism_suffix,
     looks_like_multi_rank_operator,
@@ -128,10 +129,18 @@ def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity
         raise TaskContractError(str(error)) from error
     if identity.producer != LOOP_PRODUCER:
         raise TaskContractError(f"identity.producer must be {LOOP_PRODUCER!r}")
-    # ``backend`` is not checked against the registered set. It selects a prompt
-    # layer, and forge-loop already answers an unregistered one with no layer
-    # rather than an error, so refusing here would cost a whole operator over a
-    # naming choice the loop is willing to live with.
+    if identity.backend not in KERNEL_BACKENDS:
+        # An unregistered backend does not reach forge-loop as itself. Campaign
+        # setup resolves it against this same registry and substitutes the
+        # fallback, warning on stderr and continuing -- so the run builds with
+        # one technology while the task directory, the experience id and the
+        # published pointer all say another, and the two addresses for one run
+        # are the shape this whole module exists to prevent. The agent is handed
+        # this list in its prompt, so the name is one it can already spell.
+        raise TaskContractError(
+            f"identity.backend must name a registered kernel backend: {identity.backend!r} is not one of "
+            f"{', '.join(sorted(KERNEL_BACKENDS))}"
+        )
     return identity, operator_id
 
 

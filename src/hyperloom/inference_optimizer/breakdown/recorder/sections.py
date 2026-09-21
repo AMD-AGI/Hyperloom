@@ -118,6 +118,7 @@ STACK_EVENT_SECTIONS: tuple[str, ...] = (
 WARM_REPLAY_EVENT_SECTIONS: tuple[str, ...] = (
     "warm_replay_event",
     "warm_replay_gate",
+    "warm_replay_apply",
 )
 
 WARM_START_EVENT_SECTIONS: tuple[str, ...] = (

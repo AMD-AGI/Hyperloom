@@ -99,6 +99,10 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "warm_start_read": "item",
     "warm_replay_event": "item",
     "warm_replay_gate": "item",
+    # Rows rather than a tally on the event: the plan's counts already say how
+    # many landed, and what a reader needs from a replay that lost is which
+    # item it was that did not.
+    "warm_replay_apply": "item",
     "framework_event": "item",
     "framework_plateau": "item",
     "framework_run": "item",

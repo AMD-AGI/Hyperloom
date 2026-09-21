@@ -1122,6 +1122,28 @@ def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     return (m - b) / b * 100.0
 
 
+def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:
+    """The configuration this patch was measured on top of.
+
+    Only the executor can answer this. The task's own params hold the stack as
+    of dispatch, and a task queued before another KEEP landed is rebound onto
+    the live stack top before it runs; ``base_tput`` is the drift-resolved
+    anchor it was actually graded against. Carried on the result for the reason
+    the configuration arm carries it -- what the session serves once this
+    returns is no longer what the patch was judged against, so a reader that
+    reconstructs the stack from the current config gets the wrong one.
+    """
+    return {
+        "throughput": base_tput or None,
+        "accuracy": float(params.get("accuracy_baseline") or 0.0) or None,
+        "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+        "extra_envs": dict(params.get("base_extra_envs") or {}),
+        "remove_args": to_str_list(params.get("base_remove_args")),
+        "unset_envs": to_str_list(params.get("base_unset_envs")),
+        "args_mode": str(params.get("base_args_mode") or "append"),
+    }
+
+
 def _preflight_missing_targets(
     framework_root: Path,
     patch_paths: list[Path],
@@ -4307,6 +4329,7 @@ class IntegratePatchExecutor:
             )
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        measured_against = _measured_against(params, base_tput=base_tput)
 
         stopped = stopped_by_the_run_class(bench_result.get("error_class"))
         if stopped is not None:
@@ -4462,6 +4485,7 @@ class IntegratePatchExecutor:
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
                         "base_tput": base_tput,
+                        "measured_against": measured_against,
                         "keep_threshold_pct": keep_threshold_pct,
                         "reason": str(parity.get("reason") or "switch-off parity failed"),
                         "switch_off_parity": parity,
@@ -4553,6 +4577,7 @@ class IntegratePatchExecutor:
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
                     "base_tput": base_tput,
+                    "measured_against": measured_against,
                     "keep_threshold_pct": keep_threshold_pct,
                     "reason": "; ".join(reasons) or "gate failed",
                     "bench_result": bench_result,
@@ -4597,6 +4622,7 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
+                    "measured_against": measured_against,
                     "bench_result": bench_result,
                     "reason": f"KEEP could not be committed: {commit_failure}",
                     "workspace": str(output_root),
@@ -4713,6 +4739,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": measured_against,
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
                 "bench_result": bench_result,
@@ -4991,6 +5018,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": _measured_against(params, base_tput=base_tput),
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": "; ".join(reason_bits),
                 "bench_result": bench_result,
