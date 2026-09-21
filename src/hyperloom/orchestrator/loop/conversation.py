@@ -512,21 +512,13 @@ class ConversationCollaborator:
             overrides = {}
         lines: list[str] = []
         if phase == _phase_state.PHASE_FRAMEWORK_AGENT:
-            # Both arms, always: the phase leaves only when both are dry, so reporting one alone would say "plateau"
-            # about a phase that is still paying on the other lever.
-            config_dry, config_ev = _phase_state.compute_plateau_explore(
-                state,
-                lookback=int(
-                    overrides.get("explore_lookback", _phase_state.DEFAULT_PLATEAU_EXPLORE_LOOKBACK),
-                ),
-                keep_gain_threshold_pct=float(
-                    overrides.get("explore_keep_gain_pct", _phase_state.DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT),
-                ),
-                empty_streak_threshold=int(
-                    overrides.get("explore_empty_streak", _phase_state.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK),
-                ),
-            )
-            source_dry, source_ev = _phase_state.source_arm_plateaued(state)
+            # The advisory reads the same predicate the exit rule does, so the
+            # model is never shown a plateau the phase machine disagrees with.
+            _, evidence = _phase_state.per_lever_dryness(state)
+            config_dry = bool(evidence.get("config_arm_plateaued"))
+            source_dry = bool(evidence.get("source_arm_plateaued"))
+            config_ev = evidence
+            source_ev = evidence
             try:
                 self._record_advisory_plateau(
                     config=(config_dry, config_ev),

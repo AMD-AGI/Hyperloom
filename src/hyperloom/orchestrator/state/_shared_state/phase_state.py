@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_ExploreStateMixin`` — explore / gap / specialist-ledger mutators for :class:`..shared_state.SharedState`."""
+"""``_PhaseStateMixin`` — the phase ledgers :class:`..shared_state.SharedState` mutates: explore search, attempts, specialist rounds and verdicts, and per-domain counters."""
 
 from __future__ import annotations
 
@@ -19,7 +19,19 @@ def _shared_state_module():
     return shared_state
 
 
-class _ExploreStateMixin:
+def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
+    """Merge rejected rows by fingerprint, newest wins. Rows without one are dropped: the fingerprint is what the dedup gate matches on."""
+    merged: dict[str, dict[str, Any]] = {}
+    for entry in [*(prior or []), *(update or [])]:
+        if not isinstance(entry, dict):
+            continue
+        fingerprint = str(entry.get("fingerprint") or "")
+        if fingerprint:
+            merged[fingerprint] = entry
+    return list(merged.values())
+
+
+class _PhaseStateMixin:
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
         if not isinstance(entry, dict) or not entry:
@@ -46,6 +58,15 @@ class _ExploreStateMixin:
         cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
         if len(self.specialist_rounds) > cap:
             self.specialist_rounds = self.specialist_rounds[-cap:]
+
+    def record_attempt(self, attempt: dict[str, Any]) -> None:
+        """Append one measured attempt; stamps the cycle the dryness judgment filters on."""
+        row = dict(attempt)
+        row.setdefault("cycle", int(self.macro_cycle or 0))
+        self.attempts.append(row)
+        cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
+        if len(self.attempts) > cap:
+            self.attempts = self.attempts[-cap:]
 
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain anchor."""
@@ -123,91 +144,6 @@ class _ExploreStateMixin:
             return ""
         matches.sort(key=lambda m: m[0])
         return matches[0][1]
-
-    def find_gap(self, canonical_id: str) -> dict[str, Any] | None:
-        """Return the gap entry matching ``canonical_id`` (or ``None``)."""
-        if not canonical_id:
-            return None
-        cid = str(canonical_id)
-        for gap in self.gaps:
-            if isinstance(gap, dict) and str(gap.get("canonical_id") or "") == cid:
-                return gap
-        return None
-
-    def upsert_gap(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Insert or update one gap row, keyed by ``canonical_id``. Coordinator-only writer (Inv-1 single-writer + CORE_STATE_FIELDS lock). Returns the merged entry."""
-        if not isinstance(entry, dict):
-            return {}
-        cid = str(entry.get("canonical_id") or "").strip()
-        if not cid:
-            return {}
-        ss = _shared_state_module()
-        now = ss._now_iso()
-        existing = self.find_gap(cid)
-        if existing is None:
-            merged: dict[str, Any] = {
-                "canonical_id": cid,
-                "symptom": str(entry.get("symptom") or ""),
-                "layer": str(entry.get("layer") or ""),
-                "severity": str(entry.get("severity") or "medium"),
-                "domain_hint": str(entry.get("domain_hint") or ""),
-                "source": str(entry.get("source") or ""),
-                # Optional origin reference (PR/blog URL).
-                "provenance": str(entry.get("provenance") or ""),
-                "first_seen_ts": str(entry.get("first_seen_ts") or now),
-                "last_updated_ts": now,
-                "attempts": list(entry.get("attempts") or []),
-            }
-            if len(merged["attempts"]) > ss._GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-ss._GAPS_ATTEMPTS_HISTORY :]
-            self.gaps.append(merged)
-        else:
-            # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
-            for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
-                incoming = entry.get(key)
-                if incoming:
-                    existing[key] = str(incoming)
-            existing.setdefault("first_seen_ts", str(entry.get("first_seen_ts") or now))
-            existing["last_updated_ts"] = now
-            incoming_attempts = list(entry.get("attempts") or [])
-            if incoming_attempts:
-                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
-                # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
-                existing["attempts"] = merged_attempts
-            merged = existing
-        # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
-        if len(self.gaps) > ss._GAPS_MAX_ENTRIES:
-            others = [g for g in self.gaps if g is not merged]
-
-            def _sort_key(g: dict[str, Any]) -> str:
-                """Sort key for gap trimming: newest-updated timestamp."""
-                return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
-
-            others.sort(key=_sort_key)
-            keep_count = ss._GAPS_MAX_ENTRIES - 1
-            others = others[-keep_count:] if keep_count > 0 else []
-            self.gaps = others + [merged]
-        return merged
-
-    def append_gap_attempt(
-        self,
-        canonical_id: str,
-        attempt: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """Append one attempt row to an existing gap; returns the gap or ``None`` when unknown."""
-        gap = self.find_gap(canonical_id)
-        if gap is None:
-            return None
-        attempts = list(gap.get("attempts") or [])
-        ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
-        if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
-            attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
-        gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss._now_iso()
-        return gap
 
     def record_intervention(
         self,
@@ -320,20 +256,25 @@ class _ExploreStateMixin:
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
         cur_bottleneck = self.current_top_bottleneck()
         ss = _shared_state_module()
+        # The executor reports the round it just benched; accumulating it over the
+        # durable ledger is this layer's job, and a re-measured fingerprint replaces
+        # its earlier row because that is what a fresh measurement means.
         merged["tested"] = ss._cap_tested_ledger(
             ss._stamp_cycle_on_tested(
-                dict(update.get("tested") or prior.get("tested") or {}),
+                {**(prior.get("tested") or {}), **(update.get("tested") or {})},
                 cur_cycle,
                 cur_bottleneck,
             )
         )
         merged["rejected"] = ss._stamp_cycle_on_rejected(
-            list(update.get("rejected") or prior.get("rejected") or []),
+            _merge_rejected(prior.get("rejected"), update.get("rejected")),
             cur_cycle,
             cur_bottleneck,
         )
-        merged["name_index"] = dict(update.get("name_index") or prior.get("name_index") or {})
-        merged["cursor"] = int(update.get("cursor") or len(merged["tested"]))
+        merged["name_index"] = {**(prior.get("name_index") or {}), **(update.get("name_index") or {})}
+        # The round ordinal, not the ledger's size: consumers key idempotency and
+        # round ids on it, so it has to advance once per benched round.
+        merged["cursor"] = int(prior.get("cursor") or 0) + 1
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         wh = list(prior.get("winners_history") or [])

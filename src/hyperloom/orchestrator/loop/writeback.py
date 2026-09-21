@@ -46,11 +46,13 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..state.attempt_ledger import record_config_attempt
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -365,10 +367,10 @@ def _record_config_attempts(
 ) -> None:
     """Record the configuration arm's measured attempts on the framework event.
 
-    The executor has no recorder to reach; this is the first coordinator-side
-    seam that sees the full per-variant outcome. The outcome is recorded
-    verbatim, unlike the journal beside it, which collapses ``KEEP_UNSTABLE``
-    and ``KILLED_OVERTIME`` into a plain revert.
+    Timeline only: the ledger row is written by ``_fact_write_hook``, which does
+    not depend on a recorder being open. The outcome is recorded verbatim here,
+    unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
+    ``KILLED_OVERTIME`` into a plain revert.
     """
     getter = getattr(coord, "_framework_timeline", None)
     recorder = getter() if callable(getter) else None
@@ -443,7 +445,7 @@ def _record_config_attempts(
                     "raw_result_path": str(row.get("raw_result_path") or ""),
                 },
                 decision=outcome,
-                adopted=outcome == "KEEP",
+                adopted=_is_kept(outcome),
                 # Recorded rather than referenced: every KEEP advances the
                 # stack, so the session's current config is not what this
                 # variant was measured on top of.
@@ -453,7 +455,7 @@ def _record_config_attempts(
                 # A pair is what makes a gain addable, so eligibility follows
                 # the pair being present rather than the outcome being a KEEP.
                 attribution_eligible=(
-                    outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
+                    _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
                 ),
             )
             for gate in gates:
@@ -1602,7 +1604,24 @@ class WritebackCollaborator:
             _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
+            round_id = str(result_dict.get("round_id") or "")
             for vo in per_variant:
+                outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
+                if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
+                    metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
+                    record_config_attempt(
+                        self.shared_state,
+                        task_id=str(task.task_id or ""),
+                        round_id=round_id,
+                        fingerprint=str(vo.get("fingerprint") or ""),
+                        variant_name=str(vo.get("variant_name") or ""),
+                        outcome=outcome,
+                        gain_pct=metrics.get("gain_pct"),
+                        before_tput=metrics.get("base_tput"),
+                        after_tput=metrics.get("tput"),
+                        error_class=str(vo.get("error_class") or ""),
+                        provenance=str(vo.get("provenance") or ""),
+                    )
                 try:
                     self._record_fact_per_variant(
                         task=task,
@@ -4250,7 +4269,6 @@ class WritebackCollaborator:
         # failed/empty rebench leaves the flag set and reports keep warning.
         is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
             "resume_stack_revalidate",
-            "resume_reverify_best",
         }
         if is_revalidation_task:
             measured = result.get("output_throughput")

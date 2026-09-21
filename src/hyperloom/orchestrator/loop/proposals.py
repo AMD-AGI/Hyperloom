@@ -446,13 +446,12 @@ class ProposalsCollaborator:
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
-        # not an eligibility gate.
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and es.get("tested"):
-            params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
+        # The round-id seed: the executor holds no cross-round state, so the round
+        # it labels itself with has to come from the durable cursor.
+        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        params.setdefault("explore_search_cursor", cursor)
 
     async def _materialize_approved_proposal(
         self,
