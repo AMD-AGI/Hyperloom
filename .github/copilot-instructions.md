@@ -49,9 +49,9 @@ Advisory review. Flag only what static gates can't.
   unreachable statements after a `return`/`raise`, commented-out blocks, `# removed …`
   tombstones. Pylint's `W0101` is warning-category, so CI's `--errors-only` invocation
   never reports it.
-- **Missing changelog entry**: an observable change — a behaviour, interface, default,
-  flag, or artifact — with no `CHANGELOG.md` entry under `[Unreleased]`, and no note in
-  the description saying why the change is unobservable.
+- **Unstated observable effect**: an observable change — a behaviour, interface, default,
+  flag, or artifact — whose PR description neither says what an operator will now see nor
+  says why the change is unobservable.
 
 ## What NOT to flag
 

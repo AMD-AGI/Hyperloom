@@ -202,7 +202,7 @@ CI enforces this through the **REUSE Compliance** workflow.
 - Branch from `main`; keep commits logically grouped.
 - PR description: problem, approach, test evidence.
 - **Do not commit:** virtualenvs, `.coverage`, build artifacts, large logs, credentials, local `.env`.
-- **Changelog:** required. Anything an operator can observe carries a `CHANGELOG.md` entry under `[Unreleased]` in the same PR — see [`AGENTS.md`](../../AGENTS.md) § *Authoring rules of engagement* for what counts and what is exempt.
+- **Observable effect:** required. Anything an operator can observe is described in the PR that changes it, and the release cut aggregates those into the GitHub release — see [`AGENTS.md`](../../AGENTS.md) § *Authoring rules of engagement* for what counts and what is exempt.
 
 ## Local development checklist
 
