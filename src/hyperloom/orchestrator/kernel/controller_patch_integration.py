@@ -12,6 +12,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.kernel_rewrite_controller.task import load_task
+
 from hyperloom.common.io import atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
@@ -76,6 +78,20 @@ PatchValidator = Callable[[ControllerPatchPublication], Awaitable[dict[str, Any]
 
 #: Records one validated KEEP into SharedState.
 KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
+    """Order publications by their original Controller task priority."""
+    root = Path(patches_root).resolve()
+    tasks_root = root.parent.parent / "controller" / "tasks"
+
+    def key(patch_dir: Path) -> tuple[int, str]:
+        parsed = load_task(tasks_root / patch_dir.name, record_state=False)
+        if parsed.task is None:
+            return (2**31 - 1, patch_dir.name)
+        return (parsed.task.priority, parsed.task.operator_id)
+
+    return tuple(sorted(discover_controller_patch_dirs(root), key=key))
 
 
 def _git_output(repo: Path, *args: str) -> str:
@@ -250,7 +266,7 @@ async def integrate_controller_patches(
     # keeping what they added.
     landed: dict[Path, list[tuple[str, Path]]] = {}
 
-    for index, patch_dir in enumerate(discover_controller_patch_dirs(patches_root)):
+    for index, patch_dir in enumerate(_priority_ordered_patch_dirs(patches_root)):
         try:
             publication = load_controller_publication(patch_dir)
         except ControllerPublicationError as error:
