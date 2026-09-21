@@ -202,9 +202,6 @@ _MARKER_WINDOW_LINES: int = 60
 #: Lines of preceding context a legacy bootstrap marker keeps.
 _MARKER_CONTEXT_LINES: int = 2
 
-# Default grace after the first fatal marker before forcing a reap.
-_SERVER_DEAD_GRACE_SEC_DEFAULT: float = 120.0
-
 
 # Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child that came up healthy but then produced no
 # generation progress (hung engine / detokenizer wedge).
