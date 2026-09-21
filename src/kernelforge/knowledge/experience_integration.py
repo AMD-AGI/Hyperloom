@@ -322,7 +322,7 @@ def _git_commit_all(
     if allowed_paths is None:
         changed = git("diff", "--name-only", "HEAD", cwd=workspace_dir)
         allowed_paths = {line.strip() for line in changed.stdout.splitlines() if line.strip()}
-    git("add", "-A", "--", *sorted(allowed_paths), cwd=workspace_dir)
+    git("add", "-A", "-f", "--", *sorted(allowed_paths), cwd=workspace_dir)
     staged = git("diff", "--cached", "--name-only", cwd=workspace_dir)
     staged_paths = {line.strip() for line in staged.stdout.splitlines() if line.strip()}
     if not staged_paths or not staged_paths.issubset(allowed_paths):

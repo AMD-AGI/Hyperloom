@@ -82,6 +82,16 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
+def test_materialize_uses_the_runtime_path_instead_of_the_image_default(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("PATH", "/opt/python/bin:/usr/bin:/bin")
+    src = _write(tmp_path / "base.yaml", envs={"PATH": "/opt/venv/bin:/usr/bin:/bin"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    assert bench["envs"]["PATH"] == "/opt/python/bin:/usr/bin:/bin"
+
+
 def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = tmp_path / "base.yaml"
@@ -725,3 +735,72 @@ def test_agentx_kb_blocked_matches_agentx_active(monkeypatch):
 
 
 # Scriptable baseline sampling cost (measurement contract values)
+
+
+# ---- naming the client's tokenizer, only when HF cannot ----------------------
+
+
+def _write_model(tmp_path, model_type):
+    import json
+
+    d = tmp_path / "m"
+    d.mkdir(exist_ok=True)
+    (d / "config.json").write_text(json.dumps({"model_type": model_type}), encoding="utf-8")
+    return str(d)
+
+
+@pytest.fixture
+def _hf_mapping(monkeypatch):
+    """A CONFIG_MAPPING this test controls, instead of whatever is installed.
+
+    ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
+    imported, and "" again when the installed transformers happens to know the
+    model_type. Both tests below then pass for reasons that have nothing to do
+    with the rule they state: on an image without transformers the negative one
+    is vacuous and the positive one fails, which is how CI reported this while
+    it was green here.
+    """
+    import sys
+    import types
+
+    mod = types.ModuleType("transformers.models.auto.configuration_auto")
+    mod.CONFIG_MAPPING = {"llama": object()}
+    for name in ("transformers", "transformers.models", "transformers.models.auto"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "transformers.models.auto.configuration_auto", mod)
+    return mod
+
+
+def test_a_model_type_transformers_cannot_map_names_its_tokenizer(tmp_path, _hf_mapping):
+    """DeepSeek-V4 is the live case: HF raises KeyError before the first request."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "deepseek_v4")) == "deepseek_v4"
+
+
+def test_a_model_type_transformers_knows_names_nothing(tmp_path, _hf_mapping):
+    """The rule is model-agnostic: a resolvable model leaves the client argv alone."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "llama")) == ""
+
+
+def test_an_unreadable_model_names_nothing(tmp_path):
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(str(tmp_path / "absent")) == ""
+    assert _client_tokenizer_mode("") == ""
+
+
+def test_an_unknown_model_type_is_not_assumed_to_be_a_tokenizer_mode(tmp_path):
+    """A tokenizer mode is a loader backend, not a model type.
+
+    kimi_k25 is equally unknown to transformers, but the client implements no
+    loader for it -- naming it would make the client reject the flag and fail
+    exactly the way the unnamed tokenizer did. Those models are served by the
+    trust-remote-code path instead.
+    """
+    from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
+
+    assert _client_tokenizer_mode(_write_model(tmp_path, "kimi_k25")) == ""
+    assert _client_tokenizer_mode(_write_model(tmp_path, "some_future_model")) == ""

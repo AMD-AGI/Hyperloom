@@ -72,6 +72,7 @@ _KIND_STAGE: Mapping[str, LadderStage] = {
     rules.CAPABILITY_DISABLED: LadderStage.ENGINE_INIT,
     rules.HIP_KERNEL_MISSING: LadderStage.ENGINE_INIT,
     rules.RESOURCE_CONSTRAINT: LadderStage.ENGINE_INIT,
+    rules.KERNEL_RESOURCE_LIMIT: LadderStage.ENGINE_INIT,
     rules.ACCURACY_BELOW_FLOOR: LadderStage.ACCURACY_OK,
     rules.EVAL_GENERATION_PATHOLOGY: LadderStage.ACCURACY_OK,
     rules.EVAL_RUNTIME_FAILURE: LadderStage.ACCURACY_OK,
