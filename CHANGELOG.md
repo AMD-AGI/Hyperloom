@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A late timeline row could take out the phase that recorded it.** Three of
+  the five calls to the KERNEL re-publish helper were unguarded, so an
+  unreadable spool while re-assembling a closed event raised into the caller;
+  the other two sat inside `except Exception`, which also swallowed genuine
+  recorder defects. The helper now owns that boundary itself and catches only
+  `RECORDING_ERRORS`, so every caller gets the same never-raises contract and a
+  broken recorder is reported instead of hidden. Recording an integrate
+  verdict, a `trace_analyze` request or a baseline promotion decision no longer
+  logs a warning in place of the failure that caused it.
+
 - **Inline MCP actions no longer block the coordinator's event loop.** The
   `run_action_now` context tool awaits the action's result without blocking the
   loop or occupying the thread pool needed by database operations. Action

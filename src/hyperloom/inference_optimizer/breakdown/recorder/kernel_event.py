@@ -425,49 +425,42 @@ def record_integrate_verdict(
     """
     if not str(integration_id or ""):
         return
-    try:
-        sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
-        if not sink.has_row(SECTION_EVENT):
-            log.debug(
-                "kernel timeline: no event %s to hold the integrate verdict for %s",
-                sink.event_id,
-                integration_id,
-            )
-            return
-        sink.record(
-            SECTION_INTEGRATE,
-            {
-                "integration_id": str(integration_id),
-                "kernel_id": str(kernel_id or ""),
-                "decision": _text(decision),
-                "status": _text(status),
-                "attempt_count": _int_or_none(attempt_count),
-                "fault_count": _int_or_none(fault_count),
-                "gain_pct": _float_or_none(gain_pct),
-                "accuracy_pass": accuracy_pass if isinstance(accuracy_pass, bool) else None,
-                "validation_tier": _text(validation_tier),
-                "patch_path": _text(patch_path),
-                "target_file": _text(target_file),
-                "error_class": _text(error_class),
-                "rejected_reason": _text(rejected_reason),
-                "retryable": bool(retryable),
-                "settled_at": _text(settled_at),
-                "settled_in_macro_cycle": _int_or_none(macro_cycle),
-                "extra_server_args": _text(extra_server_args),
-                "basis": _text(basis),
-                "alignment_status": _text(alignment_status),
-                "gain_attributed": gain_attributed if isinstance(gain_attributed, bool) else None,
-            },
-            row_type=ROW_INTEGRATE,
-            natural_ids=str(integration_id),
-        )
-        _republish_closed_event(sink.event_id)
-    except Exception:  # noqa: BLE001 — observability cannot change KERNEL behavior
-        log.warning(
-            "kernel timeline: could not record the integrate verdict for %s",
+    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    if not sink.has_row(SECTION_EVENT):
+        log.debug(
+            "kernel timeline: no event %s to hold the integrate verdict for %s",
+            sink.event_id,
             integration_id,
-            exc_info=True,
         )
+        return
+    sink.record(
+        SECTION_INTEGRATE,
+        {
+            "integration_id": str(integration_id),
+            "kernel_id": str(kernel_id or ""),
+            "decision": _text(decision),
+            "status": _text(status),
+            "attempt_count": _int_or_none(attempt_count),
+            "fault_count": _int_or_none(fault_count),
+            "gain_pct": _float_or_none(gain_pct),
+            "accuracy_pass": accuracy_pass if isinstance(accuracy_pass, bool) else None,
+            "validation_tier": _text(validation_tier),
+            "patch_path": _text(patch_path),
+            "target_file": _text(target_file),
+            "error_class": _text(error_class),
+            "rejected_reason": _text(rejected_reason),
+            "retryable": bool(retryable),
+            "settled_at": _text(settled_at),
+            "settled_in_macro_cycle": _int_or_none(macro_cycle),
+            "extra_server_args": _text(extra_server_args),
+            "basis": _text(basis),
+            "alignment_status": _text(alignment_status),
+            "gain_attributed": gain_attributed if isinstance(gain_attributed, bool) else None,
+        },
+        row_type=ROW_INTEGRATE,
+        natural_ids=str(integration_id),
+    )
+    _republish_closed_event(sink.event_id)
 
 
 def _write_discovered_kernels(
@@ -586,35 +579,28 @@ def record_trace_analyze_request(
     """
     if not str(run_id or ""):
         return
-    try:
-        sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
-        if not sink.has_row(SECTION_EVENT):
-            log.debug(
-                "kernel timeline: no event %s to hold the trace_analyze request %s",
-                sink.event_id,
-                run_id,
-            )
-            return
-        _write_trace_analyze_run(
-            sink,
-            run_id=run_id,
-            trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
-            status=status,
-            result=result,
-            requested_by=requested_by,
-            request_msg_id=request_msg_id,
-            trace_input=trace_input,
-            top_k=top_k,
-            snapshot=snapshot,
-            cache_hit=cache_hit,
-        )
-        _republish_closed_event(sink.event_id)
-    except Exception:  # noqa: BLE001 — observability cannot change KERNEL behavior
-        log.warning(
-            "kernel timeline: could not record the trace_analyze request %s",
+    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    if not sink.has_row(SECTION_EVENT):
+        log.debug(
+            "kernel timeline: no event %s to hold the trace_analyze request %s",
+            sink.event_id,
             run_id,
-            exc_info=True,
         )
+        return
+    _write_trace_analyze_run(
+        sink,
+        run_id=run_id,
+        trigger=TRACE_ANALYZE_TRIGGER_BUS_REQUEST,
+        status=status,
+        result=result,
+        requested_by=requested_by,
+        request_msg_id=request_msg_id,
+        trace_input=trace_input,
+        top_k=top_k,
+        snapshot=snapshot,
+        cache_hit=cache_hit,
+    )
+    _republish_closed_event(sink.event_id)
 
 
 def _republish_closed_event(event: str) -> None:
@@ -629,26 +615,33 @@ def _republish_closed_event(event: str) -> None:
     An event still running is left alone: its own close will assemble the row
     along with everything else, and publishing a half-finished event here
     would show it closed.
+
+    Never raises: the row this re-publishes is already in the spool, so a
+    re-assembly that cannot read it costs the caller nothing it can act on.
     """
     from ...session.sbd_v6 import timeline_sequence
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    parts = event_parts(EVENT_SECTIONS, event=event)
-    rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
-    header = rows[0] if rows else {}
-    end_time = _text(header.get("end_time"))
-    if not end_time:
-        return
-    ext, derived = assemble_kernel_ext(parts, event=event)
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=event,
-        sequence=timeline_sequence(header),
-        status=_text(header.get("closed_status")) or derived,
-        ext=ext,
-        kind=EVENT_KIND,
-        start_time=_text(header.get("start_time")) or "",
-        end_time=end_time,
-    )
+    try:
+        parts = event_parts(EVENT_SECTIONS, event=event)
+        rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+        header = rows[0] if rows else {}
+        end_time = _text(header.get("end_time"))
+        if not end_time:
+            return
+        ext, derived = assemble_kernel_ext(parts, event=event)
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=event,
+            sequence=timeline_sequence(header),
+            status=_text(header.get("closed_status")) or derived,
+            ext=ext,
+            kind=EVENT_KIND,
+            start_time=_text(header.get("start_time")) or "",
+            end_time=end_time,
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
 
 
 def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
