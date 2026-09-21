@@ -102,8 +102,19 @@ doc is the authority on where that boundary lives.
   agents driving this system are capable, so redundant re-checks, layered fallbacks, and
   belt-and-braces defaults buy nothing — they hide the failure they were added to survive
   and bury the real path.
-- **Delete, don't comment out.** Dead code goes; version control is the archive.
-  Commented-out blocks and `# removed …` tombstones rot and mislead.
+- **Finish the replacement.** When a new path supersedes an old one, migrate the callers
+  and delete what it replaced — the superseded implementation, the switch that chose
+  between them, the configuration that fed it, the fixtures that only ever described the
+  old shape — carrying the regression assertions across to the new path. Dead code goes;
+  version control is the archive, and commented-out blocks and `# removed …` tombstones
+  rot and mislead. A wrapper, an alias, dual-format parsing or a fallback route kept only
+  to preserve an old *internal* shape is the replacement left unfinished. Compatibility is
+  owed to identified consumers — supported public APIs, CLI behaviour, persisted data,
+  plugins, anything deployed separately — so establish that boundary before deleting: a
+  file's location in this repo and a text search that found nothing are not evidence that
+  an entry point is unused. If the migration has to be staged, name the consumer still on
+  the old path and the condition that retires it, and keep the adapter narrow enough that
+  it does not become the new general entry point.
 - **Comment below the local average.** Python explains most of itself; prefer a clearer
   name or a smaller function over a sentence about it. A comment earns its place only by
   saying what the code cannot — an invariant, a constraint from outside the file, why the
@@ -114,8 +125,21 @@ doc is the authority on where that boundary lives.
   read as one job: cohesive inside, a minimal typed interface outward, and dependencies
   pointing one way down the layers — no cycles, and no reaching around the layer that owns
   a thing to touch what is behind it. Derive over hardcode — a single computed source
-  beats duplicated constants. A second copy of a behaviour is a bug you will later fix
+  beats duplicated constants, and duplicated state or a duplicated decision is the same
+  problem: name the owner it derives from, and state the invariant any cache or replica
+  left standing has to hold. A second copy of a behaviour is a bug you will later fix
   once and miss elsewhere; extend the existing one, or lift the shared part out.
+- **Simplify by removing a mechanism.** A refactor that ends with the same moving parts in
+  new positions has not simplified anything. The win is one mechanism fewer — a duplicated
+  behaviour, a second source of state or configuration, an obsolete decision path, a
+  forwarding layer with no job of its own — and it is judged across the whole
+  responsibility and its callers, including the helpers, interfaces and parameter plumbing
+  the change itself introduces. Extract a helper when it names a complete job or carries a
+  rule that is genuinely the same in both places; inlining a thin wrapper or merging two
+  equivalent entry points is the same kind of win, not the opposite of one. Caller count
+  settles nothing on its own: a single-caller helper can earn its name, and code that only
+  looks alike but answers to different contracts should stay apart rather than become one
+  function with modes.
 - **Leave nothing behind.** Working notes, audit trails, and analysis write-ups are
   byproducts of doing the work, not deliverables — don't commit them, least of all at the
   repo root, unless they were asked for. The change is the artifact.

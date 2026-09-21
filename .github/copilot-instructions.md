@@ -70,4 +70,6 @@ Advisory review. Flag only what static gates can't.
 - **Be specific not tedious.** Anchor to a line or the existing code being duplicated,
   but skip style/taste nits a linter would catch.
 - **Prefer deletion and reuse.** When you see a leaner form — reuse an existing helper,
-  drop a redundant layer, fold a flag away — propose it directly.
+  drop a redundant layer, fold a flag away — propose it directly. A replacement that
+  leaves the old path reachable, or keeps a wrapper or a second format only to preserve an
+  internal shape, is unfinished: ask which consumer still needs it.
