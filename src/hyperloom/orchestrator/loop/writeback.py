@@ -46,6 +46,7 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
@@ -393,7 +394,7 @@ def _record_config_attempts(
                     "raw_result_path": str(row.get("raw_result_path") or ""),
                 },
                 decision=outcome,
-                adopted=outcome == "KEEP",
+                adopted=_is_kept(outcome),
                 # Recorded rather than referenced: every KEEP advances the
                 # stack, so the session's current config is not what this
                 # variant was measured on top of.
@@ -403,7 +404,7 @@ def _record_config_attempts(
                 # A pair is what makes a gain addable, so eligibility follows
                 # the pair being present rather than the outcome being a KEEP.
                 attribution_eligible=(
-                    outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
+                    _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
                 ),
             )
             for gate in row.get("gates") or []:

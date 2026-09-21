@@ -55,6 +55,11 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._grid_base import (
+    TS_FAILED,
+    TS_KILLED_OVERTIME,
+    TS_SKIPPED_DEDUP,
+)
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
@@ -974,7 +979,7 @@ class ExploreExecutor:
                                 "extra_envs": dict(gv.extra_envs),
                                 **control_fields,
                                 "note": gv.note,
-                                "outcome": "FAILED",
+                                "outcome": TS_FAILED,
                                 "status": getattr(w, "status", "failed") if w is not None else "failed",
                                 "tput": None,
                                 "gain_pct": None,
@@ -1089,7 +1094,7 @@ class ExploreExecutor:
                         f"tput {graded.tput_reference:.1f}->{graded.tput_candidate:.1f}"
                     )
                     gain: float | None
-                    outcome = "FAILED"
+                    outcome = TS_FAILED
                     reason: str = ""
                     # Each gate's verdict as it rules, in the order it ruled.
                     # Recorded here because this is where it is known: read off
@@ -1154,7 +1159,7 @@ class ExploreExecutor:
                     accuracy_value: float | None = None
                     accuracy_reference: float | None = None
                     accuracy_gated = False
-                    if outcome == "FAILED" and not reason:
+                    if outcome == TS_FAILED and not reason:
                         # Accuracy gate.
                         from hyperloom.inference_optimizer import framework_registry
 
@@ -1436,8 +1441,8 @@ class ExploreExecutor:
             if outcome not in (
                 "KEEP",
                 "REVERT",
-                "FAILED",
-                "KILLED_OVERTIME",
+                TS_FAILED,
+                TS_KILLED_OVERTIME,
             ):
                 continue
             metrics: dict[str, Any] = {}
@@ -1507,7 +1512,7 @@ class ExploreExecutor:
             per_variant_outcomes.append(
                 {
                     "variant_name": str(sd.get("name") or ""),
-                    "outcome": "SKIPPED_DEDUP",
+                    "outcome": TS_SKIPPED_DEDUP,
                     "fingerprint": str(sd.get("fingerprint") or ""),
                     "provenance": "",
                     "metrics": {},
@@ -1530,7 +1535,7 @@ class ExploreExecutor:
         killed_overtime_fps = [
             str(te.get("fingerprint") or "")
             for te in tested_update.values()
-            if te.get("round_id") == round_id and te.get("outcome") == "KILLED_OVERTIME"
+            if te.get("round_id") == round_id and te.get("outcome") == TS_KILLED_OVERTIME
         ]
         last_round_summary = {
             "round_id": round_id,
@@ -1572,7 +1577,7 @@ class ExploreExecutor:
             in (
                 "KEEP",
                 "REVERT",
-                "KILLED_OVERTIME",
+                TS_KILLED_OVERTIME,
             )
             for t in tested_update.values()
             if t.get("round_id") == round_id
