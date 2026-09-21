@@ -1126,17 +1126,10 @@ ensure_tracelens() {
     export TRACELENS_ROOT
     return 0
   fi
-  # Read-only source guard. When
-  # $TRACELENS_INTERNAL_ROOT is on a read-only mount (the WekaFS default), pip
-  # install -e fails because it must write *.egg-info into the source
-  # tree, and at runtime tools/tracelens_analysis.py re-runs the same
-  # editable install in a subprocess on every trace_analyze request,
-  # producing a tight failure loop. Detecting unwritable source up front
-  # and mirroring to $TRACELENS_MIRROR_DIR lets both
-  # the install-time and the runtime pip install land on a writable
-  # filesystem. write_env_file() emits the resulting TRACELENS_INTERNAL_ROOT into
-  # the pod-local kernel-agent env so subsequent CLI subprocesses inherit
-  # the mirror.
+  # Editable installation needs writable source for package metadata. Mirror
+  # read-only checkouts before the install-time pip call; runtime analysis only
+  # checks dependencies. write_env_file() preserves the mirror path for later
+  # CLI subprocesses.
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     if ! ( : > "$TRACELENS_INTERNAL_ROOT/.hl_write_test" ) 2>/dev/null; then
       log "TraceLens-internal root not writable ($TRACELENS_INTERNAL_ROOT); mirroring to $TRACELENS_MIRROR_DIR"
