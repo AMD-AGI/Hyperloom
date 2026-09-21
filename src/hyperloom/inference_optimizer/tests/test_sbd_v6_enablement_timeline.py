@@ -579,6 +579,7 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
     )
     enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_attempts_exhausted")
 
+
 # --------------------------------------------------------------------------
 # The replay contract reaches the event.
 #

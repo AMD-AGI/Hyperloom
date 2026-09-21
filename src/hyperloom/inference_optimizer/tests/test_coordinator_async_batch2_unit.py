@@ -2108,6 +2108,7 @@ async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coo
     create_action.assert_not_called()
     schedule.assert_not_called()
 
+
 # -- atomic config levers ride with the patch they are inseparable from -----
 def _autosubmitted_integrate_params(coord: Coordinator) -> dict:
     """Return the params of the integrate_patch proposal the bridge just queued."""

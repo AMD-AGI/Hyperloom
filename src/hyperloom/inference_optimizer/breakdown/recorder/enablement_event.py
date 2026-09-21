@@ -39,6 +39,7 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import finish_event, open_event
+from .recorder_warnings import note_failure
 
 # Every section an enablement event assembles from. Named from the leaf module
 # the assembler shares, so this writer reads its parts without an import cycle.
