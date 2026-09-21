@@ -13,6 +13,7 @@ import kernelforge.kernel_backends as _kernel_backends_pkg
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
+from kernelforge.loop.scoring import canonical_gate_prompt, runs_task_suite_acceptance
 
 
 _GPU = "gfx950"
@@ -73,16 +74,29 @@ def forge_loop_prompts(monkeypatch):
 # Each time the rendered prompts were diffed line by line against their previous
 # rendering; for the card renames every changed line was a card name and nothing
 # else moved. See test_rename_completeness.py for the tree-wide check.
+# The acceptance-gate correction moved all nine, the only re-snapshot so far
+# that had to: the loop stopped running the task's declared suite for every
+# backend but assembly, and each prompt still described the removed step.
+# Diffed line by line. The eight non-assembly prompts swapped the nine-line
+# task-config paragraph for the seven-line driver one; assembly kept its
+# paragraph less the warm-start clause, which no path performs any more; the
+# five agent-facing sentences that repeated the claim outside the shared
+# paragraph were corrected (aiter/ck/hip/triton step 4, flydsl step 4, ck's
+# iron rule, fusion's stop condition, gluon's smaller-shape trap); "GATE" as a
+# name for the performance target became "performance target" in ck/hip/
+# hipblaslt, since the word now has a defined meaning beside it; and hipblaslt
+# gained the paragraph it had never rendered despite three stop conditions
+# resting on it.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "322db8617f4b69ce31a3b582cdda4ed09c4037a411f8161b81afb07874d23385",
-    "assembly": "30244b18035a169b81cf7874d1ab2cdaadcb34bcab21027e4f0e5baf7230a10e",
-    "ck": "8c8bd5b1b15e4f21bf70e729c3831de55a8efb7f29e868f99d5e9f73ed0e908e",
-    "flydsl": "270def2d0c6600290b3d9b7ccf468f03e3a0f1ced7481b7128dde2a9f74cc7c9",
-    "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
-    "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
-    "hip": "7399928977cf188ae30f49fc0087386285d0fd5c131cd70b3a9064095f03fba7",
-    "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
-    "triton": "67345584efeba90afc87959e75583167c11bb9b9ac9a0275dbddbed2f945037a",
+    "aiter": "3535633aa83c8cf725211c1d6ceb8bb50dbd50884f78dba434fdccf8a21e1d21",
+    "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
+    "ck": "2b3728b0d546a9e16427f1881d1c316bd0243ef57aeea2253bde566e7a92435f",
+    "flydsl": "f65b1f31f2f4c881ab9a19e96a66140aa0608a06090793f6f4123a583eedfdbb",
+    "fusion": "cf383be0c7c747629dca1490a77de6c77c540b9f5fe74d2a53d5c9e5f5223f52",
+    "gluon": "4b20a6be3cb41188ef76339920c01114c7f78e5a81f3a7c87fbc5c728ac328d2",
+    "hip": "e8867227a644afee37b6fa96c7578376e9141f522236b5ebaa0cc2a9a0b83a8d",
+    "hipblaslt": "0a5a2dc43b8ee3c8598a04b975c50ec7158219cb929b37d72da8071c75d9a11a",
+    "triton": "3acb6da27c977cbd18c3dd138cf5beb1e75a2d5710d7af63998110c5f6cae187",
 }
 
 
@@ -94,6 +108,33 @@ class TestRenderedPromptSnapshots:
             got = _sha256(prompt)
             assert got == _SHA256_FORGE_LOOP[backend], (
                 f"{backend}: forge-loop prompt changed (got {got!r}, expected {_SHA256_FORGE_LOOP[backend]!r})"
+            )
+
+
+class TestAcceptanceGateMatchesTheLoop:
+    """Every prompt states the gate the loop will actually apply to that backend.
+
+    The description and the loop's Step 7 were two copies of one fact, and they
+    drifted: the step became assembly's alone while all eight other prompts kept
+    telling their agent that forge runs the task's `compile_command` and
+    `correctness_command` on every candidate. An agent optimizes against the
+    criterion it is given, so that is not a stale sentence -- it points the
+    implementer at a verdict no longer formed and at a diagnostic never
+    produced. Both sides now read ``runs_task_suite_acceptance``.
+    """
+
+    def test_each_prompt_carries_the_gate_its_backend_is_judged_by(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            assert canonical_gate_prompt(backend) in prompt, (
+                f"{backend}: prompt does not state the acceptance gate the loop applies to it"
+            )
+
+    def test_only_a_task_suite_backend_claims_forge_runs_the_task_config(self, forge_loop_prompts):
+        for backend, prompt in forge_loop_prompts.items():
+            claims = "`correctness_command`" in prompt
+            assert claims is runs_task_suite_acceptance(backend), (
+                f"{backend}: prompt {'claims' if claims else 'omits'} the task-config gate while the loop "
+                f"{'runs' if runs_task_suite_acceptance(backend) else 'does not run'} it"
             )
 
 

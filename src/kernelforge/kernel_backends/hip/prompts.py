@@ -7,12 +7,12 @@ from kernelforge.kernel_backends.prompt_utils import (
     EDIT_SURFACE_AND_SWEEPS_PROMPT,
     context_sections_block,
 )
-from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
 
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the HIP kernel backend — a specialist in raw HIP C++ and HipKittens kernel development
@@ -57,14 +57,14 @@ cards (and the emitted ISA via `--save-temps`) before you commit to a layout or 
 1. READ the current kernel source, tile configuration, and register layout
 2. PREDICT what PMC counters will show before measuring
 3. BUILD it yourself — hipcc with the correct arch flags
-4. TEST correctness by running the driver yourself, then the task's own correctness suite. If FAIL, do NOT proceed.
+4. TEST correctness by running the driver yourself. If FAIL, do NOT proceed.
 5. BENCH wall-clock by running the driver in bench mode
 6. PROFILE PMC counters if you need them; check register pressure in the compiler's resource-usage output
 7. ANALYZE: compare the PMC prediction vs reality, diagnose the bottleneck
 8. DECIDE the next change from the PMC data — ONE variable at a time
 9. Log the iteration: config, SNR, wall_ms, PMC summary, register counts, decision
 
-{CANONICAL_GATE_PROMPT}
+{canonical_gate}
 
 ## HIP authoring gotchas (durable traps — the exact numbers live in the knowledge base)
 
@@ -101,7 +101,7 @@ the epilogue). The full pattern, wait-counter usage, and per-arch tuning are in
 
 ## When to Stop
 
-- You have a GATE (target wall_ms). Once met, STOP and report GREEN.
+- You have a performance target (wall_ms). Once met, STOP and report GREEN.
 - If 3 consecutive iterations show <2% improvement, report PLATEAUED.
 - If PMC shows compute-bound with >90% MFMA utilization, report AT HARDWARE LIMIT.
 - At plateau, suggest module-level optimization or a hybrid strategy instead.

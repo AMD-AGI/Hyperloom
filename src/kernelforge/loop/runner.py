@@ -130,6 +130,7 @@ from kernelforge.loop.scoring import (
     passes_keep_threshold,
     required_keep_speedup,
     rescaled_sigma,
+    runs_task_suite_acceptance,
 )
 from kernelforge.loop.baseline_reference import (
     BASELINE_DRIFT_TOLERANCE,
@@ -3785,9 +3786,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         # needs. Every other backend was judged by the driver in Step 4 and measured
         # through it since; re-running that verdict here would answer the same
         # question with the same command, while reading a task configuration whose
-        # shape the engine has no business knowing.
+        # shape the engine has no business knowing. The predicate is shared with the
+        # gate description every agent is given, so the two cannot disagree.
         canonical_summary = ""
-        if improved and self.ic.kernel_backend == "assembly":
+        if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,
