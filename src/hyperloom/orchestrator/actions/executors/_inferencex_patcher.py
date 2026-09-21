@@ -886,6 +886,7 @@ def verify_patch_anchors(
         One :class:`AnchorStatus` per (patch, existing file) pair, in
         ``_ANCHOR_CONTRACT`` order. Empty when no InferenceX tree resolves.
     """
+
     def _resolve(name: str, parts: tuple[str, ...]) -> list[Path]:
         """Name the files one patch targets across every discovered root."""
         if name == _BENCH_SERVING_ANCHOR_NAME:
