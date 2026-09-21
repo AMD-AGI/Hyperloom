@@ -413,47 +413,9 @@ def apply_agentx_switch(
         return
     envs = bench.setdefault("envs", {})
     bench["benchmark_script"] = "aiperf_client.sh"
-    # The Magpie benchmark config's flat wall-clock cap (``benchmark.timeout_seconds``,
-    # e.g. 7200s from baseline_vllm.yaml) is one deadline over server boot + warmup +
-    # the measurement window + result export. AgentX runs at the model's native
-    # context (``max_model_len`` lifted from the synthetic 6144 to e.g. 1M), so boot +
-    # warmup alone can consume ~45 min before the window even opens; the flat cap then
-    # SIGKILLs the benchmark before aiperf writes ``inferencex_result.json`` -- a 0-tput
-    # baseline that fails the session. Raise the inner cap to the same AgentX budget the
-    # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
-    # layers stay consistent. AgentX-only: this function returned early above when AgentX
-    # is off, so the default (synthetic) cap is untouched. The import is function-local
-    # so standalone workload materialization uses the same timeout derivation.
-    #
-    # max(), never assignment: this is the ONLY place in the AgentX path that
-    # writes an existing cap, and a bare assignment LOWERS every config that
-    # already declares more than the AgentX derivation. profile_sglang.yaml
-    # declares 14400s ("Qwen-32B TP=1 profile with steady-state window can take
-    # ~3 h") against a default derivation of 10800s, so an AgentX profile round
-    # there was being cut from four hours to three -- the same mid-round kill this
-    # module exists to prevent, introduced by the fix for it. A declared cap is a
-    # measured statement about that config; the derivation is a floor under it,
-    # not a replacement for it.
-    from ._agentx_timeouts import (
-        agentx_baseline_timeout_sec,
-        agentx_warmup_grace_sec,
-    )
+    from ._agentx_timeouts import agentx_warmup_grace_sec
 
     _agentx_env = agentx_env_for_conc(conc)
-    _derived = agentx_baseline_timeout_sec(_agentx_env)
-    try:
-        _declared = int(bench.get("timeout_seconds") or 0)
-    except (TypeError, ValueError):
-        _declared = 0
-    if _declared > _derived:
-        log.info(
-            "AgentX: keeping the config's declared benchmark timeout %ds (> the AgentX "
-            "derivation %ds). The derivation is a floor, never a ceiling -- lowering a "
-            "cap the config measured for itself is how a round gets killed mid-window.",
-            _declared,
-            _derived,
-        )
-    bench["timeout_seconds"] = max(_declared, _derived)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
@@ -465,31 +427,15 @@ def apply_agentx_switch(
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
-    # ...but AGENTX_WARMUP_GRACE_PERIOD must not be forwarded raw. It is read by
-    # TWO layers that have to agree: this process derives the subprocess cap from
-    # it (scaled by CONC, because warmup is per-lane requests x CONC lanes), while
-    # aiperf_client.sh hands it to aiperf as --warmup-grace-period, which is what
-    # actually cuts the warmup off. The loop above copies the operator's raw
-    # value, so the client was bounded at the UNSCALED number while the cap
-    # budgeted the scaled one.
-    #
-    # Measured on a Kimi-K3 conc=32 round: cap 14400s of warmup vs client bound
-    # 3600s. Warmup would have been cut at 106 of 354 requests -- not a crash, a
-    # round that reports a prefix-reuse figure measured before the cache had
-    # anything in it. Export the derived value so both layers see one number.
-    #
-    # AgentX-only by construction: this function returned early when AgentX is
-    # off, and AGENTX_* has no meaning on the synthetic path.
+    # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
     _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
-    envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
+    if bench.get("timeout_seconds") is not None:
+        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(bench["timeout_seconds"])
     if _raw_grace != str(_grace):
         log.info(
-            "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
-            "(operator value %s). The client's --warmup-grace-period and this "
-            "process's subprocess cap are derived from the same number, so a "
-            "raw forward here would bound the warmup below what the cap pays for.",
+            "AgentX: exporting the CONC-scaled warmup grace %ds to the client (operator value %s).",
             _grace,
             _raw_grace or "unset",
         )
@@ -829,6 +775,52 @@ def _model_requires_remote_code(model_path: str | None) -> bool:
         return True
     auto_map = data.get("auto_map")
     return isinstance(auto_map, dict) and bool(auto_map.get("AutoTokenizer"))
+
+
+#: Tokenizer modes the benchmark client actually implements a loader for.
+#:
+#: A tokenizer mode is a loader backend, not a model type: naming one the client
+#: does not implement makes it reject the flag, which fails exactly the way the
+#: unnamed tokenizer did. So "transformers cannot map this model_type" is
+#: necessary but not sufficient -- the mode has to be one the client knows.
+#: ``deepseek_v4`` is routed by InferenceX's ``benchmark_serving.py`` to vLLM's
+#: own loader; other custom-code checkpoints (``kimi_k25``, say) are served by
+#: the trust-remote-code path above and must NOT be named here.
+_CLIENT_TOKENIZER_MODES: frozenset[str] = frozenset({"deepseek_v4"})
+
+
+def _client_tokenizer_mode(model_path: str | None) -> str:
+    """Return the tokenizer mode the benchmark client must be told, or ``""``.
+
+    The generic bench client resolves a checkpoint through HF ``AutoConfig``. A
+    model whose ``model_type`` this transformers build does not know dies there
+    with ``KeyError: '<model_type>'`` before issuing a request, so no throughput
+    result is written and the round is graded a boot failure with the server up
+    and serving. InferenceX's client already routes ``--tokenizer-mode`` to
+    vLLM's own loader, which does know it; this names the mode to pass.
+
+    Model-agnostic on purpose: the question asked is "can HF resolve this
+    model_type", not "is this DeepSeek-V4". A model HF understands returns ``""``
+    and the client argv is unchanged.
+    """
+    model = str(model_path or "").strip()
+    if not model:
+        return ""
+    data = _load_model_config_dict(model)
+    if data is None:
+        return ""
+    model_type = str(data.get("model_type") or "").strip().lower()
+    if model_type not in _CLIENT_TOKENIZER_MODES:
+        return ""
+    try:
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+    except ImportError:
+        # No transformers, no HF resolution to reason about; naming a mode here
+        # would be a guess.
+        return ""
+    if model_type in CONFIG_MAPPING:
+        return ""
+    return model_type
 
 
 def inject_vllm_expert_parallel(
@@ -1551,6 +1543,27 @@ def materialize_config_with_envs(
                 ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
+            # ``profiler`` and ``torch_profiler_dir`` are normally set by
+            # Magpie's launcher script, not by this layer -- but that script
+            # appends its own flags *after* EXTRA_VLLM_ARGS in the real
+            # ``vllm serve`` invocation, so the argv preflight probe (which
+            # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
+            # delay_iterations/max_iterations against a ProfilerConfig that
+            # never saw ``profiler=torch`` or a trace dir. vLLM's validator
+            # requires both whenever those bounds are present, so the probe
+            # fails an argv that will be valid once Magpie's flags are
+            # appended, and this layer's profiler bounds get treated as
+            # invalid and dropped instead of launched. Asserting placeholders
+            # here keeps the probed fragment self-consistent; the actual
+            # ``torch_profiler_dir`` Magpie computes from ``$WORKSPACE_DIR``
+            # overrides this one at real launch time via vLLM's dotted-flag
+            # last-wins merge, so the value here only has to be a valid
+            # absolute path, not the directory the trace ends up under. An
+            # operator-set flag is left untouched either way.
+            if _profiler_flag_value(existing_vllm_args, "profiler") is None:
+                profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
+            if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
+                profiler_flags.append(("torch_profiler_dir", f"--profiler-config.torch_profiler_dir {output_dir}"))
             if tracelens_patch_ok:
                 profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1919,6 +1932,12 @@ def materialize_config_with_envs(
         "HF_HUB_TRUST_REMOTE_CODE",  # transformers / HF hub tokenizer auto-load
     ):
         envs.setdefault(_trust_key, "1")
+    # ── Client tokenizer mode (model-agnostic) ───────────────────────────
+    # Trusting remote code is not enough when transformers cannot map the
+    # model_type at all: the client has to be told which loader to use.
+    _client_tok_mode = _client_tokenizer_mode(model_path or bench.get("model"))
+    if _client_tok_mode:
+        envs.setdefault("HYPERLOOM_CLIENT_TOKENIZER_MODE", _client_tok_mode)
     if _model_requires_remote_code(model_path or bench.get("model")):
         add_server_arg_unless_pinned(
             envs,

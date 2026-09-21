@@ -139,10 +139,8 @@ resolved values in the launch plan before starting the optimizer.
 - `SERVER_ARGS`: empty.
 - `REFERENCE_SCRIPT`: unset.
 - `CONC_SWEEP_CONCS`: unset, so Hyperloom uses its default sweep ladder.
-- `CONC_SWEEP_TIMEOUT_SEC`: unset, so Hyperloom uses its default per-variant
-  timeout.
 - `CONC_SWEEP_TOTAL_BUDGET_SEC`: unset, so Hyperloom uses its default total
-  sweep budget.
+  sweep budget. This bounds the whole sweep, not a single benchmark spawn.
 - Phase budget percentages default to:
   - `PHASE_BUDGET_PRELUDE_PCT=0.03`: startup, preflight, baseline setup, and
     initial orchestration.
@@ -171,8 +169,14 @@ Collect these optional advanced values:
 - Routing and baseline options: `--skip-variants`, `--server-args`,
   `--reference-script`, `--model-class`, `--gpu-type`, `--framework-version`,
   `--target-summary`, `--compare-against-gpu`.
-- Concurrency sweep: `--conc-sweep-concs`, `--conc-sweep-timeout-sec`,
-  `--conc-sweep-total-budget-sec`.
+- Concurrency sweep: `--conc-sweep-concs` and `--conc-sweep-total-budget-sec`
+  (the total budget across the sweep).
+- Benchmark limits: `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`
+  seconds per actual spawn, including boot and accuracy) and
+  `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default `600` seconds,
+  armed only after real server readiness, not for scriptable workloads).
+  Both must be finite and positive; output never extends the hard deadline.
+  `--max-hours` and cancellation apply independently.
 
 Guardrails:
 
@@ -333,7 +337,6 @@ OPT_FLAGS=(
 [ -n "${SERVER_ARGS:-}" ] && OPT_FLAGS+=(--server-args "$SERVER_ARGS")
 [ -n "${REFERENCE_SCRIPT:-}" ] && OPT_FLAGS+=(--reference-script "$REFERENCE_SCRIPT")
 [ -n "${CONC_SWEEP_CONCS:-}" ] && OPT_FLAGS+=(--conc-sweep-concs "$CONC_SWEEP_CONCS")
-[ -n "${CONC_SWEEP_TIMEOUT_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-timeout-sec "$CONC_SWEEP_TIMEOUT_SEC")
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
 [ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
 [ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
@@ -385,9 +388,8 @@ fi
 if [ -n "$REAL_PID" ]; then
   echo "$REAL_PID" > "$PID_FILE"
 else
-  # Never leave the dead setsid `$!` wrapper pid in the file -- the monitor
-  # would read it and fire a spurious resume. Absent means "unknown", which
-  # sends the monitor to the lock/heartbeat/lease signals instead.
+  # A dead setsid `$!` wrapper is not the optimizer's identity. Leave the PID
+  # unknown rather than directing later health checks to an unrelated process.
   rm -f "$PID_FILE"
   echo "WARN: removed $PID_FILE (no authoritative pid)." >&2
 fi
@@ -406,7 +408,7 @@ test -f "$SESSION_DIR/manifest.json" && echo "manifest_present=true session_dir=
 test -f "$SESSION_DIR/state.json" && echo "state_exists=true"
 ```
 
-If adding quantization, critic, robustness, or research-lane flags, append only
+If adding quantization, critic, or research-lane flags, append only
 real flags accepted by
 `python3 -m hyperloom.inference_optimizer.cli optimize --help`; do not invent
 aliases.
@@ -442,7 +444,10 @@ After the runtime install, report whether it succeeded and the path to
 - `state.json` path;
 - initial health check result.
 
-During monitoring, print a short summary at each 300-second check:
+On each requested status check, read persisted state and print a short summary.
+Use platform-scheduled invocations if recurring checks are requested; do not
+start a background watchdog, hold a blocking polling connection, or auto-resume.
+Busy logs alone are not evidence of useful progress. Include:
 
 - process alive/stopped;
 - phase and `stop_reason`;
@@ -458,15 +463,15 @@ and the stop reason. Never print API keys, tokens, or custom header values.
 1. Run the pre-launch runtime install above and source
    `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
 2. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so
-   robustness and critic subprocesses can import `hyperloom.agents` after
+   critic subprocesses can import `hyperloom.agents` after
    changing cwd.
 3. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
 4. Pass all required workload flags in the
    `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely
    on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`.
 5. Report the session ID, log path, PID, and initial health check result.
-6. Monitor the process every 300 seconds until work is done.
-7. To recover an unexpected crash, only run
+6. Inspect persisted state on requested status checks; report when work stops.
+7. After diagnosing an unexpected crash and obtaining explicit resume approval, only run
    `optimize --resume-from "$SESSION_DIR"` against the same session dir. After
    the first launch, never start a new `optimize`; that creates a new
    `<UTC_ts>` session and is forbidden.

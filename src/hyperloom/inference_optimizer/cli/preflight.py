@@ -28,6 +28,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
+    DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
@@ -1530,18 +1531,12 @@ def _emit_preflight_diagnostics(
     args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight."""
-    from hyperloom.orchestrator.actions.executors.baseline import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-        BASELINE_DEFAULT_TIMEOUT_SEC,
-        _probe_aiter_jit_cache,
-    )
+    from hyperloom.orchestrator.actions.executors._aiter_jit import probe_aiter_jit_cache as _probe_aiter_jit_cache
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
     from ..session.paths import asset_root
 
     probe = _probe_aiter_jit_cache()
-    cold_cap = os.environ.get(
-        "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-        str(BASELINE_COLD_START_TIMEOUT_SEC),
-    )
+    silence_timeout, hard_timeout = resolve_benchmark_timeouts()
     if probe["probe_status"] == "found":
         kind = "COLD" if probe["is_cold"] else "WARM"
         cache_line = f"{probe['kernel_count']} .so / {probe['size_mb']} MB ({kind}) at {probe['path']}"
@@ -1559,8 +1554,8 @@ def _emit_preflight_diagnostics(
     print(f"  magpie_python       = {magpie_python}")
     print(f"  INFERENCEX_PATH     = {os.environ.get('INFERENCEX_PATH', '<unset>')}")
     print(f"  aiter jit cache     = {cache_line}")
-    print(f"  cold_start_timeout  = {cold_cap}s")
-    print(f"  warm_timeout        = {BASELINE_DEFAULT_TIMEOUT_SEC}s")
+    print(f"  benchmark_timeout   = {hard_timeout}s")
+    print(f"  benchmark_silence   = {silence_timeout}s")
     if anthropic_base_url:
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
@@ -1604,8 +1599,8 @@ def _emit_preflight_diagnostics(
             "inferencex_path": os.environ.get("INFERENCEX_PATH") or None,
             "aiter_jit_cache": dict(probe),
             "recipe_kb_queue": queue_status,
-            "cold_start_timeout_sec": int(cold_cap) if str(cold_cap).isdigit() else cold_cap,
-            "warm_timeout_sec": BASELINE_DEFAULT_TIMEOUT_SEC,
+            "benchmark_timeout_sec": hard_timeout,
+            "benchmark_silence_timeout_sec": silence_timeout,
             "anthropic_base_url": anthropic_base_url,
         },
     }
@@ -2136,7 +2131,7 @@ def _preflight(
         claude_primary_key = anthropic_synthesizable_key()
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
-            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
+            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)

@@ -52,9 +52,6 @@ write source patches. The new contract is:
 
 * **Orchestration** only. PolicyGate's `specialist_dispatch_source` rule
   rejects `delegate{action_name='specialist'}` from any other role.
-  Robustness can recommend a specialist via
-  `escalate_strategy_change{hint='need_specialist:<domain>'}`; the next
-  Orchestration tick picks it up.
 
 ## When to delegate
 

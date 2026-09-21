@@ -53,6 +53,19 @@ def _make_fake_ray(init_side_effects):
     return fake
 
 
+@pytest.fixture(autouse=True)
+def _clear_stale_connect_flag():
+    """``_STALE_CONNECT_POSSIBLE`` is process-wide by design, so tests must isolate it.
+
+    A timeout in one test otherwise makes the next one's first ``ray.init``
+    clear a session it never left behind -- the coupling is real in production
+    too, where it is exactly the intended behaviour across legs.
+    """
+    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+    yield
+    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+
+
 def test_is_version_mismatch_detects_banner():
     assert ray_runtime._is_ray_version_mismatch(_VERSION_MISMATCH_MSG)
     assert ray_runtime._is_ray_version_mismatch("ray Version Mismatch: foo")
@@ -155,3 +168,167 @@ def test_force_restart_raises_when_start_fails(tmp_path):
     with mock.patch.object(ray_runtime.subprocess, "run", _fake_run):
         with pytest.raises(RuntimeError, match="restart local Ray"):
             ray_runtime.force_restart_local_cluster(num_gpus=1, log_path=log_path)
+
+
+# ---- ray.init is bounded -----------------------------------------------------
+
+
+def test_quiet_ray_init_times_out_instead_of_hanging(monkeypatch):
+    """A raylet that accepts the socket and never replies must not block forever.
+
+    Observed live: a coordinator sat inside this call for 44 minutes holding
+    tick 1, with no child process, no server log and no failure to read -- the
+    stall was indistinguishable from a slow model load.
+    """
+    import threading as _threading
+
+    release = _threading.Event()
+
+    class _WedgedRay:
+        def init(self, **_kwargs):
+            release.wait(30)  # never released within the test's timeout
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(ray_runtime, "safe_runtime_env", lambda: {"env_vars": {}})
+    monkeypatch.setitem(__import__("sys").modules, "ray", _WedgedRay())
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.5")
+
+    with pytest.raises(TimeoutError, match="did not complete within"):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+    release.set()
+
+
+def test_quiet_ray_init_timeout_is_configurable(monkeypatch):
+    """The bound is a knob, so a genuinely slow cold start can be waited out."""
+    monkeypatch.delenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", raising=False)
+    assert ray_runtime._ray_init_timeout_sec() == ray_runtime.DEFAULT_RAY_INIT_TIMEOUT_SEC
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "12.5")
+    assert ray_runtime._ray_init_timeout_sec() == 12.5
+
+
+def test_a_timed_out_init_leaves_stdout_usable(monkeypatch, capsys):
+    """The abandoned thread must not take the process's stdout with it.
+
+    ``sys.stdout`` is process-global. A redirection held on the thread the caller
+    abandons would never unwind, so every later write from every thread would
+    disappear into a buffer nobody reads -- trading a bounded stall for a
+    permanent one.
+    """
+    import threading as _threading
+
+    release = _threading.Event()
+
+    class _WedgedRay:
+        def init(self, **_kwargs):
+            release.wait(30)
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(ray_runtime, "safe_runtime_env", lambda: {"env_vars": {}})
+    monkeypatch.setitem(sys.modules, "ray", _WedgedRay())
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.5")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+
+    # The wedged connect is still alive; the caller's stream must still work.
+    assert _threading.active_count() >= 1
+    print("visible-after-timeout")
+    assert "visible-after-timeout" in capsys.readouterr().out
+    release.set()
+
+
+def test_an_abandoned_runner_never_tears_down_a_session(monkeypatch):
+    """The late thread is no longer the owner, so it must not clean up.
+
+    ``ignore_reinit_error=True`` means a late ``ray.init`` on an
+    already-connected process is a no-op that attaches to whatever session is
+    current. A shutdown from that thread would therefore tear down a LATER
+    leg's working connection rather than its own -- a cross-leg teardown in a
+    long-lived coordinator, which is worse than the stale session it was meant
+    to clear.
+    """
+    import threading
+    import types
+
+    release = threading.Event()
+    shutdowns = []
+
+    def _slow_init(**_kw):
+        release.wait(5)
+
+    fake_ray = types.SimpleNamespace(
+        init=_slow_init, shutdown=lambda: shutdowns.append(1), is_initialized=lambda: False
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+
+    release.set()
+    threading.Event().wait(0.3)
+    assert shutdowns == [], "the abandoned runner must not shut anything down"
+
+
+def test_a_second_attempt_waits_out_an_unresolved_first(monkeypatch):
+    """Two connects may not overlap, because ``ray.init`` is process-global.
+
+    The interleaving that matters: the second attempt starts while the first
+    runner is still inside ``ray.init``. If it were allowed to run, its shutdown
+    would happen before that runner connects, the connect would land in the gap,
+    and its own ``ray.init`` -- ``ignore_reinit_error=True`` -- would silently
+    attach to the OLD cluster. Which is exactly what the version-mismatch retry
+    exists to escape.
+    """
+    import threading
+    import types
+
+    release = threading.Event()
+    order = []
+
+    def _init(**_kw):
+        order.append("init")
+        if len(order) == 1:
+            release.wait(5)
+
+    fake_ray = types.SimpleNamespace(
+        init=_init, shutdown=lambda: order.append("shutdown"), is_initialized=lambda: False
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    monkeypatch.setenv("HYPERLOOM_RAY_INIT_TIMEOUT_SEC", "0.2")
+
+    with pytest.raises(TimeoutError):
+        ray_runtime.quiet_ray_init(num_gpus=1)
+
+    # The first runner is still blocked, so the gate is still held and the second
+    # attempt cannot even begin its connect.
+    second: dict = {}
+
+    def _second():
+        try:
+            ray_runtime.quiet_ray_init(num_gpus=1)
+            second["ok"] = True
+        except BaseException as exc:  # noqa: BLE001
+            second["error"] = exc
+
+    t = threading.Thread(target=_second, daemon=True)
+    t.start()
+    t.join(5)
+    assert order == ["init"], f"the second attempt started while the first was unresolved: {order}"
+    assert isinstance(second.get("error"), TimeoutError), second
+    assert "still outstanding" in str(second["error"])
+
+    # Once the first resolves, the gate frees and a later attempt proceeds --
+    # and its cleanup now runs AFTER that late connect rather than before it.
+    release.set()
+    for _ in range(100):
+        if ray_runtime._INIT_GATE.acquire(blocking=False):
+            ray_runtime._INIT_GATE.release()
+            break
+        threading.Event().wait(0.05)
+    ray_runtime.quiet_ray_init(num_gpus=1)
+    assert order[1:] == ["shutdown", "init"], order

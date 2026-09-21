@@ -15,6 +15,8 @@ from pathlib import Path
 from hyperloom.common.llm_config import (
     ANTHROPIC_SYNTHESIZABLE_KEY_ENVS,
     CLAUDE_OAUTH_TOKEN_ENV,
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
     anthropic_synthesizable_key,
     has_anthropic_credential,
 )
@@ -26,20 +28,16 @@ _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 # AMD Claude allowlist, ordered best-first: on a catalog miss preflight walks this tuple and takes the first id the
 # gateway actually serves, so the order is the fallback ladder.
-_CLAUDE_PREFERRED_MODEL = "claude-opus-5"
-
 _CLAUDE_ALLOWED_MODELS = (
-    _CLAUDE_PREFERRED_MODEL,
+    DEFAULT_CLAUDE_MODEL,
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
 )
 
 # Codex-side counterpart, also ordered best-first.
-_CODEX_PREFERRED_MODEL = "gpt-5.6-sol"
-
 _CODEX_FALLBACK_MODELS = (
-    _CODEX_PREFERRED_MODEL,
+    DEFAULT_CODEX_MODEL,
     "gpt-5.5",
     "gpt-5.4",
 )
@@ -99,10 +97,6 @@ def _validate_agent_runtime(root: Path, *, agent: str) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-
-
-# Robustness-agent runtime location resolution; mirrors the critic-agent env.
-_ROBUSTNESS_AGENT_ROOT_ENV = "ROBUSTNESS_AGENT_ROOT"
 
 
 # Matches the ``base_url:`` line in a legacy / explicitly supplied GEAK litellm yaml.

@@ -25,7 +25,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.roles import (
     MockBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
     ScriptedPlan,
 )
 
@@ -47,7 +46,6 @@ def _silent_backends() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
 
 
@@ -192,10 +190,22 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 
 
-def test_recording_failure_does_not_refuse_the_adoption(session_dir, monkeypatch):
+def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir, monkeypatch):
+    """The sink drops the row it could not write; the adoption still stands.
+
+    Failed at the write itself rather than by making the writer raise: the sink
+    is where recording is allowed to fail quietly, so a fault anywhere else is
+    a defect and is meant to surface.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import recorder as recorder_module
+
     with session_scope(session_dir):
         coord = _coord(session_dir)
-        monkeypatch.setattr(stack_event, "_sink", lambda: (_ for _ in ()).throw(RuntimeError("spool down")))
+        monkeypatch.setattr(
+            recorder_module.Recorder,
+            "record_upsert_item",
+            lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+        )
 
         assert coord._lift_to_current_best("explore", 1100.0, {"name": "kept"}) is True
         assert len(coord.shared_state.optimization_stack) == 1

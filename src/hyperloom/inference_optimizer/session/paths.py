@@ -43,7 +43,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "reports",
     "agents/orchestration",
     "agents/critic",
-    "agents/robustness",
     "runs/baseline",
     "runs/profile",
     "runs/backends",
@@ -53,7 +52,7 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "kernel-agent-workspace",
     "kernel-agent",  # tools/<name>.py output root (runs/<session_id>/...)
     "patches",
-    "optimizer_runs",  # launcher stdout / pid / robustness monitor logs
+    "optimizer_runs",  # launcher stdout / pid logs
 )
 
 # Workspace-shared layout (one copy per $USER_DATA_PATH). mkdir-ed by install.sh + reused for every session_dir

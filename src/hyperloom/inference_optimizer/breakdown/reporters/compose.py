@@ -41,9 +41,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ),
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
-    # The two side-channel agents watch the run rather than take part in it, so
-    # they sit after the optimization story and before the raw trace.
-    ("Review & Robustness", ["critic", "robustness"]),
+    ("Review", ["critic", "robustness"]),
     ("Run Trace", ["phase_timeline"]),
 ]
 

@@ -229,6 +229,7 @@ def _writeback(session_dir: Path, **overrides: Any):
     fake = types.SimpleNamespace(
         shared_state=state,
         rounds=overrides.get("rounds") or _rounds(session_dir),
+        session_dir=str(session_dir),
     )
     for name in ("_persist_eval_failure", "_record_enablement_eval_trigger", "_close_enablement_lane"):
         setattr(fake, name, types.MethodType(getattr(WritebackCollaborator, name), fake))
@@ -606,3 +607,45 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     assert task_id
     assert lane.shared_state.enablement.validation_pending is True
     assert lane.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
+async def test_a_kept_round_leaves_the_lane_open_for_its_revalidation(tmp_path):
+    """A KEEP is provisional, so it is not the terminal that judges the stack.
+
+    This used to be the lane's terminal: a KEEP set ``succeeded`` and closed the
+    lane, and the close carried the replay verdict. Upstream made every KEEP open
+    a revalidation window instead -- ``succeeded`` is now set only where the
+    promote happens -- so the round that lands a KEEP closes nothing, and a
+    verdict recorded here would describe a stack no measurement had confirmed.
+
+    The guard that the close still computes a verdict lives on the terminal that
+    remains: :func:`test_the_writeback_close_also_carries_a_replay_verdict`.
+    """
+    lane = _lane(tmp_path)
+
+    await lane._maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "kept",
+            "specialist_task_id": "spec-1",
+            "patches_applied": ["/p/1.patch"],
+        }
+    )
+
+    assert lane.shared_state.enablement.validation_pending is True
+    assert lane.shared_state.enablement.succeeded is False
+    assert _ext()["recipe"] is None, "a provisional KEEP must not publish a terminal verdict"
+
+
+@pytest.mark.asyncio
+async def test_the_writeback_close_also_carries_a_replay_verdict(tmp_path):
+    """The second terminal. A guard on one path is a guard on one path."""
+    writeback = _writeback(tmp_path)
+
+    await writeback._close_enablement_lane(
+        outcome=enablement_event.OUTCOME_STALLED,
+        reason="cap reached",
+    )
+
+    assert _ext()["recipe"] is not None

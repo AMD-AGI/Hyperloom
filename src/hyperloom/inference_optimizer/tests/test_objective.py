@@ -51,7 +51,6 @@ def _backends_silent() -> dict[str, object]:
     return {
         "orchestration": MockBackend(silent, name="o"),
         "critic": MockBackend(silent, name="c"),
-        "robustness": MockBackend(silent, name="r"),
     }
 
 
@@ -377,7 +376,6 @@ async def test_run_closing_phase_skips_reactor(session_dir):
     backends = {
         "orchestration": spy,
         "critic": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="c"),
-        "robustness": MockBackend(ScriptedPlan(turns=[], default_intent=_heartbeat()), name="r"),
     }
     c = Coordinator(session_dir, backends=backends)
     c.sub.register_executor("report", report_executor)

@@ -1,326 +1,64 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The AgentX baseline cap, and why the aiter cold/warm probe cannot supply it."""
+"""Fixed benchmark caps remain independent of AgentX client warmup settings."""
 
 from __future__ import annotations
+
+import sys
 
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _agentx_timeouts as _timeouts
-from hyperloom.orchestrator.actions.executors.baseline import (
-    AGENTX_BASELINE_OVERHEAD_SEC,
+from hyperloom.orchestrator.actions.executors._agentx_timeouts import (
     AGENTX_CANON_WARMUP_CONC,
     AGENTX_CANON_WARMUP_GRACE_SEC,
-    AGENTX_DEFAULT_DURATION_SEC,
-    BASELINE_DEFAULT_TIMEOUT_SEC,
-    BaselineExecutor,
-    agentx_baseline_timeout_sec,
     agentx_warmup_grace_conc,
     agentx_warmup_grace_sec,
 )
-
-_MEASURED_VLLM_SEC = 6676  # the E4 round, warm corpus, no first-compile
-_FIRST_COMPILE_SEC = 1800  # the cold-start comment's own "30+ minutes"
-_COLD_CORPUS_SEC = 840  # the client's own "4-14 min" upper bound
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
+from hyperloom.orchestrator.actions.executors._workload_envs import apply_agentx_switch
 
 
 def _clear(monkeypatch):
-    # The derivation logs each distinct payload once per process so a conc sweep cannot reprint them per rung.
     _timeouts._AGENTX_SAID.clear()
-    for k in (
+    for key in (
         "HYPERLOOM_AGENTX",
-        "AGENTX_DURATION",
-        "AGENTX_BASELINE_TIMEOUT_SEC",
-        "AGENTX_BASELINE_OVERHEAD_SEC",
         "AGENTX_WARMUP_GRACE_PERIOD",
-        # An inherited CONC would silently scale the warmup share and make every cap assertion below
-        # concurrency-dependent.
-        "CONC",
         "AGENTX_WARMUP_GRACE_CONC",
+        "CONC",
+        "INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC",
     ):
-        monkeypatch.delenv(k, raising=False)
+        monkeypatch.delenv(key, raising=False)
 
 
-# --- the derived cap -----------------------------------------------------------
-
-
-def test_default_cap_covers_the_measured_worst_case(monkeypatch):
-    """The number has to clear a measurement, not a hunch."""
+@pytest.mark.parametrize("agentx", ["0", "1"])
+def test_baseline_cap_does_not_expand_with_workload(monkeypatch, tmp_path, agentx):
     _clear(monkeypatch)
-    worst = _MEASURED_VLLM_SEC + _FIRST_COMPILE_SEC + _COLD_CORPUS_SEC
-    cap = agentx_baseline_timeout_sec()
-    assert cap == AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
-    assert cap > worst, f"cap {cap} does not clear the modelled worst case {worst}"
+    monkeypatch.setenv("HYPERLOOM_AGENTX", agentx)
+    monkeypatch.setenv("AGENTX_DURATION", "50000")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "20000")
+    executor = BaselineExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    assert executor._resolve_timeout({"timeout_sec": 99}) == 7800
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "123.5")
+    assert executor._resolve_timeout({}) == 123.5
 
 
-def test_neither_stock_cap_would_have_covered_it():
-    """Why this exists at all: both existing caps lose to the same arithmetic."""
-    from hyperloom.orchestrator.actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-    )
-
-    worst = _MEASURED_VLLM_SEC + _FIRST_COMPILE_SEC + _COLD_CORPUS_SEC
-    assert BASELINE_DEFAULT_TIMEOUT_SEC < worst
-    assert BASELINE_COLD_START_TIMEOUT_SEC < worst
+def test_profile_retains_nonbenchmark_budget(monkeypatch, tmp_path):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "99")
+    executor = ProfileExecutor(magpie_python=sys.executable, session_dir=tmp_path)
+    assert executor.benchmark_watchdog is False
+    assert executor._resolve_timeout({}) == 14400
+    assert executor._resolve_timeout({"timeout_sec": 15000}) == 15000
 
 
-def test_cap_tracks_the_measurement_window(monkeypatch):
-    """Derived, not pinned: a longer window must not need a second edit."""
+def test_agentx_switch_keeps_profile_yaml_cap(monkeypatch):
     _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_DURATION", "7200")
-    assert agentx_baseline_timeout_sec() == 7200 + AGENTX_BASELINE_OVERHEAD_SEC
-
-
-def test_overhead_budget_is_tunable(monkeypatch):
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
-
-
-def test_default_overhead_warns_it_may_not_fit_every_model(monkeypatch, caplog):
-    """A raw aiperf run against Kimi-K3 (conc=64) measured warmup alone taking ~12075s -- longer than this whole default cap."""
-    _clear(monkeypatch)
-    with caplog.at_level("WARNING"):
-        agentx_baseline_timeout_sec()
-    assert any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
-
-
-def test_explicit_overhead_override_suppresses_the_warning(monkeypatch, caplog):
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "20000")
-    with caplog.at_level("WARNING"):
-        agentx_baseline_timeout_sec()
-    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
-
-
-def test_overhead_tracks_the_warmup_grace_the_operator_set(monkeypatch):
-    """The knob that bounds the warmup must also size the cap that has to cover it."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    grown = 14400 - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
-
-
-def test_canonical_grace_reproduces_the_measured_constant(monkeypatch):
-    """Splitting the constant must not move it: same inputs, same number."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
-
-
-def test_explicit_overhead_outranks_the_derivation(monkeypatch):
-    """A pinned overhead is an answer, not an input: the grace must not add to it."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
-
-
-def test_a_tuned_grace_suppresses_the_uncalibrated_warning(monkeypatch, caplog):
-    """The warning is about nobody having sized this model, not about the default."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
-    with caplog.at_level("WARNING"):
-        agentx_baseline_timeout_sec()
-    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
-
-
-@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
-def test_unparseable_grace_falls_back_to_canonical(monkeypatch, bad):
-    """A typo in the grace must not shrink the cap below the measured default."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
-
-
-# --- the CONC-scaled warmup floor ----------------------------------------------
-
-
-@pytest.mark.parametrize("conc", ["1", "4", "8"])
-def test_at_or_below_the_anchor_the_cap_is_unchanged(monkeypatch, conc):
-    """Every round already validated at conc<=8 must keep its exact cap."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", conc)
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
-
-
-@pytest.mark.parametrize("conc", [16, 32, 64])
-def test_the_warmup_share_scales_linearly_with_conc(monkeypatch, conc):
-    """Warmup is per-lane requests x CONC lanes, so a MEASURED budget tracks CONC."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
-    monkeypatch.setenv("CONC", str(conc))
-    grown = (AGENTX_CANON_WARMUP_GRACE_SEC * conc) // AGENTX_CANON_WARMUP_CONC - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
-
-
-@pytest.mark.parametrize("conc", [16, 32, 64, 256])
-def test_an_untuned_round_keeps_the_canonical_cap_at_every_conc(monkeypatch, conc):
-    """Nothing measured means nothing to scale."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", str(conc))
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
-
-
-def test_the_untuned_warning_decomposition_still_adds_up(monkeypatch, caplog):
-    """The warning prints ``overhead = non-warmup + grace``; it must be arithmetic."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", "64")
-    with caplog.at_level("WARNING"):
-        agentx_baseline_timeout_sec()
-    msgs = [r.getMessage() for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
-    assert msgs, "the untuned warning did not fire"
-    assert f"canonical {AGENTX_BASELINE_OVERHEAD_SEC}s" in msgs[0]
-    assert f"{AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC}s non-warmup" in msgs[0]
-
-
-def test_the_floor_composes_with_an_operator_raised_grace(monkeypatch):
-    """A grace the operator already raised is the thing that gets scaled."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    monkeypatch.setenv("CONC", "32")
-    scaled = (3600 * 32) // AGENTX_CANON_WARMUP_CONC
-    grown = scaled - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
-
-
-@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
-def test_an_unusable_conc_leaves_the_derivation_alone(monkeypatch, bad):
-    """A missing or malformed CONC must not move the cap in either direction."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", bad)
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
-
-
-def test_the_floor_never_shrinks_a_cap(monkeypatch):
-    """Whatever CONC says, the cap may only grow -- an under-sized cap kills a round that would have finished, while an over-sized one costs a longer wait on a round that was hung anyway."""
-    _clear(monkeypatch)
-    base = agentx_baseline_timeout_sec()
-    for conc in (1, 2, 4, 8, 9, 16, 24, 32, 64, 128):
-        monkeypatch.setenv("CONC", str(conc))
-        assert agentx_baseline_timeout_sec() >= base
-
-
-def test_a_pinned_cap_outranks_the_conc_floor(monkeypatch):
-    """The explicit escape hatch stays the last word, as it is for every other input."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", "64")
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "12345")
-    assert agentx_baseline_timeout_sec() == 12345
-
-
-def test_a_pinned_overhead_outranks_the_conc_floor(monkeypatch):
-    """A pinned overhead is an answer, not an input -- same rule as the grace."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("CONC", "64")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
-
-
-def test_the_scaling_is_announced(monkeypatch, caplog):
-    """A cap that moved silently is a cap nobody can reconcile against a log."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    monkeypatch.setenv("CONC", "32")
-    with caplog.at_level("INFO"):
-        agentx_baseline_timeout_sec()
-    assert any("CONC=32" in r.getMessage() for r in caplog.records)
-
-
-def test_explicit_cap_wins_outright(monkeypatch):
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_DURATION", "7200")
-    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "12345")
-    assert agentx_baseline_timeout_sec() == 12345
-
-
-@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
-def test_unparseable_or_nonpositive_env_falls_back(monkeypatch, bad):
-    """A typo must not silently produce a cap of zero."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", bad)
-    monkeypatch.setenv("AGENTX_DURATION", bad)
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
-
-
-# --- wiring into _resolve_timeout ----------------------------------------------
-
-
-def _probe_must_not_run(*_a, **_k):
-    raise AssertionError("the aiter probe was consulted on the AgentX path")
-
-
-def test_agentx_bypasses_the_probe(monkeypatch):
-    """Asking the probe first would return WARM and the cap that cannot work."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        _probe_must_not_run,
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == agentx_baseline_timeout_sec()
-
-
-def test_explicit_task_param_still_outranks_agentx(monkeypatch):
-    """The pre-existing highest-priority override keeps its place."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert BaselineExecutor()._resolve_timeout({"timeout_sec": 4242}) == 4242
-
-
-def test_synthetic_path_still_uses_the_probe(monkeypatch):
-    """Zero regression: AgentX off must reach the probe and its warm default."""
-    seen = {}
-
-    def _fake_probe():
-        seen["called"] = True
-        return {"probe_status": "found", "is_cold": False, "path": "/x", "kernel_count": 99, "size_mb": 1}
-
-    _clear(monkeypatch)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        _fake_probe,
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == BASELINE_DEFAULT_TIMEOUT_SEC
-    assert seen.get("called") is True
-
-
-def test_synthetic_cold_start_bump_is_untouched(monkeypatch):
-    from hyperloom.orchestrator.actions.executors._aiter_jit import (
-        BASELINE_COLD_START_TIMEOUT_SEC,
-    )
-
-    _clear(monkeypatch)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline._probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "path": "/x", "kernel_count": 1, "size_mb": 1},
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.sweep_stale_aiter_locks_if_dead",
-        lambda: {},
-    )
-    assert BaselineExecutor()._resolve_timeout({}) == BASELINE_COLD_START_TIMEOUT_SEC
-
-
-# --- the warmup grace both layers must read -------------------------------------
-
-
-def test_the_cap_and_the_clients_bound_come_from_one_function(monkeypatch):
-    """The cap's warmup share IS the client's bound, or the round gets cut early."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
-    monkeypatch.setenv("CONC", "32")
-    grace = agentx_warmup_grace_sec()
-    _NON_WARMUP = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert grace == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
-    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + _NON_WARMUP + grace)
+    monkeypatch.setenv("AGENTX_DURATION", "50000")
+    bench = {"framework": "sglang", "timeout_seconds": 14400}
+    apply_agentx_switch(bench, active=True)
+    assert bench["timeout_seconds"] == 14400
 
 
 @pytest.mark.parametrize("conc", ["1", "4", "8"])
@@ -416,16 +154,6 @@ def test_declaring_the_default_anchor_is_what_enables_the_floor(monkeypatch):
     assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
 
 
-def test_the_cap_follows_the_declared_anchor_too(monkeypatch):
-    """The subprocess cap and the client bound stay one number under any anchor."""
-    _clear(monkeypatch)
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
-    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
-    monkeypatch.setenv("CONC", "32")
-    non_warmup = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + non_warmup + 28800
-
-
 def test_a_whole_number_written_with_a_decimal_point_is_honoured(monkeypatch):
     """\"16.0\" is an anchor of 16, not a missing anchor."""
     _clear(monkeypatch)
@@ -451,16 +179,6 @@ def test_an_exponent_form_whole_number_is_accepted(monkeypatch):
     assert agentx_warmup_grace_conc() == 1000
 
 
-def test_the_derivation_logs_do_not_repeat_per_rung(monkeypatch, caplog):
-    """A 8-rung, 2-arm sweep must not print the same eight-line warning 16 times."""
-    _clear(monkeypatch)
-    with caplog.at_level("INFO"):
-        for _ in range(16):
-            agentx_baseline_timeout_sec()
-    untuned = [r for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
-    assert len(untuned) == 1, f"warned {len(untuned)} times"
-
-
 def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
     """Deduping on the payload, not on a bare flag: new numbers are new news."""
     _clear(monkeypatch)
@@ -473,16 +191,6 @@ def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
         agentx_warmup_grace_sec()
     scaled = [r for r in caplog.records if "scaling the warmup share" in r.getMessage()]
     assert len(scaled) == 2, [r.getMessage() for r in scaled]
-
-
-def test_a_grace_without_a_declared_anchor_is_never_scaled(monkeypatch):
-    """A ratio needs two numbers; assuming the second one invents a bound."""
-    for conc in ("8", "16", "64", "256"):
-        _clear(monkeypatch)
-        monkeypatch.setenv("CONC", conc)
-        unset = agentx_baseline_timeout_sec()
-        monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
-        assert agentx_baseline_timeout_sec() == unset, f"CONC={conc}"
 
 
 def test_declaring_the_anchor_is_what_turns_scaling_on(monkeypatch):

@@ -354,7 +354,6 @@ async def test_run_grid_yaml_build_error_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert len(results) == 1
     assert results[0].status == "failed"
@@ -375,7 +374,6 @@ async def test_run_grid_magpie_timeout_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "magpie_timeout"
@@ -395,72 +393,10 @@ async def test_run_grid_server_dead_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class == "server_init_dead"
     assert results[0].returncode == gr.SERVER_DEAD_RETURNCODE
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_branch(tmp_path, monkeypatch):
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, **_k):
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    assert results[0].status == "failed"
-    assert results[0].killed_overtime is True
-    assert results[0].estimated_output_throughput is None
-
-
-@pytest.mark.asyncio
-async def test_run_grid_overtime_kill_estimates_tput_from_server_log(
-    tmp_path,
-    monkeypatch,
-):
-    """A killed-overtime variant salvages a rough output tput from the engine's partial ``server.log`` decode-throughput logs."""
-    base = tmp_path / "base.yaml"
-    _write_base_yaml(base)
-
-    def _overtime(*_a, output_dir, **_k):
-        # Mimic the engine dumping periodic decode throughput before the reaper.
-        Path(output_dir).mkdir(parents=True, exist_ok=True)
-        (Path(output_dir) / "server.log").write_text(
-            "Decode batch. gen throughput (token/s): 100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 900.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1000.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1100.0, #queue-req: 0\n"
-            "Decode batch. gen throughput (token/s): 1200.0, #queue-req: 0\n"
-        )
-        return gr.OVERTIME_KILL_RETURNCODE, "", ""
-
-    monkeypatch.setattr(gr, "_run_magpie", _overtime)
-    results = await run_grid(
-        base_yaml_path=base,
-        base_extra_args="",
-        grid=[GridVariant("vA")],
-        output_root=tmp_path / "out",
-        variant_timeout_sec=5,
-        soft_deadline_sec=1.0,
-    )
-    r = results[0]
-    assert r.status == "failed"
-    assert r.killed_overtime is True
-    assert r.output_throughput is None
-    # warmup trim drops the 100.0 ramp -> mean(900,1000,1100,1200)=1050.0
-    assert r.estimated_output_throughput == pytest.approx(1050.0)
-    assert any(w.startswith("estimated_output_throughput_from_server_log:") for w in r.nonfatal_warnings)
 
 
 @pytest.mark.asyncio
@@ -477,7 +413,6 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
         base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert len(results) == 1
@@ -502,7 +437,6 @@ async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkey
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert len(results) == 1
@@ -526,7 +460,6 @@ async def test_agentx_preflight_abort_abandons_the_rest_of_the_grid(tmp_path, mo
         base_extra_args="",
         grid=[GridVariant("vA"), GridVariant("vB"), GridVariant("vC")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=True,  # would otherwise walk every point
     )
     assert [r.status for r in results] == ["failed", "skipped", "skipped"], (
@@ -552,7 +485,6 @@ async def test_agentx_preflight_abort_never_reports_an_empty_error(tmp_path, mon
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
         keep_going_on_failure=False,
     )
     assert (results[0].error or "").strip(), "an empty diagnosis reached the result"
@@ -578,7 +510,6 @@ async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     assert results[0].status == "failed"
     assert results[0].error_class in {
@@ -618,7 +549,6 @@ async def test_run_grid_nonzero_rc_with_valid_measurement_fails(tmp_path, monkey
         base_extra_args="",
         grid=[GridVariant("vA")],
         output_root=tmp_path / "out",
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"
@@ -653,7 +583,6 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
         base_extra_args="",
         grid=[GridVariant("fp8_kv")],
         output_root=out_root,
-        variant_timeout_sec=5,
     )
     r = results[0]
     assert r.status == "failed"

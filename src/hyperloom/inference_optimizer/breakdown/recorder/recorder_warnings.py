@@ -23,9 +23,23 @@ from __future__ import annotations
 import logging
 import threading
 
+from ...session.session_binding import SessionNotBoundError
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
+
+#: What recording can fail with that is not a defect in the recorder itself.
+#:
+#: The spool is one JSON file per row, so a write or a read-back fails the way
+#: the filesystem does; the only other way in is with no session bound, which a
+#: subprocess hits by design. ``ValueError`` covers a malformed event id, the
+#: one piece of caller input the sink validates.
+#:
+#: Everything else -- a ``TypeError`` projecting a row, an ``AttributeError``
+#: on a result that changed shape -- is a bug in the recorder. Catching those
+#: too is what let a breakdown go quietly wrong while every phase reported
+#: success, so they are left to raise where they can be seen and fixed.
+RECORDING_ERRORS: tuple[type[Exception], ...] = (OSError, SessionNotBoundError, ValueError)
 
 #: One warning per section and error class. A writer on a hot path fails the
 #: same way every tick, and an unbounded sidecar of identical lines would bury
@@ -102,4 +116,4 @@ def note_failure(
         _parking.active = False
 
 
-__all__ = ["note_failure", "reset_for_tests"]
+__all__ = ["RECORDING_ERRORS", "note_failure", "reset_for_tests"]

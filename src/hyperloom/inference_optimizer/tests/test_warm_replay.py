@@ -2286,6 +2286,90 @@ def test_every_patched_tree_is_promoted(tmp_path):
     assert promotion["target_repos"] == [str(sglang), str(tuning)]
 
 
+def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
+    """On a pip-installed framework it is the only status an overlay can land under."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.warm_replay_pending = {"task_id": "warm"}
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+        lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "combined_current_contract": True,
+            "combined_keep_threshold_pct": 1.0,
+            # The whole recipe is the timeline: nothing else can carry the replay.
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+        }
+    )
+
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 750.0,
+            "warm_patches_applied": [{"patch_file": "p.patch", "status": "applied_nogit"}],
+        },
+        task=task,
+    )
+
+    # The recipe's only content is the timeline, so a filtered-out status leaves the replay
+    # with nothing to carry and it is dropped as "reproduced but no params".
+    assert coord.shared_state.warm_replay_outcome.get("reason") != "reproduced_but_no_params"
+    assert coord.shared_state.optimization_stack, "the reproduced overlay has to reach the stack"
+
+
+def test_a_nogit_tree_promotes_on_the_backups_that_restore_it(tmp_path):
+    """A pip-installed framework has no sha; its backups are the restore channel."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": str(install_root),
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [{"path": "vllm/fp8.py", "backup": str(tmp_path / "b.bin")}],
+                },
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(install_root)]
+
+
+def test_a_tree_that_names_no_checkout_is_still_refused(tmp_path):
+    """A record that cannot say which tree it patched is not promotable."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": "/sglang"}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {"warm_patch_trees": [{"root": "", "pre_sha": "", "snapshot_manifest": None, "nogit_backups": []}]},
+        task,
+    )
+
+    assert ok is False
+    assert promotion["failure"] == "validated_recipe_checkout_incomplete"
+
+
 def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
     """The gain came from the whole set, so a half-promoted replay is not a win."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -2313,6 +2397,100 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
 
     assert ok is False
     assert promotion["failure"] == "validated_recipe_checkout_manifest_mismatch"
+
+
+def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
+    """A pip-installed framework has no manifest; its backups are the way back."""
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    restored: list[list] = []
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_warm_patch_state",
+        lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
+            restored.append(nogit_backups) or {"ok": True, "errors": []}
+        ),
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    )
+    backups = [{"target": "vllm/fp8.py", "backup": "/tmp/0000.bin"}]
+
+    outcome = coord.phase_prelude._rollback_combined_warm(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": "/usr/local/lib/python3.12/dist-packages",
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": backups,
+                    "mutated": True,
+                },
+            ],
+        },
+        _StubTask(params={}),
+    )
+
+    assert outcome["ok"] is True
+    assert restored == [backups]
+
+
+def test_rollback_of_an_unmutated_tree_is_a_no_op(tmp_path):
+    """An overlay already present is applied as a no-op, so there is nothing to undo."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    )
+
+    outcome = coord.phase_prelude._rollback_combined_warm(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": "/usr/local/lib/python3.12/dist-packages",
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [],
+                    "mutated": False,
+                },
+            ],
+        },
+        _StubTask(params={}),
+    )
+
+    assert outcome["ok"] is True
+    assert outcome.get("errors") in (None, [])
+
+
+def test_an_unmutated_tree_promotes_because_it_already_carries_the_overlay(tmp_path):
+    """Reaching promotion means every required overlay applied, no-op included."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    install_root = tmp_path / "dist-packages"
+    install_root.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(install_root)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {
+                    "root": str(install_root),
+                    "pre_sha": "",
+                    "snapshot_manifest": None,
+                    "nogit_backups": [],
+                    "mutated": False,
+                },
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(install_root)]
 
 
 def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):

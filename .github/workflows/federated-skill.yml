@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Federated skill
+
+# Validates the skill amd/skills imports from this repo against the rules its
+# catalog enforces.
+#
+# Deliberately has NO ``paths-ignore``, for the same reason as
+# ``packaging.yml``: the skill is a markdown file, so a documentation-only PR is
+# both the change that can break it and the change ``lint.yml`` and
+# ``tests-coverage.yml`` skip. Nothing else here would catch it, and the catalog
+# would only find out on its nightly import.
+on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: federated-skill-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skill-contract:
+    name: federated skill contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install pytest
+        # Frontmatter parsing only, so no project extras are installed here;
+        # this job stays seconds long.
+        run: |
+          pip install --upgrade pip
+          pip install "pytest>=8.0" "pyyaml>=6.0"
+
+      - name: Check the federated skill
+        run: |
+          pytest scripts/tests/test_federated_skill_contract.py \
+            -p no:cacheprovider -v

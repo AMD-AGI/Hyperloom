@@ -73,7 +73,7 @@ def _heartbeat() -> Intent:
 
 def _backends_silent() -> dict[str, object]:
     silent = ScriptedPlan(turns=[], default_intent=_heartbeat())
-    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic", "robustness")}
+    return {n: MockBackend(silent, name=n) for n in ("orchestration", "critic")}
 
 
 def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch):
@@ -446,6 +446,40 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
+    # ``profiler=torch`` and a trace dir have to be asserted here too, not left to
+    # Magpie's launcher script alone: that script appends its own flags *after*
+    # EXTRA_VLLM_ARGS at actual launch, but the argv preflight probe only sees
+    # EXTRA_VLLM_ARGS, and vLLM's ProfilerConfig validator rejects
+    # delay/max_iterations without both present in the checked fragment.
+    assert "--profiler-config.profiler torch" in extra, extra
+    assert "--profiler-config.torch_profiler_dir" in extra, extra
+
+
+def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
+    tmp_path,
+    monkeypatch,
+):
+    """An operator-set ``profiler``/``torch_profiler_dir`` must not be doubled."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(
+        tmp_path,
+        "vllm",
+        {
+            "CONC": 32,
+            "ISL": 256,
+            "OSL": 1024,
+            "EXTRA_VLLM_ARGS": (
+                "--profiler-config.profiler torch --profiler-config.torch_profiler_dir /tmp/operator-dir"
+            ),
+        },
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert extra.count("--profiler-config.profiler") == 1, extra
+    assert extra.count("--profiler-config.torch_profiler_dir") == 1, extra
+    assert "/tmp/operator-dir" in extra, extra
 
 
 def test_materialize_profile_window_vllm_skill_formula_explicit_R(
@@ -734,6 +768,8 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
         tmp_path,
         extra_envs={
             "EXTRA_VLLM_ARGS": (
+                "--profiler-config.profiler torch "
+                "--profiler-config.torch_profiler_dir /tmp/already-set "
                 "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "

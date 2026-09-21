@@ -25,7 +25,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_PRECISION,
     DEFAULT_TP,
 )
-from hyperloom.orchestrator.roles.agent_role import (
+from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
 )
@@ -752,77 +752,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "Ignored (with a warning) under --critic-mock, which runs no review "
         "inference.",
     )
-    # Robustness backend selection (mirrors critic)
-    opt.add_argument(
-        "--robustness-mock",
-        dest="robustness_backend",
-        action="store_const",
-        const="mock",
-        default=None,
-        help="Force the observation-only mock Robustness backend.",
-    )
-    opt.add_argument(
-        "--robustness-agent",
-        dest="robustness_backend",
-        action="store_const",
-        const="agent",
-        help="Force the robustness-agent runtime backend (subprocess + JSON, "
-        "mirrors critic-agent transport). Requires ROBUSTNESS_AGENT_ROOT "
-        "or a sibling $REPO_ROOT/robustness-agent/ directory.",
-    )
-    opt.add_argument(
-        "--robustness-llm-rca",
-        dest="robustness_llm_rca",
-        action="store_true",
-        default=None,
-        help="Forward llm_rca_enabled=true into request.options. The agent "
-        "still falls back to NoopRcaEngine when LLM credentials aren't "
-        "set in the runtime env.",
-    )
-    opt.add_argument(
-        "--no-robustness-llm-rca",
-        dest="robustness_llm_rca",
-        action="store_false",
-        help="Forward llm_rca_enabled=false into request.options.",
-    )
-    opt.add_argument(
-        "--robustness-disable-local-probe",
-        dest="robustness_disable_local_probe",
-        action="store_true",
-        default=None,
-        help="Force disable_local_probe=true. The robustness-agent silences "
-        "its LocalProbe fallback so per-pod sandbox checks (ps, rocm-smi, "
-        "local HTTP) cannot emit false-positive symptoms.",
-    )
-    opt.add_argument(
-        "--no-robustness-disable-local-probe",
-        dest="robustness_disable_local_probe",
-        action="store_false",
-        help="Force disable_local_probe=false (keep the LocalProbe fallback even in multi-node mode).",
-    )
-    opt.add_argument(
-        "--robustness-disable-server-probe",
-        dest="robustness_disable_server_probe",
-        action="store_true",
-        default=None,
-        help="Force auto_probe_inference_server=false: stop the robustness-agent "
-        "from auto-probing the local inference-server health endpoint "
-        "(http://127.0.0.1:8888/health). Unlike --robustness-disable-local-probe "
-        "this is surgical — the REST of LocalProbe (gpu-leak, gateway 401, "
-        "coordinator-zombie, aiter-JIT, disk/fd) stays active. Use on "
-        "single-node runs where the optimizer restarts the inference server "
-        "between benchmarks: those restart windows otherwise trip "
-        "false-positive local_server_unreachable symptoms (which can escalate "
-        "to a premature skip_to_close / robustness_escalated stop). "
-        "Auto-enabled in multi-node.",
-    )
-    opt.add_argument(
-        "--no-robustness-disable-server-probe",
-        dest="robustness_disable_server_probe",
-        action="store_false",
-        help="Force auto_probe_inference_server=true (keep the 127.0.0.1:8888 "
-        "/health auto-probe even in multi-node mode).",
-    )
     opt.add_argument(
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
@@ -1113,15 +1042,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "prompt, so the same card saturates far lower).",
     )
     opt.add_argument(
-        "--conc-sweep-timeout-sec",
-        dest="conc_sweep_timeout_sec",
-        type=int,
-        default=1800,
-        help="Per-variant timeout (seconds) for --enable-conc-sweep. "
-        "Default 1800 (~30 min). Per-variant cap is also clamped "
-        "by the remaining --conc-sweep-total-budget-sec.",
-    )
-    opt.add_argument(
         "--conc-sweep-total-budget-sec",
         dest="conc_sweep_total_budget_sec",
         type=int,
@@ -1136,51 +1056,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "a SWEEP-phase action.",
     )
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
-    opt.add_argument(
-        "--explore-overtime-kill-ratio",
-        dest="explore_overtime_kill_ratio",
-        type=float,
-        default=2.0,
-        help="Per-variant explore overtime kill: each single-variant "
-        "Magpie run in the explore loop is reaped once its "
-        "POST-READY (pure hot client) wall-clock exceeds "
-        "``decision_anchor_sec * RATIO`` (the warm-decision anchor is "
-        "``baseline_warm_runtime_sec``; pre-ready boot / weight load / "
-        "first-request recompile is excluded — see "
-        "INFERENCE_OPTIMIZER_SOFT_DEADLINE_FROM_READY). The variant is "
-        "recorded with outcome=KILLED_OVERTIME + runtime_sec + "
-        "wall_clock_ratio_vs_baseline (no tput) so the LLM can "
-        "distinguish it from a hard timeout / crash. Default 2.0 (kill "
-        "at +100%% over the warm client anchor). Pass 0 to disable.",
-    )
     # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;
     # mirrored to SharedState.explore_variant_timeout_sec_override.
-    opt.add_argument(
-        "--explore-variant-timeout-sec",
-        dest="explore_variant_timeout_sec",
-        type=int,
-        default=0,
-        help="Pin the per-variant hard timeout (seconds) inside the "
-        "optimisation phase. ``0`` (default) auto-derives from "
-        "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
-        "--explore-variant-timeout-safety-margin)`` once baseline "
-        "lands, with a 2400-14400 s range guard. Set to a positive "
-        "integer to pin (CI smoke runs / debugging).",
-    )
-    opt.add_argument(
-        "--explore-variant-timeout-safety-margin",
-        dest="explore_variant_timeout_safety_margin",
-        type=float,
-        default=0.5,
-        help="Headroom (as a fraction of baseline_runtime_sec) added on "
-        "top of --explore-overtime-kill-ratio when the explore hard "
-        "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
-        "buffer for variant cold starts: torch.compile AOTI compile, "
-        "fresh aiter shapes, spec-decoding draft load). Bump for "
-        "workloads with heavy compile cost; lower to tighten the "
-        "backstop. No effect when --explore-variant-timeout-sec is "
-        "set to a positive value.",
-    )
     opt.add_argument(
         "--reset-state",
         dest="reset_state",
@@ -1309,6 +1186,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "generations. Use ONLY when the live emitter never ran for this "
         "session (e.g. it was disabled during the run); otherwise it "
         "duplicates generations already pushed live.",
+    )
+    rec.add_argument(
+        "--confirm-stopped",
+        metavar="TASK_ID",
+        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
+        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirmation-reason",
+        metavar="TEXT",
+        help="Required audit reason for --confirm-stopped. Both options must be provided together "
+        "and cannot be combined with --force or --backfill-trace.",
     )
 
     return p

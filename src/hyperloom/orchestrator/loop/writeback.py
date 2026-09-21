@@ -1169,6 +1169,9 @@ class WritebackCollaborator:
         enablement_event.finish(
             outcome=outcome,
             reason=reason,
+            enablement=lane,
+            session_dir=str(self.session_dir or ""),
+            mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
             kept_patches=lane.kept_patches,
             kept_artifacts=lane.kept_artifacts,
             setup_commands=lane.setup_commands,
@@ -6109,9 +6112,7 @@ class WritebackCollaborator:
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
-                    # Both halves of the catalogue contract: without lanes the row
-                    # launches a server unserialised; without a TTL it is invisible
-                    # to ``reclaim_expired_running``.
+                    # Preserve serving-lane serialization and the catalogue's admission estimate.
                     requires_lanes=lanes,
                     lease_ttl_sec=ttl,
                 )
