@@ -266,7 +266,7 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
     assert written["written"] is True
     assert written["speedup"] == 2.0
     # Filed under the five-tuple, with the GPU in the address.
-    assert written["kernel"] == "kernel:forge-loop:deterministic:aiter:unspecified:triton:mi355x"
+    assert written["kernel"] == "kernel:forge-loop:deterministic:aiter:unknown:triton:mi355x"
     assert written["solution"] == f"{written['kernel']}/{written['session_id']}"
     assert written["champion"] is True
     assert warm["candidate"] is True
