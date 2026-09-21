@@ -12,6 +12,7 @@ import os
 import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
+from concurrent.futures import Future
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
@@ -1826,22 +1827,14 @@ class DispatcherCollaborator:
             allowed.add(name)
         return frozenset(allowed)
 
-    def _run_action_now_sync(
+    def _schedule_inline_action(
         self,
         action_name: str,
         params: dict[str, Any] | None = None,
-    ) -> str:
-        """Bridge callable for the ``run_action_now`` context tool (A3): marshals the executor coroutine onto the Coordinator loop and blocks with a timeout.
-
-        Args:
-            action_name: Name of the action to run inline; must be
-                inline-eligible per :meth:`_inline_action_whitelist`.
-            params: Optional parameter mapping forwarded to the executor.
-
-        Returns:
-            A human-readable status string describing the inline run outcome,
-            disablement, ineligibility, timeout, or error.
-        """
+        *,
+        synchronous: bool = False,
+    ) -> str | tuple[Future[str], str, float]:
+        """Admit and submit an inline action, returning its future and caller wait budget."""
         if not self._inline_fast_actions_enabled:
             return (
                 "(run_action_now disabled: set "
@@ -1862,19 +1855,12 @@ class DispatcherCollaborator:
         loop = self._coordinator_loop
         if loop is None or loop.is_closed():
             return "(run_action_now unavailable: coordinator loop not running)"
-        # Defensive audit (log-only): detect and log if this sync bridge is
-        # invoked on the coordinator loop thread. Behaviour is unchanged.
         try:
-            _running = asyncio.get_running_loop()
-            if _running is loop:
-                log.warning(
-                    "run_action_now: invoked on the coordinator loop thread (action=%r)",
-                    name,
-                )
+            running_loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass
-        except Exception:  # noqa: BLE001 - audit must never affect flow
-            pass
+            running_loop = None
+        if synchronous and running_loop is loop:
+            return "(run_action_now unavailable: sync bridge invoked on the coordinator loop thread)"
         coro = self._run_action_now(name, dict(params or {}))
         # Cap inline wait under backend timeout so a slow action can't wedge the turn.
         try:
@@ -1891,8 +1877,13 @@ class DispatcherCollaborator:
             fut = asyncio.run_coroutine_threadsafe(coro, loop)
         except RuntimeError as exc:
             return f"(run_action_now: could not schedule on coordinator loop: {exc!r})"
+        return fut, name, timeout_s
+
+    @staticmethod
+    def _inline_action_result(fut: Future[str], name: str, timeout_s: float, *, wait_timeout_s: float) -> str:
+        """Render one shared result contract for synchronous and asynchronous callers."""
         try:
-            return fut.result(timeout=timeout_s)
+            return fut.result(timeout=wait_timeout_s)
         except FuturesTimeoutError:
             return (
                 f"(run_action_now: {name!r} still running after "
@@ -1913,6 +1904,30 @@ class DispatcherCollaborator:
         except Exception as exc:  # noqa: BLE001 — never crash the turn
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
+
+    def _run_action_now_sync(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        """Wait from another thread without allowing the coordinator loop to wait on itself."""
+        scheduled = self._schedule_inline_action(action_name, params, synchronous=True)
+        if isinstance(scheduled, str):
+            return scheduled
+        future, name, timeout_s = scheduled
+        return self._inline_action_result(future, name, timeout_s, wait_timeout_s=timeout_s)
+
+    async def _run_action_now_wait(self, action_name: str, params: dict[str, Any] | None = None) -> str:
+        """Wait without blocking the loop or cancelling the action when its caller leaves."""
+        scheduled = self._schedule_inline_action(action_name, params)
+        if isinstance(scheduled, str):
+            return scheduled
+        future, name, timeout_s = scheduled
+        waiting = asyncio.wrap_future(future)
+
+        def consume_completion(done: asyncio.Future[str]) -> None:
+            if not done.cancelled():
+                done.exception()
+
+        waiting.add_done_callback(consume_completion)
+        await asyncio.wait({waiting}, timeout=timeout_s)
+        return self._inline_action_result(future, name, timeout_s, wait_timeout_s=0)
 
     async def _inline_action_denial(
         self,
