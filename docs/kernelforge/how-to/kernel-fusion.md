@@ -48,12 +48,62 @@ kernelforge forge-fuse ... --dry-run
 That writes the manifest with the localized recipe skeleton so you can see which
 chain would be attempted and where in the framework source it lives.
 
+## Naming the kernel yourself
+
+Ranking picks the chain by default, which is the wrong answer when you already
+know which kernel is interesting. `--fuse-kernel` takes the full GPU kernel name,
+exactly as the trace spells it, and fixes what the fusion is built around. What to
+fuse it *with* is still discovered: the run reads what the trace shows running
+before and after that kernel and hands the agent that neighbourhood.
+
+```bash
+kernelforge forge-fuse ... --dry-run \
+    --fuse-kernel 'void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16tofloat32_copy_kernel_cuda(...)>'
+```
+
+With `--dry-run` this resolves and stops, writing `fusion_anchor.json` without
+reaching an agent, so you can confirm the selection before spending anything:
+
+```
+gemm -> cast -> attention   (1456/1488 = 97.8%)
+  immediately before (gemm), distinct kernels:
+       496x  hgemm_bf16_32x64x128x4_SPK4_W1x4x1_BLDS1_TN_AS1_0
+       ...
+```
+
+Neighbours are aggregated **by category**, not by name. Kernels that differ only
+in template parameters -- `SPK2`/`SPK4`/`SPK7` above -- are one pattern, and
+counting them separately would report a stable GEMM epilogue as three unrelated
+coincidences. The concrete names are listed underneath so nothing is hidden.
+
+A name the trace does not contain is a usage error that lists the closest ones; a
+fragment is not a name.
+
+`--fuse-kernel-ts` records the launch you were looking at, **in nanoseconds**
+(`--fuse-kernel-ts 7008117376499794`). The trace itself stores microseconds; the
+conversion happens for you, and `fusion_anchor.json` reports `pinned_ts_ns` in
+nanoseconds too, so a timestamp pastes straight back in. It is a reference, not a
+filter: every launch is still aggregated, and the report says whether the one you
+named is representative. A value that lands outside the kernel's own launch window
+is reported with that window, and a value that would fit it after scaling is called
+out as microseconds.
+
+Naming a kernel also overrides the diagnosis. `is_candidate: false` normally ends
+the run, but a trace-wide verdict is not an argument about the kernel you picked.
+
+When the anchor's neighbours turn out to live outside the model file -- which is
+common, since attention and GEMM kernels are usually called from a backend the
+model file only delegates to -- the agent is asked to say so and propose the
+largest fusion that is reachable and still contains the anchor, rather than
+returning nothing.
+
 ## What happens
 
 1. **Diagnose** the trace into a launch-bound share and a predicted gain.
-2. **Discover** which chain to fuse, either by matching the pattern library
-   (`--discover patterns`, the default) or by letting an agent read the trace
-   and the real source (`--discover llm`).
+2. **Discover** which chain to fuse: by matching the pattern library
+   (`--discover patterns`, the default), by letting an agent read the trace and
+   the real source (`--discover llm`), or around a kernel you named yourself
+   (`--fuse-kernel`).
 3. **Claim an existing pass.** If a vLLM compile pass already covers the chain,
    flipping its default on and running a serving A/B is cheaper than authoring
    anything, so that shortcut runs before the loop.
@@ -121,6 +171,7 @@ against the fused arm whenever eager is timed first.
 | `serving_smoke_<pattern>.log` | The server log from the final gate |
 | `fusion.patch` | The fusion, exported before the smoke so a killed run still hands one over |
 | `kernel_keep_checkpoint.json` | Written after that patch exists; marks a KEEP as salvageable |
+| `fusion_anchor.json` | With `--fuse-kernel`: the resolved kernel, its neighbours and any warnings |
 
 The serving gate boots the model once, with the session's own tensor-parallel
 size, KV block size and max model length -- a sparse-attention model rejects the
@@ -133,8 +184,11 @@ and its patch in place for e2e integrate to judge, and the run still exits zero
 so the caller does not read a deferral as a failure.
 
 The manifest is the stable machine-readable output; `verdict` is one of
-`candidate`, `no_opportunity` or `llm_unavailable`, and exit code 3 means the
-run never reached the model. Each history entry carries the `experiment_id` of
+`candidate`, `no_opportunity`, `llm_unavailable` or `anchor_resolved`, and exit
+code 3 means the run never reached the model. The last two both mean the run has
+no opinion about the kernel rather than a negative one: `llm_unavailable` because
+the model was never reached, `anchor_resolved` because a `--fuse-kernel --dry-run`
+located the kernel and stopped before discovery. Each history entry carries the `experiment_id` of
 the forge-loop run behind it, and `best_experiment_id` names the one that
 produced the kept result.
 

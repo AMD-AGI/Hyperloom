@@ -56,6 +56,9 @@ _DEFAULT_MAX_FUSIONS = 4
 # Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
 
+# Heavy kernels a fusible chain runs between; everything else is launch-bound tail.
+COMPUTE_CATEGORIES: frozenset[str] = frozenset({"gemm", "attention", "conv", "moe"})
+
 
 def _resolve_max_fusions(value: Optional[int] = None) -> int:
     if value is not None:
@@ -102,10 +105,9 @@ def hot_kernels_from_trace(
         return []
 
     rows: list[dict[str, Any]] = []
-    compute = {"gemm", "attention", "conv", "moe"}
     for name, (dur, count) in agg.items():
         cat = categorize_kernel_name(name)
-        if launch_bound_only and cat in compute:
+        if launch_bound_only and cat in COMPUTE_CATEGORIES:
             continue
         rows.append(
             {
@@ -153,14 +155,14 @@ def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[
     return [name for name, _ in ranked[:top_n]]
 
 
-def ordered_fusion_boundaries_from_trace(
+def stream_ordered_kernels(
     trace_path: str | Path,
-    *,
-    top_n: int = 16,
-    max_chain_len: int = 8,
-    min_repeats: int = 2,
-) -> list[dict[str, Any]]:
-    """Recover repeated compute-to-compute fusion boundaries from stream order."""
+) -> tuple[dict[tuple[Any, Any], list[dict[str, Any]]], float]:
+    """Kernel events bucketed by GPU stream, each bucket ordered by timestamp.
+
+    Returns the buckets and the summed kernel duration. Execution order only holds
+    within one stream, so every adjacency question has to be asked per bucket.
+    """
     streams: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     total_kernel_us = 0.0
     for event in _load_trace_events(trace_path):
@@ -188,8 +190,20 @@ def ordered_fusion_boundaries_from_trace(
             }
         )
         total_kernel_us += duration
+    for bucket in streams.values():
+        bucket.sort(key=lambda item: item["ts"])
+    return streams, total_kernel_us
 
-    compute_categories = {"gemm", "attention", "conv", "moe"}
+
+def ordered_fusion_boundaries_from_trace(
+    trace_path: str | Path,
+    *,
+    top_n: int = 16,
+    max_chain_len: int = 8,
+    min_repeats: int = 2,
+) -> list[dict[str, Any]]:
+    """Recover repeated compute-to-compute fusion boundaries from stream order."""
+    streams, total_kernel_us = stream_ordered_kernels(trace_path)
 
     def normalized_name(name: str) -> str:
         value = re.sub(r"0x[0-9a-f]+", "0x*", name.lower())
@@ -208,12 +222,12 @@ def ordered_fusion_boundaries_from_trace(
         interior_count = max(0, len(segment) - 2)
         if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
             boundary_kind = "epilogue"
-        elif categories[0] in compute_categories:
+        elif categories[0] in COMPUTE_CATEGORIES:
             boundary_kind = "compute_boundary"
         else:
             boundary_kind = "vertical"
         # The trailing kernel is the NEXT compute anchor.
-        terminal_compute = categories[-1] if categories[-1] in compute_categories else ""
+        terminal_compute = categories[-1] if categories[-1] in COMPUTE_CATEGORIES else ""
         fusable_categories = categories[1:-1] if terminal_compute else categories[1:]
         row = aggregated.setdefault(
             key,
@@ -232,11 +246,10 @@ def ordered_fusion_boundaries_from_trace(
         row["count"] += 1
         row["total_us"] += sum(float(item["dur"]) for item in segment)
 
-    for stream_events in streams.values():
-        ordered = sorted(stream_events, key=lambda item: item["ts"])
+    for ordered in streams.values():
         start_index: Optional[int] = None
         for index, event in enumerate(ordered):
-            if event["category"] not in compute_categories:
+            if event["category"] not in COMPUTE_CATEGORIES:
                 continue
             if start_index is not None:
                 record(ordered[start_index : index + 1])
@@ -505,6 +518,64 @@ def declared_traits(item: Any) -> list[str]:
     return _declared_terms(item, "traits", FUSION_TRAIT_VOCAB)
 
 
+# Shared by every discovery prompt: the rules that decide whether a proposal can be wired at all.
+_FUSION_CONSTRAINTS = """Constraints for each proposed fusion:
+- Must be a real contiguous chain in this source (name the exact functions/methods).
+- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+  it is broken. The fusion is delivered by REPLACING one call site in the source
+  file printed below, so the entire chain must live inside THAT file, and every
+  tensor your kernel takes as input must already be a local name at that call
+  site. Do not fuse across a boundary: not into a method defined in another
+  module (an imported `XMLP`, an imported norm class), and not into work the
+  framework performs below the call (in vLLM the KV-cache write happens inside
+  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
+  reachable from a model `forward` and a fusion folding them in cannot be wired).
+  Before proposing, name the exact call site you would replace and check that
+  every input is in scope there. A chain that fails this test is worth zero
+  end-to-end even when its microbenchmark is 30x.
+- One patch, one file. If two different modules each hold a fusible chain,
+  propose them as two SEPARATE entries, each self-contained in its own file --
+  never one entry spanning both.
+- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
+  framework CUDA-only fused op.
+- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
+  their semantics, dtype, shape, and cache layout match.
+- The correctness reference must be the REAL eager op imported from this source
+  (say which symbol to import), never a re-derivation."""
+
+
+def _output_schema_block(model_type: str) -> str:
+    """The JSON contract every discovery prompt asks the model to answer in."""
+    return f"""## Output — a single JSON array (and nothing after it). Be TERSE to fit the
+## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
+## sentence. Each element:
+{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
+  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
+  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
+          {_OP_VOCAB_FOR_PROMPT}.
+          This list IS the fusion's identity: two runs proposing the same fusion
+          must produce the same list, so decide by one test rather than by
+          impression. For each candidate ask: does my kernel carry out that
+          computation? If the op runs in the surrounding module, or you only
+          read its result, or you only hand your result to it, then it is NOT
+          yours -- leave it out. Where the kernel sits is irrelevant; only what
+          it computes counts. List every op that passes the test, and nothing
+          else.>],
+  "traits": [<how the kernel is built, chosen ONLY from:
+          {_TRAIT_VOCAB_FOR_PROMPT}.
+          Precision, architecture variant, and which part of the model this sits
+          in. These describe the kernel rather than name an operation it
+          performs, so they do NOT belong in "ops". Omit the field when none
+          apply.>],
+  "source_anchors": ["<symbol/line to grep>", "..."],
+  "fusion_math": "<what the fused kernel computes, precisely>",
+  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
+  "candidate_kind": "<integration|new_fusion|replacement>",
+  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
+  "priority": <0.0-1.0 by expected launch-bound time saved>,
+  "rationale": "<why this chain, tied to the hot kernels above>"}}"""
+
+
 def build_discovery_prompt(
     *,
     model_type: str,
@@ -594,58 +665,9 @@ that covers a larger boundary as an `integration` candidate and benchmark/wire i
 before proposing a new kernel. Judge from the SOURCE and ordered trace what actually
 runs back-to-back on the decode path.
 
-Constraints for each proposed fusion:
-- Must be a real contiguous chain in this source (name the exact functions/methods).
-- SCOPE — the single hardest constraint, and the one that wastes a whole run when
-  it is broken. The fusion is delivered by REPLACING one call site in the source
-  file printed below, so the entire chain must live inside THAT file, and every
-  tensor your kernel takes as input must already be a local name at that call
-  site. Do not fuse across a boundary: not into a method defined in another
-  module (an imported `XMLP`, an imported norm class), and not into work the
-  framework performs below the call (in vLLM the KV-cache write happens inside
-  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
-  reachable from a model `forward` and a fusion folding them in cannot be wired).
-  Before proposing, name the exact call site you would replace and check that
-  every input is in scope there. A chain that fails this test is worth zero
-  end-to-end even when its microbenchmark is 30x.
-- One patch, one file. If two different modules each hold a fusible chain,
-  propose them as two SEPARATE entries, each self-contained in its own file --
-  never one entry spanning both.
-- ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
-  framework CUDA-only fused op.
-- Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
-  their semantics, dtype, shape, and cache layout match.
-- The correctness reference must be the REAL eager op imported from this source
-  (say which symbol to import), never a re-derivation.
+{_FUSION_CONSTRAINTS}
 
-## Output — a single JSON array (and nothing after it). Be TERSE to fit the
-## response budget: keep ``fusion_math`` <= 2 sentences and ``rationale`` <= 1
-## sentence. Each element:
-{{"name": "<short_id>", "env_flag": "<{model_type.upper()}_FUSED_...>",
-  "op_chain": "<the eager methods/ops fused, e.g. A + B>",
-  "ops": [<every op YOUR fused kernel computes itself, chosen ONLY from:
-          {_OP_VOCAB_FOR_PROMPT}.
-          This list IS the fusion's identity: two runs proposing the same fusion
-          must produce the same list, so decide by one test rather than by
-          impression. For each candidate ask: does my kernel carry out that
-          computation? If the op runs in the surrounding module, or you only
-          read its result, or you only hand your result to it, then it is NOT
-          yours -- leave it out. Where the kernel sits is irrelevant; only what
-          it computes counts. List every op that passes the test, and nothing
-          else.>],
-  "traits": [<how the kernel is built, chosen ONLY from:
-          {_TRAIT_VOCAB_FOR_PROMPT}.
-          Precision, architecture variant, and which part of the model this sits
-          in. These describe the kernel rather than name an operation it
-          performs, so they do NOT belong in "ops". Omit the field when none
-          apply.>],
-  "source_anchors": ["<symbol/line to grep>", "..."],
-  "fusion_math": "<what the fused kernel computes, precisely>",
-  "eager_reference": "<which real symbol(s) to import + call for the parity ref>",
-  "candidate_kind": "<integration|new_fusion|replacement>",
-  "existing_operator": "<operator name when candidate_kind=integration, else empty>",
-  "priority": <0.0-1.0 by expected launch-bound time saved>,
-  "rationale": "<why this chain, tied to the hot kernels above>"}}
+{_output_schema_block(model_type)}
 
 ## Model source (`{model_type}` in {framework})
 ```python
@@ -800,8 +822,14 @@ def parse_discovered_recipes(
     category_shares: dict[str, float] | None = None,
     pass_probe: Optional[Callable[[str], PassState]] = None,
     framework_root: str = "",
+    explicit_target: bool = False,
 ) -> list[Recipe]:
-    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects."""
+    """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
+
+    ``explicit_target`` marks a run whose target an operator named. The scope gate
+    then warns instead of dropping: it recognizes nine coarse terms, so it can reject
+    a wireable chain, and discarding what was explicitly asked for hides that.
+    """
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
     # The same file the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
     # the model was shown.
@@ -845,14 +873,17 @@ def parse_discovered_recipes(
         # claiming ops that file never performs is unwireable no matter how good the kernel is.
         outside = out_of_scope_terms(source_text, [*declared, *traits])
         if outside:
-            log.info(
-                "discovery: dropping %s (%s not performed in %s -- the fusion crosses "
+            log.log(
+                logging.WARNING if explicit_target else logging.INFO,
+                "discovery: %s %s (%s not performed in %s -- the fusion crosses "
                 "a module boundary and has no wireable call site there)",
+                "keeping operator-named" if explicit_target else "dropping",
                 name,
                 ",".join(outside),
                 Path(source_file).name or source_file,
             )
-            continue
+            if not explicit_target:
+                continue
         # Compile-pass gate: never author a chain vLLM fuses at compile time.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],

@@ -20,7 +20,23 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
-Nothing yet.
+### Added
+
+- **`--fuse-kernel` / `--fuse-kernel-ts` for `forge-fuse`.** Name the GPU
+  kernel a fusion is built around (full trace spelling); neighbours are taken
+  from the trace and aggregated by op category. Implies `--discover anchored`.
+  `--fuse-kernel-ts` records a reference launch timestamp in nanoseconds for
+  the report (`pinned_ts_ns` in `fusion_anchor.json`), not a filter. With
+  `--dry-run`, resolution writes `fusion_anchor.json` and stops with the new
+  `anchor_resolved` verdict. The manifest gains an `anchor` key (`null` when
+  unused).
+
+### Fixed
+
+- **`forge-fuse` forwards a concrete agent provider to `forge-loop`.** Default
+  `--agent-backend auto` was passed through unchanged; `forge-loop` rejects
+  `auto`, so campaigns died after discovery. The resolved provider is now
+  forwarded.
 
 ## Hyperloom 1.1.2 release
 

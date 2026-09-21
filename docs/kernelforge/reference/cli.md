@@ -236,6 +236,11 @@ authors one fused Triton kernel that survives CUDA-graph capture, A/B-validated
 against the framework's own eager op. Writes `fusion_manifest.json` and exits 3
 when no fusion is found.
 
+Which chain is fused is chosen from the trace by default. `--fuse-kernel` fixes it
+instead: name one GPU kernel and the fusion is built around that kernel and its
+trace neighbours. With `--dry-run` this resolves and writes `fusion_anchor.json`
+without reaching an agent, so the selection can be checked before anything is spent.
+
 ### Inputs
 
 | Option | Default | Meaning |
@@ -252,7 +257,9 @@ when no fusion is found.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--discover <mode>` | `patterns` | `patterns` (template library) or `llm` (the LLM reads trace and source, autonomous). |
+| `--discover <mode>` | `patterns` | `patterns` (template library), `llm` (the LLM reads trace and source, autonomous), or `anchored` (fuse around the kernel `--fuse-kernel` names). |
+| `--fuse-kernel <name>` | `''` | Full GPU kernel name, exactly as the trace spells it. Fusion is then built around that kernel and whatever the trace shows running beside it, instead of a ranked guess. Implies `--discover anchored`. A name the trace does not contain is a usage error listing the closest ones; a fragment is not a name. |
+| `--fuse-kernel-ts <ns>` | `0` (any) | Trace timestamp **in nanoseconds** of the `--fuse-kernel` launch you were looking at. A reference for reporting, not a filter: the nearest launch is used, every launch is still aggregated, and the report says whether the one you named is representative. `fusion_anchor.json` reports `pinned_ts_ns` in the same unit, so it pastes straight back. |
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |

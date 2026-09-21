@@ -44,6 +44,7 @@ from .campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
+from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
 from .discover import discover_recipes, registered_agent_llm_fn
 from .emit import _git_tracks, _is_fused_module_name, export_artifacts, restore_exported_changes
@@ -54,7 +55,14 @@ from .locate import build_recipes, resolve_framework_source_file
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
-from .report import LLM_UNAVAILABLE_VERDICT, build_manifest, write_manifest
+from .report import (
+    ANCHOR_REPORT_NAME,
+    ANCHOR_RESOLVED_VERDICT,
+    LLM_UNAVAILABLE_VERDICT,
+    build_manifest,
+    write_anchor_report,
+    write_manifest,
+)
 from .shapes import load_model_config, resolve_decode_shapes
 from .validate import (
     DEFAULT_TARGET_SPEEDUP,
@@ -360,6 +368,23 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     root.addHandler(sh)
 
 
+def _verdict_override(
+    llm_error: Optional[LlmUnavailableError],
+    anchor_report: Optional[AnchorReport],
+    dry_run: bool,
+) -> str:
+    """Name the outcomes that are not a judgement about the kernel.
+
+    A run that never asked the model must not report ``no_opportunity``: that reads
+    as "there is nothing to fuse here" when nothing was ever looked at.
+    """
+    if llm_error is not None:
+        return LLM_UNAVAILABLE_VERDICT
+    if anchor_report is not None and dry_run:
+        return ANCHOR_RESOLVED_VERDICT
+    return ""
+
+
 @click.command("forge-fuse")
 @click.version_option(version=__version__)
 @click.option(
@@ -418,9 +443,26 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 @click.option(
     "--discover",
     "discover_mode",
-    type=click.Choice(["patterns", "llm"]),
+    type=click.Choice(["patterns", "llm", "anchored"]),
     default="patterns",
-    help="Recipe discovery: 'patterns' (template library) or 'llm' (LLM reads trace+source, autonomous).",
+    help="Recipe discovery: 'patterns' (template library), 'llm' (LLM reads trace+source, autonomous), "
+    "or 'anchored' (fuse around the kernel named by --fuse-kernel).",
+)
+@click.option(
+    "--fuse-kernel",
+    "fuse_kernel",
+    default="",
+    help="Full GPU kernel name, exactly as the trace spells it. Fusion is then built around "
+    "this kernel and its trace neighbours instead of a ranked guess; implies --discover anchored.",
+)
+@click.option(
+    "--fuse-kernel-ts",
+    "fuse_kernel_ts",
+    default=0,
+    type=int,
+    help="Trace timestamp in NANOSECONDS of the --fuse-kernel launch you were looking at. A "
+    "reference for reporting, not a filter: the nearest launch is used and every launch is "
+    "still aggregated.",
 )
 @click.option(
     "--dry-run",
@@ -518,6 +560,8 @@ def run(
     decode_batch: int,
     decode_steps: int,
     discover_mode: str,
+    fuse_kernel: str,
+    fuse_kernel_ts: int,
     dry_run: bool,
     author: bool,
     validate: bool,
@@ -565,6 +609,12 @@ def run(
     if missing:
         raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
 
+    fuse_kernel = fuse_kernel.strip()
+    if fuse_kernel:
+        discover_mode = "anchored"
+    elif discover_mode == "anchored":
+        raise click.UsageError("--discover anchored requires --fuse-kernel to name the kernel to fuse around.")
+
     out = Path(output_dir)
     _setup_logging(out, verbose)
 
@@ -606,7 +656,66 @@ def run(
 
     model_type = str(load_model_config(model_path).get("model_type") or "")
     llm_error: LlmUnavailableError | None = None
-    if discover_mode == "llm":
+    anchor_report = None
+    if discover_mode == "anchored":
+        try:
+            anchor_report = resolve_anchor(
+                trace_path,
+                KernelAnchor(name=fuse_kernel, ts_ns=fuse_kernel_ts or None),
+            )
+        except AnchorResolutionError as exc:
+            raise click.UsageError(str(exc)) from exc
+        write_anchor_report(anchor_report, out)
+        log.info(
+            "anchor: %s | %d launches, %.1fus, %.2f%% of kernel time | %s (%.1f%%)",
+            anchor_report.category,
+            anchor_report.occurrences,
+            anchor_report.total_us,
+            anchor_report.share * 100,
+            anchor_report.signature,
+            anchor_report.consistency * 100,
+        )
+        for text in anchor_report.warnings:
+            log.warning("anchor: %s", text)
+        shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
+        source_file, _source_note = resolve_framework_source_file(
+            model_path, framework, framework_root=framework_root, model_type=model_type
+        )
+        if dry_run:
+            # Resolution is the whole point of a dry run here: the operator has to see which launches were
+            # selected before an agent or a GPU is paid for.
+            recipes = []
+            log.info("dry run: anchor resolved to %s, skipping discovery", out / ANCHOR_REPORT_NAME)
+        else:
+            try:
+                discovery_agent = require_agent_backend()
+                recipes = discover_anchored_recipes(
+                    model_type=model_type,
+                    framework=framework,
+                    source_file=source_file,
+                    shapes=shapes,
+                    report=anchor_report,
+                    framework_root=framework_root,
+                    category_shares=diagnosis.category_shares,
+                    llm_fn=registered_agent_llm_fn(
+                        discovery_agent,
+                        model=discovery_agent.runtime.model,
+                        workdir=_framework_repo_root(source_file, framework_root)
+                        or str(Path(source_file).parent if source_file else Path.cwd()),
+                        protected_files=[source_file] if source_file else [],
+                        log_path=str(out / "discovery_llm.txt"),
+                    ),
+                )
+            except LlmUnavailableError as exc:
+                llm_error = exc
+                recipes = []
+                log.error(
+                    "anchored discovery could not reach the LLM (%s after %d attempt(s)): %s",
+                    exc.kind,
+                    exc.attempts,
+                    exc,
+                )
+    elif discover_mode == "llm":
         # LLM-autonomous discovery: the model reads the launch-bound profile + the real source and proposes fusible
         # chains itself (not capped to templates).
         shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
@@ -669,6 +778,11 @@ def run(
             "(verdict: %s) — this is NOT a no_opportunity result",
             LLM_UNAVAILABLE_VERDICT,
         )
+    elif anchor_report is not None and dry_run:
+        log.info(
+            "anchor resolved, discovery not run (verdict: %s) — this is NOT a no_opportunity result",
+            ANCHOR_RESOLVED_VERDICT,
+        )
     else:
         log.info("no fusion recipe located (verdict: no_opportunity)")
 
@@ -698,6 +812,7 @@ def run(
             diagnosis=diagnosis,
             recipe=top_recipe,
             candidates=recipes,
+            anchor=anchor_report.to_dict() if anchor_report is not None else None,
             validation=validation,
             artifacts=artifacts,
             loop=loop,
@@ -740,6 +855,10 @@ def run(
         )
 
     if not dry_run and top_recipe is not None:
+        # forge-loop takes a concrete provider. "auto" is this command's own spelling, and the choice was already
+        # resolved here on purpose -- forwarding the literal is exactly the disagreement _resolve_agent_choice exists
+        # to prevent, and forge-loop rejects it outright.
+        campaign_agent_backend, _campaign_model = _resolve_agent_choice(agent_backend, llm_model)
         repo_root = _framework_repo_root(top_recipe.source_file, framework_root)
         # Snapshot the pristine model source BEFORE authoring so a patch can be produced even when the framework is a
         # non-git pip install (git diff would otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
@@ -779,7 +898,7 @@ def run(
                 target_speedup=target_speedup,
                 model_path=model_path,
                 run_arch=run_arch,
-                agent_backend=agent_backend,
+                agent_backend=campaign_agent_backend,
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -848,7 +967,7 @@ def run(
                 combine=fuse_all_confirmed,
                 model_path=model_path,
                 gpu_arch=run_arch,
-                agent_backend=agent_backend,
+                agent_backend=campaign_agent_backend,
                 agent_sandbox_mode=agent_sandbox_mode,
                 server_extra=server_extra,
                 ab_isl=ab_isl,
@@ -955,7 +1074,7 @@ def run(
         artifacts=artifacts,
         loop=loop_manifest,
         compile_pass=compile_pass_outcome,
-        verdict_override=(LLM_UNAVAILABLE_VERDICT if llm_error is not None else ""),
+        verdict_override=_verdict_override(llm_error, anchor_report, dry_run),
         error=(llm_error.to_dict() if llm_error is not None else None),
         nomination=nomination_summary,
     )
