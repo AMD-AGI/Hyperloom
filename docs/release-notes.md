@@ -8,9 +8,8 @@ myst:
 # Hyperloom release notes
 
 The current packaged version is 1.1.1 (`pyproject.toml`). For the
-per-change history since the initial snapshot, see
-[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md),
-or view a detailed breakdown of all previous Hyperloom pre-release versions under
+per-change history since the initial snapshot, and for a detailed breakdown of
+all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
 summarizes the headline capabilities.
 
@@ -44,7 +43,7 @@ before upgrading.
 The deprecated KernelForge console-script alias is also gone, so a script
 invoking it fails with `command not found` rather than a parser error. Call
 `kernelforge`, which has been the name since v1.0.0b2; the retired spelling is
-in [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
+`kernel-agents`.
 
 Eight environment variables 1.1.0 read are also gone, and these fail differently
 from the options above: nothing refuses them. A box that still exports them
@@ -110,13 +109,12 @@ say so.
 
 - **Dead surfaces are removed**: the pre-rename KernelForge
   console script kept as an alias since v1.0.0b2, superseded by `kernelforge`
-  (see [`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md)
-  for the retired spelling); and its `learning/` tuning database with the
-  tracker's superseded scoring layer, about 1.4k lines whose writes had already
-  been disabled. The one observable difference: a `forge-loop` run no longer
-  writes lesson markdown under the writable knowledge base's `learned/`
-  directory and no longer prints `Lessons learned: N`. Nothing read that
-  directory.
+  (the retired spelling is `kernel-agents`); and its `learning/` tuning
+  database with the tracker's superseded scoring layer, about 1.4k lines whose
+  writes had already been disabled. The one observable difference: a
+  `forge-loop` run no longer writes lesson markdown under the writable
+  knowledge base's `learned/` directory and no longer prints
+  `Lessons learned: N`. Nothing read that directory.
 
 ## Hyperloom 1.1.0 release
 
@@ -137,8 +135,8 @@ measure which shape a workload wants.
 
 1.1.0 carries a number of breaking changes to the CLI, the environment
 variables, and the session record. The ones that need a plan before upgrading
-are marked below; the full per-change list is in
-[`CHANGELOG.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md).
+are marked below; the full per-change list is in the
+[1.1.0 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.0).
 
 ### 1.1.0 highlights
 
@@ -204,8 +202,8 @@ are marked below; the full per-change list is in
   a retired spelling of `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS` is still
   forwarded into the run and then ignored; the latter is detected and warned
   about once per run, because an operator who had switched compiled kernel
-  backends off would otherwise silently get them back. `CHANGELOG.md` carries
-  the retired spellings verbatim for anyone migrating a script.
+  backends off would otherwise silently get them back. The retired spelling a
+  migrating script will be carrying is `FORGE_DISABLE_COMPILED_FELLOWS`.
 
 - **An AgentX run is graded on total token throughput under an interactivity
   constraint**: the corpus an agentic replay runs averages ~114k prompt tokens
