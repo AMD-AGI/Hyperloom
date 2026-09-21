@@ -338,60 +338,6 @@ it.
 
 ### Removed
 
-- **Every non-official LLM key name as a Hyperloom credential.** `OPENAI_API_KEY`
-  and the three Anthropic-side names are the only credentials the optimizer
-  authenticates with. A survey of the eight vendor and gateway aliases found a
-  credential read path behind exactly one of them: `LLM_GATEWAY_KEY`, which
-  `resolve_openai_client_config` accepted one rung above the Anthropic fallback
-  and which `codex_session` would name as the Codex key variable. `LLM_API_KEY`
-  had one too — the robustness RCA resolver, when the OpenAI side carried no key
-  — and it went with the agent itself; nothing reads it as a credential to
-  remove here. The other six — `AMD_API_KEY`, `AMD_LLM_API_KEY`,
-  `GEAK_API_KEY`, `LLM_PROXY_API_KEY`, `CLAW_API_KEY` and the LLM-side
-  `SAFE_API_KEY` — never authenticated anything here at all.
-
-  Two of the gateway key's read sites were a credential name doing a second job
-  it had no business doing. `_provider_only_mode` treated a bare `LLM_GATEWAY_KEY` as
-  proof that the host fronted both protocols, which suppressed single-provider
-  detection; single-provider intent is now read off the two sides' own URL and
-  key. TraceLens took the same variable as an on-its-own gateway marker, which
-  `HYPERLOOM_STRICT_GATEWAY_MARKERS` exists to express three lines below the
-  check that was removed. The specialist secret allowlist also stops forwarding
-  `LLM_GATEWAY_KEY` to the child, which could not have authenticated with it
-  once `codex_session` no longer resolves it.
-
-  A deployment whose `.env` carries `LLM_GATEWAY_KEY` as its only OpenAI-side
-  credential has to rename it to `OPENAI_API_KEY`; the value and the endpoint
-  are unchanged. An Anthropic-only host that also carried the gateway key now
-  resolves its Anthropic bearer for OpenAI-protocol calls instead, which is the
-  credential it was already using for everything else.
-
-  The OpenAI key also stops being copied into `LLM_API_KEY`, `AMD_LLM_API_KEY`,
-  `AMD_API_KEY` and `LLM_GATEWAY_KEY` — by CLI preflight into its own
-  environment, and by the kernel agent into the Ray runtime env — and the four
-  names leave the Ray allowlist, so an operator's own export no longer reaches a
-  worker either. That mirroring was kept on the reading that GEAK receives its
-  credential through those names. It does not: GEAK authenticates on
-  `GEAK_AMDKEY` or `OPENAI_API_KEY`, and of the four only `AMD_LLM_API_KEY`
-  appears in that tree at all, in a quick-start line invoking a script the
-  repository no longer carries. `LLM_API_BASE` stays — it addresses an endpoint
-  rather than authenticating to one, and preflight still derives it from the
-  resolved OpenAI-side URL.
-
-  Surveying the rest of that allowlist against the same two trees retired three
-  more entries that no longer reach a reader. `LLM_PROXY_BASE_URL` and
-  `GEAK_WORK_DIR` each occurred exactly once in this repository — the allowlist
-  line itself — with nothing writing them and nothing consuming them, and
-  `GEAK_WORK_DIR` carried a comment describing a harness contract GEAK does not
-  have. `LLM_PROXY_API_KEY` was forwarded to every worker without anything
-  setting or reading it either; it keeps its redaction entry for the same reason
-  the retired credential names do. `GEAK_API_KEY` and `GEAK_BASE_URL` stay: both
-  are documented operator overrides, and preflight reads the URL to sync GEAK's
-  config file. All eight names also stay in the benchmark secret,
-  variant, external and specialist-redaction lists: membership there asserts
-  that a name holds a secret worth scrubbing, not that anything consumes it, and
-  an operator's stale export still needs stripping from child processes.
-
 - **`--recipe-kb-strict-fingerprint`.** It was declared in the parser and read
   nowhere, and it promised to refuse rows whose `stack_fingerprint` disagreed
   with the pod — which was never the exposure, since framework version and
@@ -566,41 +512,6 @@ it.
   `preferred_agent_backend` picks for this deployment -- Claude through the
   single-shot Anthropic transport, Codex through `achat_completion` -- and is
   skipped entirely when neither side is credentialed.
-
-- **Orchestration picked its CLI from the endpoint shape instead of the rule
-  every other agentic role had been moved onto.** `cli/backends.py` was outside
-  #1472's reach and still asked `is_openai_only()` for the coordinator, so it
-  read neither credential nor installed SDK. One shape moves now that it falls
-  through to `preferred_agent_backend()`: both sides configured with only the
-  Codex extra installed runs orchestration on Codex rather than on a
-  `ClaudeBackend` that cannot import its SDK. A single-provider launch still
-  pins its own CLI ahead of the shared rule, because by that point the CLI has
-  already rewritten one model id into the other's, and that is the only launch
-  the ranked path is not consulted for.
-
-  **The ranking was written twice.** `preferred_agent_backend` and the Forge
-  registry's `select_default_agent_provider` each built the credential-then-SDK
-  sort key themselves and were kept in step by two docstrings pointing at each
-  other. Both now sort on `llm_config.agent_backend_rank`, the registry probes
-  the optional SDKs through `llm_config` instead of repeating `find_spec`, and
-  the CLI's pass-through wrappers around `is_anthropic_only` / `is_openai_only`
-  are gone along with the model defaults that re-derived the same shape test by
-  hand. That last one was a narrower copy: it compared the two base URLs and
-  never read `OPENAI_API_KEY`, so an `ANTHROPIC_API_KEY` + `OPENAI_BASE_URL`
-  launch defaulted `--claude-model` to a Codex model id.
-
-  **The two sides disagreed about what authenticates the OpenAI side, and the
-  disagreement is settled by retiring the extra name rather than by accepting
-  it.** `openai_agent_credentialed` recognised `OPENAI_API_KEY` while
-  `codex_session` would also name `LLM_GATEWAY_KEY` as the Codex key variable,
-  each keeping its own copy of the list. Teaching the predicate the session's
-  longer list was the wrong end to fix: `_validate_credentials` has only ever
-  admitted a run on `OPENAI_API_KEY`, so a host whose sole OpenAI-side
-  credential is the gateway key exits at preflight and never reaches a ranking
-  to be misrouted by. Both now name `OPENAI_API_KEY` alone, which is what the
-  retirement under *Removed* makes true of the remaining read paths as well. No
-  running deployment moves on this paragraph; it was the two lists that were the
-  exposure.
 
 - **An accuracy eval that failed because the server was gone was read as a
   missing framework capability.** `run_eval` reports a vanished server and a
