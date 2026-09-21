@@ -288,6 +288,7 @@ def _agentx_default_corpus(model: str) -> str:
 # and GEAK's summary can be compared as strings on both sides.
 GEAK_METRIC_OUTPUT = ("output", "aggregate_output_tok_s")
 GEAK_METRIC_TOTAL = ("total", "aggregate_total_token_tok_s")
+GEAK_METRIC_INTVTY = ("intvty", GRADED_INTVTY)
 
 
 def geak_metric_axis(
@@ -297,16 +298,21 @@ def geak_metric_axis(
 ) -> tuple[str, str]:
     """GEAK's ``(E2E_METRIC, metric_basis)`` pair for this session's throughput axis.
 
-    The handoff must name the token-throughput axis this session actually reads.
-    An agentic replay is guarded on total token throughput, so publishing the
-    output axis would aim GEAK's search at the ~0.7% of the token budget the
-    session never scores -- and a candidate GEAK measured on one axis cannot be
-    compared against a reference read on the other, which run ~140x apart.
+    The handoff must name the axis this session actually reads. An agentic
+    replay is graded on interactivity and guarded on total token throughput, so
+    publishing the output axis would aim GEAK's search at the ~0.7% of the token
+    budget the session never scores -- and a candidate GEAK measured on one axis
+    cannot be compared against a reference read on another.
 
-    ``E2E_METRIC`` selects between output and total token throughput, so it
-    cannot name the interactivity axis AgentX is now graded on; total is the
-    throughput axis of that 2-D verdict, and the one a GEAK ratio stays
-    comparable against.
+    ``E2E_METRIC=intvty`` names the objective itself. Before GEAK could measure
+    that axis this returned the guard instead, as the only comparable axis it
+    could name; on a trace replay under a ~97% prefix cache the guard is ~99%
+    input tokens that were never computed, so it is near-incompressible and a
+    kernel win cannot surface on it. Pointing the search at the guard is what a
+    13h GLM-5.2-MXFP4 session spent its budget doing, banking nothing.
+
+    Callers must not send ``intvty`` to a GEAK that predates it: that build
+    falls back to output and labels the summary with an axis nobody requested.
 
     Args:
         benchmark_mode: The session's persisted mode, when the caller holds one.
@@ -326,7 +332,7 @@ def geak_metric_axis(
     else:
         on_intvty = intvty_grading_enabled(benchmark_mode=benchmark_mode)
     if on_intvty:
-        return GEAK_METRIC_TOTAL
+        return GEAK_METRIC_INTVTY
     return GEAK_METRIC_OUTPUT
 
 

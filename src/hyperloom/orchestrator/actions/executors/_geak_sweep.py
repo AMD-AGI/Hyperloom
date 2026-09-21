@@ -18,6 +18,7 @@ import yaml
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_INTVTY
 from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS, effective_mask_tokens, is_rocr_level
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _accepted_config_as_variant,
@@ -299,6 +300,11 @@ async def sweep_via_geak(
                 tput = summ.get("throughput_tok_s_median")
                 if tput is None:
                     tput = summ.get("output_throughput_tok_s_median")
+                # The basis GEAK actually measured. On the interactivity axis the median is a
+                # per-request token rate, not a throughput, so it must not be published under
+                # ``output_throughput`` -- that name is GRADED_OUTPUT, which the perf snapshot
+                # reads. ``measured_value`` carries the number whatever the axis.
+                basis = summ.get("metric_basis")
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")
                 e2el = summ.get("e2el_ms_median")
@@ -308,7 +314,9 @@ async def sweep_via_geak(
                     entry.update(
                         {
                             "status": "succeeded",
-                            "output_throughput": tput,
+                            "measured_value": tput,
+                            "metric_basis": basis,
+                            **({} if basis == GRADED_INTVTY else {"output_throughput": tput}),
                             "ttft_mean_ms": ttft,
                             "tpot_mean_ms": tpot,
                             "accuracy": evaluation.get("accuracy"),
@@ -354,8 +362,10 @@ async def sweep_via_geak(
 
     # The replay runs one (conc, isl, osl) repeated, so the fastest succeeded point is the headline.
     succeeded = [e for e in entries if e["status"] == "succeeded"]
-    measured = [e for e in succeeded if isinstance(e.get("output_throughput"), (int, float))]
-    promotion_measurement = max(measured, key=lambda e: e["output_throughput"], default={})
+    # Ranked on ``measured_value`` so the selection is axis-agnostic; every axis GEAK can
+    # measure is higher-is-better, so "max" stays the right pick on all of them.
+    measured = [e for e in succeeded if isinstance(e.get("measured_value"), (int, float))]
+    promotion_measurement = max(measured, key=lambda e: e["measured_value"], default={})
     return {
         "status": "succeeded" if succeeded else "failed",
         **({"error": str(entries[0].get("error") or "replay_failed")} if entries and not succeeded else {}),

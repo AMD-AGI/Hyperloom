@@ -969,13 +969,20 @@ def _geak_overlay_digest(overlay: str) -> str:
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """The measured throughput a ``sweep_via_geak`` replay produced, or None."""
+    """The value a ``sweep_via_geak`` replay measured on its own axis, or None.
+
+    ``measured_value`` is the axis-neutral field; the ``output_throughput`` fallback keeps
+    summaries written before it existed readable. On the interactivity axis only the neutral
+    field is populated, because there the number is not a throughput.
+    """
     if not isinstance(res, dict):
         return None
     best = res.get("promotion_measurement")
     if not isinstance(best, dict):
         return None
-    tput = best.get("output_throughput")
+    tput = best.get("measured_value")
+    if not isinstance(tput, (int, float)):
+        tput = best.get("output_throughput")
     return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None
 
 

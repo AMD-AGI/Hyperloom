@@ -47,7 +47,15 @@ def _isolate_workload_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(key, raising=False)
 
 
-def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, metric: str = "total") -> Coordinator:
+#: GEAK's ``E2E_METRIC`` value -> the ``metric_basis`` that must ride with it.
+_BASIS_OF = {
+    "output": "aggregate_output_tok_s",
+    "total": "aggregate_total_token_tok_s",
+    "intvty": "e2e_norm_intvty_p90",
+}
+
+
+def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, metric: str = "intvty") -> Coordinator:
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
     for name in ("benchmark_lib.sh", f"{framework}_mi355x.sh", "aiperf_client.sh"):
@@ -62,7 +70,7 @@ def _coord(tmp_path: Path, *, framework: str = "sglang", agentx: bool = True, me
                 "duration_s": 3600,
                 "geak_loop_duration_s": 900,
                 "concurrency": 6,
-                "metric_basis": "aggregate_total_token_tok_s" if metric == "total" else "aggregate_output_tok_s",
+                "metric_basis": _BASIS_OF[metric],
             }
         }
         if agentx
@@ -159,8 +167,8 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
     recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
     assert handoff["workload_spec"] == recipe["benchmark"]["workload_spec"]
-    assert handoff["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
-    assert handoff["e2e_metric"] == "total"
+    assert handoff["workload_spec"]["metric_basis"] == "e2e_norm_intvty_p90"
+    assert handoff["e2e_metric"] == "intvty"
     assert handoff["framework"] == framework
     assert handoff["model_path"] == "/models/accepted"
     assert handoff["gpu_type"] == "mi355x"
@@ -186,7 +194,7 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
 
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
-    [(None, "total"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],
+    [(None, "intvty"), ("intvty_v1", "intvty"), ("composite_v1", "output"), ("output", "output")],
 )
 @pytest.mark.asyncio
 async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
@@ -199,7 +207,9 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     if metric_override is not None:
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", metric_override)
     coord = _coord(tmp_path, metric=expected_metric)
-    monkeypatch.setenv("E2E_METRIC", "output" if expected_metric == "total" else "total")
+    # Seed a DIFFERENT axis so the assertion below proves the handoff overrides the
+    # inherited env rather than happening to agree with it.
+    monkeypatch.setenv("E2E_METRIC", "total" if expected_metric != "total" else "output")
     monkeypatch.setattr(
         "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
         lambda _name: tmp_path / "mock_geak_runner.py",
@@ -219,8 +229,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    expected_basis = "aggregate_total_token_tok_s" if expected_metric == "total" else "aggregate_output_tok_s"
-    assert handoff["workload_spec"]["metric_basis"] == expected_basis
+    assert handoff["workload_spec"]["metric_basis"] == _BASIS_OF[expected_metric]
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0
@@ -233,7 +242,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
 
 @pytest.mark.parametrize(
     ("metric_override", "expected_metric"),
-    [(None, "output"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],
+    [(None, "output"), ("intvty_v1", "intvty"), ("composite_v1", "output"), ("output", "output")],
 )
 @pytest.mark.asyncio
 async def test_synthetic_handoff_keeps_existing_protocol_and_metric_policy(
