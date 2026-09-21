@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Macro-cycle engine: cycle-focus planning, soft-restart, reprofile, and orchestration-memory capture."""
+"""Macro-cycle engine: cycle-focus planning, reloop, soft-restart, and the cycle-start reprofile."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from typing import Any
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
 from ..loop.maintenance import run_lease_and_db_reclaim
-from ..prompts import write_prompt_snapshot as _write_prompt_snapshot
-from ..state.orchestration_memory import MEMORY_REQUEST_PROMPT, build_memory_record, parse_memory_reply
 
 log = _logging.getLogger(__name__)
 

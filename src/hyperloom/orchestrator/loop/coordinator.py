@@ -857,6 +857,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_refresh_gaps": "gap_refresh",
         "_extract_gaps_from_baseline": "gap_refresh",
         "_extract_gaps_from_attempts": "gap_refresh",
+        "_framework_authoring_domain": "gap_refresh",
         "_gap_layer_for_action": "gap_refresh",
         "_seed_gaps_from_research_hints": "gap_refresh",
         "_record_explore_round_gaps": "phase_framework",

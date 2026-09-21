@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import Any
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.framework import FrameworkPhase
 
 
 class _StateStub:

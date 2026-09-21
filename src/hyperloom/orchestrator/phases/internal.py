@@ -10,6 +10,7 @@ import re
 from typing import Any
 from ..state.task_registry import Task
 from .base import PhaseHandler
+from .machine_state import config_arm_round_count
 
 log = _logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ class InternalTasksPhase(PhaseHandler):
         if not bool(getattr(state, "research_scout_enabled", True)):
             return
         interval = max(1, int(getattr(state, "research_scout_interval", 3) or 3))
-        round_id = len(getattr(state, "attempts", None) or [])
+        round_id = config_arm_round_count(state)
         if round_id <= 0 or (round_id % interval) != 0:
             return
         if int(getattr(state, "research_scout_last_round", -1)) == round_id:

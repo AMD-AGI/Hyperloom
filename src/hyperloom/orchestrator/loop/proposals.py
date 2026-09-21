@@ -448,6 +448,10 @@ class ProposalsCollaborator:
             params.setdefault("baseline_warm_runtime_sec", bwr)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
+        # The round-id seed: the executor holds no cross-round state, so the round
+        # it labels itself with has to come from the durable cursor.
+        cursor = int((getattr(self.shared_state, "explore_search", None) or {}).get("cursor") or 0)
+        params.setdefault("explore_search_cursor", cursor)
 
     async def _materialize_approved_proposal(
         self,

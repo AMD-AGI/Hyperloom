@@ -1,70 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""One identity for a specialist proposal, its deltas, and the explore variant it becomes."""
+"""One identity for a specialist proposal and the explore variant it becomes."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_str_list
 
 from ._canonical_fingerprint import canonical_fingerprint
 
-if TYPE_CHECKING:
-    from ._grid_base import GridVariant
-
 
 __all__ = [
-    "ArtifactDelta",
-    "ConfigDelta",
-    "PatchDelta",
-    "SetupDelta",
     "coerce_args",
     "controls_of",
     "effective_fingerprint",
     "is_executable",
     "normalize_proposal",
-    "to_grid_variant",
 ]
-
-
-@dataclass(frozen=True)
-class ConfigDelta:
-    """A server-arg / env change that requires no workspace mutation."""
-
-    extra_args: str = ""
-    extra_envs: dict[str, str] = field(default_factory=dict)
-    remove_args: list[str] = field(default_factory=list)
-    unset_envs: list[str] = field(default_factory=list)
-    args_mode: str = "append"
-
-
-@dataclass(frozen=True)
-class PatchDelta:
-    """A diff the specialist wrote into its worktree."""
-
-    patches_written: list[str] = field(default_factory=list)
-    setup_commands: list[str] = field(default_factory=list)
-    artifacts_written: list[dict] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class ArtifactDelta:
-    """A non-diff tuned artifact (e.g. an autotuned config JSON)."""
-
-    source: str = ""
-    target: str = ""
-    kind: str = ""
-    description: str = ""
-
-
-@dataclass(frozen=True)
-class SetupDelta:
-    """A setup command sequence (e.g. install a wheel)."""
-
-    commands: list[str] = field(default_factory=list)
 
 
 def coerce_args(value: Any) -> str:
@@ -92,32 +46,6 @@ def normalize_proposal(proposal: Mapping[str, Any]) -> dict[str, Any]:
         "atomic": bool(proposal.get("atomic")),
         "reason": str(proposal.get("reason") or "").strip(),
     }
-
-
-def to_grid_variant(proposal: Mapping[str, Any]) -> "GridVariant":
-    """Project a proposal entry onto a GridVariant for the explore executor."""
-    from ._grid_base import GridVariant
-
-    fields = normalize_proposal(proposal)
-    gv = GridVariant(
-        name=fields["name"],
-        extra_server_args=fields["extra_args"],
-        extra_envs=dict(fields["extra_envs"]),
-        note=str(proposal.get("reason") or ""),
-        remove_args=list(fields["remove_args"]),
-        unset_envs=list(fields["unset_envs"]),
-        args_mode=fields["args_mode"],
-    )
-    gv.provenance = str(proposal.get("provenance") or "specialist")  # type: ignore[attr-defined]
-    gv.scope = str(proposal.get("scope") or "")  # type: ignore[attr-defined]
-    gv.overlay_pythonpath = str(proposal.get("overlay_pythonpath") or "")  # type: ignore[attr-defined]
-    gv.accepted_kernels = [  # type: ignore[attr-defined]
-        str(k).strip() for k in (proposal.get("accepted_kernels") or []) if str(k).strip()
-    ]
-    gv.kb_evidence = list(proposal.get("kb_evidence") or [])  # type: ignore[attr-defined]
-    gv.pr_evidence = list(proposal.get("pr_evidence") or [])  # type: ignore[attr-defined]
-    gv.source_evidence = list(proposal.get("source_evidence") or [])  # type: ignore[attr-defined]
-    return gv
 
 
 def is_executable(fields: Mapping[str, Any]) -> bool:
