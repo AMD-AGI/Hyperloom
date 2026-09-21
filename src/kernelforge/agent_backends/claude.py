@@ -17,6 +17,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentHook,
@@ -39,7 +40,6 @@ from kernelforge.llm.process_reaping import (
     reap_processes_under,
 )
 
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
 log = logging.getLogger(__name__)
 
 
@@ -718,6 +718,5 @@ __all__ = [
     "ClaudeBackendError",
     "ClaudeTimeoutError",
     "ClaudeUnavailableError",
-    "DEFAULT_CLAUDE_MODEL",
     "resolve_claude_cli",
 ]

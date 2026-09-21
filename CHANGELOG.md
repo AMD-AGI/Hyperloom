@@ -386,6 +386,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
     same row as the gain they produced, because a revalidation moves the
     cumulative figure without re-promoting the recipe.
 
+- **One definition of the agent default model ids, and the backend picks its own
+  last rung.** `DEFAULT_CLAUDE_MODEL` and `DEFAULT_CODEX_MODEL` lived in
+  `orchestrator/roles/agent_role.py` and again in
+  `kernelforge/agent_backends/{claude,codex}.py`, and the two values were also
+  spelled as bare literals in the Forge provider registry beside the module that
+  defined them, in the Claude allowlist head, in the GEAK model default, in the
+  TraceLens Claude path and in the Critic's Codex field. Eight copies of two
+  strings, each free to drift. They now live in `hyperloom/common/llm_config.py`
+  next to `AGENT_BACKEND_CLAUDE` / `AGENT_BACKEND_CODEX`, which is the pair they
+  are keyed by, following the `DEFAULT_REASONING_EFFORT` precedent that both
+  packages already import from `common`.
+
+  `resolve_forge_llm_model` lost its `default` parameter. Every caller passed the
+  chosen backend's own default, and `request_handlers` reimplemented the
+  per-backend branch the function already performs to work out what to pass;
+  `patch_conflict_merge` carried a comment at each call site explaining that a
+  default is mandatory because `CLAUDE_MODEL` is unset on OAuth-token runs and
+  the resolver would otherwise post an empty model id. The function knows the
+  backend, so it now answers that itself and the parameter that could be
+  forgotten is gone.
+
+  The test that asserted the allowlist head equals `DEFAULT_CLAUDE_MODEL` is
+  gone with it: the head is now that constant by construction, so the drift it
+  watched for is unrepresentable. Model knobs that merely share a value today
+  are deliberately untouched — the narrative report model, the RCA model, the KB
+  synthesis model and the quantization driver model each have their own
+  override and their own reason to move, and collapsing them onto one constant
+  would couple decisions that should stay free to diverge.
+
 - **Roofline CUDA graph capture failures are classified instead of retried in
   eager mode.** When profiling cannot capture a graph, the executor records a
   structured failure category and writes a diagnosis artifact rather than
