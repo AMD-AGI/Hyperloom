@@ -123,8 +123,10 @@ The following inference frameworks are supported:
      - 10.0 (docker) / 7.2.4 (bare-metal wheel)
      - Default framework. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
    * - vLLM
-     - 7.2.3
-     - Do not mix frameworks within one session
+     - 10.0 (docker) / 7.2.3 (bare-metal wheel)
+     - Validated ``docker`` image is the ROCm 10.0 build below. The bare-metal
+       installer still resolves ``vllm==0.29.0+rocm723`` from wheels.vllm.ai, so
+       that path stays on ROCm 7.2.3. Do not mix frameworks within one session
    * - Atom
      - 7.2.4
      - AMD out-of-tree engine, launched as ``python3 -m atom.entrypoints.openai_server``. Container image only: ``install_baremetal.sh`` verifies ``atom`` but cannot install it, because ``--install-framework`` accepts only ``none``, ``sglang`` and ``vllm``. The kernel phase defaults to the KernelForge backend here (``KERNEL_OPT_BACKEND_ORDER`` is set to ``forge`` when you leave it unset). On a quantized non-vLLM backend GEAK must resolve a live rewrite seam rather than guess one, which forge does not require.
@@ -137,7 +139,7 @@ Container images
 
 Pick the image that matches your environment. Public Docker Hub refs are used
 on your own GPU machine: the official upstream ``lmsysorg/sglang-rocm:<tag>``
-for SGLang, ``vllm/vllm-openai-rocm:<tag>`` for vLLM and
+for SGLang, ``rocm/vllm:<tag>`` for vLLM and
 ``rocm/atom-dev:<tag>`` for Atom. If your deployment uses a private registry
 mirror, set the registry prefix accordingly.
 
@@ -164,7 +166,7 @@ nightly build and moves. Pin the versioned tag so a session stays reproducible.
 
 Browse all available tags at
 `hub.docker.com/r/lmsysorg/sglang-rocm/tags <https://hub.docker.com/r/lmsysorg/sglang-rocm/tags>`_,
-`hub.docker.com/r/vllm/vllm-openai-rocm/tags <https://hub.docker.com/r/vllm/vllm-openai-rocm/tags>`_
+`hub.docker.com/r/rocm/vllm/tags <https://hub.docker.com/r/rocm/vllm/tags>`_
 and
 `hub.docker.com/r/rocm/atom-dev/tags <https://hub.docker.com/r/rocm/atom-dev/tags>`_.
 
@@ -200,9 +202,9 @@ Hyperloom does not install ROCm or torch itself.
      - v0.29.0 (rocm723), isolated venv
      - Installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
 
-Bare-metal ROCm patch levels differ per framework, and each one matches its
-container image. The vLLM stack installs the ``rocm723`` variant (ROCm
-7.2.3), matching ``vllm/vllm-openai-rocm:v0.29.0``; the SGLang stack
+Bare-metal ROCm patch levels differ per framework. The vLLM stack installs the
+``rocm723`` variant (ROCm 7.2.3), one patch level behind the ROCm 10.0
+``rocm/vllm`` image the ``docker`` route uses; the SGLang stack
 installs from the ROCm 7.2.4 AMD wheel index when a host stays on ROCm 7.2.x;
 the recommended SGLang ``docker`` stack uses the two
 ``lmsysorg/sglang-rocm:v0.5.20-rocm10-*`` images (ROCm 10.0). ``docker`` mode is still
