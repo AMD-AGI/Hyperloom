@@ -734,7 +734,8 @@ def test_ensure_git_committed_takes_a_whole_attempt_directory(tmp_path):
         capture_output=True,
         text=True,
     ).stdout.split()
-    inside = sorted(path[len(attempt.relative_root) + 1:] for path in tracked if path.startswith(attempt.relative_root))
+    prefix = attempt.relative_root + "/"
+    inside = sorted(path.removeprefix(prefix) for path in tracked if path.startswith(prefix))
     assert inside == ["kernel.py", "lib/util.py", "tiles.py"]
 
 
