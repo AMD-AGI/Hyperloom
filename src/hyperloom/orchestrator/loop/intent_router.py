@@ -57,7 +57,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.REVIEW_VERDICT: "_handle_review_verdict",
     IntentType.DELEGATE: "_handle_delegate",
     IntentType.REQUEST: "_handle_request",
-    IntentType.RESPONSE: "_handle_response",
     IntentType.EXTEND_LEASE: "_handle_extend_lease",
     IntentType.PRUNE_BRANCH: "_handle_prune_branch",
     IntentType.ESCALATE_STRATEGY_CHANGE: "_handle_escalate_strategy_change",
@@ -552,7 +551,6 @@ class IntentRouter:
             "*",
             "proposal",
             {**payload, "needs_review": True},
-            priority=1,
         )
         await self.bus.append_and_seq(msg)
         from .coordinator import PendingProposal
@@ -733,7 +731,6 @@ class IntentRouter:
                 pending.from_agent,
                 "review_verdict",
                 rebroadcast_payload,
-                priority=0 if verdict == "reject" else 1,
                 in_reply_to=pending.proposal_msg_id,
             )
         )
@@ -1061,13 +1058,12 @@ class IntentRouter:
         if denied is not None:
             await self._record_policy_denied(source, intent, denied)
             return
-        # Always record the request on the bus for the kernel reactor / replay.
+        # Always record the request on the bus for replay.
         request_msg = Message.new(
             source,
             target_agent,
             "request",
             dict(intent.payload),
-            priority=1,
         )
         await self.bus.append_and_seq(request_msg)
 
@@ -1091,7 +1087,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -1117,7 +1112,6 @@ class IntentRouter:
                             "source": "coordinator_auto_reject",
                         },
                         in_reply_to=request_msg.msg_id,
-                        priority=1,
                     )
                 )
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
@@ -1230,7 +1224,6 @@ class IntentRouter:
                         "source": cache_hit_source or "programmatic_handler",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
@@ -1279,27 +1272,9 @@ class IntentRouter:
                         "source": "coordinator_auto_reject",
                     },
                     in_reply_to=request_msg.msg_id,
-                    priority=1,
                 )
             )
             self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=_fail_result)
-
-    async def _handle_response(self, source: str, intent: Intent) -> None:
-        """Route a RESPONSE intent back to the original requester."""
-        in_reply_to = intent.payload["in_reply_to"]
-        # Locate the original requester so we can address the response.
-        original = await self.bus.lookup_by_id(in_reply_to)
-        target = original.from_agent if original else "*"
-        await self.bus.append_and_seq(
-            Message.new(
-                source,
-                target,
-                "response",
-                dict(intent.payload),
-                in_reply_to=in_reply_to,
-                priority=1,
-            )
-        )
 
     async def _handle_extend_lease(self, source: str, intent: Intent) -> None:
         """Grant a running task more lease time."""
@@ -1419,13 +1394,11 @@ class IntentRouter:
                 "*",
                 "strategy_change",
                 payload,
-                priority=0,
             )
         )
         from ..phases.machine_state import (
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
-            ESCALATE_HINT_SKIP_TO_CLOSE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
@@ -1434,29 +1407,6 @@ class IntentRouter:
 
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
-            return
-        # Pre-enablement close guard: drop a premature ``skip_to_close`` while the model is not yet runnable and let
-        # the enablement loop continue.
-        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and self.shared_state.enablement_close_guard_active():
-            self.shared_state.enablement.skip_to_close_suppressions += 1
-            log.info(
-                "escalate_strategy_change: dropping premature skip_to_close from %s "
-                "(pre-enablement: baseline not established; enablement loop still active)",
-                source,
-            )
-            await self.bus.append_and_seq(
-                Message.new(
-                    "coordinator",
-                    "*",
-                    "observation",
-                    {
-                        "kind": "enablement_skip_to_close_suppressed",
-                        "source": source,
-                        "phase": (self.shared_state.phase or ""),
-                        "suppressions": self.shared_state.enablement.skip_to_close_suppressions,
-                    },
-                )
-            )
             return
         # extend_*_budget mutates phase_budget_pct directly.
         now_ts = datetime.now(timezone.utc).isoformat()
@@ -1531,15 +1481,13 @@ class IntentRouter:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:
-        """Broadcast an alert message, prioritized by severity."""
-        prio = 0 if intent.payload.get("severity") == "high" else 1
+        """Broadcast an alert message."""
         await self.bus.append_and_seq(
             Message.new(
                 source,
                 "*",
                 "alert",
                 dict(intent.payload),
-                priority=prio,
             )
         )
 

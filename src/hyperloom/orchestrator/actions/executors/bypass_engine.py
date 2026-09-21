@@ -85,16 +85,26 @@ def build_server_command(
             ]
         if max_model_len:
             cmd += ["--max-model-len", str(max_model_len)]
-        if profile_dir:
-            # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
-            # ignored), without which /start_profile returns 404 and no trace is written.
-            cmd += [
+        if not profile_dir:
+            return cmd + list(extra_args)
+        # vLLM enables the torch profiler via --profiler-config (the legacy VLLM_TORCH_PROFILER_DIR env is
+        # ignored), without which /start_profile returns 404 and no trace is written.
+        #
+        # Last, after extra_args, the way Magpie's launcher orders its own: EXTRA_VLLM_ARGS has to carry a
+        # torch_profiler_dir for the argv preflight to accept the profile bounds beside it -- ProfilerConfig
+        # refuses `profiler=torch` without one -- and that value is a placeholder standing in for whatever the
+        # launcher computes. Emitting it first would let the placeholder win vLLM's last-wins dotted-flag merge
+        # and send the trace somewhere this backend's discovery never looks.
+        return (
+            cmd
+            + list(extra_args)
+            + [
                 "--profiler-config.profiler",
                 "torch",
                 "--profiler-config.torch_profiler_dir",
                 profile_dir,
             ]
-        return cmd + list(extra_args)
+        )
     if fw == "atom":
         cmd = [
             interp,

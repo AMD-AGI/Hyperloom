@@ -54,6 +54,12 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
     return any(hint in repo_name for hint in hints.get(component, ()))
 
 
+#: What ``_note_build_routed`` stamps on a row. A manifest entry is a routing
+#: sentinel only if it carries one of these; a ``BuildResult.to_state`` attempt
+#: row never does, and must not answer for a build nobody has routed.
+_ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
+
+
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
@@ -73,13 +79,13 @@ class EnablementBuild(CoordinatorCollaborator):
         if is_multi_node():
             return
         try:
-            from hyperloom.agents.framework.enablement import (
+            from hyperloom.common.failure_signature import (
                 MISSING_MODEL_ARCH,
                 MISSING_WEIGHT,
                 NOT_IMPLEMENTED,
                 is_targeted_build_candidate,
             )
-            from ..framework.build_actions import TargetedBuildAction
+            from .runtime.build_actions import TargetedBuildAction
 
             state = self.shared_state
             # The round's own filed observation; wrapper text is the fallback,
@@ -131,7 +137,7 @@ class EnablementBuild(CoordinatorCollaborator):
             source_pr_url = ""
             # When no operator-pinned/kept ref, try the top discovery candidate.
             if not ref:
-                from ..framework.build_actions import resolve_build_ref
+                from .runtime.build_actions import resolve_build_ref
 
                 _component_hints = {
                     "aiter": ("aiter",),
@@ -240,7 +246,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 _consume_marker()
                 return
 
-            from ..framework.build_actions import (
+            from .runtime.build_actions import (
                 _COMPONENTS,
                 TargetedBuildAction,
                 resolve_build_ref,
@@ -359,7 +365,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 "enablement_launch_log": new_log,
             }
         else:
-            from ..framework.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
+            from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
 
             task_params = getattr(task, "params", None) or {}
             _action = _TBA.from_state(task_params)
@@ -398,13 +404,9 @@ class EnablementBuild(CoordinatorCollaborator):
         """Turn a succeeded targeted build into a launch probe, or a no-progress round."""
         task_id = str(getattr(task, "task_id", "") or "")
         attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
-        # The build's attempt_root is resolved at pump time and is NOT written back into the task params (they keep
-        # the enqueue-time default "").
-        if not attempt_root and task_id:
-            attempt_root = str(self.session_dir / "enablement" / "builds" / task_id)
         br = None
         if attempt_root:
-            from ..framework.targeted_build import _load_result_json
+            from .runtime.targeted_build import _load_result_json
 
             br = _load_result_json(attempt_root)
 
@@ -428,18 +430,36 @@ class EnablementBuild(CoordinatorCollaborator):
         self._note_build_routed(task_id, probe_task_id=probe_tid, probe_generation=generation)
 
     def _build_routing_record(self, build_task_id: str) -> dict[str, Any] | None:
-        """The record of what a build's outcome was already routed to, if any."""
+        """The record of what a build's outcome was already routed to, if any.
+
+        Matched on a routing field as well as the id. ``BuildResult.to_state``
+        writes no ``task_id`` today, so an attempt row cannot answer here by
+        accident -- but that is an invariant of a serializer two packages away,
+        and if it ever gains one, every completed build would read as already
+        routed and its launch probe would never be enqueued. The lookup says
+        what it is looking for instead of relying on what it will not find.
+        """
         for entry in reversed(list(self.shared_state.enablement.build_manifest or [])):
-            if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
+            if not isinstance(entry, dict) or str(entry.get("task_id") or "") != build_task_id:
+                continue
+            if any(field in entry for field in _ROUTING_FIELDS):
                 return entry
         return None
 
     def _note_build_routed(self, build_task_id: str, **fields: Any) -> None:
-        """Record that a build's outcome has been routed, and to what."""
+        """Record that a build's outcome has been routed, and to what.
+
+        ``routed`` is stamped on both paths. The append path always carried it;
+        the merge path took only the caller's fields, so routing a build with
+        nothing to say about it left a row that named the build and no longer
+        said it had been routed. That was legible only because the reader
+        matched on the id alone -- which is what made an attempt row's id, had
+        it ever carried one, answer for a build nobody had routed.
+        """
         manifest = list(self.shared_state.enablement.build_manifest or [])
         for idx, entry in enumerate(manifest):
             if isinstance(entry, dict) and str(entry.get("task_id") or "") == build_task_id:
-                manifest[idx] = {**entry, **fields}
+                manifest[idx] = {**entry, "routed": True, **fields}
                 break
         else:
             manifest.append({"task_id": build_task_id, "routed": True, **fields})

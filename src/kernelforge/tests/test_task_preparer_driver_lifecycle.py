@@ -81,6 +81,27 @@ def _init_repo(root: Path) -> None:
     task_preparer._git(root, "commit", "-q", "--allow-empty", "-m", "task baseline")
 
 
+def test_stage_preparation_changes_excludes_preexisting_untracked_files(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tracked = workspace / "tracked.py"
+    tracked.write_text("old\n", encoding="utf-8")
+    _init_repo(workspace)
+    preexisting = workspace / "runtime.cache"
+    preexisting.write_text("cache\n", encoding="utf-8")
+    pre_untracked = task_preparer._git_untracked(workspace)
+
+    tracked.write_text("new\n", encoding="utf-8")
+    (workspace / "driver.py").write_text("driver\n", encoding="utf-8")
+    code, output = task_preparer._stage_preparation_changes(workspace, pre_untracked)
+
+    assert code == 0, output
+    staged_code, staged = task_preparer._git(workspace, "diff", "--cached", "--name-only")
+    assert staged_code == 0
+    assert staged.splitlines() == ["driver.py", "tracked.py"]
+    assert task_preparer._git_untracked(workspace) == {"runtime.cache"}
+
+
 def _runtime_spec_path(prompt: str) -> str:
     """The path the prompt advertises as the specification's runtime location."""
     match = re.search(r"`\./([^`]+)` is DURABLE", prompt) or re.search(r"Read on `\./([^`]+)`", prompt)

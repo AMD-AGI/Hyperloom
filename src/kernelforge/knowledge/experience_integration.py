@@ -322,7 +322,7 @@ def _git_commit_all(
     if allowed_paths is None:
         changed = git("diff", "--name-only", "HEAD", cwd=workspace_dir)
         allowed_paths = {line.strip() for line in changed.stdout.splitlines() if line.strip()}
-    git("add", "-A", "--", *sorted(allowed_paths), cwd=workspace_dir)
+    git("add", "-A", "-f", "--", *sorted(allowed_paths), cwd=workspace_dir)
     staged = git("diff", "--cached", "--name-only", cwd=workspace_dir)
     staged_paths = {line.strip() for line in staged.stdout.splitlines() if line.strip()}
     if not staged_paths or not staged_paths.issubset(allowed_paths):
@@ -1112,7 +1112,10 @@ def kb_warmstart(
                 "read_error": read_status["read_error"],
             }
 
-        read_status = {"read_reason": "hit", "read_error": ""}
+        # Keep identity-match metadata populated by the reader (for example a
+        # fuzzy donor's requested/selected canonical ids) while normalizing the
+        # final read verdict.
+        read_status.update(read_reason="hit", read_error="")
 
         statuses = ["not_attempted" for _ in sols]
         _persist_kb_references(workspace_dir, sols, statuses)

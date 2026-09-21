@@ -442,42 +442,10 @@ class ProposalsCollaborator:
         baseline_accuracy = float(getattr(self.shared_state, "baseline_accuracy", 0.0) or 0.0)
         if baseline_accuracy > 0:
             params.setdefault("accuracy_baseline", baseline_accuracy)
-        # Warm measure-round anchor for the decision-round overtime kill.
+        # Warm measure-round anchor for admission costing.
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        kill_ratio = float(
-            getattr(
-                self.shared_state,
-                "explore_overtime_kill_ratio",
-                0.0,
-            )
-            or 0.0
-        )
-        if kill_ratio > 0:
-            params.setdefault("explore_overtime_kill_ratio", kill_ratio)
-        variant_timeout_override = int(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_sec_override",
-                0,
-            )
-            or 0
-        )
-        if variant_timeout_override > 0:
-            params.setdefault("variant_timeout_sec", variant_timeout_override)
-        safety_margin_override = float(
-            getattr(
-                self.shared_state,
-                "explore_variant_timeout_safety_margin",
-                -1.0,
-            )
-        )
-        if safety_margin_override >= 0:
-            params.setdefault(
-                "variant_timeout_safety_margin",
-                safety_margin_override,
-            )
         # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
         # not an eligibility gate.
         es = getattr(self.shared_state, "explore_search", None)

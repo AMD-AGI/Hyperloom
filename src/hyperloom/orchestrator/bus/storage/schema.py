@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import sqlite3
 
-# Recorded by ensure_schema for provenance only: nothing compares it against the
-# version already in the DB, so a database written by an older version keeps its
-# own columns and is read as-is. Rows are addressed by column name, so a column
-# this version no longer writes is inert rather than a migration hazard.
-SCHEMA_VERSION = 5
+# Recorded for provenance, not migration gating: ensure_schema inspects columns
+# so databases sharing a version but differing in layout migrate correctly.
+# Legacy ownership stays unknown; retired NOT NULL columns without defaults
+# must be dropped before new writers can insert rows.
+SCHEMA_VERSION = 6
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
@@ -35,6 +35,7 @@ _DDL = [
         task_id       TEXT    NOT NULL,
         action        TEXT    NOT NULL,
         pid           INTEGER NOT NULL,
+        owner_scope   TEXT    NOT NULL DEFAULT '',
         acquired_at   TEXT    NOT NULL,
         expires_at    TEXT    NOT NULL,
         heartbeat_at  TEXT    NOT NULL,
@@ -60,7 +61,6 @@ _DDL = [
         topic         TEXT    NOT NULL,
         in_reply_to   TEXT,
         payload       TEXT    NOT NULL,
-        priority      INTEGER NOT NULL,
         ts            TEXT    NOT NULL
     )
     """,
@@ -108,8 +108,7 @@ _DDL = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_gpu_leases_expires ON gpu_leases(expires_at)",
     # bringup_rounds — the durable mutex deciding whether another round may
-    # start. Admission reads state and expires_unix, so exclusion is bounded by
-    # the lease: a round nobody settles stops excluding on its own.
+    # start. Only explicit settlement ends exclusion; timestamps describe budgets.
     """
     CREATE TABLE IF NOT EXISTS bringup_rounds (
         round_id             TEXT    PRIMARY KEY,
@@ -163,6 +162,25 @@ _MANAGED_TABLES = (
     "round_events",
     "schema_version",
 )
+
+
+#: SQLite gained ``ALTER TABLE ... DROP COLUMN`` here.
+_DROP_COLUMN_MIN_SQLITE = (3, 35, 0)
+
+
+def _drop_legacy_priority_column(cur: sqlite3.Cursor) -> None:
+    """Take ``events.priority`` off a database written before the column was retired."""
+    cur.execute("PRAGMA table_info(events)")
+    if "priority" not in {row[1] for row in cur.fetchall()}:
+        return
+    if sqlite3.sqlite_version_info < _DROP_COLUMN_MIN_SQLITE:
+        floor = ".".join(str(part) for part in _DROP_COLUMN_MIN_SQLITE)
+        raise RuntimeError(
+            "this coordinator.db still carries the retired events.priority column, and SQLite "
+            f"{sqlite3.sqlite_version} cannot drop it ({floor} is the floor). Finish or discard "
+            "the session under the build that started it."
+        )
+    cur.execute("ALTER TABLE events DROP COLUMN priority")
 
 
 def _seed_default_lane_capacity(cur: sqlite3.Cursor) -> None:
@@ -219,6 +237,10 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         cur.execute("BEGIN IMMEDIATE")
         for stmt in _DDL:
             cur.execute(stmt)
+        cur.execute("PRAGMA table_info(leases)")
+        if "owner_scope" not in {row[1] for row in cur.fetchall()}:
+            cur.execute("ALTER TABLE leases ADD COLUMN owner_scope TEXT NOT NULL DEFAULT ''")
+        _drop_legacy_priority_column(cur)
         _seed_default_lane_capacity(cur)
         cur.execute(
             "INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES (?, datetime('now'))",

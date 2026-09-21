@@ -9,14 +9,8 @@ import math
 from dataclasses import dataclass
 from typing import Mapping
 
-LANE_REWRITE = "rewrite"
 LANE_FUSION = "fusion"
 LANE_GEMM = "gemm"
-
-#: Rewrite: the producer's own floor plus the reserve the caller keeps back for
-#: apply-back. Below this sum the route declines outright, so it is the divisor
-#: for how many kernels fit.
-REWRITE_MIN_TARGET_SEC = 4500
 
 #: gemm: a tuner's own estimate is the cost, and the router supplies it per
 #: tuner. This is only the fallback for a tuner that reports none.
@@ -30,12 +24,15 @@ FUSION_MAX_TARGETS = 3
 #: itself needs to close out.
 PHASE_RESERVE_SEC = 300
 
-#: Default split. Rewrite is weighted highest because its targets are the most
-#: expensive and the only ones with a hard admission floor.
+#: Rewrite is not a lane: the route budgets itself against the wall clock (see
+#: ``_kernel_rewrite_controller_timeouts``), so its half comes off the top and
+#: never becomes an allocation the caller has to discard.
+REWRITE_RESERVE_SHARE = 0.5
+
+#: Default split of what is left for the lanes once rewrite has taken its share.
 DEFAULT_LANE_WEIGHTS: Mapping[str, float] = {
-    LANE_REWRITE: 0.5,
-    LANE_FUSION: 0.3,
-    LANE_GEMM: 0.2,
+    LANE_FUSION: 0.6,
+    LANE_GEMM: 0.4,
 }
 
 
@@ -82,7 +79,7 @@ def split_lanes(
         raise LaneBudgetError("at least one lane weight is required")
     total = 0.0
     for lane, weight in resolved.items():
-        if lane not in {LANE_REWRITE, LANE_FUSION, LANE_GEMM}:
+        if lane not in {LANE_FUSION, LANE_GEMM}:
             raise LaneBudgetError(f"unknown lane {lane!r}")
         if isinstance(weight, bool) or not isinstance(weight, (int, float)):
             raise LaneBudgetError(f"weight for {lane!r} must be numeric, got {weight!r}")
@@ -102,8 +99,6 @@ def max_targets(
     """How many targets a lane may pick with the budget it was given."""
     if isinstance(budget_sec, bool) or not isinstance(budget_sec, int) or budget_sec < 0:
         raise LaneBudgetError(f"lane budget must be a non-negative int, got {budget_sec!r}")
-    if lane == LANE_REWRITE:
-        return budget_sec // REWRITE_MIN_TARGET_SEC
     if lane == LANE_GEMM:
         return _greedy_fit(budget_sec, target_costs_sec)
     if lane == LANE_FUSION:
@@ -120,7 +115,8 @@ def allocate(
 ) -> dict[str, LaneAllocation]:
     """Derive every lane's share and target ceiling in one pass."""
     phase_sec = phase_budget_sec(remaining_minutes, reserve_sec=reserve_sec)
-    shares = split_lanes(phase_sec, weights=weights)
+    lane_sec = phase_sec - int(phase_sec * REWRITE_RESERVE_SHARE)
+    shares = split_lanes(lane_sec, weights=weights)
     return {
         lane: LaneAllocation(
             lane=lane,

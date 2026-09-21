@@ -9,7 +9,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from hyperloom.agents.framework import enablement as rules
+from hyperloom.common import failure_signature as rules
 from hyperloom.common.bringup import (
     BootObservation,
     Excerpt,
@@ -54,6 +54,10 @@ _PROGRESS_MARKERS: tuple[tuple[LadderStage, str], ...] = (
     (LadderStage.HTTP_READY, "the server is fired up and ready to roll"),
 )
 
+#: The marker substrings alone, for a reader that must guarantee its text still
+#: witnesses every milestone after it drops the bulk of a log.
+PROGRESS_MARKER_SUBSTRINGS: tuple[str, ...] = tuple(marker for _stage, marker in _PROGRESS_MARKERS)
+
 #: Where each enablement failure kind sits on the ladder. Kinds absent here
 #: carry no fixed position and are placed relative to observed progress.
 _KIND_STAGE: Mapping[str, LadderStage] = {
@@ -68,6 +72,7 @@ _KIND_STAGE: Mapping[str, LadderStage] = {
     rules.CAPABILITY_DISABLED: LadderStage.ENGINE_INIT,
     rules.HIP_KERNEL_MISSING: LadderStage.ENGINE_INIT,
     rules.RESOURCE_CONSTRAINT: LadderStage.ENGINE_INIT,
+    rules.KERNEL_RESOURCE_LIMIT: LadderStage.ENGINE_INIT,
     rules.ACCURACY_BELOW_FLOOR: LadderStage.ACCURACY_OK,
     rules.EVAL_GENERATION_PATHOLOGY: LadderStage.ACCURACY_OK,
     rules.EVAL_RUNTIME_FAILURE: LadderStage.ACCURACY_OK,

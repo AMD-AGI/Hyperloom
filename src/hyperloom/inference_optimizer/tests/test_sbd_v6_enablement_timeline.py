@@ -563,3 +563,374 @@ def test_a_copy_the_archive_refused_is_named_nowhere(_bound_session):
     row = _ext(_bound_session)["attempts"]["rows"][0]
     assert row["files"] == []
     assert row["accepted_config_path"] is None
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):
+    """Lane teardown must not raise when the close-time spool read fails.
+
+    Callers (``_close_enablement_lane``, ``_settle_enablement_round``) do not
+    guard ``finish``, and a raise after ``stop_reason`` / ``state.save`` would
+    leave the lane half torn down.
+    """
+    _boot_trigger()
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="enablement_attempts_exhausted")
+
+
+# --------------------------------------------------------------------------
+# The replay contract reaches the event.
+#
+# #1455 retired the export-time reader that used to publish this; the verdict
+# was then computed on every KEEP and discarded, which is indistinguishable
+# from never judging one. These pin the author-time producer instead: the
+# assertion is that the key EXISTS on a closed lane, because its absence is
+# what a consumer reads as "nothing judged this".
+# --------------------------------------------------------------------------
+
+
+def _closing_round(*, captured=True):
+    """The durable state a boot-origin KEEP leaves behind, one patch deep.
+
+    ``captured=False`` removes only the capture, so the difference between the
+    two is exactly the stack evidence the verdict is supposed to judge.
+    """
+    from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+
+    root = {
+        "id": "r1",
+        "path": "/fr",
+        "kind": "framework_checkout",
+        "contributions": ["patch_apply"],
+        "is_git": True,
+        "base_sha": "a" * 40,
+        "replay_target": {"anchor": "framework_root", "rel": ""},
+    }
+    return EnablementRound(
+        succeeded=True,
+        framework_root="/fr",
+        kept_patches=["/p/1.patch"],
+        patch_roots={"/p/1.patch": "/fr"},
+        patch_targets={"/p/1.patch": {"srt/a.py": "upsert"}},
+        last_specialist_task_id="spec-1",
+        roots=[root] if captured else [],
+        accepted_stack_targets={"r1": {"srt/a.py": "upsert"}} if captured else {},
+        source_snapshots=(
+            [
+                {
+                    "root_id": "r1",
+                    "complete": True,
+                    "snapshot_ref": "optimization_stack/enablement/r1",
+                    "files": [{"rel": "srt/a.py", "op": "upsert"}],
+                }
+            ]
+            if captured
+            else []
+        ),
+    )
+
+
+#: Every code that says something about the accepted STACK, as opposed to the
+#: launch, the closure or the setup ledger. One of these standing is what shows
+#: the stack was actually judged.
+_STACK_CODES = frozenset(
+    {
+        "accepted_stack_not_launched",
+        "patch_targets_unknown",
+        "patch_step_not_captured",
+        "source_snapshot_missing",
+        "source_snapshot_incomplete",
+        "root_unidentified",
+    }
+)
+
+
+def _capture_overlay(session_dir):
+    """Write the bytes the snapshot manifest names into the session's overlay.
+
+    The manifest travels in the emitted section, the captured bytes do not, so a
+    round whose overlay was never written is one a consumer cannot replay. A
+    fixture that declares a capture has to put it on disk to claim it.
+    """
+    captured = Path(session_dir) / "optimization_stack" / "enablement" / "r1" / "files" / "srt"
+    captured.mkdir(parents=True, exist_ok=True)
+    (captured / "a.py").write_text("# captured\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "observed, expected",
+    [
+        (None, None),
+        ([], []),
+        (["_C.abi3.so"], ["_C.abi3.so"]),
+    ],
+)
+def test_the_tri_state_scans_survive_into_the_recorded_recipe(_bound_session, observed, expected):
+    """The verdict is kept beside the evidence it was reached over, or it is hearsay.
+
+    ``build_extensions_not_carried`` and ``levers_without_readers`` decide two
+    of the sufficiency reasons, and all three readings mean different things:
+    ``None`` that the scan could not be made, ``[]`` that it came back clean, a
+    list what it found. They were computed, judged, and then dropped before the
+    event was recorded -- so a consumer reading those reasons could not see what
+    they were decided over, and could not re-derive the verdict it was asked to
+    trust.
+    """
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.build_extensions_not_carried = observed
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None
+    assert "build_extensions_not_carried" in recipe, sorted(recipe)
+    assert recipe["build_extensions_not_carried"] == expected
+
+
+def test_a_build_linked_only_through_a_kept_round_survives_the_projection(_bound_session):
+    """``last_specialist_task_id`` is one-shot; the kept rounds outlive it.
+
+    ``select_linked_build`` falls back to ``kept_rounds`` for exactly the case
+    where the marker has already been consumed -- which is the normal case by
+    the time a build is linked. The projection's field list omitted
+    ``kept_rounds``, so the fallback existed at runtime and could never fire in
+    the recorded recipe: a build reachable only that way vanished from it.
+    """
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.last_specialist_task_id = ""  # consumed, as it is when a build lands
+    rnd.kept_rounds = [{"task_id": "spec-1", "patches": ["/p/1.patch"]}]
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None
+    assert "kept_rounds" in recipe, sorted(recipe)
+    assert [r.get("task_id") for r in recipe["kept_rounds"]] == ["spec-1"]
+
+
+def test_the_kept_rounds_carry_no_paths_from_the_authoring_host(_bound_session):
+    """A recipe is replayed somewhere else, so it may not name this machine.
+
+    ``_push_kept_round`` stores authoring-workspace patch paths and raw artifact
+    dicts carrying source and target. Exported verbatim, those absolute paths
+    travel into a recipe whose whole purpose is to be acted on elsewhere --
+    beside a ``kept_patches`` that is relativized and a ``kept_artifacts``
+    reduced to its normalized fields, which is what makes the inconsistency a
+    defect rather than a preference.
+    """
+    import json as _json
+
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    rnd = _closing_round()
+    rnd.last_specialist_task_id = ""
+    rnd.kept_rounds = [
+        {
+            "task_id": "spec-1",
+            "patches": ["/authoring/ws/enablement/spec-1/001.patch"],
+            "artifacts": [{"source": "/authoring/ws/build/_C.so", "target": "/srv/vllm/_C.so", "rel_target": "_C.so"}],
+        }
+    ]
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=rnd,
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    blob = _json.dumps(_ext(_bound_session)["recipe"]["kept_rounds"])
+    assert "/authoring/ws" not in blob, blob
+    assert "_C.so" in blob, "the linkage itself must survive the normalization"
+
+
+def test_a_closed_lane_carries_a_replay_verdict(_bound_session):
+    _capture_overlay(_bound_session)
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is not None, "a closed lane with no verdict is read as never judged"
+    codes = [r["code"] for r in recipe["replay_sufficiency"]["reasons"]]
+    # ``not_evaluated`` is the fallback a projection that could not run records.
+    # Accepting it would let this pass with the projection gone entirely.
+    assert "not_evaluated" not in codes, recipe["replay_sufficiency"]
+    # The capture is present and complete, so no stack rule may stand.
+    assert not (_STACK_CODES & set(codes)), codes
+    # The steps the verdict was reached over travel with it, so a consumer can
+    # re-derive the decision rather than only trust it.
+    assert [step["kind"] for step in recipe["recipe_steps"]] == ["patch"]
+
+
+def test_an_uncapturable_stack_closes_the_lane_as_insufficient(_bound_session):
+    """Fail closed, both ways: nothing was captured for the patch this recipe
+    replays, so the verdict says so rather than the key going missing.
+
+    This is the counterpart of the sufficient control above: the two fixtures
+    differ only in whether the capture is there, so a pass here and a pass there
+    together show that judgement actually ran over the stack. Which particular
+    rule catches it is settled in :mod:`test_enablement_replay_sufficiency`;
+    pinning one code here would restate that instead of testing the recorder.
+    """
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import REASON_BLOCKS
+
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(captured=False),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    decision = _ext(_bound_session)["recipe"]["replay_sufficiency"]
+    assert decision["status"] == "insufficient"
+    codes = [r["code"] for r in decision["reasons"]]
+    # Not the projection giving up -- the stack rules actually firing.
+    assert "not_evaluated" not in codes, decision
+    assert _STACK_CODES & set(codes), codes
+    # The vocabulary is closed; an unrecognized code is itself insufficient.
+    assert set(codes) <= set(REASON_BLOCKS)
+
+
+def test_a_lane_closed_without_its_state_records_no_recipe_rather_than_an_empty_one(_bound_session):
+    """A caller that passes no state judged nothing, and says so by absence.
+
+    ``read_status`` reads an absent decision as ``not_evaluated`` /
+    insufficient, so the null is the fail-closed answer. What it must never be
+    is a *present* verdict synthesised over a state nobody supplied.
+    """
+    from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
+
+    _boot_trigger()
+    enablement_event.finish(outcome=enablement_event.OUTCOME_STALLED, reason="cap reached")
+
+    recipe = _ext(_bound_session)["recipe"]
+    assert recipe is None
+    assert read_status(recipe or {})["status"] == "insufficient"
+
+
+def test_a_recipe_too_large_to_record_is_reported_as_unjudged(_bound_session, monkeypatch):
+    """Nothing else on this path bounds the block, and truncating it would be
+    the wrong bound: a shortened closure is indistinguishable from a narrow one,
+    while the verdict was computed over the full payload. The pair would then
+    contradict each other, so the recipe is replaced by the explicit
+    ``not_evaluated`` decision, which every consumer reads as insufficient."""
+    monkeypatch.setattr(enablement_event, "_MAX_RECIPE_BYTES", 8)
+
+    _boot_trigger()
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="kept",
+        enablement=_closing_round(),
+        session_dir=str(_bound_session),
+        mode="all",
+    )
+
+    recipe = _ext(_bound_session)["recipe"]
+    decision = recipe["replay_sufficiency"]
+    assert decision["status"] == "insufficient"
+    assert [r["code"] for r in decision["reasons"]] == ["not_evaluated"]
+    # Nothing of the oversized payload survives to be read as partial evidence.
+    assert set(recipe) == {"replay_sufficiency"}
+
+
+def test_the_same_patch_is_named_the_same_way_everywhere_in_the_recipe(_bound_session):
+    """Two fields describing one patch may not disagree about what it is called.
+
+    ``kept_rounds`` was normalized and ``kept_patches`` was not, so a recipe
+    carried the same patch twice -- once by name and once by an absolute path
+    into a directory the consumer does not have. Both use the one rule now:
+    session-relative where the patch is in the session, the bare name where it
+    is not, never the authoring host's directory.
+    """
+    from pathlib import Path as _Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+
+    state = {
+        "enablement": {
+            "kept_patches": ["/authoring/ws/a.patch"],
+            "kept_rounds": [{"task_id": "s1", "patches": ["/authoring/ws/a.patch"], "artifacts": []}],
+        },
+        "enablement_mode": "all",
+    }
+    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+
+    assert collected["kept_patches"] == ["a.patch"]
+    assert collected["kept_rounds"][0]["patches"] == ["a.patch"]
+
+
+def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
+    """One assertion over the whole recorded recipe, not one per field.
+
+    This leak was closed four times in a row and kept reappearing somewhere
+    else: kept_rounds, then kept_patches, then the artifact fallback, then
+    recipe_steps -- which is the recipe's own product, the array a consumer
+    replays in order. Each fix normalized the surface in front of it. Asserting
+    over the serialized whole is the only form that does not have to be
+    remembered next time a field is added.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder.enablement_section import collect_enablement
+
+    state = {
+        "enablement": {
+            # Every field that has leaked so far, populated at once. Each earlier
+            # fixture left one of them empty, which is how the next surface kept
+            # going unnoticed.
+            "framework_root": "/srv/vllm",
+            "kept_patches": ["/authoring/ws/a.patch"],
+            "patch_roots": {"/authoring/ws/a.patch": "/srv/vllm"},
+            "kept_rounds": [
+                {
+                    "task_id": "s1",
+                    "patches": ["/authoring/ws/a.patch"],
+                    "artifacts": [{"source": "/authoring/ws/_C.so", "target": "/srv/vllm/_C.so"}],
+                }
+            ],
+            "kept_artifacts": [
+                {"target": "/srv/vllm/_C.so", "rel_target": "_C.so", "kind": "ext", "root": "/srv/vllm"}
+            ],
+            "roots": [{"id": "r1", "path": "/srv/vllm", "kind": "framework_checkout"}],
+        },
+        "enablement_mode": "all",
+    }
+    collected = collect_enablement(_Path(str(_bound_session)), state, [])
+
+    blob = _json.dumps(collected)
+    assert "/authoring/ws" not in blob, blob
+    # ``framework_root`` stays: it is the recipe's declared subject, and the
+    # setting script exports it. What may not carry a host path is a field with
+    # no use for one -- the step's resolved root and the artifact's install
+    # target, both of which the rules reach through ``root_id`` instead.
+    steps = collected["recipe_steps"]
+    assert all("root" not in st for st in steps if st.get("kind") == "patch"), steps
+    assert all("target" not in a for a in collected["kept_artifacts"]), collected["kept_artifacts"]
+    # The linkage itself must survive: normalizing must not mean discarding.
+    assert "a.patch" in blob and "_C.so" in blob
+    assert "r1" in blob, "the portable root identifier must remain"

@@ -433,7 +433,16 @@ class KernelStackPhase(PhaseHandler):
                 incremental_gain_pct = (
                     (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
                 )
-                if graded.verdict != VERDICT_KEEP:
+                if not graded.comparable:
+                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
+                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
+                    # is a call for a human, and the revert path below still leaves the tree clean either way.
+                    log.info(
+                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
+                    )
+                    graded_verdict = graded.verdict
+                    decision = "NEEDS_REVIEW"
+                elif graded.verdict != VERDICT_KEEP:
                     log.info(
                         "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
                         stack_id,
@@ -443,16 +452,11 @@ class KernelStackPhase(PhaseHandler):
                         graded.tput_reference,
                         graded.tput_candidate,
                     )
-                graded_verdict = graded.verdict
-                decision = "KEEP" if graded.verdict == VERDICT_KEEP else "REVERT"
-                if not graded.comparable:
-                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
-                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
-                    # is a call for a human, and the revert path below still leaves the tree clean either way.
-                    log.info(
-                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
-                    )
-                    decision = "NEEDS_REVIEW"
+                    graded_verdict = graded.verdict
+                    decision = "REVERT"
+                else:
+                    graded_verdict = graded.verdict
+                    decision = "KEEP"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
@@ -595,7 +599,6 @@ class KernelStackPhase(PhaseHandler):
                         "source": "auto_integrate_after_kernel_opt",
                         "mode": "patch",
                     },
-                    priority=2,
                 )
             )
             self._auto_integrate_attempt_marks[dispatch_key] = recorded

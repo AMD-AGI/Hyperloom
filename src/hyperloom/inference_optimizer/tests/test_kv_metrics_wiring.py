@@ -388,6 +388,9 @@ class _Recorder:
 class _DoneProc:
     args = ["x"]
 
+    def poll(self):
+        return None
+
     def communicate(self, timeout=None):
         return ("out", "err")
 
@@ -395,16 +398,18 @@ class _DoneProc:
 class _HangingProc:
     args = ["x"]
 
+    def poll(self):
+        return None
+
     def communicate(self, timeout=None):
         raise sk.subprocess.TimeoutExpired(self.args, timeout)
 
 
 def test_recorder_is_closed_on_the_normal_return_path():
     rec = _Recorder()
-    sk._communicate_with_soft_deadline(
+    sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        soft_deadline_sec=5,
         kv_recorder=rec,
     )
 
@@ -417,10 +422,9 @@ def test_no_scraping_before_the_server_is_up():
     the ready marker and the death gate most need it responsive. Boot has no
     traffic to measure anyway."""
     rec = _Recorder()
-    sk._communicate_with_soft_deadline(
+    sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        soft_deadline_sec=5,
         kv_recorder=rec,
     )
 
@@ -435,10 +439,9 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
     never enters a comparison, so the whole round aggregated to empty.
     """
     rec = _Recorder()
-    sk._communicate_with_soft_deadline(
+    sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        soft_deadline_sec=5,
         server_already_ready=True,
         kv_recorder=rec,
     )
@@ -510,10 +513,9 @@ def test_recorder_is_closed_as_aborted_when_a_gate_raises():
     """The failure a consumer cannot recover from is a window that never closed."""
     rec = _Recorder()
     with pytest.raises(sk.subprocess.TimeoutExpired):
-        sk._communicate_with_soft_deadline(
+        sk._communicate_with_watchdog(
             _HangingProc(),
             hard_timeout=0.01,
-            soft_deadline_sec=5,
             kv_recorder=rec,
         )
 
@@ -541,18 +543,19 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
         args = ["x"]
         calls = 0
 
+        def poll(self):
+            return None
+
         def communicate(self, timeout=None):
             _SlowProc.calls += 1
             if _SlowProc.calls <= 4:
                 raise sk.subprocess.TimeoutExpired(self.args, timeout)
             return ("out", "err")
 
-    sk._communicate_with_soft_deadline(
+    sk._communicate_with_watchdog(
         _SlowProc(),
         hard_timeout=60,
-        soft_deadline_sec=60,
         server_log_path=str(log_path),
-        server_dead_grace_sec=60,
         kv_recorder=rec,
     )
 
@@ -562,10 +565,9 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
 def test_no_recorder_leaves_the_loop_unchanged():
     """The default must be a strict no-op: this is a production watchdog."""
-    out = sk._communicate_with_soft_deadline(
+    out = sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        soft_deadline_sec=5,
     )
     assert out == ("out", "err")
 
@@ -616,7 +618,6 @@ def test_run_with_session_kill_produces_the_artifact(tmp_path):
         [sys.executable, "-c", "import time; time.sleep(1.2)"],
         timeout=30,
         server_log_path=str(log_path),
-        server_dead_grace_sec=30.0,
     )
 
     artifact = tmp_path / KV_ARTIFACT_NAME

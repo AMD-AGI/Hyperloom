@@ -243,7 +243,6 @@ class _BusMessage:
     topic: str
     payload: dict[str, Any]
     in_reply_to: str = ""
-    priority: int = 1
     msg_id: str = ""
 
 
@@ -261,7 +260,6 @@ class _StubBus:
                 topic=getattr(msg, "topic", ""),
                 payload=dict(getattr(msg, "payload", {}) or {}),
                 in_reply_to=getattr(msg, "in_reply_to", "") or "",
-                priority=int(getattr(msg, "priority", 1) or 1),
                 msg_id=getattr(msg, "msg_id", ""),
             )
         )

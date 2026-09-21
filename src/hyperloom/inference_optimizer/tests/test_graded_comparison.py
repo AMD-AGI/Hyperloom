@@ -20,7 +20,6 @@ from hyperloom.common.perf_metric import (
     graded_axes_of,
 )
 from hyperloom.orchestrator.state.shared_state import (
-    ANCHOR_DEGRADED,
     resolve_graded_comparison,
     resolve_grading_anchor_tput,
 )
@@ -123,25 +122,14 @@ def test_agentx_recorded_when_neither_dominates(monkeypatch):
     assert graded.verdict == VERDICT_RECORDED
 
 
-def test_a_degraded_round_stays_on_the_output_axis(monkeypatch):
-    """``ANCHOR_DEGRADED`` must not re-resolve the session anchor.
-
-    A round degrades when a KEEP cannot supply the graded axes. Passing ``None``
-    reads as "no anchor supplied" and falls back to ``current_best``, which
-    would grade later variants on interactivity against the round's opening
-    state while they stack on top of a KEEP graded on output.
-    """
+def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
+    """The resolver chokepoint must not emit KEEP on a substitute output axis."""
     _agentx(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
-    meas = _full_measurement(total=26000.0, output=190.0, intvty=30.0)
-
-    graded = resolve_graded_comparison(state, meas, anchor_perf=ANCHOR_DEGRADED, anchor_tput=185.0)
-    assert graded.objective == GRADED_OUTPUT
-    assert graded.reference == pytest.approx(185.0)
-    assert graded.degrade_reason == "round_degraded"
-
-    # None keeps the old "not supplied" meaning.
-    assert resolve_graded_comparison(state, meas, anchor_perf=None).objective == GRADED_INTVTY
+    graded = resolve_graded_comparison(state, {"output_throughput": 190.0})
+    assert graded.degrade_reason == "candidate_axes_missing"
+    assert graded.comparable is False
+    assert graded.verdict == VERDICT_REVERT
 
 
 @pytest.mark.parametrize(
@@ -170,6 +158,7 @@ def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(monkey
     assert graded.reference == pytest.approx(_ANCHOR["output_throughput"])
     assert graded.degrade_reason == "candidate_axes_missing"
     assert graded.comparable is False
+    assert graded.verdict == VERDICT_REVERT
 
 
 @pytest.mark.parametrize(
@@ -198,6 +187,7 @@ def test_an_anchor_without_the_graded_axes_degrades_both_sides_together(monkeypa
     assert graded.reference == pytest.approx(183.44)
     assert graded.degrade_reason == "current_best_axes_missing"
     assert graded.comparable is False
+    assert graded.verdict == VERDICT_REVERT
 
 
 def test_a_synthetic_run_grades_output_against_output(monkeypatch):

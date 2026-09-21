@@ -1588,7 +1588,7 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"conservative (it is added to `required`, so raising it makes "
         f"admission stricter, not looser)."
     )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json.
+    # Persist the stop reason for CI and session diagnostics.
     try:
         from hyperloom.orchestrator.state.shared_state import SharedState
         from hyperloom.orchestrator.actions.executors.report import (
@@ -1883,7 +1883,7 @@ def _preflight_unsupported_model_arch(
         f"{hit.get('signal', 'unknown architecture')}. Submit a "
         f"text-generation checkpoint instead."
     )
-    # Persist the stop reason so CI / the robustness monitor read it from state.json.
+    # Persist the stop reason for CI and session diagnostics.
     try:
         from hyperloom.orchestrator.state.shared_state import SharedState
         from hyperloom.orchestrator.actions.executors.report import (

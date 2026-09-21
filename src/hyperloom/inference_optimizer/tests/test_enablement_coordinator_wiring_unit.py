@@ -281,6 +281,7 @@ async def _queued_of_kind(fake, kind: str) -> list:
 
 def _enqueue_self(**state_kw):
     state = types.SimpleNamespace(
+        phase=state_kw.get("phase", "ENABLEMENT"),
         framework=state_kw.get("framework", "sglang"),
         model_name=state_kw.get("model_name", "zai-org/GLM-5"),
         model_path=state_kw.get("model_path", ""),
@@ -361,9 +362,10 @@ def _enqueue_self(**state_kw):
     from hyperloom.orchestrator.enablement.lane import EnablementLane
 
     for name in (
+        "_enablement_admitted",
         "_enablement_in_flight",
-        "_refused_argv_is_terminal",
-        "_environment_fault_is_terminal",
+        "_check_argv_terminal",
+        "_check_environment_terminal",
         "_environment_verdict",
         "_round_has_live_work",
         "_open_authoring_round",
@@ -628,26 +630,11 @@ async def test_no_false_stall_while_integrate_proposal_pending(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rearm_kept_is_terminal(monkeypatch):
-    fake = _enqueue_self()
+async def test_rearm_kept_opens_revalidation_window(monkeypatch):
+    fake = _enqueue_self(enablement_revalidation_generation=1)
     await _hold_round(fake, "spec-1")
     await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
-    assert fake.shared_state.enablement.succeeded is True
-    settled = await fake.rounds.get("enablement-spec-1")
-    assert settled is not None and settled.outcome == "booted"
-    # A subsequent enqueue attempt is a no-op.
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-
-
-@pytest.mark.asyncio
-async def test_rearm_kept_eval_origin_holds_for_revalidation(monkeypatch):
-    fake = _enqueue_self(enablement_origin="eval", enablement_revalidation_generation=1)
-    await _hold_round(fake, "spec-1")
-    await fake._maybe_rearm_enablement({"enablement": True, "status": "kept"})
-    # eval-origin KEEP is NOT terminal: hold succeeded, open validation window.
+    # A KEEP always opens the revalidation window; succeeded is set by promote.
     assert fake.shared_state.enablement.validation_pending is True
     assert fake.shared_state.enablement.succeeded is False
     # The authoring round is over, so the revalidation can take the machine.
@@ -702,7 +689,7 @@ async def test_revalidation_prefers_accepted_config_over_probe():
 @pytest.mark.asyncio
 async def test_revalidation_carries_active_runtime():
     """When an active runtime is recorded, its override is included in params."""
-    from hyperloom.orchestrator.framework.stack_actions import FrameworkRuntime
+    from hyperloom.orchestrator.enablement.runtime.stack_actions import FrameworkRuntime
 
     rt = FrameworkRuntime(bin_path="/attempt/bin", python_path="/attempt/bin/python", venv_root="/attempt/venv")
     fake = _enqueue_self(
@@ -788,6 +775,39 @@ async def test_rearm_kept_stores_accepted_config():
         }
     )
     assert fake.shared_state.enablement.accepted_config == effective
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make():
+    """A KEEP that observed nothing must not inherit the previous KEEP's map.
+
+    The closure and the assertion set describe the image and interpreter of the
+    KEEP that observed them, so a standing value left in place would present
+    another KEEP's evidence as this one's and read as verified.
+    """
+    fake = _enqueue_self()
+    fake.shared_state.enablement.environment_closure = {"distributions": {"torch": "2.6"}}
+    fake.shared_state.enablement.installed_versions_at_keep = {"torch": "2.6"}
+    fake.shared_state.enablement.launch_evidence = {"recipe_digest": "sha256:old"}
+
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
+
+    assert fake.shared_state.enablement.environment_closure == {}
+    assert fake.shared_state.enablement.installed_versions_at_keep == {}
+    assert fake.shared_state.enablement.launch_evidence == {}
+
+
+@pytest.mark.asyncio
+async def test_rearm_kept_leaves_the_accepted_stack_records_a_round_did_not_touch():
+    """Stack identity accumulates: a round contributing none clears none."""
+    fake = _enqueue_self()
+    fake.shared_state.enablement.roots = [{"id": "r1", "path": "/fr"}]
+    fake.shared_state.enablement.base_sha = "a" * 40
+
+    await fake._maybe_rearm_enablement({"status": "kept", "enablement": True, "specialist_task_id": "spec-1"})
+
+    assert fake.shared_state.enablement.roots == [{"id": "r1", "path": "/fr"}]
+    assert fake.shared_state.enablement.base_sha == "a" * 40
 
 
 @pytest.mark.asyncio
@@ -942,74 +962,12 @@ async def test_rearm_kept_stacks_setup_commands(monkeypatch):
             "setup_commands_applied": ["apt-get install -y gh", "pip install vllm==0.24"],
         }
     )
-    assert fake.shared_state.enablement.succeeded is True
+    assert fake.shared_state.enablement.validation_pending is True
+    assert fake.shared_state.enablement.succeeded is False
     assert fake.shared_state.enablement.setup_commands == [
         "apt-get install -y gh",
         "pip install vllm==0.24",
     ]
-
-
-def test_enablement_close_guard_blocks_premature_skip_to_close():
-    """Q2: pre-enablement (baseline never established) the close guard is active."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.phase = "PRELUDE"
-    s.baseline_tput = 0.0
-    s.enablement.succeeded = False
-    assert s.enablement_close_guard_active() is True
-    # Once a baseline exists, or enablement succeeded, the guard lifts.
-    s.baseline_tput = 100.0
-    assert s.enablement_close_guard_active() is False
-    s.baseline_tput = 0.0
-    s.enablement.succeeded = True
-    assert s.enablement_close_guard_active() is False
-
-
-def test_enablement_close_guard_active_during_validation_pending():
-    """An eval-origin KEEP awaiting revalidation must keep the guard active even if a stale positive tput is present."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.phase = "SWEEP"
-    s.baseline_tput = 100.0
-    s.enablement.succeeded = False
-    s.enablement.validation_pending = True
-    assert s.enablement_close_guard_active() is True
-    s.enablement.validation_pending = False
-    assert s.enablement_close_guard_active() is False
-
-
-def test_the_close_guard_stops_dropping_skip_to_close_once_its_bound_is_spent():
-    """The guard may delay a close; it may not be the reason one never happens.
-
-    Every input the guard reads is set by one path and cleared by several, so a
-    missed clear would otherwise leave it the sole authority refusing the last
-    exit a run that cannot be promoted has.
-    """
-    from hyperloom.orchestrator.state.shared_state import (
-        MAX_SKIP_TO_CLOSE_SUPPRESSIONS,
-        SharedState,
-    )
-
-    for phase, tput, pending in (("PRELUDE", 0.0, False), ("SWEEP", 100.0, True)):
-        s = SharedState()
-        s.phase = phase
-        s.baseline_tput = tput
-        s.enablement.succeeded = False
-        s.enablement.validation_pending = pending
-        assert s.enablement_close_guard_active() is True
-        s.enablement.skip_to_close_suppressions = MAX_SKIP_TO_CLOSE_SUPPRESSIONS
-        assert s.enablement_close_guard_active() is False, f"{phase} latched past its bound"
-
-
-def test_the_suppression_count_survives_a_resume():
-    """A bound that reset on load would let a resumed session latch again."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    s = SharedState()
-    s.enablement.skip_to_close_suppressions = 3
-    assert SharedState.from_dict(s.to_dict()).enablement.skip_to_close_suppressions == 3
 
 
 def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch):
@@ -1069,21 +1027,14 @@ async def test_enqueue_noop_when_already_dispatched(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_noop_when_baseline_runnable(monkeypatch):
+async def test_enqueue_noop_when_not_in_enablement_phase(monkeypatch):
+    """The pump phase-gates: outside ENABLEMENT it no-ops immediately."""
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(baseline_tput=1234.0)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
-
-
-@pytest.mark.asyncio
-async def test_enqueue_noop_when_no_failure_streak(monkeypatch):
-    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
-
-    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
-    fake = _enqueue_self(baseline_failure_streak=0)
-    assert await Coordinator._maybe_enqueue_enablement_specialist(fake) == ""
+    fake = _enqueue_self(phase="PRELUDE")
+    assert await Coordinator._pump_enablement_safely(fake, caller="test") is None
+    assert await _queued_of_kind(fake, "specialist") == []
 
 
 @pytest.mark.asyncio
@@ -1254,7 +1205,7 @@ def _make_coord_with_phase(session_dir) -> "Coordinator":
         turns=[],
         default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"}),
     )
-    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic", "robustness")}
+    backends = {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
     return Coordinator(session_dir, backends=backends)
 
 
@@ -1473,3 +1424,37 @@ async def test_rearm_advanced_deduplicates_artifacts(monkeypatch):
         }
     )
     assert len(fake.shared_state.enablement.kept_artifacts) == 1
+
+
+@pytest.mark.parametrize(
+    "status,accepted",
+    [("kept", True), ("apply_failed", False), ("no_patches", False), ("reverted", False)],
+)
+async def test_rearm_records_the_rounds_disposition_on_the_executions_it_performed(status, accepted):
+    """Only the accepted round's applied commands reach the validated launch.
+
+    A discarded round still mutated the shared venv, so its rows stay in the
+    ledger carrying the outcome the lane reported for them.
+    """
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+
+    fake = _enqueue_self()
+    fake.shared_state.enablement.setup_executions = [
+        build_execution_row(
+            seq=1,
+            round_task_id="spec-1",
+            cmd_index=0,
+            cmd="pip install -U transformers",
+            source="proposed",
+            outcome="applied",
+            env={},
+            fs_root="/nonexistent-probe-root",
+        )
+    ]
+    await fake._maybe_rearm_enablement(
+        {"enablement": True, "status": status, "specialist_task_id": "spec-1", "patches_applied": []}
+    )
+    row = fake.shared_state.enablement.setup_executions[0]
+    assert row["round_disposition"] == status
+    assert row["at_accepted_round"] is accepted
+    assert row["present_at_final_launch"] is accepted

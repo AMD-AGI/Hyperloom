@@ -27,61 +27,15 @@ def conn(tmp_path):
     db.close()
 
 
-# TaskRegistry.reclaim_expired_running (watchdog)
 @pytest.mark.asyncio
-async def test_reclaim_expired_running_orphan(conn):
+@pytest.mark.parametrize("ttl", [0, 60, 600])
+async def test_old_running_rows_without_death_evidence_are_retained(conn, ttl):
     reg = TaskRegistry(conn)
-    t = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="k1",
-        lease_ttl_sec=60,
-    )
-    await reg.transition(t.task_id, "running")
-    future = datetime.now(timezone.utc).timestamp() + 10_000
-    reclaimed = await reg.reclaim_expired_running(now_unix=future)
-    assert reclaimed == [t.task_id]
-    assert (await reg.get(t.task_id)).state == "failed"
-    assert await reg.reclaim_expired_running(now_unix=future) == []
-
-
-@pytest.mark.asyncio
-async def test_reclaim_leaves_fresh_and_no_ttl_running(conn):
-    reg = TaskRegistry(conn)
-    fresh = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="fresh",
-        lease_ttl_sec=600,
-    )
-    await reg.transition(fresh.task_id, "running")
-    no_ttl = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="nottl",
-        lease_ttl_sec=0,
-    )
-    await reg.transition(no_ttl.task_id, "running")
-    future = datetime.now(timezone.utc).timestamp() + 10_000
-    reclaimed = await reg.reclaim_expired_running(now_unix=future)
-    assert fresh.task_id in reclaimed
-    assert no_ttl.task_id not in reclaimed
-    assert (await reg.get(no_ttl.task_id)).state == "running"
-
-
-@pytest.mark.asyncio
-async def test_reclaim_respects_lease_window(conn):
-    reg = TaskRegistry(conn)
-    t = await reg.create(
-        kind="bench",
-        params={},
-        idempotency_key="k",
-        lease_ttl_sec=600,
-    )
-    await reg.transition(t.task_id, "running")
-    soon = datetime.now(timezone.utc).timestamp() + 10
-    assert await reg.reclaim_expired_running(now_unix=soon) == []
-    assert (await reg.get(t.task_id)).state == "running"
+    task = await reg.create(kind="bench", params={}, idempotency_key="old", lease_ttl_sec=ttl)
+    await reg.transition(task.task_id, "running")
+    await conn.execute("UPDATE tasks SET updated_at='2020-01-01T00:00:00+00:00'")
+    assert await reg.reclaim_dead_running() == []
+    assert (await reg.get(task.task_id)).state == "running"
 
 
 # cycle-boundary soft restart
@@ -96,7 +50,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles import (
         MockBackend,
         MockCriticBackend,
-        MockRobustnessBackend,
         ScriptedPlan,
     )
     from .conftest import seed_target_analysis_marker
@@ -106,7 +59,6 @@ def cyclic_coordinator(tmp_path, monkeypatch):
     backends = {
         "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
         "critic": MockCriticBackend(),
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(sd, backends=backends)
     yield c
@@ -145,7 +97,7 @@ async def test_soft_restart_runs_at_loopback(cyclic_coordinator):
 
     assert st.phase == ps.PHASE_FRAMEWORK_AGENT
     assert st.macro_cycle == 1
-    assert (await c.tasks.get(t.task_id)).state == "failed"
+    assert (await c.tasks.get(t.task_id)).state == "running"
 
 
 @pytest.mark.asyncio
@@ -437,7 +389,6 @@ async def _build_minimal_coord(tmp_path: Path, monkeypatch):
     backends = {
         "orchestration": MockBackend(idle_plan),
         "critic": MockBackend(idle_plan),
-        "robustness": MockBackend(idle_plan),
     }
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from .conftest import seed_target_analysis_marker
@@ -491,9 +442,7 @@ async def test_pump_reclaims_expired_running_task(tmp_path: Path, monkeypatch):
 
     await coord._pump_dispatcher_once()
 
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed", (
-        "orphaned expired-running task must be failed by the pump"
-    )
+    assert (await coord.tasks.get(orphan.task_id)).state == "running", "age alone cannot establish worker death"
     assert (await coord.tasks.get(live.task_id)).state == "running", "in-window running task must not be reclaimed"
     assert (await coord.tasks.get(no_ttl.task_id)).state == "running", "no-TTL running task must never be reclaimed"
 
@@ -517,7 +466,7 @@ async def test_pump_reclaim_idempotent(tmp_path: Path, monkeypatch):
     )
 
     await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
+    assert (await coord.tasks.get(orphan.task_id)).state == "running"
 
     await coord._pump_dispatcher_once()
-    assert (await coord.tasks.get(orphan.task_id)).state == "failed"
+    assert (await coord.tasks.get(orphan.task_id)).state == "running"
