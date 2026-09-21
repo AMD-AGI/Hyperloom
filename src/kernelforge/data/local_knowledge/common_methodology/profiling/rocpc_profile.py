@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import glob
+import importlib.util
 import os
 import shutil
 import signal
@@ -13,9 +14,21 @@ import subprocess
 import sys
 
 
+def _rocm_profiler_wheel_roots() -> list[str]:
+    """Roots of TheRock's `_rocm_profiler` wheel, which carries the profiler on
+    pip-packaged ROCm; there ROCM_PATH points at the separate `_rocm_sdk_devel`."""
+    try:
+        spec = importlib.util.find_spec("_rocm_profiler")
+    except Exception:  # noqa: BLE001
+        return []
+    return list(getattr(spec, "submodule_search_locations", None) or [])
+
+
 def _resolve_libexec() -> str | None:
     """Locate the rocprofiler-compute install dir (holds rocprof_compute_base.py)."""
-    for root in (os.environ.get("ROCM_PATH", "").strip(), "/opt/rocm"):
+    roots = [os.environ.get("ROCM_PATH", "").strip(), "/opt/rocm"]
+    roots.extend(_rocm_profiler_wheel_roots())
+    for root in roots:
         if not root:
             continue
         d = os.path.join(root, "libexec", "rocprofiler-compute")
@@ -29,11 +42,67 @@ def _python_can_run_rocpc(python: str, libexec: str) -> bool:
     try:
         p = subprocess.run(
             [python, os.path.join(libexec, "rocprof-compute"), "--help"],
-            capture_output=True, timeout=60,
+            capture_output=True,
+            timeout=60,
         )
         return p.returncode == 0
     except Exception:  # noqa: BLE001
         return False
+
+
+def _rocm_profiler_runtime_root() -> str | None:
+    """ROCm tree holding the profiler's own rocprofiler-sdk libraries.
+
+    Pip-packaged ROCm splits these across wheels: the runtime-only stack ships
+    only _rocm_sdk_core and leaves ROCM_PATH unset, and rocprof-compute then
+    cannot resolve its sdk tool and aborts before profiling anything.
+    """
+    current = os.environ.get("ROCM_PATH", "").strip()
+    if current and os.path.isdir(os.path.join(current, "lib", "rocprofiler-sdk")):
+        return current
+    for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except Exception:  # noqa: BLE001
+            continue
+        for root in list(getattr(spec, "submodule_search_locations", None) or []):
+            if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
+                return root
+    return None
+
+
+def _profiler_env() -> dict:
+    """Environment rocprof-compute needs on a pip-packaged ROCm stack."""
+    env = dict(os.environ)
+    root = _rocm_profiler_runtime_root()
+    if not root:
+        return env
+    env["ROCM_PATH"] = root
+    # amdsmi ships inside the SDK wheel rather than on sys.path. The PyPI build
+    # cannot stand in: it is ROCm 7 era and resolves libamd_smi.so under
+    # /opt/rocm, which does not exist on this layout.
+    amdsmi = os.path.join(root, "share", "amd_smi")
+    if os.path.isdir(amdsmi):
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (amdsmi, env.get("PYTHONPATH", "")) if p)
+    return env
+
+
+def _rocpc_venv_python() -> str:
+    """Interpreter of the private venv install.sh builds for analyze mode."""
+    return os.path.join(os.environ.get("ROCPC_VENV", "").strip() or "/opt/rocprof-compute-venv", "bin", "python")
+
+
+def _analyze_python(libexec: str) -> str | None:
+    """Interpreter to run `analyze` under.
+
+    Analyze gates on the exact pins in the tool's own requirements.txt; meeting
+    them in the serving image would pull numpy and pandas out from under torch,
+    so install.sh puts them in a private venv. Falls back when it is absent.
+    """
+    venv_python = _rocpc_venv_python()
+    if os.access(venv_python, os.X_OK):
+        return venv_python
+    return _detect_rocpc_python(libexec)
 
 
 def _detect_rocpc_python(libexec: str) -> str | None:
@@ -47,6 +116,41 @@ def _detect_rocpc_python(libexec: str) -> str | None:
         if _python_can_run_rocpc(py, libexec):
             return py
     return None
+
+
+def _torch_import_under_rocprofv3(driver_python: str) -> tuple[bool, str]:
+    """Fast check for images where rocprofv3 and torch cannot share a process."""
+    rocprofv3 = shutil.which("rocprofv3", path=_profiler_env().get("PATH")) or shutil.which("rocprofv3")
+    if not rocprofv3:
+        return True, ""
+    try:
+        p = subprocess.run(
+            [
+                rocprofv3,
+                "--hip-trace",
+                "--",
+                driver_python,
+                "-c",
+                "import torch; print('rocprofv3 torch import ok')",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            env=_profiler_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "rocprofv3 timed out while importing torch; this image cannot be profiled safely"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"rocprofv3 torch-import preflight failed: {exc}"
+    output = f"{p.stdout}{p.stderr}"
+    if p.returncode == 0:
+        return True, ""
+    if "spirv-expand-step" in output or "inconsistency in registered CommandLine options" in output:
+        return (
+            False,
+            "rocprofv3 and torch collide in LLVM option registry (spirv-expand-step registered more than once)",
+        )
+    return False, output[-1000:] or f"rocprofv3 torch-import preflight exited {p.returncode}"
 
 
 # The in-flight rocprof-compute child, so an external SIGTERM (e.g. the agent's Bash `timeout`) can reap its whole
@@ -68,7 +172,7 @@ def _descendant_pids(root_pid: int) -> list[int]:
         try:
             with open(f"/proc/{pid}/stat") as f:
                 stat = f.read()
-            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+            ppid = int(stat[stat.rindex(")") + 2 :].split()[1])
         except (OSError, ValueError, IndexError):
             continue
         children.setdefault(ppid, []).append(pid)
@@ -107,8 +211,13 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
     global _CURRENT_PROC
     cmd = [rocpc_python, os.path.join(libexec, "rocprof-compute"), *native]
     proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        env=_profiler_env(),
     )
     _CURRENT_PROC = proc
     try:
@@ -146,10 +255,19 @@ def main() -> int:
         return 3
     rocpc_python = _detect_rocpc_python(libexec)
     if not rocpc_python:
-        print("rocprof-compute is installed, but its Python deps are not available in any detected "
-              "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling.")
-        print("To enable it, install the forge-profiling extra (pip install -e \".[forge-profiling]\") — or "
-              f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them.")
+        print(
+            "rocprof-compute is installed, but its Python deps are not available in any detected "
+            "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling."
+        )
+        print(
+            'To enable it, install the forge-profiling extra (pip install -e ".[forge-profiling]") — or '
+            f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them."
+        )
+        return 3
+    ok, msg = _torch_import_under_rocprofv3(driver_python)
+    if not ok:
+        print("rocprofv3 cannot profile this image's torch runtime — skipping profiling.")
+        print(msg)
         return 3
 
     out = a.out or os.path.join(os.getcwd(), "forge_profile")
@@ -164,8 +282,10 @@ def main() -> int:
     if rc != 0:
         # Deps were already verified by _detect_rocpc_python, so a failure here is almost always the driver: it
         # crashed or launched no GPU kernel.
-        print("PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
-              "launched no GPU kernel — see its traceback in the tail below.")
+        print(
+            "PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
+            "launched no GPU kernel — see its traceback in the tail below."
+        )
         print("--- rocprof-compute output tail ---")
         print(log[-1800:])
         return 1
@@ -182,7 +302,7 @@ def main() -> int:
     an = ["analyze", "-p", workload, "-b", *blocks, "--max-stat-num", "6"]
     if a.kernel:
         an += ["-k", a.kernel]
-    rc, report = _run(rocpc_python, libexec, an, timeout=300)
+    rc, report = _run(_analyze_python(libexec) or rocpc_python, libexec, an, timeout=300)
     if rc != 0:
         print("ANALYZE FAILED.")
         print(report[-1500:])
@@ -190,12 +310,16 @@ def main() -> int:
 
     print(report)
     print(f"\nRaw counters + workload kept under: {workload}")
-    print("How to interpret: read measure_triage.md and measure_roofline.md "
-          "(same folder) — the '% of Peak' column is distance-to-ceiling; with --roofline, "
-          "the Roofline section gives arithmetic intensity + distance-to-roof.")
+    print(
+        "How to interpret: read measure_triage.md and measure_roofline.md "
+        "(same folder) — the '% of Peak' column is distance-to-ceiling; with --roofline, "
+        "the Roofline section gives arithmetic intensity + distance-to-roof."
+    )
     if not a.kernel:
-        print("Tip: to isolate YOUR kernel, find its index in the 'Top Stats' table above and "
-              "re-run with --kernel <index>.")
+        print(
+            "Tip: to isolate YOUR kernel, find its index in the 'Top Stats' table above and "
+            "re-run with --kernel <index>."
+        )
     return 0
 
 
