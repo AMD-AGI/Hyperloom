@@ -603,6 +603,7 @@ class FrameworkEventRecorder:
             "patch_source",
             "patch_path",
             "reasoning",
+            "reasoning_origin",
         ):
             if name in fields:
                 row[name] = str(fields.get(name) or "")
@@ -654,6 +655,7 @@ class FrameworkEventRecorder:
             row["failure"] = {
                 "error_class": str(failure.get("error_class") or ""),
                 "error_excerpt": str(failure.get("error_excerpt") or ""),
+                "attribution": str(failure.get("attribution") or ""),
             }
         if "artifacts" in fields:
             artifacts = _as_dict(fields.get("artifacts"))

@@ -55,6 +55,14 @@ _TERMINAL_OUTCOMES = {
     "REVERTED",
 }
 _FAILED_OUTCOMES = {"FAILED", "KILLED_OVERTIME"}
+_CANDIDATE_FAILURE_ATTRIBUTION = "candidate_caused"
+_ACTION_TIME_REASONING_PREFIXES = (
+    "action_payload.",
+    "action_params.",
+    "candidate.",
+    "generated_variant.",
+    "proposal.",
+)
 _SECRET_ARG_RE = re.compile(
     r"(?i)(?:^|\s)--?[^\s=]*(?:api[-_]?key|token|secret|password|credential)"
     r"(?:=|\s)"
@@ -77,6 +85,7 @@ class ProjectedAttempt:
     baseline_configuration: dict[str, Any]
     baseline_value: float
     reasoning: str
+    reasoning_origin: str
     change_family: str
     change_fingerprint: str
     change_summary: str
@@ -85,6 +94,7 @@ class ProjectedAttempt:
     decision: str
     outcome_value: float | None
     error_class: str
+    failure_attribution: str
     constraints: tuple[tuple[str, bool, Any], ...]
     reflection: str
     provenance_extra: dict[str, Any]
@@ -97,12 +107,14 @@ class ProjectedAttempt:
             "baseline_identity": dict(self.baseline_identity),
             "baseline_configuration": dict(self.baseline_configuration),
             "baseline_value": self.baseline_value,
+            "reasoning_origin": self.reasoning_origin,
             "change_identity": {
                 "change_family": self.change_family,
                 "change_fingerprint": self.change_fingerprint,
             },
             "decision": self.decision,
             "outcome_value": self.outcome_value,
+            "failure_attribution": self.failure_attribution,
             "constraints": [
                 {"name": name, "passed": passed, "value": value} for name, passed, value in self.constraints
             ],
@@ -232,12 +244,25 @@ def _event_id(event: Mapping[str, Any]) -> str:
     return _text(event.get("event") or event.get("event_id") or event.get("id"))
 
 
-def _reasoning(attempt: Mapping[str, Any], proposal: Mapping[str, Any]) -> str:
-    value = _text(attempt.get("reasoning") or proposal.get("reasoning"))
+def _reasoning(attempt: Mapping[str, Any], proposal: Mapping[str, Any]) -> tuple[str, str]:
+    attempt_value = _text(attempt.get("reasoning"))
+    attempt_origin = _text(attempt.get("reasoning_origin"))
+    proposal_value = _text(proposal.get("reasoning"))
+    if attempt_value and any(attempt_origin.startswith(prefix) for prefix in _ACTION_TIME_REASONING_PREFIXES):
+        value = attempt_value
+        origin = attempt_origin
+    elif proposal_value:
+        value = proposal_value
+        origin = "proposal.reasoning"
+    else:
+        value = attempt_value
+        origin = attempt_origin
     normalized = re.sub(r"\s+", " ", value).strip()
     if len(normalized) < 20 or normalized.lower().rstrip(".") in _GENERIC_REASONING:
         raise ProjectionError("decision reasoning is missing or non-specific")
-    return normalized
+    if not any(origin.startswith(prefix) for prefix in _ACTION_TIME_REASONING_PREFIXES):
+        raise ProjectionError("decision reasoning is not traceable to the action-time proposal")
+    return normalized, origin
 
 
 def _canonical_json(value: Any) -> str:
@@ -431,7 +456,7 @@ def _change(
     )
 
 
-def _decision(attempt: Mapping[str, Any]) -> tuple[str, float | None, str]:
+def _decision(attempt: Mapping[str, Any]) -> tuple[str, float | None, str, str]:
     outcome = _text(attempt.get("outcome") or attempt.get("decision")).upper()
     if outcome not in _TERMINAL_OUTCOMES:
         raise ProjectionError("attempt has no supported terminal outcome")
@@ -446,15 +471,20 @@ def _decision(attempt: Mapping[str, Any]) -> tuple[str, float | None, str]:
             failure.get("error_class") or outcome.lower(),
             name="failure.error_class",
         )
-        return "failed", after, error_class
+        attribution = _text(failure.get("attribution")).lower()
+        if attribution != _CANDIDATE_FAILURE_ATTRIBUTION:
+            raise ProjectionError(
+                f"failed attempt is not candidate-attributed (failure_attribution={attribution or 'missing'})"
+            )
+        return "failed", after, error_class, attribution
     if after is None or after <= 0:
         raise ProjectionError("measured attempt has no valid after_tput")
     if outcome in {"KEEP", "KEPT"}:
         accuracy = _mapping(attempt.get("accuracy"))
         if accuracy.get("required") is True and accuracy.get("passed") is not True:
             raise ProjectionError("kept attempt did not pass required accuracy")
-        return "keep", after, ""
-    return "revert", after, ""
+        return "keep", after, "", ""
+    return "revert", after, "", ""
 
 
 def _constraints(attempt: Mapping[str, Any]) -> tuple[tuple[str, bool, Any], ...]:
@@ -494,13 +524,13 @@ def _project(
     if baseline is None or baseline <= 0:
         raise ProjectionError("attempt has no valid measured baseline")
     baseline_configuration = _baseline_configuration(attempt)
-    reasoning = _reasoning(attempt, proposal)
+    reasoning, reasoning_origin = _reasoning(attempt, proposal)
     family, fingerprint, summary, content, resource_refs = _change(
         attempt,
         proposal,
         session_dir,
     )
-    decision, outcome_value, error_class = _decision(attempt)
+    decision, outcome_value, error_class, failure_attribution = _decision(attempt)
     constraints = _constraints(attempt)
     facts = {
         "attempt_id": attempt_id,
@@ -524,6 +554,7 @@ def _project(
         baseline_configuration=baseline_configuration,
         baseline_value=baseline,
         reasoning=reasoning,
+        reasoning_origin=reasoning_origin,
         change_family=family,
         change_fingerprint=fingerprint,
         change_summary=summary,
@@ -532,6 +563,7 @@ def _project(
         decision=decision,
         outcome_value=outcome_value,
         error_class=error_class,
+        failure_attribution=failure_attribution,
         constraints=constraints,
         reflection="Recorded outcome: " + _canonical_json(facts),
         provenance_extra={
@@ -539,10 +571,14 @@ def _project(
             "framework_event_id": _event_id(event),
             "arm": _text(attempt.get("arm")),
             "proposal_ref": _text(attempt.get("proposal_ref")),
+            "action_ref": _text(attempt.get("proposal_ref") or attempt.get("task_id")),
+            "reasoning_origin": reasoning_origin,
             "round_id": _text(attempt.get("round_id")),
             "variant_name": _text(attempt.get("variant_name")),
             "validation_basis": _text(attempt.get("validation_basis")),
             "reflection_source": "deterministic_outcome_summary",
+            "failure_attribution": failure_attribution,
+            "failure_stage": _text(attempt.get("stage")),
         },
     )
 
