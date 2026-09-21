@@ -18,6 +18,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
 
+### Added
+
+- **An enablement session now ships an ordered replay recipe, and a verdict on
+  whether it can be replayed at all.** The session's durable state said what was
+  kept and nothing about how to reproduce it: an operator holding a KEEP had a
+  list of patches, no order to apply them in, no record of which tree each was
+  written against, and no way to tell a complete stack from one whose evidence
+  was never captured.
+
+  `recipe_steps` projects the state onto an ordered array — setup, build, patch —
+  each step naming the root it applies to, the targets its own diff declares and
+  the identity of what each install consumed. `replay_sufficiency` judges that
+  array and reports `sufficient` or `insufficient` against a closed vocabulary of
+  reasons, each naming what it blocks: replay, assertion validation, or both. A
+  patch whose targets nobody recorded, a build nothing replayed, a root with no
+  base commit and a credential the recipe cannot supply are all refusals, not
+  assumptions. Both appear in `session_breakdown.json` under `enablement.recipe`,
+  and the session package now carries the KEEP's source overlay the steps
+  reference, so a `sufficient` recipe does not ship with its own evidence
+  missing.
+
+  The KEEP records what the two need: each root's identity and base commit taken
+  before the round's first mutation, byte-exact snapshots of every declared
+  target, the environment closure and installed versions read through the
+  interpreter the accepted bench launched, and an append-only ledger of the setup
+  commands as they ran. Credentials are classified and sanitised on emission.
+
+- **`ray.init`'s connect is bounded.** It had no timeout at all, so an
+  unreachable head node hung the leg until the session clock ran out instead of
+  failing it.
+
 ### Changed
 
 - **Session breakdown timeline events now name what they used to lose.** A
@@ -36,6 +67,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   cannot drift silently again.
 
 ### Fixed
+
+- **KernelForge results could be lost or integrated in the wrong order.** KB
+  warm-start commits now force only their approved pathspecs, so tracked files
+  matched by a repository's ignore rules cannot reject the whole commit. Task
+  preparation stages tracked edits and only newly created files, preventing
+  pre-existing JIT caches and generated artifacts from leaking into exported
+  patches. Forge-loop stdout and stderr are retained beside each task result,
+  and Controller patches are integrated by `task.json.priority` rather than
+  encoded directory-name order so cumulative E2E validation follows the
+  opportunity analyst's ordering.
 
 - **Timeline close paths can no longer raise into the loop on a broken spool.**
   After the recorder boundary narrowing, several event `finish` / `_close`

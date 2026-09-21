@@ -1133,6 +1133,7 @@ class V6EnablementExt(TypedDict, total=False):
     human_review: dict[str, Any]
     result: dict[str, Any] | None
     failure: V6Failure | None
+    recipe: dict[str, Any] | None
 
 
 class V6PhaseSegment(TypedDict, total=False):

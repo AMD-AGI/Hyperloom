@@ -914,6 +914,21 @@ def _git_untracked(workspace: Path) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
+def _stage_preparation_changes(workspace: Path, pre_untracked: set[str]) -> tuple[int, str]:
+    """Stage tracked edits and only untracked files created by preparation."""
+    code, output = _git(workspace, "add", "-u", "--", ".")
+    if code != 0:
+        return code, output
+    created = sorted(
+        path
+        for path in (_git_untracked(workspace) - pre_untracked)
+        if path != "forge_experiments" and not path.startswith("forge_experiments/")
+    )
+    if not created:
+        return 0, output
+    return _git(workspace, "add", "--", *created)
+
+
 def _git_indexed(workspace: Path, path: Path) -> bool | None:
     """Whether ``path`` is in the workspace's index, i.e. will be committed."""
     try:
@@ -1921,7 +1936,19 @@ async def prepare_task(
             )
 
         # In-repository task scaffolding must become part of pristine before IterationLoop captures its base SHA.
-        _git(workspace, "add", "-A", "--", ".", ":(exclude)forge_experiments")
+        stage_code, stage_out = _stage_preparation_changes(workspace, pre_untracked)
+        if stage_code != 0:
+            _rollback()
+            return PrepareResult(
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=True,
+                final_preflight=pf,
+                message=f"could not stage prepared task files: {stage_out.strip()[-200:]}",
+                audit_dir=audit_dir_str,
+            )
         # The driver is about to become pristine; anything it reads at runtime has to become pristine with it.
         spec_indexed = None if spec_path is None else _git_indexed(workspace, spec_path)
         if spec_path is not None and spec_indexed is not True:

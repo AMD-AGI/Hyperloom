@@ -93,6 +93,7 @@ from ._agentx_timeouts import (
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
 )
 from ._workload_envs import (
+    _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     agentx_active,
@@ -108,7 +109,7 @@ from ._inferencex_patcher import (
     failed_patch_anchors,
     failed_patch_anchors_in,
 )
-from ._magpie_patcher import ensure_eval_concurrency_compat
+from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text as _patch_touched_paths,
@@ -1689,6 +1690,39 @@ class BaselineExecutor:
         return float(params.get("timeout_sec") or self.default_timeout_sec)
 
     @staticmethod
+    def _client_script_from_config(config_path: Path) -> str | None:
+        """Name the client script this round will run, or ``None`` if unknown.
+
+        Magpie selects ``<framework>_<runner_type>.sh``. Naming it keeps the
+        tokenizer check to the script that matters: the multimodal variants carry
+        the same ``--result-dir`` marker with a different client call, and judging
+        them would let an unrelated shape veto a workload whose own script is fine.
+        """
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return None
+        bench = (cfg.get("benchmark") if isinstance(cfg, dict) else {}) or {}
+        override = str(bench.get("benchmark_script") or "").strip()
+        if override:
+            return override
+        framework = str(bench.get("framework") or "").strip().lower()
+        runner = str(bench.get("runner_type") or "").strip().lower()
+        if not framework or not runner:
+            return None
+        return f"{framework}_{runner}.sh"
+
+    @staticmethod
+    def _model_from_config(config_path: Path) -> str:
+        """Read the benchmark model path out of the materialized config."""
+        try:
+            cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            return ""
+        bench = cfg.get("benchmark") if isinstance(cfg, dict) else {}
+        return str((bench or {}).get("model") or "").strip()
+
+    @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
         """Resolve the InferenceX checkout the subprocess will ``cd`` into."""
         try:
@@ -1709,6 +1743,37 @@ class BaselineExecutor:
         if ix_root:
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
+        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
+        # client, which runs whether or not lm-eval does. Independent of the fail-soft
+        # eval-concurrency result: a missing tokenizer hook is
+        # fatal only for a model whose tokenizer has to be named, and for that model it is
+        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
+        # no throughput result, and the round is graded a boot failure with the server serving.
+        tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
+        if tok_mode:
+            try:
+                hook_ok = ensure_client_tokenizer_hook(
+                    inferencex_dir=ix_root or None,
+                    script_name=self._client_script_from_config(config_path),
+                )
+            except OSError as exc:
+                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
+                hook_ok = False
+            if not hook_ok:
+                msg = (
+                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
+                    f"the hook could not be installed in InferenceX's benchmark scripts "
+                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+                    "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
+                    "would die before issuing a request and the round would be graded a boot "
+                    "failure with the server up."
+                )
+                log.error("baseline_executor: %s", msg)
+                return {
+                    "status": "failed",
+                    "error_class": "client_tokenizer_unpatchable",
+                    "error": msg,
+                }
         if not materialized_run_eval_disabled(config_path):
             # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
             # rather than failing every eval run.
@@ -2254,6 +2319,28 @@ class BaselineExecutor:
         state = self._resolve_shared_state(extra.get("shared_state"))
         return bool(getattr(state, "eval_disabled", False))
 
+    @staticmethod
+    def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
+        """The server's dying words, for a round that reached the accuracy stop without a reference.
+
+        A round whose server dies *after* the throughput benchmark still reports
+        ``succeeded`` -- the numbers were already measured. The accuracy eval then runs,
+        per the round script, against a port nobody is listening on: every request is
+        refused, no ``results*.json`` is written, and the session stops for a missing
+        accuracy reference under a message that blames the baseline setup, which is the
+        one thing that was not wrong.
+
+        The marker this returns proves only that the server died somewhere in that log,
+        never that it died before the eval or that it is why the reference is missing --
+        so callers must report it as evidence to read, not as an established cause.
+        """
+        path = str(result.get("server_log_path") or "").strip()
+        if not path:
+            return ""
+        # ``server_log_death_excerpt`` already answers ``None`` for a log it cannot read,
+        # so an unreadable path is simply "no death on record" -- no guard of our own.
+        return server_log_death_excerpt(path) or ""
+
     def _eval_enablement_active(self, ctx: RunnerContext) -> bool:
         """Whether an eval failure should route into enablement this run."""
         from ._accuracy_gate import eval_enablement_allowed
@@ -2455,9 +2542,23 @@ class BaselineExecutor:
                 kind,
             )
             return
+        # Only a *missing* reference can be explained by a dead server. A measured zero -- including one salvaged
+        # from a sibling attempt -- means the eval did run and did write its results, so blaming the death here would
+        # state the opposite of what the artifacts show, however dead the server later became.
+        death = self._accuracy_stop_death_evidence(result) if acc is None else ""
+        if death:
+            log.error(
+                "baseline_executor: no accuracy reference, and this round's server.log "
+                "records a fatal engine death. The marker carries no ordering against "
+                "the eval, so the two are not established to be the same failure -- but "
+                "a broken setup is no longer the only suspect, and this is the excerpt "
+                "to read before looking at any config:\n%s",
+                death,
+            )
         request_baseline_accuracy_stop(
             shared_state,
-            context=f"baseline:{framework or 'unknown'}",
+            context=f"baseline:{framework or 'unknown'}{':server_died' if death else ''}",
+            cause="no accuracy result, and a fatal engine death on record for this round" if death else "",
         )
 
     def _apply_salvaged_accuracy(
