@@ -136,6 +136,19 @@ class _InflightAction(NamedTuple):
     scope: CancelScope
 
 
+def _lanes_for_delta_shape(done_payload: dict[str, Any] | None) -> tuple[str, ...]:
+    """Return the extra lanes required by the delta shape a specialist returned.
+
+    A config-only deliverable needs no workspace mutation lane. A patch or
+    artifact deliverable writes into the framework tree, so it does.
+    """
+    if not isinstance(done_payload, dict):
+        return ()
+    if done_payload.get("patches_written") or done_payload.get("artifacts_written"):
+        return ("workspace_mutation",)
+    return ()
+
+
 class DispatcherCollaborator:
     """Extracted collaborator; delegates unknown attrs to its Coordinator."""
 

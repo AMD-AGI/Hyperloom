@@ -36,11 +36,14 @@ def coord(session_dir) -> Coordinator:
 
 
 # _framework_config_levers_from_done
-def test_config_levers_non_dict_and_patch_precedence() -> None:
+def test_config_levers_non_dict_and_missing() -> None:
     f = coord_mod._framework_config_levers_from_done
     assert f(None) == {}
-    # A patch deliverable is not a config-only outcome.
-    assert f({"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}) == {}
+    # A patch takes precedence over a lever that merely accompanies it, unless the
+    # lane says the pair is inseparable.
+    patched = {"patches_written": ["a.patch"], "proposal_set": [{"extra_envs": {"X": "1"}}]}
+    assert f(patched) == {}
+    assert f(patched, levers_ride_with_patches=True).get("extra_envs") == {"X": "1"}
     assert f({"proposal_set": "nope"}) == {}
     assert f({}) == {}
 

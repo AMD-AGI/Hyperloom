@@ -733,10 +733,20 @@ def test_config_levers_helper_extracts_from_proposal_set():
         "extra_envs": {"VLLM_USE_MTP": "1"},
     }
 
-    # A patch deliverable is NOT a config-only outcome.
-    assert (
-        _framework_config_levers_from_done({"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}) == {}
-    )
+    # A patch alongside a non-atomic lever, while optimizing: the patch is its own
+    # outcome and the lever is judged on its own, so nothing rides with the patch.
+    patched = {"patches_written": ["p.patch"], "proposal_set": done["proposal_set"]}
+    assert _framework_config_levers_from_done(patched) == {}
+    # The same deliverable in an ENABLEMENT round: the pair is jointly what makes
+    # the model boot, so the lever rides with the patch.
+    coupled = _framework_config_levers_from_done(patched, levers_ride_with_patches=True)
+    assert coupled.get("extra_envs") == {"VLLM_USE_MTP": "1"}
+    # An explicitly atomic lever rides with the patch on either lane.
+    atomic = {
+        "patches_written": ["p.patch"],
+        "proposal_set": [{**done["proposal_set"][0], "atomic": True}],
+    }
+    assert _framework_config_levers_from_done(atomic).get("extra_envs") == {"VLLM_USE_MTP": "1"}
     # No levers → empty.
     assert (
         _framework_config_levers_from_done({"patches_written": [], "proposal_set": [{"name": "research-only"}]}) == {}

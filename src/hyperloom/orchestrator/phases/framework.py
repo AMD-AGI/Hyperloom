@@ -368,10 +368,6 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
 class FrameworkPhase(CoordinatorCollaborator):
     """The source arm of the OPTIMIZE phase: upstream candidates, authored patches, and the enablement hand-off."""
 
-    # Marker for the candidate-free local-exploration arm (a synthetic "candidate" whose id is ``local_explore:<n>``):
-    # the ranker may pick it, and it routes to a write-capable authoring specialist instead of a PR.
-    _LOCAL_EXPLORE_KIND = "local_explore"
-
     def _framework_timeline(self):
         """Return the recorder for this FRAMEWORK entry, or ``None``.
 
@@ -582,20 +578,31 @@ class FrameworkPhase(CoordinatorCollaborator):
             if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
                 state.save(self.session_dir)
                 return
-            if await self._maybe_dispatch_local_explore(reason="no_new_candidates"):
-                state.save(self.session_dir)
-                return
+            if self._framework_local_explore_arm_enabled():
+                gap, keywords = self._compose_framework_local_explore_gap()
+                title = (
+                    f"local source exploration ({gap})"
+                    if gap
+                    else "local source exploration (author a throughput patch from live source + profile)"
+                )
+                dispatched = await self._enqueue_framework_agent_local_explore_specialist(
+                    {
+                        "title": title,
+                        "repo": "(local source)",
+                        "framework": str(getattr(state, "framework", "") or "").strip().lower(),
+                        "gap_description": gap,
+                        "gap_keywords": keywords,
+                    },
+                    reason="no_new_candidates",
+                )
+                if dispatched:
+                    state.save(self.session_dir)
+                    return
             self._record_framework_agent_phase_done(
                 reason="no_candidates_and_discovery_exhausted",
                 failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
             )
             state.framework_agent_phase_done = True
-            state.save(self.session_dir)
-            return
-        # Local-exploration arm: a candidate-free authoring specialist has no upstream diff, so it dispatches
-        # directly.
-        if str(next_candidate.get("kind") or "") == self._LOCAL_EXPLORE_KIND:
-            await self._enqueue_framework_agent_local_explore_specialist(next_candidate)
             state.save(self.session_dir)
             return
         # Submit the candidate as a proposal; the async Critic verdict drives the apply/author enqueue or the
@@ -608,16 +615,15 @@ class FrameworkPhase(CoordinatorCollaborator):
 
     async def _framework_agent_authoring_inflight(self) -> bool:
         """True while a FRAMEWORK-authored patch for an unprocessed candidate is still in flight."""
-        unprocessed_ids = {self._framework_candidate_key(c) for c in self._unprocessed_framework_agent_candidates()}
-        # The local-exploration arm's synthetic candidate id never appears in a PR batch, so it is "in flight" while
-        # it lacks a terminal progress row.
         processed_ids = self._framework_processed_candidate_keys()
 
         def _cand_pins_pump(cand_id: str) -> bool:
-            """True when an authoring cand_id keeps the pump serialized."""
-            if not cand_id or cand_id in unprocessed_ids:
-                return True
-            return cand_id.startswith("local_explore:") and cand_id not in processed_ids
+            """True when an authoring cand_id keeps the pump serialized: it has no terminal progress row yet.
+
+            A candidate-free local-exploration id never appears in a PR batch, so
+            the settled outcome -- not batch membership -- is what releases it.
+            """
+            return not cand_id or cand_id not in processed_ids
 
         queued = await self.tasks.queued()
         running = await self.tasks.running()
@@ -1247,46 +1253,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
             return "", []
 
-    def _next_local_explore_candidate_id(self) -> str:
-        """Return the next unique local-exploration candidate id."""
-        progress = getattr(self.shared_state, "framework_agent_phase_progress", None) or []
-        n = sum(
-            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
-        )
-        return f"local_explore:{n}"
-
-    def _make_local_explore_pseudo_candidate(self) -> dict[str, Any] | None:
-        """Build the synthetic local-exploration candidate, or ``None`` when disabled."""
-        if not self._framework_local_explore_arm_enabled():
-            return None
-        gap, keywords = self._compose_framework_local_explore_gap()
-        cand_id = self._next_local_explore_candidate_id()
-        title = (
-            f"local source exploration ({gap})"
-            if gap
-            else "local source exploration (author a throughput patch from live source + profile)"
-        )
-        return {
-            "kind": self._LOCAL_EXPLORE_KIND,
-            "candidate_id": cand_id,
-            "title": title,
-            "repo": "(local source)",
-            "framework": str(getattr(self.shared_state, "framework", "") or "").strip().lower(),
-            "gap_description": gap,
-            "gap_keywords": keywords,
-            "gap_canonical_id": f"gap.framework.local_explore.{cand_id}",
-        }
-
-    async def _maybe_dispatch_local_explore(self, *, reason: str) -> bool:
-        """Dispatch a local-exploration specialist when the arm is enabled."""
-        if not self._framework_local_explore_arm_enabled():
-            return False
-        pseudo = self._make_local_explore_pseudo_candidate()
-        if pseudo is None:
-            return False
-        tid = await self._enqueue_framework_agent_local_explore_specialist(pseudo, reason=reason)
-        return bool(tid)
-
     async def _enqueue_framework_agent_local_explore_specialist(
         self,
         candidate: dict[str, Any],
@@ -1295,7 +1261,12 @@ class FrameworkPhase(CoordinatorCollaborator):
     ) -> str:
         """Dispatch a candidate-free authoring specialist (no upstream PR lead)."""
         state = self.shared_state
-        cand_id = self._framework_candidate_key(candidate) or self._next_local_explore_candidate_id()
+        # A local-exploration round has no upstream lead to key on, so its id counts the rounds already settled.
+        progress = getattr(state, "framework_agent_phase_progress", None) or []
+        settled = sum(
+            1 for p in progress if isinstance(p, dict) and str(p.get("candidate_id") or "").startswith("local_explore:")
+        )
+        cand_id = self._framework_candidate_key(candidate) or f"local_explore:{settled}"
         gap = str(candidate.get("gap_description") or "").strip()
         gap_cid = str(candidate.get("gap_canonical_id") or "").strip() or f"gap.framework.local_explore.{cand_id}"
         framework = str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower()
@@ -2840,6 +2811,16 @@ class FrameworkPhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
+        # If the deliverable also carries config levers, fold them into the same
+        # integrate_patch proposal so the patch and its companion flag are benched
+        # together — the coupled-deliverable fix that closes D1.
+        try:
+            config_levers = _framework_config_levers_from_done(done_payload)
+            if config_levers:
+                integrate_params["extra_server_args"] = str(config_levers.get("extra_server_args") or "")
+                integrate_params["extra_envs"] = dict(config_levers.get("extra_envs") or {})
+        except Exception:  # noqa: BLE001 — best-effort; never drop the patch for a lever failure
+            log.debug("FRAMEWORK: config-lever merge into patch proposal failed task=%s", sid, exc_info=True)
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
         # authored-outcome bridge keys the progress row on the real candidate id.
