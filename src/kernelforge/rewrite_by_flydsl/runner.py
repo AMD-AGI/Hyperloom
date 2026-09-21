@@ -66,6 +66,14 @@ def _git(workspace: str, *args: str) -> subprocess.CompletedProcess:
     return git("-C", workspace, *args, check=False)
 
 
+#: Interpreter caches appear beside any module the driver imports, at any depth
+#: under the path being added. The exclusion is anchored under that path because
+#: a leading-wildcard pathspec matches nothing here and would silently stage an
+#: empty set, and ``**/`` alone requires an intervening directory, which misses
+#: the cache sitting next to the entry point.
+_PYCACHE_EXCLUDES = (":(exclude){path}/__pycache__/**", ":(exclude){path}/**/__pycache__/**")
+
+
 def _ensure_git_committed(
     workspace: str,
     message: str,
@@ -73,7 +81,13 @@ def _ensure_git_committed(
     *,
     branch: str = "",
 ) -> None:
-    """Ensure ``workspace`` is a git repo and commit ONLY ``paths`` on ``branch``."""
+    """Ensure ``workspace`` is a git repo and commit ONLY ``paths`` on ``branch``.
+
+    A path may be a directory, which commits what it holds. That is what the
+    port needs: the driver validates an implementation as it stands on disk, so
+    committing one declared file out of it would select something no stage ever
+    measured.
+    """
     if not (Path(workspace) / ".git").exists():
         _git(workspace, "init")
         _git(workspace, "config", "user.email", "forge-rewrite@local")
@@ -86,8 +100,10 @@ def _ensure_git_committed(
         if not p:
             continue
         # Force-add: the candidate lives under a dot-directory a caller's ignore rules may exclude, and forge-loop's
-        # keep/revert silently no-ops on an untracked kernel.
-        r = _git(workspace, "add", "-f", "--", p)
+        # keep/revert silently no-ops on an untracked kernel. Interpreter caches are the one thing a path may hold
+        # that no consumer wants; excluding them keeps a directory path usable here.
+        excludes = [item.format(path=p.rstrip("/")) for item in _PYCACHE_EXCLUDES]
+        r = _git(workspace, "add", "-f", "--", p, *excludes)
         if r.returncode != 0:
             log.warning("forge-rewrite: git add failed for %s: %s", p, (r.stderr or r.stdout).strip())
             continue
@@ -395,10 +411,16 @@ def run_rewrite(
     print(f"  [forge-rewrite] PORT OK (attempt {port.attempts}, SNR={port.snr_db})", flush=True)
 
     # Commit the correct port so forge-loop starts from a clean committed state.
+    # The whole attempt directory, not the kernel alone: a port free to structure
+    # its implementation may put part of it in a module beside the entry point,
+    # and the driver validated all of it. Committing only the entry point would
+    # select a candidate that was never measured, and leave the rest behind for
+    # a consumer that reads the commit. The directory is the producer's own, so
+    # this adds nothing the caller protects.
     _ensure_git_committed(
         workspace,
         "forge-rewrite: initial correct flydsl port",
-        [spec.flydsl_kernel],
+        [attempt.relative_root],
         branch=optimize_git_branch,
     )
     port_commit_result = _git(workspace, "rev-parse", "HEAD")

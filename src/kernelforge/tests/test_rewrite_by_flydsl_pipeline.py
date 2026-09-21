@@ -704,6 +704,40 @@ def test_ensure_git_committed_tracks_only_named_paths(tmp_path):
     assert "kernel.py" in tracked and "other.py" not in tracked
 
 
+def test_ensure_git_committed_takes_a_whole_attempt_directory(tmp_path):
+    """The port commits what the driver validated, not one file out of it.
+
+    A port that puts part of its implementation in a module beside the entry
+    point is still one implementation. Committing the entry point alone selects
+    a candidate no stage measured, and a consumer reading the commit gets an
+    entry point whose import is missing.
+    """
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    (tmp_path / ".gitignore").write_text(".forge_rewrite/\n__pycache__/\n")
+    attempt = create_attempt_workspace(tmp_path)
+    attempt.candidate_path("kernel.py").write_text("import tiles\n")
+    attempt.candidate_path("tiles.py").write_text("SIZE = 64\n")
+    nested = attempt.root / "lib"
+    nested.mkdir()
+    (nested / "util.py").write_text("def pad(x):\n    return x\n")
+    # Interpreter caches sit beside a module at any depth and belong to no one.
+    for cache in (attempt.root / "__pycache__", nested / "__pycache__"):
+        cache.mkdir()
+        (cache / "stale.pyc").write_text("bytecode")
+
+    runner._ensure_git_committed(str(tmp_path), "port", [attempt.relative_root])
+
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-tree", "-r", "--name-only", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    inside = sorted(path[len(attempt.relative_root) + 1:] for path in tracked if path.startswith(attempt.relative_root))
+    assert inside == ["kernel.py", "lib/util.py", "tiles.py"]
+
+
 def test_ensure_git_committed_skips_empty_and_unaddable_paths(tmp_path):
     # Empty path is skipped; an unaddable path leaves nothing staged -> early return (no commit), and must not raise.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
