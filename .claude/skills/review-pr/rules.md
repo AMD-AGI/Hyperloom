@@ -25,13 +25,14 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 
 | The diff... | Read |
 |---|---|
-| changes any non-test file under `src/`, or carries more than one commit | X1 X2 |
+| changes any non-test file under `src/`, or carries more than one commit | X1 X2 X3 |
 | adds or changes a value that crosses a boundary: status literal, enum member, dataclass or TypedDict field, keyword argument, signature, return semantics | C1 C3 C5 |
 | adds or changes a knob or a pin: CLI flag, env var, config key, default value, a pinned external version, ref or sha, an install script, `docs/compatibility.rst`, or the argv or extra-args list one is assembled into | C4 S6 T4 X5 X7 D8 D9 |
 | removes a flag, env var, enum member, test, fallback/legacy/bypass route or whole file, or tightens a comparison (`<` returns as `==`, a new `all(...)`) | C3 T2 X4 D3 |
 | fixes one site of an operation that has siblings (executors, per-framework patchers, sync and async twins), or moves, copies or consolidates code | C2 T4 D1 D2 D4 |
+| adds a second implementation of an operation the repo already owns (patch deploy, revert, snapshot, cleanup, revalidation), or a `pre_applied`/`skip_*`/already-done branch that short-circuits one | D1 D2 |
 | touches persisted or shared state: `SCHEMA_VERSION`, `from_dict`, `CREATE TABLE`, a `record_*`/`read_*`/`seal_*` pair, `.save()`, a spec, manifest or recipe, a context manager, recovery or resume | X6 R4 P4 P5 |
-| touches a prompt, `SKILL.md` or `docs/reference/**`, or changes a function body whose docstring or comments stay put | X3 X5 |
+| touches a prompt, `SKILL.md`, `docs/**`, `*.md` or `*.rst` | X3 X5 |
 | adds error handling or a default: `except`, `contextlib.suppress`, `ignore_errors=True`, `.get(k, 0)`, `or {}`, an early `isinstance` guard, a noop or degraded implementation | S1 S2 S3 S4 S5 S7 |
 | touches tests, or adds a large `src/` module with no matching test file | T1 T2 T3 |
 | touches async code, a lock, a subprocess, a poll or retry loop, a per-candidate step, a timeout or a budget | P1 P2 P3 P6 |
@@ -199,7 +200,7 @@ contains.
 **The rule:** A docstring asserting the opposite of the new behaviour is worse than none, especially when the stated property -- ordering, gate condition, return value, metric name, when a budget is reserved -- is what callers depend on. A correction applied to one copy and not the duplicated ones is the same defect. A prompt is the agent's spec: a schema line still marking a now-required field optional drives the agent into a guaranteed denial, so stale prompt text is a behaviour bug, not a doc nit. `AGENTS.md` constrains comment quality; the re-sync obligation is this rule.
 **Seen in:** PR #1410 -- `orchestration.md:272` documented `mode` as optional in the same prompt that had just made it required, so every agent following the schema line was denied at the gate.
 **Not a finding when:** the prose is vague rather than contradicted, or the sentence describes a neighbouring function whose behaviour did not change.
-**Evidence:** `$WORK/diff.txt` -- changed function bodies against their unchanged prose; the head tree for duplicated copies of the same sentence.
+**Evidence:** `$WORK/diff.txt` -- changed function bodies against their unchanged prose; `$WORK/docfiles.txt` against `$WORK/files.txt` for the prose that did not move at all; the head tree for duplicated copies of the same sentence.
 **Report as:** `X3 <file>:<line> -- doc/comment/prompt states "<old contract>"; code now does <new contract>`
 
 ### X4 -- A removal must be swept for remaining references and declared as a compatibility break

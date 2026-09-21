@@ -81,6 +81,11 @@ cut -f3- "$WORK/numstat.txt" > "$WORK/files.txt"
 
 grep -E '(^|/)tests/' "$WORK/files.txt" > "$WORK/testfiles.txt" || : > "$WORK/testfiles.txt"
 
+# The X family's mechanical input, the counterpart of testfiles.txt for the T family. An empty
+# docfiles.txt beside a changed src/ file is the shape X3 fires on, so the emptiness is the signal.
+grep -E '(^|/)docs/|(^|/)prompts/|\.md$|\.rst$' "$WORK/files.txt" > "$WORK/docfiles.txt" \
+  || : > "$WORK/docfiles.txt"
+
 # Queried by head sha, not by PR: gh pr checks reports the PR's checks whatever commit
 # they ran against, so a green from an earlier push reads as a pass for the current one.
 # Commit statuses too -- an external reporter posts a status, not a check run, and
@@ -125,7 +130,7 @@ awk -v self="$PR" -F'\t' '
 rm -f "$WORK/.openprs.tsv"
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
-  base.txt ci.txt comments.txt testfiles.txt openprs.txt; do
+  base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt; do
   printf '%-16s %s line(s)\n' "$artifact" "$(wc -l < "$WORK/$artifact" | tr -d ' ')"
 done
 

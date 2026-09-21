@@ -69,6 +69,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `ci.txt` | check runs at the current head: name, conclusion, url |
 | `comments.txt` | existing review and issue comments — do not repeat a point already made |
 | `testfiles.txt` | changed paths under a `tests/` directory |
+| `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
 | `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
 
 ## Step 1b — Select the rules
