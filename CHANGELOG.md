@@ -20,6 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **KernelForge results could be lost or integrated in the wrong order.** KB
+  warm-start commits now force only their approved pathspecs, so tracked files
+  matched by a repository's ignore rules cannot reject the whole commit. Task
+  preparation stages tracked edits and only newly created files, preventing
+  pre-existing JIT caches and generated artifacts from leaking into exported
+  patches. Forge-loop stdout and stderr are retained beside each task result,
+  and Controller patches are integrated by `task.json.priority` rather than
+  encoded directory-name order so cumulative E2E validation follows the
+  opportunity analyst's ordering.
+
 - **A Slurm row declaring a workload shape was benchmarked at the defaults.**
   The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
   flag > persisted state > default and deliberately never reads them from the

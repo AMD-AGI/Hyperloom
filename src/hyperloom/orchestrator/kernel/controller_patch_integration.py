@@ -237,7 +237,7 @@ async def integrate_controller_patches(
     record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
 ) -> ControllerIntegrationSummary:
-    """Apply and E2E-validate every complete Controller patch in filename order.
+    """Apply and E2E-validate complete Controller patches in task-priority order.
 
     Args:
         patches_root: The Controller's published patch directory.
