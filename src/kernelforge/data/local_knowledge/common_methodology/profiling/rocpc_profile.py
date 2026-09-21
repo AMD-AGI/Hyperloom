@@ -49,6 +49,61 @@ def _python_can_run_rocpc(python: str, libexec: str) -> bool:
         return False
 
 
+def _rocm_profiler_runtime_root() -> str | None:
+    """ROCm tree holding the profiler's own rocprofiler-sdk libraries.
+
+    Pip-packaged ROCm splits these across wheels: the runtime-only stack ships
+    only _rocm_sdk_core and leaves ROCM_PATH unset, and rocprof-compute then
+    cannot resolve its sdk tool and aborts before profiling anything.
+    """
+    current = os.environ.get("ROCM_PATH", "").strip()
+    if current and os.path.isdir(os.path.join(current, "lib", "rocprofiler-sdk")):
+        return current
+    for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
+        try:
+            spec = importlib.util.find_spec(pkg)
+        except Exception:  # noqa: BLE001
+            continue
+        for root in list(getattr(spec, "submodule_search_locations", None) or []):
+            if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
+                return root
+    return None
+
+
+def _profiler_env() -> dict:
+    """Environment rocprof-compute needs on a pip-packaged ROCm stack."""
+    env = dict(os.environ)
+    root = _rocm_profiler_runtime_root()
+    if not root:
+        return env
+    env["ROCM_PATH"] = root
+    # amdsmi ships inside the SDK wheel rather than on sys.path. The PyPI build
+    # cannot stand in: it is ROCm 7 era and resolves libamd_smi.so under
+    # /opt/rocm, which does not exist on this layout.
+    amdsmi = os.path.join(root, "share", "amd_smi")
+    if os.path.isdir(amdsmi):
+        env["PYTHONPATH"] = os.pathsep.join(p for p in (amdsmi, env.get("PYTHONPATH", "")) if p)
+    return env
+
+
+def _rocpc_venv_python() -> str:
+    """Interpreter of the private venv install.sh builds for analyze mode."""
+    return os.path.join(os.environ.get("ROCPC_VENV", "").strip() or "/opt/rocprof-compute-venv", "bin", "python")
+
+
+def _analyze_python(libexec: str) -> str | None:
+    """Interpreter to run `analyze` under.
+
+    Analyze gates on the exact pins in the tool's own requirements.txt; meeting
+    them in the serving image would pull numpy and pandas out from under torch,
+    so install.sh puts them in a private venv. Falls back when it is absent.
+    """
+    venv_python = _rocpc_venv_python()
+    if os.access(venv_python, os.X_OK):
+        return venv_python
+    return _detect_rocpc_python(libexec)
+
+
 def _detect_rocpc_python(libexec: str) -> str | None:
     """First interpreter that can run the rocprof-compute CLI, or None."""
     seen: set[str] = set()
@@ -121,7 +176,7 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
     cmd = [rocpc_python, os.path.join(libexec, "rocprof-compute"), *native]
     proc = subprocess.Popen(
         cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        text=True, start_new_session=True, env=_profiler_env(),
     )
     _CURRENT_PROC = proc
     try:
@@ -195,7 +250,7 @@ def main() -> int:
     an = ["analyze", "-p", workload, "-b", *blocks, "--max-stat-num", "6"]
     if a.kernel:
         an += ["-k", a.kernel]
-    rc, report = _run(rocpc_python, libexec, an, timeout=300)
+    rc, report = _run(_analyze_python(libexec) or rocpc_python, libexec, an, timeout=300)
     if rc != 0:
         print("ANALYZE FAILED.")
         print(report[-1500:])
