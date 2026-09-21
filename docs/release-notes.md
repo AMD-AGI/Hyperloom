@@ -20,6 +20,15 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Repair kernel-tuning promotion and analysis handoffs.** GEMM integration
+  and fusion siblings now default to a 1% E2E KEEP threshold instead of 3%,
+  preserving explicit fusion overrides. MoE tuning collects and persists valid
+  candidate tables and reports missing artifacts instead of exporting unusable
+  paths. TraceLens uses the coordinator's Python interpreter and distinguishes
+  dependency or splitter failures from successful splits with no steady-state
+  output. **Upgrade note:** pre-install TraceLens and its dependencies in that
+  interpreter; analysis no longer runs `pip install -e .` on each request.
+
 - **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
   agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
   supervision and resume, and task/lease age expiry. Each actual benchmark spawn

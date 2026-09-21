@@ -4565,7 +4565,7 @@ class TestBuildTraceAnalyzeCmd:
             analysis_mode="inference",
         )
         assert cmd == [
-            "python3",
+            krh.sys.executable,
             "/tools/tracelens_analysis.py",
             "--trace-input",
             "/t/trace",

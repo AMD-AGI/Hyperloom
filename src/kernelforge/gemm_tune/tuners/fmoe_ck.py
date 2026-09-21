@@ -43,16 +43,17 @@ _FMOE_CSV_HEADER = (
 _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
 
 
-def _validate_fmoe_csv(path: Path) -> str | None:
-    """Return why ``path`` is unusable as an untuned fmoe CSV, or None if it is."""
+def _validate_fmoe_csv(path: Path, *, tuned: bool = False) -> str | None:
+    """Return why ``path`` is unusable as an fmoe CSV, or None if it is."""
     try:
         lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         return f"unreadable ({exc})"
     if not lines:
         return "file is empty"
     header = tuple(col.strip() for col in lines[0].split(","))
-    missing = [col for col in _FMOE_CSV_COLUMNS if col not in header]
+    required = _FMOE_CSV_COLUMNS + (("kernelName1", "kernelName2") if tuned else ())
+    missing = [col for col in required if col not in header]
     if missing:
         return f"header is missing required column(s): {', '.join(missing)}"
     if len(lines) < 2:
@@ -310,19 +311,6 @@ class FmoeCKTuner(BaseTuner):
 
         return results
 
-    def _find_candidate_csv(self, start_time: float, tuned_stem: str = "tuned_fmoe") -> Path | None:
-        """Find the candidate CSV produced by --compare mode for THIS run only."""
-        compare_dir = Path("/tmp/aiter_compare")
-        if not compare_dir.is_dir():
-            return None
-        candidates = [
-            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and tuned_stem in p.name
-        ]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0]
-
     def run(self) -> TuneResult:
         script = find_tuner_script("fmoe_ck")
         assert script is not None  # validated already
@@ -356,8 +344,11 @@ class FmoeCKTuner(BaseTuner):
         aiter_root = resolve_aiter_root()
         cwd = aiter_root if aiter_root else None
 
+        env_override = _tr.compare_temp_env()
+        compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
+        isolated = _tr.is_isolation_enabled()
         iso_candidate = None
-        if _tr.is_isolation_enabled():
+        if isolated:
             blocklist = _tr.FaultBlocklist(
                 getattr(self.ctx, "faulted_blocklist_path", None),
                 {
@@ -378,6 +369,7 @@ class FmoeCKTuner(BaseTuner):
                 task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
                 gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
                 blocklist=blocklist,
+                env_override=env_override,
             )
         else:
             cmd = _tr.with_task_timeout(
@@ -388,6 +380,7 @@ class FmoeCKTuner(BaseTuner):
                 cwd=cwd,
                 timeout_s=self.ctx.timeout_s,
                 log_file=self.work_dir / "tune.log",
+                env_override=env_override,
             )
 
         if rc == 124:
@@ -413,11 +406,14 @@ class FmoeCKTuner(BaseTuner):
             shape_results = self._parse_compare_output(stderr)
 
         # Find candidate CSV.
-        candidate_csv = iso_candidate if iso_candidate is not None else self._find_candidate_csv(run_start_time)
-        artifact = str(candidate_csv) if candidate_csv else str(tuned_csv)
-
-        # Copy candidate to output dir for persistence
-        if candidate_csv and candidate_csv.is_file():
+        candidate_csv = (
+            iso_candidate if isolated else _tr._latest_candidate(compare_dir, tuned_csv.stem, run_start_time)
+        )
+        artifact = ""
+        artifact_problem = (
+            _validate_fmoe_csv(candidate_csv, tuned=True) if candidate_csv else "no candidate CSV produced"
+        )
+        if artifact_problem is None:
             dest = self.work_dir / "candidate_fmoe.csv"
             dest.write_bytes(candidate_csv.read_bytes())
             artifact = str(dest)
@@ -442,6 +438,8 @@ class FmoeCKTuner(BaseTuner):
             status = "empty_output"
         elif n_improved == 0:
             status = "no_improvement"
+        elif not artifact:
+            status = "failed"
         else:
             status = "ok"
 
@@ -449,8 +447,10 @@ class FmoeCKTuner(BaseTuner):
             tuner_name=self.name,
             status=status,
             artifact_path=artifact,
-            env_var=self.env_var,
+            env_var=self.env_var if artifact else "",
             env_value=artifact,
+            error=f"Unusable MoE compare artifact: {artifact_problem}" if status == "failed" else "",
+            error_class="missing_artifact" if status == "failed" else "",
             total_shapes=total,
             improved_shapes=n_improved,
             best_micro_speedup=best_speedup,
