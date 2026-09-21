@@ -815,6 +815,52 @@ def test_a_phase_crash_closes_the_event_naming_the_stage(tmp_path):
     assert "boom" in outcome["reason"]
 
 
+def test_a_crash_after_a_measured_win_still_closes_failed(tmp_path):
+    """A visit that raised is not a good one, whatever it delivered first.
+
+    The verdict is derived from the instruments, and they hold a real win
+    here, so deriving the status from the verdict too had a crashed visit
+    closing ``succeeded``. The two answer different questions: the verdict
+    keeps the win, because it was measured; the status reports that the visit
+    did not get to the end, which is the phase's to say and only it knows.
+    """
+    recorder = _forge_recorder()
+    recorder.enter_stage("forge_fusion")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7",
+        kernel_id="k001",
+        status="success",
+        micro_decision="keep",
+        speedup=1.4,
+    )
+    recorder.finish_crashed(RuntimeError("boom"))
+
+    event = _kernel_events(tmp_path)[0]
+    assert event["status"] == "failed"
+    outcome = event["ext"]["outcome"]
+    assert outcome["verdict"] == "improved"
+    assert outcome["failed_stage"] == "forge_fusion"
+    assert outcome["error_class"] == "RuntimeError"
+
+
+def test_reassembling_a_crashed_visit_reaches_the_same_status(tmp_path):
+    """The close is a fact on the rows, so a later re-read cannot soften it."""
+    recorder = _forge_recorder()
+    recorder.enter_stage("forge_fusion")
+    recorder.record_kernel_rewrite(
+        run_id="attempt-7",
+        kernel_id="k001",
+        status="success",
+        micro_decision="keep",
+        speedup=1.4,
+    )
+    recorder.finish_crashed(RuntimeError("boom"))
+
+    event_id = _kernel_events(tmp_path)[0]["id"]
+    _ext, status = assemble_kernel_ext(kernel_event_parts(), event=event_id)
+    assert status == "failed"
+
+
 def test_a_fault_mid_visit_is_named_without_ending_the_visit(tmp_path):
     """A raising tick is swallowed by the loop, so the visit outlives it.
 

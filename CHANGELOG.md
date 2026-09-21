@@ -54,14 +54,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Session breakdown timeline events now name what they used to lose.** A
   KERNEL visit's verdict is derived from the instruments that ruled on each
   candidate rather than from the phase's own exit story, so a visit that kept
-  nothing is no longer readable as a clean success. Sub-steps of a phase event
-  (baseline rounds, roofline probes) can be attributed back to the parent via
-  `sbd_event_id` instead of opening a standalone event that orphans the
-  measurement. Warm replay records each apply item's fate; baseline events
-  carry the anchoring eval that established quality; FRAMEWORK records
-  configuration-arm runs and mid-entry faults; ENABLEMENT and the coordinator
-  name phase-spanning exceptions that previously left those events closing
-  clean. Prelude marks dropped arms. The corresponding TypedDicts
+  nothing is no longer readable as a clean success. The event's status stays a
+  separate answer: a visit that crashed reports `failed` even where the
+  instruments measured a real win before the raise, so the win is still
+  readable on the verdict without the crashed visit reading as a good one.
+  Sub-steps of a phase event (baseline rounds, roofline probes) can be
+  attributed back to the parent via `sbd_event_id` instead of opening a
+  standalone event that orphans the measurement. Warm replay records each apply
+  item's fate; baseline events carry the anchoring eval that established
+  quality; FRAMEWORK records configuration-arm runs and mid-entry faults; the
+  coordinator names phase-spanning exceptions on the KERNEL visit or FRAMEWORK
+  entry that was open for them, and the enablement lane names the faults from
+  its own pump, where before those events closed clean. Prelude marks dropped
+  arms. The corresponding TypedDicts
   (`V6Framework*`, `V6Kernel*`, `V6BaselineExt`, `V6WarmReplayExt`,
   `V6RooflineExt`) and a schema-contract test pin the wire so a renamed key
   cannot drift silently again.

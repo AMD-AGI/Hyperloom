@@ -1451,26 +1451,27 @@ class Coordinator(metaclass=_CoordinatorMeta):
             log.exception("failed to persist Coordinator exception metadata")
 
     def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
-        """Name this exception on the phase-spanning events it struck, if open.
+        """Name this exception on the phase event it struck, if one is open.
 
         Every other timeline event is closed on the exception by the executor
-        that raised it. A KERNEL visit, a FRAMEWORK entry, and an enablement
-        lane have no such frame -- each spans the ticks the machine sits in its
-        phase (or, for enablement, the whole session), and is closed when that
-        span ends -- so the exceptions swallowed here were the ones that
-        reached their event nowhere, leaving it to close clean and report an
-        outcome for a phase that had blown up.
+        that raised it. A KERNEL visit and a FRAMEWORK entry have no such frame
+        -- each spans the ticks the machine sits in its phase, and is closed
+        when that span ends -- so the exceptions swallowed here were the ones
+        that reached their event nowhere, leaving it to close clean and report
+        an outcome for a phase that had blown up.
+
+        Both recorders are absent unless their phase is the one running, which
+        is what keeps a fault on the event that was open for it. The enablement
+        lane is deliberately not here: it spans the whole session, so it is
+        open for every exception and is the thing that raised for almost none
+        of them. Its own pump records what it is responsible for.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import active_kernel_recorder
 
         for recorder in (active_kernel_recorder(), self._framework_timeline()):
             if recorder is None:
                 continue
             recorder.record_fault(stage=stage, exc=exc)
-        # The enablement lane keeps no recorder object: its entry points are
-        # module-level, so it is called the way the lane itself calls them.
-        enablement_event.record_fault(stage=stage, exc=exc)
 
     def _seconds_until_session_bound(self) -> float | None:
         """Seconds left on the active run or closing bound; ``None`` if unbounded."""

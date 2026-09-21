@@ -175,6 +175,14 @@ VERDICT_IMPROVED = "improved"
 VERDICT_NO_IMPROVEMENT = "no_improvement"
 VERDICT_FAILED = "failed"
 
+#: The two statuses a closed visit reports. Separate from the verdict above:
+#: the verdict says what the visit found, the status whether it got to the end
+#: to find it. A visit can deliver a measured win and then raise, and calling
+#: that "succeeded" because of the win, or "no_improvement" because of the
+#: raise, each hides one half of what happened.
+STATUS_SUCCEEDED = "succeeded"
+STATUS_FAILED = "failed"
+
 #: A lane run that reports one of these produced no candidate to judge. Owned
 #: here because this is where the distinction is spent: the producers that
 #: stamp a run's ``micro_decision`` ask the same question, and answering it
@@ -1743,6 +1751,7 @@ class KernelEventRecorder:
         self,
         *,
         exit_reason: str = "",
+        failed: bool = False,
         tput_after: Any = None,
         cumulative_gain_validated_out: Any = None,
         stack_depth_out: Any = None,
@@ -1754,6 +1763,11 @@ class KernelEventRecorder:
         The phase states what it measured on the way out, not how the visit
         ran: the verdict is read off the instruments that ruled on each
         candidate, and a phase allowed to state its own could contradict them.
+
+        ``failed`` is the one thing only the phase knows -- that it could not
+        get past the stage it was in, rather than reaching a conclusion the
+        instruments can be asked about. It decides the event's status and is
+        recorded, so a re-assembly after the close reaches the same one.
         """
         if self._closed:
             return
@@ -1765,6 +1779,7 @@ class KernelEventRecorder:
                 "in_flight_stage": None,
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
+                "closed_status": STATUS_FAILED if failed else "",
                 "outcome": {
                     "exit_reason": _text(exit_reason),
                     "tput_after": _float_or_none(tput_after),
@@ -1838,8 +1853,12 @@ class KernelEventRecorder:
     def finish_failed(self, *, stage: str, error_class: str = "", message: Any = "") -> None:
         """Close the event as failed, naming the stage that failed.
 
-        Outranks any fault recorded earlier: this is the phase naming the stage
-        it could not get past, rather than one it carried on through.
+        This is the phase naming the stage it could not get past, rather than
+        one it carried on through, so it decides the status where a fault
+        recorded through :meth:`record_fault` does not: that visit survived and
+        is judged on what its instruments went on to measure. The verdict is
+        still derived either way -- a win delivered before the raise stays
+        readable, beside the status that says the visit did not end well.
         """
         self._sink.record(
             SECTION_EVENT,
@@ -1851,7 +1870,7 @@ class KernelEventRecorder:
                 )
             },
         )
-        self.finish(exit_reason=str(stage or ""))
+        self.finish(exit_reason=str(stage or ""), failed=True)
 
     def finish_crashed(self, exc: BaseException) -> None:
         """Close an event whose phase raised instead of returning."""
@@ -2090,13 +2109,15 @@ def _derive_verdict(attempts: list[dict[str, Any]], *, failure: Mapping[str, Any
     return VERDICT_NO_IMPROVEMENT, "nothing measured a gain on the candidates kept"
 
 
-#: The event status each verdict closes on. A visit that kept nothing still
-#: ran to a conclusion, so the distinction the status draws is whether the
-#: visit finished, not whether it found a win.
+#: The event status each verdict closes on, for a visit that returned. A visit
+#: that kept nothing still ran to a conclusion, so the distinction the status
+#: draws is whether the visit finished, not whether it found a win. A visit
+#: that did not return is not in here: its close names the stage it could not
+#: get past, and that outranks anything the rows add up to.
 _STATUS_BY_VERDICT = {
-    VERDICT_IMPROVED: "succeeded",
-    VERDICT_NO_IMPROVEMENT: "succeeded",
-    VERDICT_FAILED: "failed",
+    VERDICT_IMPROVED: STATUS_SUCCEEDED,
+    VERDICT_NO_IMPROVEMENT: STATUS_SUCCEEDED,
+    VERDICT_FAILED: STATUS_FAILED,
 }
 
 
@@ -2327,7 +2348,12 @@ def assemble_kernel_ext(
         outcome["verdict"] = ""
         outcome["reason"] = ""
         return ext, "running"
-    return ext, _STATUS_BY_VERDICT[verdict]
+    # A visit that could not get past its stage said so when it closed, and
+    # that outranks the verdict: the rows can hold a measured win the visit
+    # delivered before it raised, and reporting the event as succeeded on the
+    # strength of that win is the crashed phase reading as a clean one. The
+    # verdict keeps the win, because an instrument did measure it.
+    return ext, _text(header.get("closed_status")) or _STATUS_BY_VERDICT[verdict]
 
 
 def make_kernel_recorder(

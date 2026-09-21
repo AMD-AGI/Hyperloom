@@ -609,9 +609,46 @@ async def test_a_lane_with_no_session_bound_still_dispatches(tmp_path, monkeypat
     assert lane.shared_state.enablement.succeeded is False
 
 
+def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
+    """The lane spans the session, so it is open for every coordinator fault.
+
+    That made it the one event that could not use the coordinator's generic
+    handler: a KERNEL visit or a FRAMEWORK entry is only open while its phase
+    runs, so a fault landing there struck the phase that was running, but the
+    lane is open for a reactor turn it has nothing to do with. Stamping those
+    on it reported a lane that did its job as broken, with an ``error_class``
+    from a subsystem it never touched.
+    """
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    enablement_event.record_trigger(
+        origin=enablement_event.ORIGIN_EVAL,
+        mode="all",
+        kind="accuracy_below_floor",
+    )
+    coordinator = types.SimpleNamespace(_framework_timeline=lambda: None)
+    Coordinator._fault_open_phase_event(
+        coordinator,
+        stage="reactor:optimizer",
+        exc=RuntimeError("boom"),
+    )
+    enablement_event.finish(
+        outcome=enablement_event.OUTCOME_SUCCEEDED,
+        reason="revalidation promoted",
+    )
+
+    event = _events(_bound_session)[0]
+    assert event["status"] == "succeeded"
+    assert event["ext"].get("failure") is None
+
+
 @pytest.mark.asyncio
 async def test_a_raising_pump_is_named_on_the_event(_bound_session):
-    """The pump must not take the tick down, but it cannot vanish either."""
+    """The pump must not take the tick down, but it cannot vanish either.
+
+    The lane records this itself rather than leaning on the coordinator's
+    handler, which no longer speaks for it -- see the test above.
+    """
     enablement_event.record_trigger(
         origin=enablement_event.ORIGIN_BOOT,
         mode="all",
@@ -629,7 +666,6 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
 
     def _record(*, stage: str, exc: BaseException, **_kw: Any) -> None:
         crashes.append({"stage": stage, "exc": exc})
-        enablement_event.record_fault(stage=stage, exc=exc)
 
     fake = types.SimpleNamespace(
         shared_state=types.SimpleNamespace(phase=PHASE_ENABLEMENT),

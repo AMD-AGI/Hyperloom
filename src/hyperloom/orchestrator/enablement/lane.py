@@ -624,10 +624,12 @@ class EnablementLane(CoordinatorCollaborator):
                 await pump()
             except Exception as exc:  # noqa: BLE001 — a wedged pump must not strand the phase
                 log.exception("ENABLEMENT %s (%s) failed", pump.__name__, caller)
-                self._record_coordinator_exception(
-                    stage=f"enablement_pump:{pump.__name__}:{caller}",
-                    exc=exc,
-                )
+                stage = f"enablement_pump:{pump.__name__}:{caller}"
+                # Named here rather than by the coordinator's generic handler:
+                # the lane's event is open for the whole session, so only the
+                # lane knows which exceptions are its own to answer for.
+                enablement_event.record_fault(stage=stage, exc=exc)
+                self._record_coordinator_exception(stage=stage, exc=exc)
 
 
 def _stack_patch_roots(state: Any, res: dict[str, Any]) -> None:
