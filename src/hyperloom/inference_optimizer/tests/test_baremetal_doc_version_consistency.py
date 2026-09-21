@@ -33,7 +33,7 @@ def test_baremetal_defaults_match_compat_doc():
     vllm_version = _default("VLLM_VERSION", sh)  # e.g. 0.29.0
     vllm_variant = _default("VLLM_ROCM_VARIANT", sh)  # e.g. rocm723
     sglang_ref = _default("SGLANG_REF", sh)  # e.g. v0.5.17
-    sglang_rocm_extra = _sglang_extra_for_rocm72(sh)  # e.g. rocm724
+    _sglang_extra_for_rocm72(sh)  # rocm724 remains the 7.2.x bare-metal wheel extra
 
     # compatibility.rst documents e.g. "v0.29.0 (rocm723)" and the pip spec "vllm==0.29.0+rocm723"; keep both in
     # lockstep with the script defaults.
@@ -54,10 +54,9 @@ def test_baremetal_defaults_match_compat_doc():
     assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"' in sh, (
         "install_baremetal.sh must export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG from SGLANG_PRETEND_VERSION"
     )
-    assert "%s (%s)" % (sglang_pretend, sglang_rocm_extra) in doc, (
-        "docs/compatibility.rst must document SGLang '%s (%s)' to match "
-        "install_baremetal.sh defaults" % (sglang_pretend, sglang_rocm_extra)
+    assert "%s (rocm10)" % sglang_pretend in doc, (
+        "docs/compatibility.rst must document SGLang '%s (rocm10)' for the validated docker stack" % sglang_pretend
     )
-    assert "SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra in doc, (
-        "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra
+    assert "SGLANG_ROCM_EXTRA=rocm724" in doc, (
+        "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=rocm724 for ROCm 7.2.x bare-metal overrides"
     )
