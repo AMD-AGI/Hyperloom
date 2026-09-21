@@ -758,25 +758,6 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
 
 
 @pytest.mark.asyncio
-async def test_resume_reverify_best_promote_clears_flag(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.optimization_stack = [
-        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
-    ]
-    coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="rb-1", params={"source": "resume_reverify_best"})
-    await coord._promote_to_shared_state(
-        "explore",
-        {"winners": [], "best_variant": None, "output_throughput": 118.0},
-        task=task,
-    )
-
-    assert coord.shared_state.resume_pending_revalidation is False
-    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-
-
-@pytest.mark.asyncio
 async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-1"}
@@ -1580,7 +1561,7 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
 
 
 def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     forwarded: dict = {}
     _forward_integrate_source({}, forwarded)

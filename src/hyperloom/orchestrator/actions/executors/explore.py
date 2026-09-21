@@ -206,9 +206,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
         gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
         gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
-        # Framework-rewrite lever this variant attributes to, and how.
-        gv.framework_lever = str(raw.get("framework_lever") or "")  # type: ignore[attr-defined]
-        gv.framework_lever_source = str(raw.get("framework_lever_source") or "")  # type: ignore[attr-defined]
         out.append(gv)
     return out
 

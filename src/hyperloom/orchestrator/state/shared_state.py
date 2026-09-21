@@ -430,11 +430,12 @@ def _stamp_cycle_on_rejected(
 from ._shared_state.render import _RenderMixin
 
 
-from ._shared_state.explore_state import _ExploreStateMixin
+from ._shared_state.explore_state import _PhaseStateMixin
+from .gaps import GapsStateMixin
 
 
 @dataclass
-class SharedState(_RenderMixin, _ExploreStateMixin):
+class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # versioned state.json schema; bumped by from_dict migration. Fresh sessions born at latest.
     schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
