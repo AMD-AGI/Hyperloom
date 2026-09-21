@@ -684,7 +684,9 @@ class ExploreExecutor:
             }
 
         # ----- explore_search ledger (history seed) -------------------------
-        search = dict(params.get("explore_search") or _initial_explore_search_state())
+        # C5: dedup history no longer threaded via params; start from a fresh
+        # round-local state so the executor is stateless across rounds.
+        search = _initial_explore_search_state()
         # Defensive default fill (resume / first-run guards).
         for key, default in (
             ("schema_version", 1),

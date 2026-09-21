@@ -132,7 +132,7 @@ class InternalTasksPhase(PhaseHandler):
         if not bool(getattr(state, "research_scout_enabled", True)):
             return
         interval = max(1, int(getattr(state, "research_scout_interval", 3) or 3))
-        round_id = int((state.explore_search or {}).get("cursor") or 0)
+        round_id = len(getattr(state, "attempts", None) or [])
         if round_id <= 0 or (round_id % interval) != 0:
             return
         if int(getattr(state, "research_scout_last_round", -1)) == round_id:

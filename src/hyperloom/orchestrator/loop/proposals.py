@@ -446,11 +446,6 @@ class ProposalsCollaborator:
         bwr = float(getattr(self.shared_state, "baseline_warm_runtime_sec", 0.0) or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        # Thread the persisted explore_search ledger so the executor seeds its tested history; it is evidence only,
-        # not an eligibility gate.
-        es = getattr(self.shared_state, "explore_search", None)
-        if isinstance(es, dict) and es.get("tested"):
-            params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
 

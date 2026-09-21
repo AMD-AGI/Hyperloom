@@ -420,6 +420,28 @@ def _record_config_attempts(
                 )
         except Exception:  # noqa: BLE001 — observability cannot change write-back
             log.debug("framework timeline: config attempt record failed", exc_info=True)
+        # Write to the unified attempts ledger (C5).
+        try:
+            shared_state = getattr(coord, "shared_state", None)
+            if shared_state is not None:
+                shared_state.record_attempt({
+                    "arm": "config",
+                    "lever_kind": "config",
+                    "round_id": round_id,
+                    "task_id": task_id,
+                    "fingerprint": fingerprint,
+                    "variant_name": str(row.get("variant_name") or ""),
+                    "outcome": outcome,
+                    "verdict": outcome,
+                    "adopted": _is_kept(outcome),
+                    "gain_pct": float(metrics["gain_pct"]) if metrics.get("gain_pct") is not None else None,
+                    "before_tput": metrics.get("base_tput"),
+                    "after_tput": metrics.get("tput"),
+                    "error_class": str(row.get("error_class") or ""),
+                    "provenance": str(row.get("provenance") or ""),
+                })
+        except Exception:  # noqa: BLE001 — unified ledger write cannot change write-back
+            log.debug("unified attempts ledger: config attempt write failed", exc_info=True)
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")
     if not (recorded and proposal_ref):

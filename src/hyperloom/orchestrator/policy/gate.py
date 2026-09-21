@@ -466,6 +466,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
+        # unified attempt ledger and known-bad fingerprint set; writeback is the sole writer.
+        "attempts",
+        "known_bad_fingerprints",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
         # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
         # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.

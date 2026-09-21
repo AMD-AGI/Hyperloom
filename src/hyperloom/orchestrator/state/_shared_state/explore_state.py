@@ -47,6 +47,23 @@ class _PhaseStateMixin:
         if len(self.specialist_rounds) > cap:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
+    def record_attempt(self, attempt: dict[str, Any]) -> None:
+        """Append one attempt to the unified attempts ledger; single-writer (writeback)."""
+        if not isinstance(attempt, dict) or not attempt:
+            return
+        attempt = dict(attempt)
+        attempt.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
+        self.attempts.append(attempt)
+        cap = _shared_state_module()._SPECIALIST_ROUNDS_CAP
+        if len(self.attempts) > cap:
+            self.attempts = self.attempts[-cap:]
+
+    def add_known_bad_fingerprint(self, fp: str) -> None:
+        """Mark a fingerprint as known-bad (pre-seeded negative from warm recipes)."""
+        fp = str(fp or "").strip()
+        if fp and fp not in self.known_bad_fingerprints:
+            self.known_bad_fingerprints.append(fp)
+
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain anchor."""
         from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
