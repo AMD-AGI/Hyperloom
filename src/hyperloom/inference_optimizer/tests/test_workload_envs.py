@@ -739,14 +739,36 @@ def _write_model(tmp_path, model_type):
     return str(d)
 
 
-def test_a_model_type_transformers_cannot_map_names_its_tokenizer(tmp_path):
+@pytest.fixture
+def _hf_mapping(monkeypatch):
+    """A CONFIG_MAPPING this test controls, instead of whatever is installed.
+
+    ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
+    imported, and "" again when the installed transformers happens to know the
+    model_type. Both tests below then pass for reasons that have nothing to do
+    with the rule they state: on an image without transformers the negative one
+    is vacuous and the positive one fails, which is how CI reported this while
+    it was green here.
+    """
+    import sys
+    import types
+
+    mod = types.ModuleType("transformers.models.auto.configuration_auto")
+    mod.CONFIG_MAPPING = {"llama": object()}
+    for name in ("transformers", "transformers.models", "transformers.models.auto"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "transformers.models.auto.configuration_auto", mod)
+    return mod
+
+
+def test_a_model_type_transformers_cannot_map_names_its_tokenizer(tmp_path, _hf_mapping):
     """DeepSeek-V4 is the live case: HF raises KeyError before the first request."""
     from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
 
     assert _client_tokenizer_mode(_write_model(tmp_path, "deepseek_v4")) == "deepseek_v4"
 
 
-def test_a_model_type_transformers_knows_names_nothing(tmp_path):
+def test_a_model_type_transformers_knows_names_nothing(tmp_path, _hf_mapping):
     """The rule is model-agnostic: a resolvable model leaves the client argv alone."""
     from hyperloom.orchestrator.actions.executors._workload_envs import _client_tokenizer_mode
 
