@@ -88,11 +88,18 @@ def rank_fallback_identities(
     cross-ISA donors remain eligible. The exact identity is omitted because
     callers probe it first.
 
-    Versions are compared as :func:`canonical_framework_version` resolves them,
-    so two spellings of one release rank as the same release rather than as
-    neighbours, and two runs that both failed to observe a version can reach
-    each other. What stays rejected is ranking *across* that: how far a known
-    release sits from an unknown one is not a question the strings can answer.
+    The target's version is resolved by :func:`canonical_framework_version`
+    because it arrives raw -- installed distribution metadata says
+    ``0.24.0+rocm723`` and an image tag says ``v0.24.0``. A stored dimension is
+    not resolved again: every page is written at its canonical address, so a
+    stored spelling that needs resolving is a page written by something that
+    skipped the address rules, and reading it as the release it names would hide
+    that rather than report it. Such a page ranks as unparseable and is dropped.
+
+    Two runs that both failed to observe a version can still reach each other,
+    because both resolve to the one word for that. What stays rejected is
+    ranking *across* it: how far a known release sits from an unknown one is not
+    a question the strings can answer.
     """
     target_version = canonical_framework_version(target.framework_version)
     target_release = _release(target_version)
@@ -120,7 +127,7 @@ def rank_fallback_identities(
         candidate_gpu = values.get("gpu", "")
         if candidate_gpu in _UNUSABLE:
             continue
-        candidate_version = canonical_framework_version(values.get("framework_version", ""))
+        candidate_version = values.get("framework_version", "")
         candidate_release = _release(candidate_version)
         if candidate_version == target_version:
             version_affinity = 3
