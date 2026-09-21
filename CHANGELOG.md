@@ -249,6 +249,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - **Restore safe AITER lock cleanup at baseline startup.** Stale locks are cleaned
   only when compiler absence is established. Unreadable live-process identity
   leaves locks untouched; known zombies do not block cleanup.
+- **The AITER version in `stack_fingerprint` is now the AITER that is actually
+  installed.** Two independent faults made that field untrustworthy.
+
+  The env tuple read `AITER_COMMIT` and `AITER_VERSION`, neither of which
+  anything in this repo writes, so the env path never produced a value.
+  `install_baremetal.sh` already resolves the exact tag it installs, exports it,
+  and persists it to `.env` as `AITER_REF`, which the dotenv loader admits under
+  its `AITER_` prefix — so the value was sitting one key away the whole time.
+  `AITER_REF` joins the tuple, behind `AITER_COMMIT`. It also covers the default
+  isolated vLLM path, where aiter lives in the framework venv and no in-process
+  probe can see it under any name.
+
+  The probe then looked up a distribution named `aiter`, but AITER renamed itself
+  to `amd-aiter` at v0.1.8, so the lookup missed every host running v0.1.8 or
+  newer. Worse, on PyPI `aiter` is an unrelated 2019 async-iterator library, so
+  where that package happened to be installed the probe recorded its version —
+  `0.13.20191203` — as the AITER version. The old name is corrected rather than
+  kept as a fallback, precisely so that value can no longer be produced: nothing
+  recorded is better than something that looks like an answer. Hosts older than
+  v0.1.8 are covered by `AITER_REF`, which is exact.
+
+  Only what gets *written* changes. No read path compares `rocm` or `aiter`
+  against the pod today; that gap is tracked in #1507, and getting the recorded
+  value right is a prerequisite for it — a comparison fed `0.13.20191203` would
+  report a confident mismatch against every real AITER build.
 
 - **AgentX grading failures no longer fall back to throughput KEEP.** When an
   AgentX session cannot grade on interactivity because either side is missing
