@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -98,6 +99,18 @@ def validate_envelope(envelope: dict[str, Any]) -> list[Intent]:
         except ValueError:
             raise IntentValidationError(f"intents[{i}].intent_type {item['intent_type']!r} not in allowed set")
         payload = item["payload"]
+        # Some models serialise a nested tool-call argument as a JSON string
+        # instead of an object. Rejecting that wedges the loop: the agent
+        # re-emits the same shape every turn and no intent ever lands. The
+        # decoded object still has to satisfy every check below, so accepting
+        # it widens the transport, not the contract.
+        if isinstance(payload, str):
+            try:
+                decoded = json.loads(payload)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):
+                payload = decoded
         if not isinstance(payload, dict):
             raise IntentValidationError(f"intents[{i}].payload must be object, got {type(payload).__name__}")
         for required in _PAYLOAD_REQUIRED[it]:
