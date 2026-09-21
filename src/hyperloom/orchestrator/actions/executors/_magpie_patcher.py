@@ -82,6 +82,21 @@ _LOCAL_CLIENT_PATCHED_BLOCK = (
     "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
 )
 
+# The generic vLLM client argv (``vllm_mi300x.sh``) names no tokenizer, so the
+# benchmark client loads the checkpoint through HF ``AutoConfig``. A model whose
+# ``model_type`` transformers does not know dies there before issuing a request.
+# InferenceX already routes ``--tokenizer-mode`` to vLLM's loader; the generic
+# script this path uses does not, and exposes no hook for it. This adds one.
+_CLIENT_TOKENIZER_MODE_SENTINEL = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
+_CLIENT_TOKENIZER_PATH_MARKER = '--result-dir "$WORKSPACE_DIR/"'
+_CLIENT_TOKENIZER_LEGACY_BLOCK = '        "${SERVER_MONITOR_ARGS[@]}" \\\n        --trust-remote-code || exit $?\n'
+_CLIENT_TOKENIZER_PATCHED_BLOCK = (
+    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
+    "        ${HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode} "
+    "${HYPERLOOM_CLIENT_TOKENIZER_MODE:+$HYPERLOOM_CLIENT_TOKENIZER_MODE} \\\n"
+    "        --trust-remote-code || exit $?\n"
+)
+
 # Strip the redundant, fatal ``--concurrent-requests <CONC>`` flag from Magpie's
 # generic benchmark scripts: InferenceX's ``run_lm_eval`` rejects it as an
 # unknown flag, aborting the whole script; concurrency still flows via the
@@ -489,12 +504,43 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     return True
 
 
+def _apply_client_tokenizer_patch_dir(scripts_dir: Path) -> bool:
+    """Give every generic client script under ``scripts_dir`` a tokenizer-mode hook."""
+    ok = True
+    for script in sorted(scripts_dir.glob("*.sh")):
+        if script.name == "benchmark_lib.sh":
+            continue
+        if not _apply_client_tokenizer_mode_patch_atomic(script):
+            ok = False
+    return ok
+
+
+def _script_dirs(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
+    """The benchmark script directories to patch, each yielded once."""
+    scanned: set[Path] = set()
+    for scripts_dir in (
+        _resolve_benchmark_scripts_dir(magpie_dir),
+        _resolve_inferencex_benchmarks_dir(inferencex_dir),
+    ):
+        if scripts_dir is None or scripts_dir in scanned:
+            continue
+        scanned.add(scripts_dir)
+        yield scripts_dir
+
+
+def _client_scripts(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
+    """Every caller script under those directories."""
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
+        for script in sorted(scripts_dir.glob("*.sh")):
+            if script.name != "benchmark_lib.sh":
+                yield script
+
+
 def _apply_eval_concurrency_fixes(
     magpie_dir: Path | str | None,
     inferencex_dir: Path | str | None,
 ) -> bool:
-    """Apply every eval-concurrency compatibility fix, independent of the
-    ``benchmarker.py`` atomic-copy patch.
+    """Apply every eval-concurrency compatibility fix.
 
     Scrubs the redundant ``--concurrent-requests`` flag from the Magpie source
     scripts dir AND the InferenceX ``benchmarks`` dir (where Magpie copies them
@@ -513,20 +559,48 @@ def _apply_eval_concurrency_fixes(
         failed.
     """
     ok = True
-    scanned: set[Path] = set()
-    for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
-    ):
-        if scripts_dir is None or scripts_dir in scanned:
-            continue
-        scanned.add(scripts_dir)
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
         if not _apply_eval_flag_patch_atomic(scripts_dir):
             ok = False
     benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
     if benchmark_lib is not None and not _apply_run_lm_eval_arg_patch_atomic(benchmark_lib):
         ok = False
     return ok
+
+
+def _client_tokenizer_hook_installed(
+    magpie_dir: Path | str | None,
+    inferencex_dir: Path | str | None,
+    script_name: str | None = None,
+) -> bool:
+    """Whether the client script this round will run now carries the hook."""
+    for script in _client_scripts(magpie_dir, inferencex_dir):
+        if script_name is not None and script.name != script_name:
+            continue
+        if not _is_client_tokenizer_mode_patched(script):
+            return False
+    return True
+
+
+def _install_client_tokenizer_hook(
+    magpie_dir: Path | str | None,
+    inferencex_dir: Path | str | None,
+    script_name: str | None = None,
+) -> bool:
+    """Apply the hook, then report the post-condition. Caller must hold the lock."""
+    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
+        _apply_client_tokenizer_patch_dir(scripts_dir)
+    return _client_tokenizer_hook_installed(magpie_dir, inferencex_dir, script_name)
+
+
+def ensure_client_tokenizer_hook(
+    magpie_dir: Path | str | None = None,
+    inferencex_dir: Path | str | None = None,
+    script_name: str | None = None,
+) -> bool:
+    """Install the client tokenizer-mode hook and report whether it is really there."""
+    with _file_lock(_LOCK_PATH):
+        return _install_client_tokenizer_hook(magpie_dir, inferencex_dir, script_name)
 
 
 def _inferencex_tolerates_eval_flag(inferencex_dir: Path | str | None) -> bool:
@@ -582,23 +656,13 @@ def live_eval_concurrency_flag_scripts(
         The offending script paths (empty when nothing is blocked).
     """
     hits: list[Path] = []
-    scanned: set[Path] = set()
-    for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
-    ):
-        if scripts_dir is None or scripts_dir in scanned:
+    for script in _client_scripts(magpie_dir, inferencex_dir):
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError:
             continue
-        scanned.add(scripts_dir)
-        for script in sorted(scripts_dir.glob("*.sh")):
-            if script.name == "benchmark_lib.sh":
-                continue
-            try:
-                text = script.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if _LIVE_RUN_EVAL_FLAG_RE.search(text):
-                hits.append(script)
+        if _LIVE_RUN_EVAL_FLAG_RE.search(text):
+            hits.append(script)
     return hits
 
 
@@ -644,6 +708,7 @@ def ensure_eval_concurrency_compat(
     """
     with _file_lock(_LOCK_PATH):
         applied_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
+        _install_client_tokenizer_hook(magpie_dir, inferencex_dir)
         return _eval_concurrency_unblocked(applied_ok, magpie_dir, inferencex_dir)
 
 
@@ -1019,6 +1084,9 @@ class MagpiePatchStatus:
     # every generic benchmark script (or none needed it). Defaults True
     # (not-applicable) so it never falsely fails install.
     eval_flag_ok: bool = True
+    # Whether every generic client script can be told which tokenizer to load.
+    # Reported separately from ``ok``; hard failure is at baseline launch time.
+    client_tokenizer_ok: bool = True
 
     @property
     def ok(self) -> bool:
@@ -1029,6 +1097,48 @@ class MagpiePatchStatus:
             both succeeded.
         """
         return self.remote_trust_ok and self.eval_flag_ok
+
+
+def _is_client_tokenizer_mode_patched(src: Path) -> bool:
+    """Whether ``src`` already names a tokenizer, or has no client shape to patch."""
+    try:
+        text = src.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _CLIENT_TOKENIZER_MODE_SENTINEL in text or _CLIENT_TOKENIZER_PATH_MARKER not in text
+
+
+def _apply_client_tokenizer_mode_patch_atomic(src: Path) -> bool:
+    """Give the generic vLLM client a way to be told which tokenizer to load."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
+        return False
+
+    if _CLIENT_TOKENIZER_MODE_SENTINEL in original or _CLIENT_TOKENIZER_PATH_MARKER not in original:
+        return True
+    if _CLIENT_TOKENIZER_LEGACY_BLOCK not in original:
+        log.warning(
+            "_magpie_patcher: generic vLLM client block not found in %s; tokenizer-mode patch could not be applied",
+            src,
+        )
+        return False
+
+    patched = original.replace(
+        _CLIENT_TOKENIZER_LEGACY_BLOCK,
+        _CLIENT_TOKENIZER_PATCHED_BLOCK,
+        1,
+    )
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=f".{src.name}.hyperloom_",
+        log_prefix="_magpie_patcher",
+    ):
+        return False
+    log.info("_magpie_patcher: applied client tokenizer-mode patch to %s", src)
+    return True
 
 
 def magpie_scripts_patch_status(
@@ -1090,11 +1200,13 @@ def magpie_scripts_patch_status(
         return MagpiePatchStatus(
             remote_trust_ok=remote_trust_ok,
             eval_flag_ok=eval_flag_ok,
+            client_tokenizer_ok=_install_client_tokenizer_hook(magpie_dir, inferencex_dir),
         )
 
 
 __all__ = [
     "MagpiePatchStatus",
+    "ensure_client_tokenizer_hook",
     "ensure_eval_concurrency_compat",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",

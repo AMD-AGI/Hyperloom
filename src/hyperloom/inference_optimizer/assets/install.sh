@@ -13,10 +13,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
 #      pinned to MAGPIE_REF (a commit SHA or tag)
-#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (root-cause fix for the Hyperloom #C1 script-tearing race;
-#       fail-soft — a no-op when the MAGPIE_REF target already has
-#       upstream atomic copying)
+#   2b. Magpie compatibility patches (SGLang custom-tokenizer trust +
+#       eval-concurrency flag scrub); idempotent no-ops on re-run. The
+#       default MAGPIE_REF already copies benchmark scripts atomically
+#       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -313,8 +313,8 @@ Env overrides:
     unset => open-source-only),
   USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
-  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
-  PR is already merged into your clone),
+  PATCH_MAGPIE (=1; set 0 to skip the SGLang trust and eval-concurrency
+  compatibility patches in step 2b),
   MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
     --concurrent-requests eval flag cannot be removed from a Magpie
     benchmark script. Set 0 only when GSM8K accuracy eval is not
