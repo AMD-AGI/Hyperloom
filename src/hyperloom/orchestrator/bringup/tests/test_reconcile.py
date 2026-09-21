@@ -22,6 +22,7 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
+    EXPIRED_REAPED,
     OPEN,
     SETTLED,
     RoundStore,
@@ -511,3 +512,112 @@ async def test_the_pass_sweeps_the_leases_and_reports_what_it_swept(db):
         (BRINGUP_ROUND_LANE, "round-spec-1"),
         ("server_lifecycle", "h1"),
     }
+
+
+async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: bool) -> str:
+    """Open a round whose holder ends still owning lane rows, and give it a successor.
+
+    Reproduces the shape the sweep meets in a live session: the lanes are taken
+    by a real acquire, so the rows carry this process's own pid and owner scope
+    and no liveness probe can refute them.
+
+    Args:
+        db: The session database.
+        rounds: The round store to open the round in.
+        tasks: The registry the holder and successor rows live in.
+        cleanup_confirmed: What the holder's terminal evidence claims, which is
+            what :func:`_terminal_by_observation` reads.
+
+    Returns:
+        str: The successor task's id.
+    """
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    await _open_round(rounds, tasks, holder="spec-1")
+    await locks.acquire_many(["server_lifecycle"], holder_id="h1", task_id="spec-1", action="explore", ttl_sec=7200)
+    await tasks.transition("spec-1", "running")
+    await tasks.transition(
+        "spec-1",
+        "succeeded",
+        evidence={"outcome": {"state": "succeeded"}, "cleanup_confirmed": cleanup_confirmed},
+    )
+    successor = await tasks.create(
+        kind="integrate_patch", params={"specialist_task_id": "spec-1"}, idempotency_key="next"
+    )
+    # Nothing here is reclaimable by liveness: the pid on the rows is this test.
+    assert await locks.reap_dead_holders() == []
+    return successor.task_id
+
+
+@pytest.mark.asyncio
+async def test_a_round_wedged_by_lane_rows_alone_is_freed_in_the_same_pass(db):
+    """The lane sweep runs first, so the round it unblocks moves in that same pass.
+
+    Before the sweep existed this round had no way out at all: its holder was
+    terminal, but ``_holder_has_resources`` saw lane rows that nothing could
+    reclaim, because the pid on them is the live coordinator and the release
+    that would have dropped them is the one that never ran. Ordering the sweep
+    ahead of the round rules is what resolves it, so the ordering is asserted
+    here rather than left to the order the rules happen to be listed in.
+    """
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    successor = await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=True)
+
+    report = await rec.run(_NOW + 10.0)
+
+    assert report.handed_off == ["round-spec-1"]
+    assert report.leases_reaped == 4  # server_lifecycle plus the three lanes it mutexes with.
+    assert (await rounds.get("round-spec-1")).holder_task_id == successor
+    # Only the round's own lane survives, and it has moved to the successor.
+    lanes = await db.fetchall("SELECT lane, task_id FROM leases")
+    assert {(r["lane"], r["task_id"]) for r in lanes} == {(BRINGUP_ROUND_LANE, successor)}
+
+
+@pytest.mark.asyncio
+async def test_lanes_come_back_without_moving_a_round_whose_cleanup_never_confirmed(db):
+    """The bound on the rule above: the lanes are freed, the round is not advanced.
+
+    These are the 2026-09-21 rows themselves. They clear the lane sweep's bar --
+    nobody is using the lane -- and fail ``_terminal_by_observation``, which asks
+    the stricter question of whether the holder ended cleanly enough to move a
+    round on. Freeing the lanes must not answer that question by accident.
+    """
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
+
+    report = await rec.run(_NOW + 10.0)
+
+    assert report.leases_reaped == 4
+    assert (report.handed_off, report.settled) == ([], [])
+    assert (await rounds.get("round-spec-1")).holder_task_id == "spec-1"
+    assert (await rounds.get("round-spec-1")).state == OPEN
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_round_with_no_successor_settles_in_the_pass_that_frees_it(db):
+    """The other end of the same rule: no successor to hand to, so it expires instead.
+
+    Freeing the lanes lets ``_advance_or_expire`` reach its cap check, and with
+    no successor waiting the round settles ``expired_reaped`` in that same pass.
+    Before the sweep it stayed open indefinitely, for the same reason the
+    hand-off case did. Asserted because it is a second round-lifecycle outcome
+    the sweep newly reaches, not only the hand-off one.
+    """
+    rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    await _open_round(rounds, tasks, holder="spec-1")
+    await locks.acquire_many(["server_lifecycle"], holder_id="h1", task_id="spec-1", action="explore", ttl_sec=7200)
+    await tasks.transition("spec-1", "running")
+    await tasks.transition(
+        "spec-1",
+        "succeeded",
+        evidence={"outcome": {"state": "succeeded"}, "cleanup_confirmed": True},
+    )
+    # No successor is created: this is the case the hand-off test does not cover.
+    assert await locks.reap_dead_holders() == []
+
+    report = await rec.run(_NOW + 10.0)
+
+    assert report.leases_reaped == 4
+    assert report.handed_off == []
+    assert report.settled == [("round-spec-1", EXPIRED_REAPED)]
+    assert (await rounds.get("round-spec-1")).state == SETTLED

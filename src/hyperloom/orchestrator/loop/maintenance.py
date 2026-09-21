@@ -21,7 +21,9 @@ async def run_lease_and_db_reclaim(
     """Report confirmed-dead cleanup and prune retained database history.
 
     Shared by periodic maintenance and cycle soft-restart. Resource ownership
-    is resolved by the reconciler, never inferred from elapsed lease budgets.
+    is resolved by the reconciler: owners it proved dead, and lanes whose holder
+    task the registry already wrote terminal -- never inferred from elapsed
+    lease budgets.
 
     Args:
         host: Coordinator exposing ``reconciler`` and ``db``.

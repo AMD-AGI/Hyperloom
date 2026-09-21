@@ -169,6 +169,88 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
     return sorted(out)
 
 
+def _reclaim_finished_holders(cur: sqlite3.Cursor, lanes: list[str], *, scope: str) -> list[dict]:
+    """Drop lane rows whose holder task already ended, inside the caller's transaction.
+
+    The rows leaked on 2026-09-21 all belonged to holders already recorded
+    terminal: :meth:`SubAgentRunner._write_terminal` (``loop/sub_agent_runner``)
+    runs even on the path that leaves cleanup unconfirmed, and it is exactly
+    that path which skips the release. A terminal task cannot resume, so its
+    lane row describes work nobody is doing -- which is why this pass reads the
+    ``tasks`` state rather than ``expires_at``. A TTL is a static per-action budget that nothing
+    enforces, so a lapse says only that a legitimately long run outlived its
+    estimate (``explore`` budgets 7200s and holds ``server_lifecycle`` plus
+    ``benchmark_lane`` across a benchmark that can exceed it); the terminal
+    state is the holder's own account of having stopped.
+
+    Sharing the caller's cursor keeps the sweep and the read that follows it in
+    one ``BEGIN IMMEDIATE``, so no second acquirer can see a row this one has
+    already reclaimed.
+
+    Args:
+        cur: Cursor of the transaction that acts on the surviving rows.
+        lanes: Lanes to sweep; empty sweeps every lane but the round lane.
+        scope: The boot/PID namespace whose rows this process may judge.
+
+    Returns:
+        list[dict]: The rows reclaimed.
+    """
+    # Deferred because ``task_registry`` imports this module; reading the state
+    # machine here keeps the terminal set single-sourced all the same.
+    from ..state.task_registry import TERMINAL_STATES
+
+    # Same first act as :meth:`SqliteLeaseBackend.holder_is_dead`: with no
+    # observable ownership domain, no row here is ours to judge.
+    #
+    # Pre-existing, inherited here, and deliberately NOT fixed by this change: a
+    # row acquired while /proc is unreadable is stored with ``owner_scope=''``
+    # (:func:`local_owner_scope` returns "" on OSError), and no reaper can ever
+    # take it back. ``holder_is_dead`` rejects it on this same guard while /proc
+    # stays unreadable and on ``row["owner_scope"] != scope`` once /proc
+    # recovers; this pass rejects it here and again on the ``owner_scope = ?``
+    # predicate below. :meth:`release` still drops such a row -- it keys on
+    # ``(lane, holder_id)`` with no scope predicate -- so a holder that ends by
+    # releasing is fine; what no reaper can do is take the row back for a holder
+    # that ends without releasing, which is precisely the case this pass exists
+    # for. Closing that means giving ownership a fallback identity
+    # for the case where the kernel will not name one, which changes what a
+    # scope asserts; it is its own change, not a widening smuggled into this
+    # one, which only reuses the guard already in force.
+    if not scope:
+        return []
+    terminal = sorted(TERMINAL_STATES)
+    states = ",".join("?" * len(terminal))
+    # A holder absent from ``tasks`` is deliberately left alone. Absence is
+    # silence, not a finished holder, and the dead-holder pass already covers
+    # the rows a crash leaves behind.
+    finished = (
+        "owner_scope = ? "
+        # A lane records its coordinator, not the specialist's GPU worker: a
+        # holder still on the cards is still working, whatever the coordinator
+        # task row says. Same exemption reap_dead_holders makes.
+        "AND task_id NOT IN (SELECT task_id FROM gpu_leases) "
+        f"AND task_id IN (SELECT task_id FROM tasks WHERE state IN ({states}))"  # nosec B608 - generated placeholders only.
+    )
+    params: tuple = (scope, *terminal)
+    if lanes:
+        # Callers pass a ``_expand_lanes`` result, which is drawn from
+        # KNOWN_LANES and so never names BRINGUP_ROUND_LANE.
+        placeholders = ",".join("?" * len(lanes))
+        where = f"lane IN ({placeholders}) AND {finished}"  # nosec B608 - generated placeholders only.
+        params = (*lanes, *params)
+    else:
+        # A round outlives its holder on purpose: only RoundStore may say a
+        # round is over, and its holder going terminal is the very input
+        # ``Reconciler._advance_or_expire`` weighs before handing off.
+        where = f"lane != ? AND {finished}"  # nosec B608 - generated placeholders only.
+        params = (BRINGUP_ROUND_LANE, *params)
+    cur.execute(f"SELECT * FROM leases WHERE {where}", params)  # nosec B608 - generated placeholders only.
+    rows = [dict(r) for r in cur.fetchall()]
+    if rows:
+        cur.execute(f"DELETE FROM leases WHERE {where}", params)  # nosec B608 - generated placeholders only.
+    return rows
+
+
 @dataclass
 class Lease:
     """Lease handle returned by ``acquire_many``."""
@@ -230,6 +312,23 @@ class SqliteLeaseBackend:
         expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
 
         async with self.db.transaction() as cur:
+            # 2026-09-21: a dispatcher that deliberately retained capacity on an
+            # unconfirmed cleanup left six lanes held by holders that
+            # :meth:`SubAgentRunner._write_terminal` had already recorded
+            # terminal. The rows still occupied the lanes two hours later, with
+            # 19 queued tasks starved behind them. Reclaim them here as well as
+            # in the sweep, so the capacity read below is never decided against
+            # a holder that went terminal since the sweep ran.
+            reclaimed = _reclaim_finished_holders(cur, expanded, scope=local_owner_scope())
+            if reclaimed:
+                # A lane that vanishes on the acquire path leaves no other trace
+                # to attribute it to; the standalone sweep logs its own.
+                log.warning(
+                    "resource_lock: acquire reclaimed %d lease(s) from terminal holders: %s",
+                    len(reclaimed),
+                    ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(task={r['task_id'][:12]})" for r in reclaimed),
+                )
+
             # Resolve capacity per lane (fallback for unseeded DBs).
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
@@ -396,6 +495,26 @@ class SqliteLeaseBackend:
             )
         return reaped
 
+    async def reap_finished_holders(self) -> list[dict]:
+        """Release every lane still held by a task recorded terminal.
+
+        A pass of its own because the dispatcher's lane gate reads
+        :meth:`lane_holders` before it attempts an acquire: a leaked row starves
+        the queue without any acquire ever running to reclaim it.
+
+        Returns:
+            list[dict]: The rows reclaimed.
+        """
+        async with self.db.transaction() as cur:
+            reaped = _reclaim_finished_holders(cur, [], scope=local_owner_scope())
+        if reaped:
+            log.warning(
+                "resource_lock: reclaimed %d lease(s) from terminal holders: %s",
+                len(reaped),
+                ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(task={r['task_id'][:12]})" for r in reaped),
+            )
+        return reaped
+
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
         """Return round ids with a retained ownership row, irrespective of age."""
         rows = await self.db.fetchall(
@@ -473,6 +592,13 @@ class ResourceLockManager:
     async def reap_dead_holders(self) -> list[dict]:
         """Release leases whose holder process is dead via the backend."""
         fn = getattr(self.backend, "reap_dead_holders", None)
+        if not callable(fn):
+            return []
+        return await fn()
+
+    async def reap_finished_holders(self) -> list[dict]:
+        """Release lanes held by tasks the registry wrote terminal, via the backend."""
+        fn = getattr(self.backend, "reap_finished_holders", None)
         if not callable(fn):
             return []
         return await fn()

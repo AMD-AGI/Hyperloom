@@ -6,18 +6,22 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
 
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import (
+    BRINGUP_ROUND_LANE,
     KNOWN_LANES,
     LANE_CONFLICTS,
     LaneBusy,
     LaneFull,
     ResourceLockManager,
     SqliteLeaseBackend,
+    StaleLeaseError,
+    hold_round_lane,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import (
@@ -473,6 +477,132 @@ async def test_old_rows_still_count_toward_lane_capacity(conn, locks):
         is None
     )
     assert not hasattr(locks, "reap_expired")
+
+
+_T0 = "2026-09-21T07:00:00+00:00"
+
+
+def _seed_task(conn, task_id: str, state: str) -> None:
+    """Give a lane holder the registry row reclamation judges it by."""
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?)",
+        (task_id, "specialist", state, f"idem-{task_id}", _T0, _T0),
+    )
+    conn.raw.commit()
+
+
+@pytest.mark.asyncio
+async def test_terminal_holder_stops_blocking_its_lanes(conn, locks):
+    """2026-09-21: six lanes held by already-terminal holders starved 19 queued tasks for two hours."""
+    _seed_task(conn, "told", "failed")
+    # Well inside its TTL: the holder's terminal state is what frees the lane.
+    lease = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="old", task_id="told", action="specialist", ttl_sec=3600
+    )
+    # The pid on the row is this very process, so liveness cannot refute it.
+    assert await locks.reap_dead_holders() == []
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
+        )
+        is not None
+    )
+    assert {r["holder_id"] for r in await conn.fetchall("SELECT holder_id FROM leases")} == {"next"}
+    # Release is holder-keyed, so the old holder's late release misses the successor.
+    assert await locks.release(lease) == 0
+
+
+@pytest.mark.asyncio
+async def test_running_holder_keeps_lanes_past_its_ttl(conn, locks):
+    """A lane TTL is a static per-action budget and nothing ends the action when it lapses."""
+    _seed_task(conn, "texplore", "running")
+    lease = await locks.acquire_many(
+        ["server_lifecycle"], holder_id="explore", task_id="texplore", action="explore", ttl_sec=-1
+    )
+    assert await locks.reap_finished_holders() == []
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
+        )
+        is None
+    )
+    await locks.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_terminal_holder_with_live_gpu_leases_keeps_its_lanes(conn, locks):
+    """A lane records its coordinator, not the specialist GPU worker still holding cards."""
+    _seed_task(conn, "tgpu", "succeeded")
+    lease = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="gpu", task_id="tgpu", action="specialist", ttl_sec=-1
+    )
+    conn.raw.execute(
+        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+        "VALUES (0,?,?,?,?,?)",
+        ("gpu", "tgpu", _T0, _T0, _T0),
+    )
+    conn.raw.commit()
+    assert await locks.reap_finished_holders() == []
+    assert (
+        await locks.try_acquire_many(
+            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
+        )
+        is None
+    )
+    await locks.release(lease)
+
+
+@pytest.mark.asyncio
+async def test_terminal_holder_from_another_scope_is_left_alone(conn, locks):
+    """Ownership is judgeable only inside the boot and PID namespace that recorded it."""
+    _seed_task(conn, "tfar", "failed")
+    await locks.acquire_many(["research_lane"], holder_id="far", task_id="tfar", action="specialist", ttl_sec=60)
+    conn.raw.execute("UPDATE leases SET owner_scope='other-boot:4026531836'")
+    conn.raw.commit()
+    assert await locks.reap_finished_holders() == []
+    assert (await locks.lane_holders())["research_lane"] == 1
+
+
+@pytest.mark.asyncio
+async def test_finished_holders_are_swept_without_an_acquire(conn, locks):
+    """The dispatcher's lane gate reads holder counts before it ever attempts an acquire."""
+    _seed_task(conn, "tdone", "cancelled")
+    _seed_task(conn, "tlive", "running")
+    _seed_task(conn, "tround", "failed")
+    await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="done", task_id="tdone", action="specialist", ttl_sec=3600
+    )
+    await locks.acquire_many(["research_lane"], holder_id="live", task_id="tlive", action="specialist", ttl_sec=3600)
+    hold_round_lane(
+        conn.raw.cursor(),
+        round_id="r1",
+        holder_task_id="tround",
+        expires_unix=time.time() + 600,
+        now_unix=time.time(),
+    )
+    conn.raw.commit()
+    reaped = await locks.reap_finished_holders()
+    assert {r["holder_id"] for r in reaped} == {"done"}
+    # A round ends in RoundStore alone, even once its holder task is terminal.
+    assert await locks.lane_holders() == {"research_lane": 1, BRINGUP_ROUND_LANE: 1}
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_holder_cannot_disturb_its_successor(conn, locks):
+    """Release and heartbeat are holder-keyed, so a late one never lands on the successor."""
+    _seed_task(conn, "tdone", "failed")
+    stale = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="done", task_id="tdone", action="specialist", ttl_sec=3600
+    )
+    successor = await locks.acquire_many(
+        ["gpu_research_lane"], holder_id="next", task_id="tnext", action="specialist", ttl_sec=600
+    )
+    assert await locks.release(stale) == 0
+    with pytest.raises(StaleLeaseError):
+        await locks.heartbeat(stale, ttl_sec=600)
+    assert (await locks.lane_holders())["gpu_research_lane"] == 1
+    await locks.release(successor)
 
 
 @pytest.mark.asyncio

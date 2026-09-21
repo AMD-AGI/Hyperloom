@@ -273,8 +273,44 @@ class Reconciler:
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
-        """Release only leases with confirmed-dead local owners."""
-        report.leases_reaped = len(await self._locks.reap_dead_holders())
+        """Release confirmed-dead local owners, then lanes held by ended tasks.
+
+        Liveness alone cannot refute a coordinator-side holder that dropped its
+        work without releasing -- the pid answering the probe is this process.
+        2026-09-21: six lanes were held that way for two hours, starving 19
+        queued tasks, by holders :meth:`SubAgentRunner._write_terminal`
+        (``loop/sub_agent_runner``) had already moved to a terminal state on the
+        cleanup-unconfirmed path. That state is the proof the lane row lacks: it
+        cannot be left behind by a holder that is still working, because a
+        terminal task never resumes.
+
+        Note the deliberately lower bar than :func:`_terminal_by_observation`
+        below, which those same rows fail: it asks whether the holder ended
+        *cleanly* enough to move a round on, whereas a lane only asks whether
+        anybody is still using it.
+
+        Running here, ahead of :meth:`_resolve_open_rounds`, also changes what
+        that rule sees, and does so deliberately.
+        :meth:`_holder_has_resources` reads the very lane rows this sweep
+        clears, so a round whose holder is terminal *by observation* and retains
+        nothing but lane rows used to sit open with no way out: not for a pass
+        or two, but indefinitely, because the recorded pid is this live
+        coordinator and the release that would have dropped those rows is the
+        one that never ran. Such a round now hands off -- or expires on its cap
+        -- in the same pass that frees its lanes, which is the same starvation
+        defect one level up, settled on the same evidence.
+
+        Two cases are deliberately left as they were, and they are the ones
+        correctness rests on: a holder still on the cards keeps its lanes and so
+        its round, via the ``gpu_leases`` exemption in the sweep; and the
+        2026-09-21 rows themselves fail :func:`_terminal_by_observation`, so
+        their lanes come back while their round stays exactly where it was.
+        ``test_a_round_wedged_by_lane_rows_alone_is_freed_in_the_same_pass``
+        pins the timing.
+        """
+        report.leases_reaped = len(await self._locks.reap_dead_holders()) + len(
+            await self._locks.reap_finished_holders()
+        )
 
     async def _advance_or_expire(self, round_row: Round, now_unix: float, report: ReconcileReport) -> None:
         """Move a terminal-holder round forward, or end it once its cap passes."""
