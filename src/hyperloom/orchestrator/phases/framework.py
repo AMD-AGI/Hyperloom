@@ -14,6 +14,7 @@ from hyperloom.common.coerce import to_float
 
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..state.attempt_ledger import record_patch_attempt
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
@@ -221,10 +222,9 @@ def _record_source_attempt(
 ) -> None:
     """Record one authored patch's measured attempt on the framework timeline event.
 
-    This function is a pure timeline recorder.  The control-plane ledger write
-    (``SharedState.attempts``) is handled unconditionally at the dispatcher seam
-    in ``attempt_ledger.record_patch_attempt``, independent of the recorder's
-    availability.
+    A pure timeline recorder: the control-plane ledger write sits beside the call
+    to this function, not inside it, so a phase with no open recorder still
+    records the attempt.
     """
     recorder = _recorder(coord)
     if recorder is None:
@@ -2163,6 +2163,19 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         if not recorded:
             return
+        record_patch_attempt(
+            self.shared_state,
+            task_id=str(getattr(task, "task_id", "") or ""),
+            specialist_task_id=spec_tid,
+            outcome=status,
+            gain_pct=delta_pct,
+            before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
+            after_tput=new_tput,
+            error_class=str(res.get("error_class") or ""),
+            # The deliverable names the lever when the dispatch did not,
+            # but a dispatch that named one outranks it.
+            evidence={**res, **params},
+        )
         _record_source_attempt(
             self,
             task=task,

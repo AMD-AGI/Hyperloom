@@ -10,7 +10,6 @@ from typing import Any
 import pytest
 
 from hyperloom.agents.framework import repo_map as _repo_map
-from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_SOURCE_PATCH
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 
@@ -632,57 +631,6 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
 
     assert recorded == ["reverted"]
     assert result.result["reauthor_attempt"] == 1
-
-
-@pytest.mark.asyncio
-async def test_a_patch_outcome_is_ledgered_without_the_authoring_flag(tmp_path: Path):
-    """The ledger decides which levers it tracks; the authoring bridge does not.
-
-    The row used to be written from inside that bridge, so it was reachable only
-    for tasks carrying ``framework_agent_authoring`` and only while the timeline
-    recorder was open. Neither is a statement about the ledger.
-    """
-    stub = _Stub(tmp_path, authoring=False)
-    stub.shared_state.attempts = []
-
-    async def _noop_async(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    stub._record_intervention_for_task = lambda *_args, **_kwargs: None
-    stub._maybe_rearm_authored_lane = _noop_async
-    stub._drain_apply_fail_retry_pending = _noop_async
-    stub._is_promotable_result = lambda *_args, **_kwargs: False
-    stub._handle_unpromotable_result = _noop_async
-    stub._fact_write_hook = _noop_async
-    stub._record_coordinator_exception = lambda **_kwargs: None
-
-    task = SimpleNamespace(
-        task_id="integrate-no-flag",
-        kind="integrate_patch",
-        # The local-exploration arm names a gap, not a lever, so it dispatches
-        # without a lever_kind; the resolver derives one from the deliverable.
-        params={"framework_agent_candidate_id": "local_explore:0"},
-    )
-    result = SubAgentResult(
-        task_id=task.task_id,
-        state="succeeded",
-        result={
-            "status": "reverted",
-            "base_tput": 5000.0,
-            "output_throughput": 4900.0,
-            "patches_applied": ["001_fix.patch"],
-        },
-    )
-
-    await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
-
-    (row,) = stub.shared_state.attempts
-    assert row["lever_kind"] == LEVER_SOURCE_PATCH
-    assert row["outcome"] == "reverted"
-    assert row["adopted"] is False
-    assert row["candidate_id"] == "local_explore:0"
-    assert row["before_tput"] == 5000.0
-    assert row["after_tput"] == 4900.0
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):

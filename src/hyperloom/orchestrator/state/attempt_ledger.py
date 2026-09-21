@@ -16,9 +16,6 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 
 from ..actions.executors._grid_base import is_kept
 
-#: Lanes that own their own ``apply_failed`` retry ladder and re-dispatch the candidate.
-_RETRY_LANES = ("perf_framework", "perf_explore")
-
 
 def _record(
     state: Any,
@@ -112,12 +109,9 @@ def record_patch_attempt(
     ``lever_kind`` in *evidence* and derives one for the local-exploration arm,
     which dispatches against a gap without naming a lever.
 
-    A candidate the lane will re-dispatch, and one dropped before it reached the
-    bench, are not resolved: counting either would let apply-conflict noise and
-    guard filtering read as a search that has run out of things to try.
+    Called once the authored-outcome bridge has settled the candidate, so a
+    result its lane will re-dispatch never reaches the ledger.
     """
-    if outcome == "skipped" or (outcome == "apply_failed" and evidence.get("lane") in _RETRY_LANES):
-        return
     _record(
         state,
         lever_kind=patch_lever_kind(evidence),
