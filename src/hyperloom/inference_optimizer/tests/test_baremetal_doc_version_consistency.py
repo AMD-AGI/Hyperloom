@@ -47,9 +47,7 @@ def test_baremetal_defaults_match_compat_doc():
 
     # SGLANG_REF is a commit SHA in install_baremetal.sh; the doc must name it
     # so moving the pin cannot leave the matrix behind.
-    assert not sglang_ref.startswith("v"), (
-        "SGLANG_REF is expected to pin a commit SHA (see docs/compatibility.rst)"
-    )
+    assert not sglang_ref.startswith("v"), "SGLANG_REF is expected to pin a commit SHA (see docs/compatibility.rst)"
     assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
 
     sglang_pretend = _default("SGLANG_PRETEND_VERSION", sh)
