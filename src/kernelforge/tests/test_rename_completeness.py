@@ -20,6 +20,12 @@ _COLLAPSE_PATTERN = re.compile(r"\bforge_llm\b|\bforge_gemm_tune\b")
 
 _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
+        "CHANGELOG.md",
+        r"forge_llm|forge_gemm_tune",
+        "Release notes recording what the packages used to be called. An entry "
+        "that gets renamed stops telling the reader which spelling to migrate from.",
+    ),
+    (
         "src/kernelforge/gemm_tune/tune_robustness.py",
         r"~/\.forge_gemm_tune/",
         "A user-home cache directory, not a module path. Renaming it would orphan "
@@ -62,10 +68,9 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "The test that asserts the alias is no longer read has to name it.",
     ),
     (
-        "docs/release-notes.md",
-        r"kernel-agents",
-        "Release notes naming the retired console script, so an operator whose script "
-        "still invokes it recognises the spelling that now fails.",
+        "CHANGELOG.md",
+        r"kernel_agents|kernel-agents|KERNEL_AGENTS_MODEL",
+        "Historical release notes.",
     ),
 )
 
@@ -95,10 +100,9 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "This file names the old spelling in order to forbid it.",
     ),
     (
-        "docs/release-notes.md",
-        r"FORGE_DISABLE_COMPILED_FELLOWS",
-        "The retired environment-variable spelling, named so a migrating operator can "
-        "find it; it is forwarded then ignored, and silently re-enables the backends.",
+        "CHANGELOG.md",
+        r"(?i)fellow",
+        "Historical release notes. An entry that gets renamed stops telling the reader which spelling to migrate from.",
     ),
 )
 

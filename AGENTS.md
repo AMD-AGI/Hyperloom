@@ -83,14 +83,13 @@ doc is the authority on where that boundary lives.
   unit-test an internal helper when it carries real logic of its own. When you replace a
   test, carry its contract and failure-mode assertions across and keep them running in the
   default CI selection. The coverage gate is a floor CI enforces, not the target.
-- **Every change states its observable effect in its own PR description.** Anything an
-  operator can observe — a behaviour, an interface, a default, a flag, an artifact — is
-  spelled out in the PR that changes it. Not a follow-up: the release cut aggregates
-  those descriptions into the GitHub release and cannot reconstruct them from commit
-  subjects. Write it for someone who will never read the diff: what they will now see,
-  and what the old behaviour cost them. Refactors with nothing observable, and test- or
-  docs-only changes, are exempt — say which in the PR description rather than leaving
-  the omission to be guessed at.
+- **Every change lands its changelog entry.** Anything an operator can observe — a
+  behaviour, an interface, a default, a flag, an artifact — carries a `CHANGELOG.md` entry
+  under `[Unreleased]` in the same PR. Not a follow-up, and not left for the release cut to
+  reconstruct from commit subjects. Write it for someone who will never read the diff: what
+  they will now see, and what the old behaviour cost them. Refactors with nothing
+  observable, and test- or docs-only changes, are exempt — say which in the PR description
+  rather than leaving the omission to be guessed at.
 - **Fix upstream, not around it.** When the root cause is inside a component (GEAK, Magpie,
   TraceLens, IntelliKit) or a framework, fix it there and pin the fix — don't paper over it
   with a local workaround.

@@ -6,7 +6,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 - Create a feature branch off `main`.
 - Keep changes focused and include context in the PR description (problem, approach, test coverage).
 - Ensure merge requirements and applicable GitHub checks pass before requesting review (see [CI and documentation-only changes](#ci-and-documentation-only-changes)).
-- Describe anything an operator can observe — a behaviour, an interface, a default, a flag, an artifact — in the PR description; the release cut aggregates those into the [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases). Refactors with nothing observable, and test- or docs-only changes, are exempt; say which in the PR description. See [`AGENTS.md`](AGENTS.md) § *Authoring rules of engagement*.
+- Add a `CHANGELOG.md` entry under `[Unreleased]` for anything an operator can observe — a behaviour, an interface, a default, a flag, an artifact — in the same PR as the change. Refactors with nothing observable, and test- or docs-only changes, are exempt; say which in the PR description. See [`AGENTS.md`](AGENTS.md) § *Authoring rules of engagement*.
 - Avoid committing generated artifacts.
 
 ## Proposing a new framework or platform
@@ -110,7 +110,7 @@ Do not treat ad hoc local `pytest --cov=...` invocations or any other workflow a
 - CI runs **Pylint** with **`--errors-only`** (fatal/error severity only, not style) on several first-party packages from [`.github/workflows/lint.yml`](.github/workflows/lint.yml) (advisory `continue-on-error` today). Root **`[tool.pylint.main]`** in `pyproject.toml` holds minimal defaults (e.g. `jobs`); tighten or add message disables there as the backlog shrinks.
 
 ## Before opening a PR
-- [ ] PR description states the observable effect, or says why the change is unobservable.
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`, or the PR description says why the change is unobservable.
 - [ ] Tests pass (`pytest`) when you changed executable code or behavior-affecting config.
 - [ ] Lint clean (`ruff check .`) when you changed Python sources.
 - [ ] Type checks clean (`mypy ...`) when you changed typed packages.
