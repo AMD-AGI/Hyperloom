@@ -60,6 +60,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
+    served_complete_protocol,
     snapshot_workspaces,
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
@@ -545,8 +546,7 @@ def _parse_report(workspace: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-# How long to keep re-reading ``benchmark_report.json`` when the process exited cleanly but the report does not yet
-# parse into a valid measurement.
+# How long to keep re-reading ``benchmark_report.json`` when the report does not yet parse into a valid measurement.
 REPORT_SETTLE_SECONDS = 30.0
 REPORT_SETTLE_POLL_SECONDS = 1.0
 
@@ -1984,13 +1984,15 @@ async def run_grid(
                 break
             continue
         report_path = workspace / "benchmark_report.json"
-        # A clean exit is worth waiting on: the report is written during shutdown and the reader runs the moment the
-        # subprocess is reaped.
+        # The report is written during shutdown and the reader runs the moment the subprocess is reaped, so the read is
+        # worth waiting on however the process exited: a non-zero exit can still be a round that served its whole
+        # protocol, and that verdict is taken from this one read.
         report, measurement = await _settled_measurement(
             workspace,
             subprocess_started_unix=variant_started_unix,
-            settle_seconds=REPORT_SETTLE_SECONDS if rc == 0 else 0.0,
+            settle_seconds=REPORT_SETTLE_SECONDS,
         )
+        nonzero_kept_error: str | None = None
         warnings = list(measurement.pop("nonfatal_warnings", []) or [])
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
@@ -2058,40 +2060,61 @@ async def run_grid(
 
         if rc != 0:
             nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="magpie_nonzero_after_valid_measurement",
-                error_summary=nonzero_error,
-                extra_args=variant.extra_server_args,
-            )
-            log.warning(
-                "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement (rc=%d)",
-                variant.name,
-                rc,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    workspace=str(workspace),
-                    report_path=str(report_path) if report_path.exists() else None,
-                    raw_result_path=measurement.get("raw_result_path"),
-                    reported_success=measurement.get("reported_success"),
-                    returncode=rc,
-                    nonfatal_warnings=warnings,
-                    error=nonzero_error,
-                    error_class="magpie_nonzero_after_valid_measurement",
-                    server_log_path=None,
-                    note=variant.note,
+            if served_complete_protocol(measurement):
+                # Every request the client recorded as requested was served, so
+                # the exit code came from something the round had already
+                # finished with. The cause stays on the result: a reader
+                # comparing this point to its neighbours is owed the reason it
+                # is not a clean zero.
+                warnings.append(f"nonzero_rc_after_complete_protocol:{rc}")
+                nonzero_kept_error = nonzero_error
+                log.warning(
+                    "grid_runner: variant %s exited %d after serving its whole protocol "
+                    "(%s of %s requests); keeping the measurement: %s",
+                    variant.name,
+                    rc,
+                    measurement.get("completed_requests"),
+                    measurement.get("requested_requests"),
+                    nonzero_error,
                 )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
+            else:
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="magpie_nonzero_after_valid_measurement",
+                    error_summary=nonzero_error,
+                    extra_args=variant.extra_server_args,
+                )
+                log.warning(
+                    "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement "
+                    "(rc=%d, served %s of %s requests)",
+                    variant.name,
+                    rc,
+                    measurement.get("completed_requests"),
+                    measurement.get("requested_requests"),
+                )
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        workspace=str(workspace),
+                        report_path=str(report_path) if report_path.exists() else None,
+                        raw_result_path=measurement.get("raw_result_path"),
+                        reported_success=measurement.get("reported_success"),
+                        returncode=rc,
+                        nonfatal_warnings=warnings,
+                        error=nonzero_error,
+                        error_class="magpie_nonzero_after_valid_measurement",
+                        server_log_path=None,
+                        note=variant.note,
+                    )
+                )
+                await _report_finished_variant(i)
+                if not keep_going_on_failure:
+                    break
+                continue
 
         results.append(
             VariantResult(
@@ -2116,6 +2139,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
+                error=nonzero_kept_error,
                 server_log_path=None,
                 note=variant.note,
                 runtime_sec=round(

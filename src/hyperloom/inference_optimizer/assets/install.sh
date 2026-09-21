@@ -13,10 +13,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
 #      pinned to MAGPIE_REF (a commit SHA or tag)
-#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (root-cause fix for the Hyperloom #C1 script-tearing race;
-#       fail-soft — a no-op when the MAGPIE_REF target already has
-#       upstream atomic copying)
+#   2b. Magpie compatibility patches (SGLang custom-tokenizer trust +
+#       eval-concurrency flag scrub); idempotent no-ops on re-run. The
+#       default MAGPIE_REF already copies benchmark scripts atomically
+#       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -216,7 +216,10 @@ EOF
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>.
+# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
+# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
+# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
 MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
@@ -313,8 +316,8 @@ Env overrides:
     unset => open-source-only),
   USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
-  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
-  PR is already merged into your clone),
+  PATCH_MAGPIE (=1; set 0 to skip the SGLang trust and eval-concurrency
+  compatibility patches in step 2b),
   MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
     --concurrent-requests eval flag cannot be removed from a Magpie
     benchmark script. Set 0 only when GSM8K accuracy eval is not
@@ -340,7 +343,7 @@ die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
 # Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
 # string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
-# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# user writing MAGPIE_EVAL_FLAG_STRICT=false would get the OPPOSITE of intent. Accept
 # the common spellings case-insensitively; returns success (0) when falsy.
 is_falsy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -937,6 +940,130 @@ sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 #
 # Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
 
+# Echo rocprof-compute's libexec dir, or non-zero if the tool is not installed.
+# Two layouts exist: the classic ROCm tree under $ROCM_PATH, and TheRock's pip
+# ROCm, which ships the profiler as its own `_rocm_profiler` wheel while
+# $ROCM_PATH points at the separate `_rocm_sdk_devel` package.
+_rocpc_libexec_dir() {
+  local root dir
+  for root in "${ROCM_PATH:-}" /opt/rocm; do
+    [ -n "$root" ] || continue
+    dir="${root%/}/libexec/rocprofiler-compute"
+    if [ -f "${dir}/rocprof_compute_base.py" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  dir="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+try:
+    spec = importlib.util.find_spec("_rocm_profiler")
+except Exception:
+    spec = None
+for root in list(getattr(spec, "submodule_search_locations", None) or []):
+    path = os.path.join(root, "libexec", "rocprofiler-compute")
+    if os.path.isfile(os.path.join(path, "rocprof_compute_base.py")):
+        print(path)
+        break
+PY
+  )" || dir=""
+  [ -n "$dir" ] || return 1
+  printf '%s\n' "$dir"
+}
+
+# Echo the installed `rocm` distribution version, or non-zero when ROCm is not
+# pip-packaged. Non-empty means TheRock's wheels, where the profiler is itself a
+# wheel and apt carries no such package at all, so apt can only ever fail there.
+_rocm_wheel_version() {
+  "$PYTHON" - <<'PY' 2>/dev/null
+import importlib.metadata
+print(importlib.metadata.version("rocm"))
+PY
+}
+
+# Echo the ROCm tree carrying rocprofiler-sdk, or non-zero when there is none.
+# Pip-packaged ROCm splits this across wheels and $ROCM_PATH does not always
+# point at the one that has it.
+_rocm_sdk_runtime_root() {
+  local root
+  root="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except Exception:
+        continue
+    for root in list(getattr(spec, "submodule_search_locations", None) or []):
+        if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
+            print(root)
+            raise SystemExit(0)
+PY
+  )" || root=""
+  [ -n "$root" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# rocprofiler-sdk dlopens aqlprofile by its unversioned soname, which the
+# rocm-sdk-core wheel omits while shipping the versioned file. Without the link
+# the sdk aborts on SIGABRT mid-profile and hangs instead of reporting. Images
+# that do ship the soname are left alone.
+_ensure_aqlprofile_soname() {
+  local root lib
+  root="$(_rocm_sdk_runtime_root)" || return 0
+  lib="${root%/}/lib"
+  [ -e "${lib}/libhsa-amd-aqlprofile64.so" ] && return 0
+  [ -f "${lib}/libhsa-amd-aqlprofile64.so.1" ] || return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would link libhsa-amd-aqlprofile64.so -> libhsa-amd-aqlprofile64.so.1 in ${lib}"
+    return 0
+  fi
+  if ln -s libhsa-amd-aqlprofile64.so.1 "${lib}/libhsa-amd-aqlprofile64.so" 2>/dev/null; then
+    log "rocprof-compute: linked the missing libhsa-amd-aqlprofile64.so soname in ${lib}"
+  else
+    warn "rocprof-compute: could not link libhsa-amd-aqlprofile64.so in ${lib}; profiling will abort in rocprofiler-sdk"
+  fi
+}
+
+# Home of the private venv analyze mode runs in. rocpc_profile.py derives the
+# same path, so the two sides need no handshake.
+_rocpc_venv_dir() {
+  printf '%s\n' "${ROCPC_VENV:-/opt/rocprof-compute-venv}"
+}
+
+# rocprof-compute's analyze mode refuses to run unless the exact pins in its own
+# requirements.txt are installed. Meeting them in the serving image would pull
+# numpy and pandas out from under torch, so they get a venv of their own. The
+# tool's file is the only source of truth: a copy kept here goes stale the next
+# ROCm release, which is how analyze broke in the first place.
+# Fail-soft: without the venv, analyze degrades, profiling still collects.
+_ensure_rocpc_analyze_venv() {
+  local libexec="$1" reqs venv venv_py
+  reqs="${libexec}/requirements.txt"
+  if [ ! -f "$reqs" ]; then
+    log "rocprof-compute: no ${reqs}; analyze needs no private venv here"
+    return 0
+  fi
+  venv="$(_rocpc_venv_dir)"
+  venv_py="${venv}/bin/python"
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would provision the rocprof-compute analyze venv at ${venv} from ${reqs}"
+    return 0
+  fi
+  if [ -x "$venv_py" ]; then
+    log "rocprof-compute: analyze venv already present at ${venv}"
+    return 0
+  fi
+  if ! "$PYTHON" -m venv "$venv" >/dev/null 2>&1; then
+    warn "rocprof-compute: could not create the analyze venv at ${venv}; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  if ! "$venv_py" -m pip install --quiet "${PIP_EXTRA[@]}" -r "$reqs"; then
+    warn "rocprof-compute: analyze venv deps from ${reqs} failed to install; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  log "rocprof-compute: analyze venv ready at ${venv}"
+}
+
 # Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
 # of $PYTHON (install-time sys.executable), /usr/bin/python3, PATH python3 that
 # can run `<libexec>/rocprof-compute --help`. Non-zero + no output if none do.
@@ -1026,9 +1153,9 @@ ensure_rocprof_compute() {
   # permanent skip: roofline profiling silently uninstalled on every pod.
   log "rocprof-compute: ensuring roofline profiling deps (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}')"
 
-  local rocm_root base
+  local rocm_root libexec rocm_ver
   rocm_root="${ROCM_PATH:-/opt/rocm}"
-  base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+  libexec="$(_rocpc_libexec_dir)" || libexec=""
 
   # --- Step 0: the profiler's Python dependencies ---
   # The tool is a Python program: without dash/kaleido/matplotlib/plotille/tqdm
@@ -1091,14 +1218,34 @@ for spec in specs:
   fi
 
   # --- Step 1: ensure the rocprof-compute tool exists ---
-  # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
-  # install when the file KernelForge's resolve_rocpc() checks is already present.
-  if [ -f "$base" ]; then
-    log "rocprof-compute already present at ${base}"
+  # Idempotent: skip the install when the tool is already present in either layout.
+  if [ -n "$libexec" ]; then
+    log "rocprof-compute already present at ${libexec}"
   elif [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute not found at ${base} (check-only; would apt-get install rocprofiler-compute). Forge profiling would degrade to the PMC path."
+    warn "rocprof-compute not found under ${rocm_root} or the _rocm_profiler wheel (check-only; would install rocprofiler-compute). Forge profiling would degrade to the PMC path."
   elif [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    if rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+      log "would run: ${PYTHON} -m pip install --extra-index-url https://stable.repo.amd.com/rocm/whl-next 'rocm-profiler==${rocm_ver}'"
+    else
+      log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    fi
+  elif rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+    # Wheel-ROCm stack. Pin the profiler to the SDK version already installed:
+    # asking for the `rocm` metapackage instead lets pip re-resolve the whole
+    # SDK and, on the py3.12 images, silently reinstall rocm-sdk-core at an
+    # older version than the one torch is built against. --extra-index-url,
+    # never --index-url: that would replace the image's own configuration,
+    # which on some images is the only route to this package.
+    log "installing rocprofiler-compute (forge profiling backend) via pip: rocm-profiler==${rocm_ver}"
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      --extra-index-url https://stable.repo.amd.com/rocm/whl-next "rocm-profiler==${rocm_ver}" \
+      || warn "rocprof-compute: pip install 'rocm-profiler==${rocm_ver}' failed; forge profiling will degrade to the PMC path. Check pip/network access to the ROCm index."
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
+    else
+      warn "rocprof-compute: pip install produced no ${rocm_root} or _rocm_profiler layout; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO)."
+    fi
   elif ! command -v apt-get >/dev/null 2>&1; then
     # No apt (RHEL/Alpine/etc.): cannot install the system package here.
     warn "rocprof-compute: apt-get unavailable; cannot install rocprofiler-compute. Forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Bake rocprofiler-compute into the image to enable roofline profiling."
@@ -1114,10 +1261,11 @@ for spec in specs:
       apt-get install -y --no-install-recommends rocprofiler-compute >>"$apt_log" 2>&1 || true
     fi
     # Verify against the SAME path KernelForge's resolve_rocpc() checks.
-    if [ -f "$base" ]; then
-      log "rocprof-compute installed OK: ${base} present"
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
     else
-      warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
+      warn "rocprof-compute install did not produce a rocprofiler-compute layout under ${rocm_root}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
       # Guard BOTH the missing-file case and pipefail: if the redirect above never
       # created $apt_log (e.g. an unwritable TMPDIR), a bare `tail | while` exits
       # non-zero and set -euo pipefail would abort install.sh — the very
@@ -1134,9 +1282,11 @@ for spec in specs:
   # Pin in the interpreter resolve_rocpc() will actually run the tool under (probe
   # mirrors KernelForge). Runs when the tool is present; in check/dry-run we
   # surface the plan against $PYTHON even before the tool exists.
-  if [ -f "$base" ]; then
+  if [ -n "$libexec" ]; then
+    _ensure_aqlprofile_soname
+    _ensure_rocpc_analyze_venv "$libexec"
     local rocpc_py
-    if rocpc_py="$(_rocpc_effective_python "$(dirname "$base")")"; then
+    if rocpc_py="$(_rocpc_effective_python "$libexec")"; then
       [ "$rocpc_py" = "$PYTHON" ] \
         || log "rocprof-compute: resolve_rocpc will run under ${rocpc_py} (not \$PYTHON=${PYTHON}); pinning pandas there"
     else
@@ -1368,37 +1518,28 @@ ensure_aiperf() {
   fi
 }
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
-# The Hyperloom #C1 script-tearing race (vllm_mi300x.sh / sglang_mi300x.sh
-# sourced by a leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
-# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
-# subprocess, so monkey-patching from the Coordinator process does not
-# reach it; we patch the cloned source in place at install time. The
-# patcher itself is idempotent + flock-serialised + atomic-rename
-# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
+# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
+# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
+# (Magpie's client call sites never forward the `trust` flag upstream), and
+# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
+# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
+# Coordinator process does not reach it; we patch the cloned source in place
+# at install time. The patcher itself is idempotent + flock-serialised +
+# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Fail-soft (was fail-loud): a `False` return means the legacy
-# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
-# upstream commit that already copies scripts atomically
-# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
-# the #C1 race is already mitigated upstream, so we `warn` and continue
-# instead of aborting every install. (A sibling branch makes the patcher
-# itself upstream-aware; this warn is the defense-in-depth complement.) If
-# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
-# apply, the script-tearing race is genuinely unpatched — review the
-# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_atomic_scripts_patch() {
+# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
+ensure_magpie_compat_patches() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_PATH}/Magpie/modes/benchmark/benchmarker.py"
+    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
     return 0
   fi
-  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
-  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
+  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
   # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
   # InferenceX ``benchmarks/`` copies Magpie executes and teach
   # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
@@ -1413,19 +1554,11 @@ status = magpie_scripts_patch_status(
     os.environ["MAGPIE_PATH"],
     os.environ.get("INFERENCEX_PATH") or None,
 )
-print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
-      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
+print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
       file=sys.stderr)
 if status.ok:
     sys.exit(0)
-# A GENUINE atomic failure (unrecognized shape / I/O error) means the
-# script-tearing race is actually unmitigated — distinct exit so a strict
-# install can fail-loud instead of swallowing it as an expected no-op.
-if status.atomic_genuine_failure:
-    sys.exit(4)
-if not status.atomic_ok:
-    sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
 # eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
@@ -1437,26 +1570,13 @@ if not status.remote_trust_ok:
 # install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
-# Defensive catch-all: a not-ok status with none of the bits above set should
-# never happen, but exit non-zero so we never fall through to exit 0.
-sys.exit(3)
+sys.exit(1)
 PY
   then
-    log "Magpie #C1 patch OK"
+    log "Magpie compatibility patches OK"
   else
     rc=$?
-    if [ "$rc" -eq 4 ]; then
-      # GENUINE failure: the legacy block is gone AND upstream is not atomic
-      # (or a read/write error). The Hyperloom #C1 script-tearing race is NOT
-      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
-      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
-      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
-      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
-        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
-      else
-        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. The Hyperloom #C1 script-tearing race is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
-      fi
-    elif [ "$rc" -eq 2 ]; then
+    if [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     elif [ "$rc" -eq 5 ]; then
       # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
@@ -1473,11 +1593,7 @@ PY
         die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
       fi
     else
-      # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
-      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
-      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
-      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
-      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_PATH). Fine for tests/dry-runs; otherwise check MAGPIE_PATH or set PATCH_MAGPIE=0."
+      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
     fi
   fi
 }
@@ -1489,12 +1605,10 @@ PY
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races behind the Hyperloom #C1 script-tearing race —
-# every fresh Magpie subprocess `shutil.copy2`'d its scripts on top of
-# the same shared files, while bash interpreters from neighbouring
-# installs were `source`-ing them. Cloning a per-install copy here
-# eliminates the cross-install fan-in (Magpie's in-place atomic-write patch then
-# closes the intra-install race window — both fixes are needed; this
-# one alone is not sufficient).
+# every fresh Magpie subprocess copied its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were `source`-ing
+# them. Cloning a per-install copy here eliminates the cross-install fan-in;
+# the pinned Magpie ref copies scripts atomically upstream.
 #
 # Policy:
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
@@ -1851,7 +1965,7 @@ acquire_install_lock
 # ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
+  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
 else
   ensure_magpie
 fi
@@ -1863,7 +1977,7 @@ ensure_inferencex
 # — running the patch before it silently skipped those targets and left
 # RUN_EVAL=true baselines aborting on 'Unknown parameter'.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_atomic_scripts_patch
+  ensure_magpie_compat_patches
 fi
 
 # aiperf (AgentX client) installs whenever this build ships the AgentX assets.

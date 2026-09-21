@@ -235,7 +235,7 @@ Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
 `GEAK_ROOT`) are added later by the workload skill's `install.sh`.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
-credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)
+credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
 by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
 and KB tokens are never forwarded. To suppress credential forwarding when the
 `claude` CLI is authenticated through its own config, set
@@ -428,8 +428,8 @@ framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.29.0`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:

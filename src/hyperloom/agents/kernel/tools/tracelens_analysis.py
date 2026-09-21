@@ -331,13 +331,11 @@ ARCH_BENCHMARK_TIMEOUT_FLOOR_S = 600
 def _is_safe_litellm_gateway() -> bool:
     """True when the Claude SDK targets a strict LiteLLM-style gateway (#574).
 
-    ``LLM_GATEWAY_KEY`` is an explicit gateway signal and wins on its own; a
-    deployment may front the gateway on a hostname with no protocol marker.
-    Otherwise detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL``
-    host; other backends are left alone.
+    Detected via the SDK's ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` host;
+    other backends are left alone. A deployment fronting the gateway on a
+    hostname with no protocol marker names it in
+    ``HYPERLOOM_STRICT_GATEWAY_MARKERS``.
     """
-    if os.environ.get("LLM_GATEWAY_KEY", "").strip():
-        return True
     base_url = (os.environ.get("ANTHROPIC_BASE_URL", "") or os.environ.get("OPENAI_BASE_URL", "")).lower()
     # Generic protocol markers by default (no operator/brand strings shipped);
     # a specific deployment can add its own gateway host substrings via
@@ -7273,7 +7271,7 @@ def main() -> int:
             update_status(
                 status_path,
                 state="running",
-                current_step="install_tracelens",
+                current_step="check_tracelens_dependencies",
                 log_path=log_path,
                 artifact_paths=artifacts,
                 run_id=run_id,
@@ -7319,12 +7317,22 @@ def main() -> int:
                     "TraceLens-internal: not provided (open-source-only; set TRACELENS_INTERNAL_ROOT to enable)",
                 )
                 os.environ.pop("TL_EXTENSION", None)
-            run_command(
-                [sys.executable, "-m", "pip", "install", "-e", "."],
+            dependency_rc = run_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import TraceLens; import TraceLens.TraceUtils.split_inference_trace_annotation",
+                ],
                 cwd=tl_root,
                 log_path=log_path,
                 timeout_s=max(60, int(args.budget_minutes * 60)),
             )
+            if dependency_rc != 0:
+                raise RuntimeError(
+                    f"tracelens_dependency_error: TraceLens/splitter import failed in {sys.executable} "
+                    f"(exit {dependency_rc}); install TraceLens dependencies in this interpreter before analysis. "
+                    f"See {log_path} for subprocess output."
+                )
             # Read and follow the analysis-orchestrator skill entry point.
             skill = tl_root / "TraceLens/Agent/Analysis/skills/analysis-orchestrator/SKILL.md"
             if not skill.exists():
@@ -7500,6 +7508,12 @@ def main() -> int:
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
+
+                if split_rc != 0:
+                    raise RuntimeError(
+                        f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
+                        f"see {log_path} for subprocess output."
+                    )
 
                 # The three chunks are parallel views; the consumer picks ONE via
                 # --steady-state-mode and we hard-fail when it is missing/empty.

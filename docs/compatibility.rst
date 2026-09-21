@@ -120,8 +120,8 @@ The following inference frameworks are supported:
      - ROCm version
      - Notes
    * - SGLang
-     - 7.2.4
-     - Default framework; recommended docker/bare-metal stack uses ``rocm724`` (see below)
+     - 10.0 (docker) / 7.2.4 (bare-metal wheel)
+     - Default framework. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
@@ -147,9 +147,9 @@ mirror, set the registry prefix accordingly.
 
    * - Image
      - GPU
-   * - ``lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825``
+   * - ``lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x-20260920``
      - MI300X / MI325X
-   * - ``lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825``
+   * - ``lmsysorg/sglang-rocm:v0.5.20-rocm10-mi35x-20260920``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.29.0``
      - MI300X / MI325X / MI355X
@@ -185,8 +185,8 @@ Hyperloom does not install ROCm or torch itself.
      - Ubuntu 24.04
      - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
    * - ROCm
-     - 7.2.x
-     - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
+     - 7.2.x (bare metal) / 10.0 (SGLang docker)
+     - Patch levels differ by framework and setup mode. vLLM uses ROCm 7.2.3 (``rocm723``). On a ROCm 7.2.x bare-metal host, SGLang resolves ``SGLANG_ROCM_EXTRA=rocm724`` (ROCm 7.2.4 layer). The validated SGLang ``docker`` stack uses ROCm 10.0 user space (``rocm10`` images below), not the 7.2.4 bare-metal wheel path.
    * - Python
      - 3.12
      - Required by the vLLM ROCm wheel.
@@ -194,8 +194,8 @@ Hyperloom does not install ROCm or torch itself.
      - ROCm build matching the host ROCm
      - Preinstalled by the operator; not managed by Hyperloom.
    * - SGLang
-     - 0.5.18 (rocm724), pinned to commit ``0c7ff19e3b73``
-     - Installed in ``shared`` mode (reuses the host torch). The wheel target is derived from the ROCm build of the installed torch rather than defaulted, so a ROCm 7.2.x stack resolves ``SGLANG_ROCM_EXTRA=rocm724`` and the SGLang ROCm layer is 7.2.4. ``SGLANG_REF`` is the 0.5.18 pre-release commit the ``lmsysorg/sglang-rocm`` images are built from, not the ``v0.5.18`` tag: upstream removed ``detailed_annotations`` from ``io_struct.py`` between the two, and TraceLens' annotation patches need that field — on the tag three of the ten patches fail to apply, the atomic set rolls back, and kernel-shape profiling is silently unavailable. Note: ``SGLANG_REF`` only pins the version on the source-install branch, which is taken for any Python other than 3.10 and for a ROCm stack no published wheel targets; on Python 3.10 with a derived target the AMD wheel index installs ``amd-sglang`` unpinned, which might resolve to a different patch release — and therefore to a build these patches do not fit.
+     - 0.5.20 (rocm10), pinned to commit ``94602c9c2b7c``
+     - Recommended ``docker`` stack uses the ``lmsysorg/sglang-rocm:v0.5.20-rocm10-*`` images above (ROCm 10.0 user space). ``SGLANG_REF`` is the ``v0.5.20`` release commit (peeled from the tag object). The pin sits at 0.5.20 because through 0.5.18 the HIP extra pinned ``compressed-tensors==0.15.0``, which caps torch below 2.11 and therefore cannot resolve at all against a ROCm 10 stack; 0.5.19 moved that dependency into ``runtime_common`` unpinned, leaving the installer's ROCm torch constraint as the version pip solves for. Bare-metal installs on ROCm 10 take the source-install path; on ROCm 7.2.x hosts, ``SGLANG_ROCM_EXTRA=rocm724`` still selects the AMD wheel index. Kernel-shape profiling for SGLang >= 0.5.18 uses TraceLens ``kernel_shape_tool`` rather than git-applying SGLang roofline patches.
    * - vLLM
      - v0.29.0 (rocm723), isolated venv
      - Installs ``vllm==0.29.0+rocm723`` from the wheels.vllm.ai pip index on Ubuntu 24.04+. vLLM's ROCm wheel pins its own torch, so it installs into a dedicated venv (``--framework-env isolated``, the default for vLLM) and never touches the host torch.
@@ -203,8 +203,9 @@ Hyperloom does not install ROCm or torch itself.
 Bare-metal ROCm patch levels differ per framework, and each one matches its
 container image. The vLLM stack installs the ``rocm723`` variant (ROCm
 7.2.3), matching ``vllm/vllm-openai-rocm:v0.29.0``; the SGLang stack
-installs from the ROCm 7.2.4 AMD wheel index, matching the two
-``lmsysorg/sglang-rocm:v0.5.18-rocm724-*`` images. ``docker`` mode is still
+installs from the ROCm 7.2.4 AMD wheel index when a host stays on ROCm 7.2.x;
+the recommended SGLang ``docker`` stack uses the two
+``lmsysorg/sglang-rocm:v0.5.20-rocm10-*`` images (ROCm 10.0). ``docker`` mode is still
 the preferred route for a pre-validated stack, since the images also pin the
 surrounding torch, Triton, and AITER builds.
 

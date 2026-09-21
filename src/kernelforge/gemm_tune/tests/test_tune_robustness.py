@@ -131,7 +131,7 @@ class TestRunIsolatedProfileMerge:
         shared_profile = tmp_path / "profile.csv"
         base_args = ["-o2", str(shared_profile), "--mp", "1", "--compare"]
 
-        def _fake_run(cmd, cwd, timeout_s, log_file):
+        def _fake_run(cmd, cwd, timeout_s, log_file, env_override):
             i = cmd[cmd.index("-i") + 1]
             o2 = cmd[cmd.index("-o2") + 1]
             data_row = _P(i).read_text(encoding="utf-8").splitlines()[1]
@@ -201,7 +201,8 @@ class TestLatestCandidateStemBoundary:
         start = time.time() - 10
         iso = tmp_path / "_iso_tuned_a8w8_blockscale_0_tuned.candidate.csv"
         self._touch(iso, start + 1)
-        assert tr._latest_candidate(tmp_path, "tuned_a8w8_blockscale", start) == iso
+        assert tr._latest_candidate(tmp_path, "_iso_tuned_a8w8_blockscale_0_tuned", start) == iso
+        assert tr._latest_candidate(tmp_path, "_iso_tuned_a8w8_blockscale_1_tuned", start) is None
 
     def test_missing_dir_returns_none(self, tmp_path):
         import time

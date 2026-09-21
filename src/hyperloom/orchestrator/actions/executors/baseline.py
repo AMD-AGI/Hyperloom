@@ -119,6 +119,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
+    served_complete_protocol,
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
@@ -3672,15 +3673,26 @@ class BaselineExecutor:
         if not sealed.tokenized or not sealed.argv:
             return None
 
+        effective_launch_env = config_launch_env(config_path, launch_env)
+        probe_argv = sealed.argv
+        if framework.strip().lower() == "vllm" and effective_launch_env.get("PROFILE") == "1":
+            probe_argv = (
+                "--profiler-config.profiler",
+                "torch",
+                "--profiler-config.torch_profiler_dir",
+                str(output_dir / "torch_trace"),
+                *probe_argv,
+            )
+
         # ``_resolve_shared_state`` is typed loosely and callers inject partial
         # doubles, so the round's repair ledger may not be present at all.
         enablement = getattr(self._resolve_shared_state(), "enablement", None)
         spent: list[str] = enablement.argv_repairs if enablement is not None else []
         verdict = check_server_argv(
             framework=framework,
-            argv=sealed.argv,
+            argv=probe_argv,
             text=sealed.text,
-            launch_env=config_launch_env(config_path, launch_env),
+            launch_env=effective_launch_env,
             repaired=spent,
             digest=sealed.digest,
         )
@@ -4219,20 +4231,34 @@ class BaselineExecutor:
                 **capture_meta,
             }
 
+        nonzero_error = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
         if proc_returncode != 0:
-            return {
-                "status": "failed",
-                "error_class": "magpie_nonzero_after_valid_measurement",
-                "returncode": proc_returncode,
-                "error": redact_secret_values((proc_stderr or proc_stdout or "")[-2000:]),
-                "output_dir": str(output_dir),
-                "workspace": str(workspace),
-                "report_path": str(report_path) if report_path.exists() else None,
-                "reported_success": measurement.get("reported_success"),
-                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                "nonfatal_warnings": warnings,
-                **capture_meta,
-            }
+            if not served_complete_protocol(measurement):
+                return {
+                    "status": "failed",
+                    "error_class": "magpie_nonzero_after_valid_measurement",
+                    "returncode": proc_returncode,
+                    "error": nonzero_error,
+                    "output_dir": str(output_dir),
+                    "workspace": str(workspace),
+                    "report_path": str(report_path) if report_path.exists() else None,
+                    "reported_success": measurement.get("reported_success"),
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                    "nonfatal_warnings": warnings,
+                    **capture_meta,
+                }
+            # The round served every request the client recorded as requested,
+            # so the exit code is not evidence against the measurement. The
+            # cause stays on the result rather than only in the log.
+            warnings.append(f"nonzero_rc_after_complete_protocol:{proc_returncode}")
+            log.warning(
+                "baseline_executor: magpie exited %d after serving its whole protocol (%s of %s requests); "
+                "keeping the measurement: %s",
+                proc_returncode,
+                measurement.get("completed_requests"),
+                measurement.get("requested_requests"),
+                nonzero_error,
+            )
 
         result = {
             "status": "succeeded",

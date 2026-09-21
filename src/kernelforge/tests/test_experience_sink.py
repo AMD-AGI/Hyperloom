@@ -36,7 +36,7 @@ SUMMARY = {
 }
 #: ``my_kernel`` loses its ``_kernel`` suffix, and a file owned by no framework
 #: package reports ``unknown`` with no installed version.
-IDENTITY = "kernel:forge-loop:my:unknown:none:triton:mi300x"
+IDENTITY = "kernel:forge-loop:my:unknown:unknown:triton:mi300x"
 
 
 @pytest.fixture()
@@ -346,6 +346,27 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
     assert len(other.list_candidates(limit=5)) == 1
     config.gpu_type = "mi300x"
     assert len(_records(config, workspace).list_candidates(limit=5)) == 1
+
+
+def test_either_spelling_of_one_operator_reaches_the_same_record(config, workspace):
+    # The campaign names the operator as the source it read spells it, and a source tree spells
+    # one kernel both ways -- KdaPackedDecodeKernel in the header that declares it,
+    # kda_packed_decode_kernel in the module that binds it. Whichever the next campaign happens
+    # to read, it must find what the last one recorded, or it re-derives a validated port.
+    _write(config, workspace, operator_name="KdaPackedDecodeKernel")
+
+    for spelling in ("KdaPackedDecodeKernel", "kda_packed_decode_kernel", "kda_packed_decode"):
+        identity, _op, _fw = resolve_loop_identity(
+            kernel_path=str(workspace / "kernel.py"),
+            kernel_source=KERNEL_SOURCE,
+            kernel_backend="triton",
+            gpu_type="mi300x",
+            framework="standalone",
+            operator_name=spelling,
+        )
+        records = KernelRecipeKB.open_identity(identity, config)
+        assert identity.kernel_name == "kda_packed_decode"
+        assert len(records.list_candidates(limit=5)) == 1
 
 
 def test_a_different_producer_is_a_different_address(config, workspace):

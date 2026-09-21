@@ -166,7 +166,6 @@ _SPECIALIST_SECRET_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
         "AWS_SHARED_CREDENTIALS_FILE",
-        "LLM_GATEWAY_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
     }

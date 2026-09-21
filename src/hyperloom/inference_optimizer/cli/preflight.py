@@ -28,6 +28,7 @@ from hyperloom.common.env_safety import (
 )
 from hyperloom.common.llm_config import (
     CLAUDE_OAUTH_TOKEN_ENV,
+    DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
@@ -65,10 +66,10 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
     # Legacy: not consumed anymore, still stripped if present.
+    "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:
     # neither an Anthropic-only nor an OpenAI-only shell may acquire the other side from a stale .env.
@@ -113,10 +114,9 @@ def _provider_only_mode() -> str:
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
     has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
-    has_gateway = bool(os.environ.get("LLM_GATEWAY_KEY"))
-    if has_anthropic and not has_openai and not has_gateway:
+    if has_anthropic and not has_openai:
         return "anthropic"
-    if has_openai and not has_anthropic and not has_gateway:
+    if has_openai and not has_anthropic:
         return "openai"
     return ""
 
@@ -1296,17 +1296,19 @@ def _ensure_lm_eval_dep(
     }
 
 
-def _unset_hip_visible_devices() -> None:
-    """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §\"GPU Runner Type\")."""
-    if "HIP_VISIBLE_DEVICES" not in os.environ:
+def _normalize_hip_visible_devices() -> None:
+    """Re-index HIP within the device view selected by ROCR."""
+    visible = [part for part in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if part.strip()]
+    if not visible:
         return
-    if "ROCR_VISIBLE_DEVICES" not in os.environ:
+    value = ",".join(str(index) for index in range(len(visible)))
+    previous = os.environ.get("HIP_VISIBLE_DEVICES")
+    if previous == value:
         return
-    value = os.environ.pop("HIP_VISIBLE_DEVICES")
+    os.environ["HIP_VISIBLE_DEVICES"] = value
     print(
-        f"Preflight: WARNING — unset HIP_VISIBLE_DEVICES={value!r} "
-        f"(ROCR_VISIBLE_DEVICES wins on ROCm; HIP_VISIBLE_DEVICES can "
-        f"make torch.cuda.is_available() false inside Magpie subprocess)"
+        f"Preflight: WARNING — normalized HIP_VISIBLE_DEVICES={previous!r} to {value!r} "
+        f"within ROCR_VISIBLE_DEVICES={os.environ['ROCR_VISIBLE_DEVICES']!r}"
     )
 
 
@@ -2063,17 +2065,6 @@ def _preflight(
         action=_prepare_kb_install_step,
     )
 
-    # --- Auth alias export (internal LLM aliases only) --- These aliases feed OpenAI-protocol consumers, so they are
-    # filled from the OpenAI-side key only and stay unset when that side is not configured.
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if openai_key:
-        for alias in (
-            "LLM_API_KEY",
-            "AMD_LLM_API_KEY",
-        ):
-            if not os.environ.get(alias):
-                os.environ[alias] = openai_key
-                print(f"Preflight: filled {alias} from OPENAI_API_KEY")
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
@@ -2128,7 +2119,7 @@ def _preflight(
         claude_primary_key = anthropic_synthesizable_key()
         _reset_claude_config_to_upstream(claude_primary_key, anthropic_url)
         if anthropic_url and not openai_url and not os.environ.get("GEAK_CLAUDE_MODEL"):
-            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or "claude-opus-5"
+            geak_claude_model = os.environ.get("CLAUDE_MODEL", "").strip() or DEFAULT_CLAUDE_MODEL
             os.environ["GEAK_CLAUDE_MODEL"] = geak_claude_model
             print(f"Preflight: GEAK_CLAUDE_MODEL <unset> -> {geak_claude_model} (GEAKv4 Claude workflow)")
         resolved_urls = (anthropic_url, openai_url)
@@ -2166,7 +2157,7 @@ def _preflight(
         print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
-    _unset_hip_visible_devices()
+    _normalize_hip_visible_devices()
     _run_install_step(
         install_event,
         step_id="check_gpu_visibility",
@@ -2378,13 +2369,14 @@ def _preflight(
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
     # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
-    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
-    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
+    # what tells that apart from a variant that genuinely cannot serve.
     inferencex_network_fs = is_network_fs(inferencex_path)
     if inferencex_network_fs:
         print(
             f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
-            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
+            f"protocol is kept, but one the flap cut short is recorded as "
             f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
             f"HYPERLOOM_CACHE_DIR on local disk.",
             file=sys.stderr,

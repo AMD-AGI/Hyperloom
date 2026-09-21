@@ -3494,7 +3494,7 @@ class KernelPhase(PhaseHandler):
                 ),
                 "extra_server_args": extra_server_args,
                 "extra_envs": test_envs,
-                "keep_threshold_pct": 3.0,
+                "keep_threshold_pct": 1.0,
                 "budget_minutes": per_tuner_budget_minutes,
                 "mode": "env_only",
             }
@@ -4125,9 +4125,9 @@ class KernelPhase(PhaseHandler):
                 )
             return
         try:
-            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0"))
+            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "1.0"))
         except (TypeError, ValueError):
-            keep_pct = 3.0
+            keep_pct = 1.0
         queued = 0
         for patch in outcome.patches:
             record = enqueue_nominated_patch(

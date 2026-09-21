@@ -15,8 +15,11 @@ sys.path.insert(0, str(_TOOLS_DIR))
 import ray_runtime  # noqa: E402
 
 # Every key alias derived by safe_runtime_env, split by provider protocol.
-_OPENAI_KEYS = ("OPENAI_API_KEY", "LLM_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY")
+_OPENAI_KEYS = ("OPENAI_API_KEY",)
 _ANTHROPIC_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# GEAK authenticates on GEAK_AMDKEY or OPENAI_API_KEY, so nothing downstream reads these; the worker must not
+# receive a copy of the OpenAI key under a name no longer recognised on either side of the boundary.
+_RETIRED_KEYS = ("LLM_API_KEY", "AMD_LLM_API_KEY", "AMD_API_KEY", "LLM_GATEWAY_KEY")
 _URL_ALIASES = ("ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "LLM_API_BASE")
 _ALL_KEY_VARS = (
     "OPENAI_API_KEY",
@@ -49,7 +52,7 @@ def test_openai_only_fills_openai_aliases_and_leaves_anthropic_unset(monkeypatch
         assert env[alias] == "ak-gateway", alias
     for alias in ("OPENAI_BASE_URL", "LLM_API_BASE"):
         assert env[alias] == "https://gateway.example/v1", alias
-    for alias in (*_ANTHROPIC_KEYS, "ANTHROPIC_BASE_URL"):
+    for alias in (*_ANTHROPIC_KEYS, "ANTHROPIC_BASE_URL", *_RETIRED_KEYS):
         assert alias not in env, alias
     # GEAK is Anthropic-only, so an OpenAI-side value is never handed to it.
     for alias in ("GEAK_API_KEY", "GEAK_BASE_URL"):
@@ -57,7 +60,7 @@ def test_openai_only_fills_openai_aliases_and_leaves_anthropic_unset(monkeypatch
 
 
 def test_explicit_anthropic_key_stays_on_anthropic_side(monkeypatch):
-    """An explicit Anthropic key stays on the Anthropic side; OpenAI aliases derive from OPENAI_API_KEY."""
+    """An explicit Anthropic key stays on the Anthropic side; the OpenAI key travels under its own name only."""
     _clear(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
@@ -68,13 +71,13 @@ def test_explicit_anthropic_key_stays_on_anthropic_side(monkeypatch):
     # The explicit Anthropic key is preserved and drives the Anthropic aliases.
     assert env["ANTHROPIC_API_KEY"] == "anthropic-key"
     assert env["ANTHROPIC_AUTH_TOKEN"] == "anthropic-key"
-    # OpenAI-side aliases derive from OPENAI_API_KEY.
-    for alias in ("LLM_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
-        assert env[alias] == "openai-key", alias
+    assert env["OPENAI_API_KEY"] == "openai-key"
+    for alias in _RETIRED_KEYS:
+        assert alias not in env, alias
 
 
 def test_split_gateway_leaves_geak_aliases_to_the_operator(monkeypatch):
-    """Split deploy: the generic OpenAI-protocol aliases derive from the OpenAI key, while the GEAK aliases stay unset for either side to claim."""
+    """Split deploy: each side's key travels under its own name, while the GEAK aliases stay unset for either side to claim."""
     _clear(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
@@ -83,8 +86,8 @@ def test_split_gateway_leaves_geak_aliases_to_the_operator(monkeypatch):
 
     env = ray_runtime.safe_runtime_env()["env_vars"]
 
-    for alias in ("LLM_API_KEY", "AMD_LLM_API_KEY", "LLM_GATEWAY_KEY"):
-        assert env[alias] == "openai-test-key", alias
+    for alias in _RETIRED_KEYS:
+        assert alias not in env, alias
     # Explicit provider keys are preserved as-is.
     assert env["OPENAI_API_KEY"] == "openai-test-key"
     assert env["ANTHROPIC_API_KEY"] == "anthropic-test-key"
@@ -123,8 +126,20 @@ def test_no_credentials_leaves_aliases_unset(monkeypatch):
     """No key/URL configured: no alias is invented."""
     _clear(monkeypatch)
     env = ray_runtime.safe_runtime_env()["env_vars"]
-    for alias in (*_OPENAI_KEYS, *_ANTHROPIC_KEYS, *_URL_ALIASES, *_HEADER_VARS):
+    for alias in (*_OPENAI_KEYS, *_ANTHROPIC_KEYS, *_RETIRED_KEYS, *_URL_ALIASES, *_HEADER_VARS):
         assert alias not in env, alias
+
+
+def test_a_retired_key_set_by_the_operator_does_not_cross_the_boundary(monkeypatch):
+    """Not merely unmirrored: the names are off the allowlist, so even an explicitly exported one is dropped."""
+    _clear(monkeypatch)
+    for name in _RETIRED_KEYS:
+        monkeypatch.setenv(name, f"operator-{name.lower()}")
+
+    env = ray_runtime.safe_runtime_env()["env_vars"]
+
+    for name in _RETIRED_KEYS:
+        assert name not in env, name
 
 
 def test_gateway_custom_headers_reach_the_worker(monkeypatch):

@@ -6,6 +6,10 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import tempfile
+import time
 
 import pytest
 
@@ -283,3 +287,135 @@ def test_fmoe_quantized_dtypes_exist_in_installed_aiter(tmp_path, precision, qua
 
     assert emitted == {repr(getattr(aiter.dtypes, alias))}
     assert getattr(aiter.dtypes, alias) in aiter.dtype2str_dict
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("temp_var", ["TMPDIR", "TEMP", "TMP", None])
+@pytest.mark.parametrize("improved", [False, True])
+def test_compare_candidate_uses_child_tempdir(tmp_path, monkeypatch, isolated, temp_var, improved):
+    parent_tmp = tmp_path / "cached"
+    parent_tmp.mkdir()
+    child_tmp = tmp_path / "child"
+    child_tmp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(parent_tmp))
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        monkeypatch.delenv(name, raising=False)
+    if temp_var:
+        monkeypatch.setenv(temp_var, str(child_tmp))
+    expected_tmp = parent_tmp
+    external = _write_runtime_csv(tmp_path)
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: isolated)
+    monkeypatch.setattr(fm._tr.FaultBlocklist, "save", lambda self: None)
+    produced = []
+
+    def run(cmd, **kwargs):
+        assert "--compare" in cmd
+        assert "--update_improved" not in cmd
+        assert Path(kwargs["env_override"]["TMPDIR"]) == expected_tmp
+        compare_dir = expected_tmp / "aiter_compare"
+        compare_dir.mkdir(exist_ok=True)
+        stem = Path(cmd[cmd.index("-o") + 1]).stem
+        candidate = compare_dir / f"{stem}.37386.candidate.csv"
+        lines = Path(cmd[cmd.index("-i") + 1]).read_text(encoding="utf-8").splitlines()
+        candidate.write_text(
+            lines[0] + ",kernelName1,kernelName2\n" + "\n".join(row + ",stage1,stage2" for row in lines[1:]) + "\n",
+            encoding="utf-8",
+        )
+        os.utime(candidate, (time.time() + 1, time.time() + 1))
+        unrelated = compare_dir / "other_tuned_fmoe.123.candidate.csv"
+        unrelated.write_text("wrong table\n", encoding="utf-8")
+        os.utime(unrelated, (time.time() + 2, time.time() + 2))
+        produced.append(candidate)
+        action = "UPDATE" if improved else "KEEP"
+        return 0, f"(4, shape) | 10 | 8 | 20% | {action}", ""
+
+    monkeypatch.setattr(fm, "run_subprocess", run)
+    monkeypatch.setattr(fm._tr, "run_subprocess", run)
+    result = tuner.run()
+    assert result.status == ("ok" if improved else "no_improvement")
+    artifact = Path(result.artifact_path)
+    assert artifact == tuner.work_dir / "candidate_fmoe.csv"
+    assert result.env_value == str(artifact)
+    for candidate in produced:
+        candidate.unlink()
+    assert _column(artifact, "token") == ["4", "512"]
+    assert _column(artifact, "kernelName1") == ["stage1", "stage1"]
+    if temp_var:
+        assert os.environ[temp_var] == str(child_tmp)
+    else:
+        assert "TMPDIR" not in os.environ
+
+
+@pytest.mark.parametrize("isolated", [False, True])
+@pytest.mark.parametrize("content", [None, "", "token,model_dim\n4,4096\n"])
+@pytest.mark.parametrize("improved", [False, True])
+def test_compare_without_valid_candidate_never_exports_path(tmp_path, monkeypatch, isolated, content, improved):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    external = _write_runtime_csv(tmp_path)
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, moe_untuned_csv=external))
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _: Path("/fake/tune.py"))
+    monkeypatch.setattr(fm, "resolve_aiter_root", lambda: None)
+    monkeypatch.setattr(fm._tr, "is_isolation_enabled", lambda: isolated)
+    monkeypatch.setattr(fm._tr.FaultBlocklist, "save", lambda self: None)
+
+    def run(cmd, **kwargs):
+        if content is not None:
+            compare_dir = tmp_path / "aiter_compare"
+            compare_dir.mkdir(exist_ok=True)
+            stem = Path(cmd[cmd.index("-o") + 1]).stem
+            candidate = compare_dir / f"{stem}.123.candidate.csv"
+            candidate.write_text(content, encoding="utf-8")
+            os.utime(candidate, (time.time() + 1, time.time() + 1))
+        action = "UPDATE" if improved else "KEEP"
+        return 0, f"(4, shape) | 10 | 8 | 20% | {action}", ""
+
+    monkeypatch.setattr(fm, "run_subprocess", run)
+    monkeypatch.setattr(fm._tr, "run_subprocess", run)
+    result = tuner.run()
+    assert result.status == ("failed" if improved else "no_improvement")
+    assert not result.artifact_path
+    assert not result.env_value
+    assert not result.env_var
+    if improved:
+        assert result.error_class == "missing_artifact"
+
+
+def test_candidate_collection_ignores_old_and_other_tuners(tmp_path):
+    for name in ("tuned_fmoe.1.candidate.csv", "tuned_fmoe_other.2.candidate.csv", "other_tuned_fmoe.3.candidate.csv"):
+        candidate = tmp_path / name
+        candidate.write_text("old", encoding="utf-8")
+        stamp = 1 if name == "tuned_fmoe.1.candidate.csv" else 20
+        os.utime(candidate, (stamp, stamp))
+    assert fm._tr._latest_candidate(tmp_path, "tuned_fmoe", 10) is None
+
+
+def test_untuned_shapes_are_not_valid_tuned_artifacts(tmp_path):
+    assert fm._validate_fmoe_csv(_write_runtime_csv(tmp_path), tuned=True) is not None
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_compare_temp_env_matches_real_child_with_relative_tmpdir(tmp_path, monkeypatch, cached):
+    import subprocess
+    import sys
+
+    selected = tmp_path / "selected"
+    selected.mkdir()
+    child_cwd = tmp_path / "child_cwd"
+    child_cwd.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TMPDIR", "selected")
+    monkeypatch.setattr(tempfile, "tempdir", "selected" if cached else None)
+    env_override = fm._tr.compare_temp_env()
+    actual = subprocess.check_output(
+        [sys.executable, "-c", "import tempfile; print(tempfile.gettempdir())"],
+        cwd=child_cwd,
+        env={**os.environ, **env_override},
+        text=True,
+    ).strip()
+    assert Path(actual) == selected
+    assert env_override == {"TMPDIR": str(selected)}
+    assert os.environ["TMPDIR"] == "selected"

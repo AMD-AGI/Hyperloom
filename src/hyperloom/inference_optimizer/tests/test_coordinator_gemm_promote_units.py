@@ -413,7 +413,11 @@ class TestQueueFusionSiblings:
     """A KEPT fusion nomination is queued as sibling records, not integrated inline."""
 
     @pytest.mark.asyncio
-    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
+    @pytest.mark.parametrize("override, expected", [(None, 1.0), ("invalid", 1.0), ("2.5", 2.5)])
+    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path, monkeypatch, override, expected):
+        monkeypatch.delenv("HYPERLOOM_FUSION_KEEP_PCT", raising=False)
+        if override is not None:
+            monkeypatch.setenv("HYPERLOOM_FUSION_KEEP_PCT", override)
         coord = _coord(tmp_path, baseline_tput=100.0)
         coord.bus = _Bus()
         phase = KernelPhase(coord)
@@ -456,9 +460,8 @@ class TestQueueFusionSiblings:
         assert rec_a["action_label"] == "fusion"
         assert rec_a["artifact_path"] == "/out/fuse_a.patch"
         assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
-        # The fusion-specific keep bar (default 3.0%) rides on the record so the generic drain grades against it
-        # rather than the integrate default.
-        assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
+        # The fusion-specific keep bar rides on the record rather than the integrate default.
+        assert rec_a["keep_threshold_pct"] == pytest.approx(expected)
         assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
     @pytest.mark.asyncio
@@ -948,6 +951,8 @@ class TestForgeGemmRuntimeConfigMerge:
             "gemm_tune_fmoe_ck",
             "gemm_tune_dense_bf16",
         ]
+        assert calls[0]["keep_threshold_pct"] == pytest.approx(1.0)
+        assert calls[1]["keep_threshold_pct"] == pytest.approx(1.0)
         assert calls[0]["base_tput"] == 110.0
         assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": str(fmoe_candidate)}

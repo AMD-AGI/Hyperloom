@@ -21,7 +21,7 @@ from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     apply_patch_resolving_conflicts,
     llm_resolution_available,
 )
-from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 
 _GIT_IDENTITY = {
     "GIT_AUTHOR_NAME": "merge-test",

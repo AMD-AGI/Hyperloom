@@ -708,6 +708,9 @@ async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tm
     base = tmp_path / "base.yaml"
     _write_baseline_yaml_mtime(base)
     output_root = tmp_path / "out"
+    # The workspace never gets a report, so the settle loop would run its full
+    # deadline; this test is about the log fallback, not about settling.
+    monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
 
     def fake_run(cmd, *args, **kwargs):
         slot = Path(cmd[cmd.index("--output-dir") + 1])
