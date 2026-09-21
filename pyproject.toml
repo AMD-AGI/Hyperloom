@@ -23,7 +23,7 @@ dependencies = []
 Homepage = "https://github.com/AMD-AGI/Hyperloom"
 Source = "https://github.com/AMD-AGI/Hyperloom"
 Issues = "https://github.com/AMD-AGI/Hyperloom/issues"
-Changelog = "https://github.com/AMD-AGI/Hyperloom/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/AMD-AGI/Hyperloom/releases"
 Security = "https://github.com/AMD-AGI/Hyperloom/security/policy"
 
 [project.optional-dependencies]
