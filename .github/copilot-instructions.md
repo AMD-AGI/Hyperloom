@@ -13,11 +13,13 @@ Advisory review. Flag only what static gates can't.
   unhandled `None`, silent truncation, a branch that returns the wrong default.
 - **Duplication / parallel routes**: a second implementation of something that already
   exists. Point to the existing one and ask to extend it.
-- **Size and complexity**: a function past ~60 lines, cyclomatic complexity past 10, or a
-  module pushed past ~800 lines. No linter covers this (Ruff runs `E`/`F`/`W`; Pylint is
-  `--errors-only`), so review is the only place it surfaces. Name the seam to split on,
-  not just the line count — and treat an existing long function the change merely edits as
-  out of scope.
+- **Size and complexity**: a unit past a trigger in the style guide's
+  [Size and complexity](../docs/contributing/style-guide.md#size-and-complexity), which
+  owns the numbers and the exceptions. No linter covers this (Ruff runs `E`/`F`/`W`;
+  Pylint is `--errors-only`), so review is the only place it surfaces. Name the seam to
+  split on, not just the line count, and don't ask for cleanup of an already oversized
+  function merely because the change edits it — but do flag a newly crossed threshold, or
+  branches and responsibilities added to a unit already over.
 - **Cohesion and coupling**: a module that has acquired a second job, a responsibility
   moved to the wrong layer, a dependency pointing back up the layers, a new import cycle,
   or a caller reaching around the layer that owns a thing. A diff that bypasses an
@@ -36,7 +38,9 @@ Advisory review. Flag only what static gates can't.
 - **Test strategy**: exported behaviour — a CLI flag, public function, persisted schema,
   artifact layout — landing without a test that pins the contract and its failure modes.
   The inverse too: per-function unit tests bolted onto internal plumbing that only threads
-  a flow together, where an end-to-end test is what the change actually needs.
+  a flow together, where a test at the entry point is what the change actually needs. A
+  replaced test that drops a contract or failure-mode assertion, or moves it behind an
+  `*_e2e` marker CI excludes, belongs here as well.
 - **PR focus**: the PR addresses one aspect. If it bundles unrelated changes, say so.
 - **Fix-around instead of fix-upstream**: a local workaround for what is really a
   GEAK/Magpie/TraceLens/framework defect.

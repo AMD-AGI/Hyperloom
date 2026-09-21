@@ -1,7 +1,7 @@
 - Description: what and why
 - Linked issue(s): close/fix refs
-- Tests: added/updated? commands run? (exported behaviour pinned by UT; business flow covered e2e)
-- Size/complexity triggers crossed (function >60 lines, CC >10, module >800 lines): split, or why the shape is right:
+- Tests: added/updated? commands run? ([what to test](../docs/contributing/style-guide.md#tests-pytest); if a test was replaced, where its assertions live now):
+- [Size/complexity](../docs/contributing/style-guide.md#size-and-complexity) triggers crossed: split, or why the shape is right:
 - `CHANGELOG.md` entry under `[Unreleased]`: yes/no (if no, why the change is unobservable):
 - Breaking changes: yes/no (details if yes)
 - PR addresses single concern: yes/no (details if no):

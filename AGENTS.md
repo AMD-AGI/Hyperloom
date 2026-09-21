@@ -53,13 +53,15 @@ doc is the authority on where that boundary lives.
   harder. Cleanup in an unrelated file is a separate PR.
 - **Size is a design signal.** A function that keeps growing, a branch tree you have to
   scroll, a module that collects everything — that is the design telling you a boundary is
-  missing, and the answer is the split, not a bigger screen. For new or rewritten code, a
-  function past ~60 lines or cyclomatic complexity 10, or a module past ~800 lines, needs
-  a reason in the PR description or a split. These are review triggers, not gates: no
-  linter measures them today and the tree carries a backlog above all three — see the
-  style guide § *Size and complexity* for the numbers and how to measure. Maintainability,
-  readability, extensibility, and reliability are what the thresholds stand in for; when a
-  threshold and one of those disagree, say so and keep the clearer code.
+  missing, and the answer is the split, not a bigger screen. New or rewritten code that
+  crosses a trigger in the style guide § *Size and complexity* — the authority on the
+  numbers, how to measure them, and when a long unit is fine as it stands — needs a reason
+  in the PR description or a split. Editing a unit that was already over is not a demand to
+  repay its debt; adding branches or a second responsibility to it is. These are review
+  triggers, not gates: no linter measures them today and the tree carries a backlog above
+  all three. Maintainability, readability, extensibility, and reliability are what the
+  thresholds stand in for; when a threshold and one of those disagree, say so and keep the
+  clearer code.
 - **Review feedback is a hypothesis.** A comment can be wrong, or right about the symptom
   and wrong about the fix. Before acting on one, ask what you would build if this code did
   not exist yet, and whether the mechanism under discussion should exist at all. Answering
@@ -76,9 +78,10 @@ doc is the authority on where that boundary lives.
   the contract and its failure modes, because someone outside this repo depends on it
   holding. Internal functions that only thread a business flow together do not each need
   one: per-function coverage there buys tests that assert the current implementation and
-  break on the next refactor. Cover those flows end to end instead, and unit-test an
-  internal helper when it carries real logic of its own. The coverage gate is a floor CI
-  enforces, not the target.
+  break on the next refactor. Prefer covering those flows through their entry point, and
+  unit-test an internal helper when it carries real logic of its own. When you replace a
+  test, carry its contract and failure-mode assertions across and keep them running in the
+  default CI selection. The coverage gate is a floor CI enforces, not the target.
 - **Every change lands its changelog entry.** Anything an operator can observe — a
   behaviour, an interface, a default, a flag, an artifact — carries a `CHANGELOG.md` entry
   under `[Unreleased]` in the same PR. Not a follow-up, and not left for the release cut to

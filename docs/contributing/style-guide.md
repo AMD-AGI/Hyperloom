@@ -59,9 +59,11 @@ Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI'
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
-| Function length | ~60 lines | Just above the tree's 90th percentile (55 lines); past this a function is usually two |
+| Function length | ~60 lines | Just above the tree's 90th percentile |
 | Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
-| Module length | ~800 lines | Roughly the tree's 90th percentile (914 lines) |
+| Module length | ~800 lines | Roughly the tree's 90th percentile |
+
+Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
 
 Measure rather than argue:
 
@@ -69,7 +71,7 @@ Measure rather than argue:
 ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 ```
 
-Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three (618 functions over CC 10, 801 over 60 lines, 92 modules over 800 lines, measured Sept 2026). **Do not grow it**, and prefer leaving a file you touched smaller than you found it. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
 Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
 
@@ -137,7 +139,9 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 - `critic_agent_e2e`, `robustness_agent_e2e`, `targeted_build_e2e`
 
-**What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with unit tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Cover those flows **end to end** (see the `*_e2e` markers above), and unit-test an internal helper when it carries real logic of its own.
+**What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly (`src/hyperloom/agents/framework/tests/integration/test_e2e_execute_mock.py` drives the CLI against a fake service in a temporary directory). Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
+
+**When you replace a test,** carry its contract and failure-mode assertions across, and keep them in the default CI selection — the `*_e2e` markers above are excluded from it, so they supplement that baseline rather than stand in for it. The 90% line-coverage floor cannot show that a specific assertion survived.
 
 **Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Cover the logic you introduce as described under *What to test*; do not chase coverage on omitted paths, and do not pad internal plumbing with per-function tests to move the number.
 

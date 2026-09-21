@@ -503,10 +503,10 @@ ignore = ["E501", "E741"]
 # extend-select = ["B", "I", "UP", "SIM", "RUF"]
 
 # C901 (mccabe) is the complexity trigger in the style guide's "Size and
-# complexity" table. It stays off rather than on-and-ignored: 618 production
-# functions sit above the default max of 10 today, so selecting it would red the
-# tree instead of gating new code. Measure on demand -- no config edit needed:
-#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom
+# complexity" table. It stays off rather than on-and-ignored: the tree carries a
+# backlog above the default max of 10, so selecting it would red the tree instead
+# of gating new code. Measure on demand -- no config edit needed:
+#   ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
 # [tool.ruff.lint.mccabe]
 # max-complexity = 10
 
