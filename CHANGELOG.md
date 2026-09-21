@@ -47,6 +47,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   open event as `interrupted` -- the same contract `phase_event` and
   `enablement_event` already keep.
 
+- **A late timeline row could take out the phase that recorded it.** Three of
+  the five calls to the KERNEL re-publish helper were unguarded, so an
+  unreadable spool while re-assembling a closed event raised into the caller;
+  the other two sat inside `except Exception`, which also swallowed genuine
+  recorder defects. The helper now owns that boundary itself and catches only
+  `RECORDING_ERRORS`, so every caller gets the same never-raises contract and a
+  broken recorder is reported instead of hidden. Recording an integrate
+  verdict, a `trace_analyze` request or a baseline promotion decision no longer
+  logs a warning in place of the failure that caused it.
+
+- **Inline MCP actions no longer block the coordinator's event loop.** The
+  `run_action_now` context tool awaits the action's result without blocking the
+  loop or occupying the thread pool needed by database operations. Action
+  execution, timers and caller cancellation can proceed concurrently. Direct
+  calls to the synchronous bridge on the coordinator loop now fail immediately
+  without scheduling work. Existing inline wait limits and registered-action
+  completion after a caller timeout remain unchanged.
+
 - **A Slurm row declaring a workload shape was benchmarked at the defaults.**
   The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
   flag > persisted state > default and deliberately never reads them from the

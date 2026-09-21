@@ -151,30 +151,23 @@ def record_action_decision(
     """
     if not str(task_id or "") or not str(decision or ""):
         return
-    try:
-        from .event_sink import make_sink
+    from .event_sink import make_sink
 
-        sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
-        if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
-            log.debug(
-                "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
-                sink.event_id,
-                task_id,
-            )
-            return
-        sink.record(
-            SECTION_ACTION,
-            {"task_id": str(task_id), "decision": str(decision)},
-            row_type=ROW_ACTION,
-            natural_ids=str(task_id),
-        )
-        _republish_closed_event(sink.event_id)
-    except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
-        log.warning(
-            "baseline timeline: could not record the promotion decision for action %s",
+    sink = make_sink(baseline_event_id(phase, macro_cycle), producer=PRODUCER)
+    if not sink.has_row(SECTION_ACTION, row_type=ROW_ACTION, natural_ids=str(task_id)):
+        log.debug(
+            "baseline timeline: event %s holds no action %s; the promotion decision is not recorded",
+            sink.event_id,
             task_id,
-            exc_info=True,
         )
+        return
+    sink.record(
+        SECTION_ACTION,
+        {"task_id": str(task_id), "decision": str(decision)},
+        row_type=ROW_ACTION,
+        natural_ids=str(task_id),
+    )
+    _republish_closed_event(sink.event_id)
 
 
 def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> dict[str, Any]:
@@ -197,27 +190,34 @@ def _republish_closed_event(event: str) -> None:
     the same storage sequence puts it there. An event with an action still
     running is left alone, since publishing here would show a running
     measurement as finished.
+
+    Never raises: the row this re-publishes is already in the spool, so a
+    re-assembly that cannot read it costs the caller nothing it can act on.
     """
     from ...session.sbd_v6 import timeline_sequence
     from .assembler import baseline_event_parts
+    from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-    parts = baseline_event_parts(event)
-    header = _event_header(parts, event=event)
-    action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
-    ends = [str(row.get("end_time") or "") for row in action_rows]
-    if not ends or not all(ends):
-        return
-    ext, derived = assemble_baseline_ext(parts, event=event)
-    finish_event(
-        event_type=EVENT_TYPE,
-        event=event,
-        sequence=timeline_sequence(header),
-        status=derived,
-        ext=ext,
-        kind=EVENT_KIND,
-        start_time=str(header.get("start_time") or ""),
-        end_time=max(ends),
-    )
+    try:
+        parts = baseline_event_parts(event)
+        header = _event_header(parts, event=event)
+        action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
+        ends = [str(row.get("end_time") or "") for row in action_rows]
+        if not ends or not all(ends):
+            return
+        ext, derived = assemble_baseline_ext(parts, event=event)
+        finish_event(
+            event_type=EVENT_TYPE,
+            event=event,
+            sequence=timeline_sequence(header),
+            status=derived,
+            ext=ext,
+            kind=EVENT_KIND,
+            start_time=str(header.get("start_time") or ""),
+            end_time=max(ends),
+        )
+    except RECORDING_ERRORS as exc:
+        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
 
 
 def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:

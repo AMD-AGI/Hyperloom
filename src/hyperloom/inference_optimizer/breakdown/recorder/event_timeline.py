@@ -13,7 +13,6 @@ from typing import Any, NamedTuple
 from .event_ids import parse_event_id
 from .event_rows import EVENT_ID_FIELD
 from .event_sink import EventSink
-from .recorder_warnings import note_failure
 
 __all__ = [
     "EVENT_STATUS_INTERRUPTED",
@@ -174,17 +173,9 @@ def _opened_sequence(event: str, *, event_section: str) -> int | None:
     """
     from ...session.sbd_v6 import timeline_sequence
 
-    from .assembler import event_parts
+    from .assembler import recorded_section
 
-    try:
-        rows = event_parts((event_section,)).get(event_section) or []
-    except Exception as exc:  # noqa: BLE001 — a spool we cannot read is not a reason to skip the shell
-        note_failure(
-            section=event_section,
-            error=exc,
-            detail=f"reading the spool to check whether event {event} is already open",
-        )
-        return None
+    rows = recorded_section(event_section, detail=f"checking whether event {event} is already open")
     for row in rows:
         if str(row.get(EVENT_ID_FIELD) or "") != str(event):
             continue

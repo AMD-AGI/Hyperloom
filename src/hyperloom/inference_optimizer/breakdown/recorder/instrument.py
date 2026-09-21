@@ -51,13 +51,7 @@ def snapshot_state_sections(
     if not session_dir or state is None:
         trace_skip(reason="no session_dir" if not session_dir else "no state", section="session")
         return
-    rec = None
-    try:
-        rec = _recorder(session_dir, producer)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("recorder unavailable", exc_info=True)
-        trace_skip(reason="writer raised", section="session", error=exc)
-        return
+    rec = _recorder(session_dir, producer)
 
     for name, fn in (
         ("session", _snapshot_session),

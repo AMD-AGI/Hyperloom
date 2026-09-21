@@ -44,7 +44,6 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
 from .event_timeline import finish_event, open_event
-from .recorder_warnings import note_failure
 
 log = logging.getLogger(__name__)
 
@@ -217,15 +216,10 @@ def _resume_gate_ordinals(event: str) -> dict[tuple[str, str], int]:
     second recorder must not renumber a gate it re-rules or reuse a taken
     number; a re-ruled gate keeps its original ordinal and position.
     """
-    try:
-        from .assembler import framework_event_parts
-
-        parts = framework_event_parts(event)
-    except Exception:  # noqa: BLE001 — a fresh event has nothing to read
-        return {}
+    from .assembler import recorded_rows
 
     gates: dict[tuple[str, str], int] = {}
-    for row in rows_for_event(parts.get(SECTION_ATTEMPT_GATE) or [], event):
+    for row in recorded_rows(SECTION_ATTEMPT_GATE, event=event):
         key = (str(row.get("attempt_id") or ""), str(row.get("gate") or ""))
         gates[key] = _int_or_none(row.get("ordinal")) or 0
     return gates
@@ -984,21 +978,14 @@ def record_review_evidence(
         return
     from ...session.session_binding import session_is_bound
 
-    try:
-        if not session_is_bound():
-            return
-        make_sink(framework_event_id(macro_cycle), producer=PRODUCER).record(
-            SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": evidence},
-            row_type=ROW_PROPOSAL,
-            natural_ids=_key(key),
-        )
-    except Exception as exc:  # noqa: BLE001 — observability cannot change the review
-        note_failure(
-            section="framework_proposal",
-            error=exc,
-            detail=f"recording the critic review evidence of proposal {key}",
-        )
+    if not session_is_bound():
+        return
+    make_sink(framework_event_id(macro_cycle), producer=PRODUCER).record(
+        SECTION_PROPOSAL,
+        {"proposal_id": key, "critic_review": evidence},
+        row_type=ROW_PROPOSAL,
+        natural_ids=_key(key),
+    )
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:

@@ -2057,28 +2057,53 @@ def test_post_opt_roofline_gate_ignores_non_dict_entries(coord: Coordinator) -> 
 
 
 @pytest.mark.asyncio
-async def test_run_action_now_sync_on_loop_thread_emits_audit(coord: Coordinator, monkeypatch, caplog) -> None:
-    # Defensive audit (log-only): invoking the run_action_now sync bridge on the coordinator loop thread must emit a
-    # log-only audit. run_coroutine_threadsafe is stubbed so the test never actually blocks.
+async def test_run_action_now_async_does_not_starve_database_executor(coord: Coordinator, monkeypatch) -> None:
     import asyncio
-    import logging
+    from concurrent.futures import ThreadPoolExecutor
+
+    loop = asyncio.get_running_loop()
+    previous_executor = loop._default_executor
+    pool = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(pool)
+    coord._inline_fast_actions_enabled = True
+    coord._coordinator_loop = loop
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S", "0.5")
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
+    calls = []
+
+    async def action(name, params):
+        row = await coord.db.fetchone("SELECT 1 AS value")
+        calls.append(params["index"])
+        return f"done:{row['value']}"
+
+    monkeypatch.setattr(coord.dispatcher, "_run_action_now", action)
+    try:
+        results = await asyncio.wait_for(
+            asyncio.gather(*(coord.dispatcher._run_action_now_wait("inline_probe", {"index": i}) for i in range(8))),
+            2.0,
+        )
+        assert results == ["done:1"] * 8
+        assert sorted(calls) == list(range(8))
+    finally:
+        loop._default_executor = previous_executor
+        pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+async def test_run_action_now_sync_on_loop_thread_rejects_without_scheduling(coord: Coordinator, monkeypatch) -> None:
+    import asyncio
+    from unittest.mock import Mock
 
     coord._inline_fast_actions_enabled = True
-    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"report"})
+    monkeypatch.setattr(coord.dispatcher, "_inline_action_whitelist", lambda: {"inline_probe"})
     coord._coordinator_loop = asyncio.get_running_loop()
+    create_action = Mock(side_effect=AssertionError("same-loop sync calls must not create an action coroutine"))
+    schedule = Mock(side_effect=AssertionError("same-loop sync calls must not schedule work"))
+    monkeypatch.setattr(coord.dispatcher, "_run_action_now", create_action)
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", schedule)
 
-    class _ImmediateFuture:
-        def result(self, timeout=None):
-            return "(stubbed inline result)"
+    out = coord._run_action_now_sync("inline_probe")
 
-    def _fake_schedule(coro, loop):
-        coro.close()
-        return _ImmediateFuture()
-
-    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _fake_schedule)
-
-    with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-        out = coord._run_action_now_sync("report")
-
-    assert any("run_action_now:" in r.getMessage() for r in caplog.records)
-    assert "stubbed inline result" in out
+    assert "unavailable" in out and "coordinator loop thread" in out
+    create_action.assert_not_called()
+    schedule.assert_not_called()
