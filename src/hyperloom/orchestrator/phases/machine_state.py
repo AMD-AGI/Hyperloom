@@ -1620,11 +1620,6 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
     return [r for r in rows if str(r.get("lever_kind") or "") in levers]
 
 
-def config_arm_round_count(state: Any) -> int:
-    """How many rounds the config arm has benched this cycle."""
-    return len(_fold_config_rounds(_lever_attempts(state, LEVER_CONFIG)))
-
-
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     """Count trailing attempts that did not adopt.
 
@@ -2219,7 +2214,6 @@ def record_lifecycle_event(
 
 
 __all__ = [
-    "config_arm_round_count",
     "DEFAULT_PHASE_BUDGET_PCT",
     "OPTIMIZATION_RESERVE_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",

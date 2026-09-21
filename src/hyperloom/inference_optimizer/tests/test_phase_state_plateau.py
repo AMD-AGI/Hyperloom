@@ -26,7 +26,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
-    config_arm_round_count,
     compute_plateau_kernel,
     exit_normal_optimize,
     exit_normal_kernel,
@@ -158,12 +157,6 @@ def test_config_lever_dry_round_that_kept_is_not_dry():
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
-
-
-def test_config_arm_round_count_counts_rounds_not_variants():
-    rows = _grid_round("r1", variants=8) + _grid_round("r2", variants=3)
-    state = SimpleNamespace(macro_cycle=0, attempts=rows)
-    assert config_arm_round_count(state) == 2
 
 
 def test_config_lever_dry_ignores_prior_macro_cycle_rows():

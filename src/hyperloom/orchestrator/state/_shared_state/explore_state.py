@@ -19,6 +19,18 @@ def _shared_state_module():
     return shared_state
 
 
+def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
+    """Merge rejected rows by fingerprint, newest wins. Rows without one are dropped: the fingerprint is what the dedup gate matches on."""
+    merged: dict[str, dict[str, Any]] = {}
+    for entry in [*(prior or []), *(update or [])]:
+        if not isinstance(entry, dict):
+            continue
+        fingerprint = str(entry.get("fingerprint") or "")
+        if fingerprint:
+            merged[fingerprint] = entry
+    return list(merged.values())
+
+
 class _PhaseStateMixin:
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
@@ -244,20 +256,25 @@ class _PhaseStateMixin:
         cur_cycle = int(getattr(self, "macro_cycle", 0) or 0)
         cur_bottleneck = self.current_top_bottleneck()
         ss = _shared_state_module()
+        # The executor reports the round it just benched; accumulating it over the
+        # durable ledger is this layer's job, and a re-measured fingerprint replaces
+        # its earlier row because that is what a fresh measurement means.
         merged["tested"] = ss._cap_tested_ledger(
             ss._stamp_cycle_on_tested(
-                dict(update.get("tested") or prior.get("tested") or {}),
+                {**(prior.get("tested") or {}), **(update.get("tested") or {})},
                 cur_cycle,
                 cur_bottleneck,
             )
         )
         merged["rejected"] = ss._stamp_cycle_on_rejected(
-            list(update.get("rejected") or prior.get("rejected") or []),
+            _merge_rejected(prior.get("rejected"), update.get("rejected")),
             cur_cycle,
             cur_bottleneck,
         )
-        merged["name_index"] = dict(update.get("name_index") or prior.get("name_index") or {})
-        merged["cursor"] = int(update.get("cursor") or len(merged["tested"]))
+        merged["name_index"] = {**(prior.get("name_index") or {}), **(update.get("name_index") or {})}
+        # The round ordinal, not the ledger's size: consumers key idempotency and
+        # round ids on it, so it has to advance once per benched round.
+        merged["cursor"] = int(prior.get("cursor") or 0) + 1
         merged["last_round"] = dict(update.get("last_round") or {})
         # Append-only history fields — merge instead of overwrite.
         wh = list(prior.get("winners_history") or [])

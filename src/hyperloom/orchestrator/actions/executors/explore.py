@@ -742,7 +742,8 @@ class ExploreExecutor:
         # ----- Per-variant serial run loop ---------------------------------
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
-        # This round's ledger writes; the Coordinator merges them over the durable ledger.
+        # This round's ledger writes; ``apply_explore_search_update`` accumulates them
+        # over the durable ledger.
         tested_update: dict[str, dict[str, Any]] = {}
         name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = []
@@ -1507,7 +1508,6 @@ class ExploreExecutor:
             "tested": tested_update,
             "rejected": list(rejected_dedup.values()),
             "name_index": name_index,
-            "cursor": len(tested_update),
             "winners_history": winners_history_update,
             "domains_round_summary": [],
             "last_round": last_round_summary,

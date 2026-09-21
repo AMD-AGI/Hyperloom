@@ -205,6 +205,62 @@ def test_apply_explore_search_update_preserves_accepted():
     assert "bb" * 8 in state.explore_search["tested"]
 
 
+def _round_update(round_no: int, fingerprint: str, name: str) -> dict:
+    """One round's worth of executor ledger writes."""
+    return {
+        "schema_version": 1,
+        "tested": {fingerprint: {"name": name, "outcome": "REVERT"}},
+        "rejected": [{"fingerprint": fingerprint, "name": name, "reason": "not_keep"}],
+        "name_index": {name: fingerprint},
+        "last_round": {"round_id": f"explore-{round_no:03d}"},
+    }
+
+
+def test_apply_explore_search_update_accumulates_across_rounds():
+    """The executor reports one round; the ledger has to remember the ones before it."""
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    state.apply_explore_search_update(_round_update(2, "bb" * 8, "b"))
+
+    search = state.explore_search
+    assert set(search["tested"]) == {"aa" * 8, "bb" * 8}
+    assert {r["fingerprint"] for r in search["rejected"]} == {"aa" * 8, "bb" * 8}
+    assert search["name_index"] == {"a": "aa" * 8, "b": "bb" * 8}
+
+
+def test_apply_explore_search_update_remeasured_fingerprint_replaces_its_row():
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    second = _round_update(2, "aa" * 8, "a")
+    second["tested"]["aa" * 8]["outcome"] = "KEEP"
+    state.apply_explore_search_update(second)
+
+    assert state.explore_search["tested"]["aa" * 8]["outcome"] == "KEEP"
+    assert len(state.explore_search["rejected"]) == 1
+
+
+def test_apply_explore_search_update_advances_the_cursor_per_round():
+    """The cursor is the round ordinal: round ids and idempotency keys derive from it."""
+    state = SharedState()
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    assert state.explore_search["cursor"] == 1
+    # A round that benched three variants still advances the ordinal by one.
+    third = _round_update(2, "bb" * 8, "b")
+    third["tested"].update({"cc" * 8: {"name": "c"}, "dd" * 8: {"name": "d"}})
+    state.apply_explore_search_update(third)
+    assert state.explore_search["cursor"] == 2
+
+
+def test_warm_history_rejected_rows_survive_the_first_round():
+    """Warm-start pre-fills ``rejected`` so the dedup gate denies re-tests; a round must not wipe it."""
+    state = SharedState()
+    state.explore_search = {
+        "rejected": [{"fingerprint": "ee" * 8, "name": "warm", "reason": "warm_recipe_what_failed"}]
+    }
+    state.apply_explore_search_update(_round_update(1, "aa" * 8, "a"))
+    assert {r["fingerprint"] for r in state.explore_search["rejected"]} == {"ee" * 8, "aa" * 8}
+
+
 @pytest.mark.asyncio
 async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
