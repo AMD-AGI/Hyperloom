@@ -345,6 +345,51 @@ def test_a_real_venv_without_the_distribution_is_authoritative(tmp_path):
     assert fp["vllm"] == "unknown"
 
 
+def _only_installed(**versions: str):
+    """An ``_im.version`` stub where anything unlisted is genuinely absent.
+
+    Every component is answered explicitly, so the test does not depend on how broadly the caller catches.
+    """
+    from importlib.metadata import PackageNotFoundError
+
+    def _version(dist: str) -> str:
+        try:
+            return versions[dist]
+        except KeyError:
+            raise PackageNotFoundError(dist) from None
+
+    return _version
+
+
+def test_the_aiter_ref_the_installer_resolved_reaches_the_fingerprint(monkeypatch):
+    """``install_baremetal.sh`` exports ``AITER_REF`` and persists it to ``.env``; nothing wrote the other two."""
+    monkeypatch.setattr(_prov._im, "version", _only_installed())
+
+    assert _prov.detect_stack_fingerprint({"AITER_REF": "v0.1.9"}, probe=True)["aiter"] == "v0.1.9"
+
+
+def test_an_operator_aiter_commit_outranks_the_installer_ref(monkeypatch):
+    """A commit is the finer pin, so an explicit one must not be displaced by the tag the installer chose."""
+    monkeypatch.setattr(_prov._im, "version", _only_installed(**{"amd-aiter": "0.1.9"}))
+
+    env = {"AITER_COMMIT": "abc123", "AITER_REF": "v0.1.9"}
+    assert _prov.detect_stack_fingerprint(env, probe=True)["aiter"] == "abc123"
+
+
+def test_the_probe_reads_the_distribution_aiter_renamed_itself_to(monkeypatch):
+    """AITER renamed its distribution to ``amd-aiter`` at v0.1.8, so the old lookup found nothing on any new host."""
+    monkeypatch.setattr(_prov._im, "version", _only_installed(**{"amd-aiter": "0.1.9"}))
+
+    assert _prov.detect_stack_fingerprint({}, probe=True)["aiter"] == "0.1.9"
+
+
+def test_the_unrelated_pypi_aiter_is_never_recorded_as_the_amd_one(monkeypatch):
+    """``aiter`` on PyPI is a 2019 async-iterator library. Its version looks like an answer and is not one."""
+    monkeypatch.setattr(_prov._im, "version", _only_installed(aiter="0.13.20191203"))
+
+    assert _prov.detect_stack_fingerprint({}, probe=True)["aiter"] == "unknown"
+
+
 def test_an_installer_venv_root_is_not_consulted(tmp_path):
     """Provenance records a resolution, it does not perform one."""
     root = tmp_path / "installer-venv"

@@ -30,7 +30,7 @@ from hyperloom.common.codex_session import (
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.orchestrator.roles.agent_role import DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -571,7 +571,7 @@ async def run_tracelens_skill(
             other TraceLens subprocess timeouts); the Claude path bounds each
             SDK message by a stream-idle timeout instead.
         model (str | None): Optional model override. Defaults to
-            ``claude-opus-5`` on the Claude SDK path, or ``$CODEX_MODEL`` /
+            :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
             :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
         sdk_query_factory (Callable[..., Any] | None): Optional injected query
             factory (used by tests); imported from the SDK when ``None``.
@@ -640,7 +640,7 @@ async def run_tracelens_skill(
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
     }
-    resolved_model = resolved_model or "claude-opus-5"
+    resolved_model = resolved_model or DEFAULT_CLAUDE_MODEL
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)

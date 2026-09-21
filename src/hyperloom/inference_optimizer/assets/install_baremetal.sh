@@ -48,22 +48,22 @@ INSTALL_FRAMEWORK="none"
 _FRAMEWORK_ENV_WAS_SET="${FRAMEWORK_ENV+x}"
 FRAMEWORK_ENV="${FRAMEWORK_ENV:-shared}"
 SGLANG_REPO="${SGLANG_REPO:-https://github.com/sgl-project/sglang.git}"
-# Framework versions track docs/compatibility.rst (SGLang 0.5.18, ROCm 7.2.4).
-# SGLANG_REF is the 0.5.18 pre-release commit the lmsysorg ROCm images are built
-# from, not the v0.5.18 tag: upstream removed `detailed_annotations` from
-# io_struct.py between the two, and TraceLens' annotation patches need that field.
-# On the tag, three of the ten patches fail `git apply --check`, the atomic set
-# rolls back, and kernel-shape profiling is silently unavailable.
+# Framework versions track docs/compatibility.rst (SGLang 0.5.19, ROCm 7.2.4).
+# SGLANG_REF is the 0.5.19 pre-release commit the lmsysorg ROCm images are built
+# from rather than a tag. Through 0.5.18 the HIP extra pinned compressed-tensors
+# to 0.15.0, which caps torch below 2.11 and so cannot resolve against a ROCm 10
+# stack at all; 0.5.19 moved that dependency into runtime_common unpinned, which
+# leaves the constraint file's ROCm torch as the version pip solves for.
 # vLLM installs 0.29.0+rocm723 from the wheels.vllm.ai pip index, matching the
 # vllm/vllm-openai-rocm:v0.29.0 Docker image. The rocm723 variant puts the
 # vLLM ROCm layer at 7.2.3, one patch level above the SGLang stack. AITER_REF
 # can pin ROCm/aiter to a released tag; when unset, the installer selects the
 # newest tag compatible with the already-installed ROCm torch/triton stack.
-SGLANG_REF="${SGLANG_REF:-0c7ff19e3b739b2aabe9bfa070047bfa1aa6a7fd}"
+SGLANG_REF="${SGLANG_REF:-00a9a81b67774e8374172646c092e14999472703}"
 # The pin is an untagged commit, so setuptools_scm has nothing to derive from and
 # would fall back to 0.0.0.*, which the patch-set version gate refuses. Declare the
 # version the patch sets target; it moves together with SGLANG_REF.
-SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.18}"
+SGLANG_PRETEND_VERSION="${SGLANG_PRETEND_VERSION:-0.5.19}"
 _SGLANG_ROCM_PYPI_VERSION_WAS_SET="${SGLANG_ROCM_PYPI_VERSION+x}"
 _AITER_REF_WAS_SET="${AITER_REF+x}"
 # Left unset so the wheel target is derived from the ROCm stack that is

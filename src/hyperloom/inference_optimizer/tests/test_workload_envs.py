@@ -82,6 +82,16 @@ def _materialize(src, out, **kw):
     return yaml.safe_load(res.read_text())["benchmark"]
 
 
+def test_materialize_uses_the_runtime_path_instead_of_the_image_default(tmp_path, monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("PATH", "/opt/python/bin:/usr/bin:/bin")
+    src = _write(tmp_path / "base.yaml", envs={"PATH": "/opt/venv/bin:/usr/bin:/bin"})
+
+    bench = _materialize(src, tmp_path / "out")
+
+    assert bench["envs"]["PATH"] == "/opt/python/bin:/usr/bin:/bin"
+
+
 def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
     _clear_env(monkeypatch)
     src = tmp_path / "base.yaml"
