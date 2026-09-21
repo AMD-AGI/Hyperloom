@@ -117,6 +117,42 @@ def _detect_rocpc_python(libexec: str) -> str | None:
     return None
 
 
+def _torch_import_under_rocprofv3(driver_python: str) -> tuple[bool, str]:
+    """Fast check for images where rocprofv3 and torch cannot share a process."""
+    rocprofv3 = shutil.which("rocprofv3", path=_profiler_env().get("PATH")) or shutil.which("rocprofv3")
+    if not rocprofv3:
+        return True, ""
+    try:
+        p = subprocess.run(
+            [
+                rocprofv3,
+                "--hip-trace",
+                "--",
+                driver_python,
+                "-c",
+                "import torch; print('rocprofv3 torch import ok')",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            env=_profiler_env(),
+        )
+    except subprocess.TimeoutExpired:
+        return False, "rocprofv3 timed out while importing torch; this image cannot be profiled safely"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"rocprofv3 torch-import preflight failed: {exc}"
+    output = f"{p.stdout}{p.stderr}"
+    if p.returncode == 0:
+        return True, ""
+    if "spirv-expand-step" in output or "inconsistency in registered CommandLine options" in output:
+        return (
+            False,
+            "rocprofv3 and torch collide in LLVM option registry "
+            "(spirv-expand-step registered more than once)",
+        )
+    return False, output[-1000:] or f"rocprofv3 torch-import preflight exited {p.returncode}"
+
+
 # The in-flight rocprof-compute child, so an external SIGTERM (e.g. the agent's Bash `timeout`) can reap its whole
 # subtree instead of orphaning rocprofv3.
 _CURRENT_PROC = None
@@ -218,6 +254,11 @@ def main() -> int:
               "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling.")
         print("To enable it, install the forge-profiling extra (pip install -e \".[forge-profiling]\") — or "
               f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them.")
+        return 3
+    ok, msg = _torch_import_under_rocprofv3(driver_python)
+    if not ok:
+        print("rocprofv3 cannot profile this image's torch runtime — skipping profiling.")
+        print(msg)
         return 3
 
     out = a.out or os.path.join(os.getcwd(), "forge_profile")

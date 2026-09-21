@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -170,3 +171,41 @@ def test_profiler_env_is_unchanged_without_a_wheel_stack(rocpc_profile, tmp_path
     monkeypatch.setattr(rocpc_profile, "_rocm_profiler_runtime_root", lambda: None)
 
     assert rocpc_profile._profiler_env()["ROCM_PATH"] == "/opt/rocm"
+
+
+def test_torch_import_preflight_detects_llvm_option_collisions(rocpc_profile, monkeypatch) -> None:
+    """Some prebuilt sglang ROCm10 images cannot profile anything that imports
+    torch: rocprofv3 aborts in LLVM option registration before the workload even
+    reaches GPU code. Detect that quickly instead of hanging inside profile."""
+    monkeypatch.setattr(rocpc_profile.shutil, "which", lambda name, path=None: "/opt/venv/bin/rocprofv3")
+
+    def fake_run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            _args,
+            137,
+            "",
+            "CommandLine Error: Option 'spirv-expand-step' registered more than once!\n"
+            "LLVM ERROR: inconsistency in registered CommandLine options\n",
+        )
+
+    monkeypatch.setattr(rocpc_profile.subprocess, "run", fake_run)
+
+    ok, msg = rocpc_profile._torch_import_under_rocprofv3("/usr/bin/python3")
+
+    assert not ok
+    assert "LLVM option registry" in msg
+    assert "spirv-expand-step" in msg
+
+
+def test_torch_import_preflight_allows_a_working_profiler(rocpc_profile, monkeypatch) -> None:
+    monkeypatch.setattr(rocpc_profile.shutil, "which", lambda name, path=None: "/opt/venv/bin/rocprofv3")
+    monkeypatch.setattr(
+        rocpc_profile.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(_args, 0, "ok\n", ""),
+    )
+
+    ok, msg = rocpc_profile._torch_import_under_rocprofv3("/usr/bin/python3")
+
+    assert ok
+    assert msg == ""
