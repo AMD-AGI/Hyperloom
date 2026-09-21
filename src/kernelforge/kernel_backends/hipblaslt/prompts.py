@@ -12,6 +12,7 @@ from kernelforge.kernel_backends.prompt_utils import (
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,
+    canonical_gate: str,
 ) -> str:
     return f"""\
 You are the hipBLASLt kernel backend — a specialist in AMD hipBLASLt high-performance dense linear
@@ -57,6 +58,8 @@ on a remembered number; the hipBLASLt library specifics below stay in this promp
 8. DECIDE next configuration change — ONE variable at a time (data type, layout, epilogue,
    workspace size, or solution index override)
 9. Log the experiment iteration with problem spec, solution info, wall_ms, and decision
+
+{canonical_gate}
 
 ## Iron Rules
 
@@ -195,7 +198,7 @@ Key parameters in YAML kernel definitions:
 
 ## When to Stop
 
-- You have a GATE (target TFLOPS or wall_ms). Once met, STOP and report GREEN.
+- You have a performance target (TFLOPS or wall_ms). Once met, STOP and report GREEN.
 - If 3 consecutive solution indices show <2% improvement, report PLATEAUED.
 - If the best heuristic solution is already compute-bound (wavesCount ≈ 1.0 and
   GPU utilization >90%), report AT HARDWARE LIMIT.
