@@ -1122,6 +1122,13 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
 
         _pytest.skip("BaselineExecutor not exposed under this name")
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
+    # The subject is the refusal, not the mode detection that precedes it.
+    # ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
+    # imported -- true of the lint/test images this suite runs on -- and also
+    # when the installed transformers happens to know ``deepseek_v4``. Left to
+    # the environment, this test asserted a refusal on the machines that had
+    # transformers and silently asserted nothing on the ones that did not.
+    monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
     res = ex._after_materialize_config(cfg, tmp_path / "out")
     assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
 
@@ -1154,6 +1161,9 @@ def test_the_hook_is_required_even_with_evaluation_disabled(tmp_path, monkeypatc
     # but the tokenizer hook still must.
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: True)
     ex = bl.BaselineExecutor(session_dir=tmp_path)
+    # Same environment dependence as the refusal test above: "" when
+    # ``transformers`` is missing, which is the state of the test images.
+    monkeypatch.setattr(bl, "_client_tokenizer_mode", lambda _model: "deepseek_v4")
     res = ex._after_materialize_config(cfg, tmp_path / "out")
     assert res is not None and res.get("error_class") == "client_tokenizer_unpatchable", res
 
