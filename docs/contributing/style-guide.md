@@ -21,6 +21,7 @@ When this guide and tooling disagree, **tooling wins** — update the guide if y
 2. **Automate what you can** — run `pre-commit` locally; let CI enforce the rest.
 3. **No secrets in the tree** — credentials belong in environment variables or secret stores.
 4. **License hygiene** — every file must satisfy [REUSE](https://reuse.software/) (see below).
+5. **Shape is reviewable** — maintainability, readability, extensibility, and reliability are review criteria, not afterthoughts; see [Size and complexity](#size-and-complexity).
 
 ## Python
 
@@ -51,6 +52,30 @@ ruff format --check .   # or `ruff format .` to apply
 **Do not** add `# noqa` or per-file ignores unless there is a documented reason (import cycles, test patterns). Existing per-file ignores live in `[tool.ruff.lint.per-file-ignores]` — extend that table instead of inline suppressions.
 
 **Future rules** (`B`, `I`, `UP`, `SIM`, `RUF`) are commented in `pyproject.toml` and will be enabled once the backlog is zero. New code should already follow import sorting and common bugbear patterns even before those rules are turned on.
+
+### Size and complexity
+
+Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI's Pylint is `--errors-only`, which excludes `R0912`/`R0915`. They are **review triggers for new and rewritten code** — the point at which a reviewer asks for a split or for the reason the shape is right.
+
+| Unit | Trigger | Where the number comes from |
+|------|---------|-----------------------------|
+| Function length | ~60 lines | Just above the tree's 90th percentile |
+| Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
+| Module length | ~800 lines | Roughly the tree's 90th percentile |
+
+Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
+
+**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. The triggers cover the Python whose style we own — `src/hyperloom` and `src/kernelforge`, minus Ruff's `extend-exclude` in `pyproject.toml`, which already names the vendored SDK copies and the shipped `src/kernelforge/data` examples. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though the command below still reports them. They are not exempt from the duplication and boundary rules.
+
+Measure rather than argue:
+
+```bash
+ruff check --select C901 --config "lint.mccabe.max-complexity=10" src/hyperloom src/kernelforge
+```
+
+Passing a trigger is not a merge blocker — it means the PR description says why, or the change splits. The tree carries a backlog above all three: **do not grow it**, and prefer leaving a file you touched smaller than you found it. Editing a unit that was already over the trigger is not a demand to repay its debt; adding branches or a second responsibility to it is. Extracting a helper while you are in there is in scope; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
+
+Structure the split along the boundaries the code already has — one job per module, cohesive inside, dependencies pointing one way down the layers. A split that only moves lines to a second file, leaving the two halves reaching into each other, trades one long file for a cycle.
 
 ### Module structure
 
@@ -101,7 +126,7 @@ Bandit scans production code (`src/hyperloom`, `scripts/`). Tests are excluded.
 
 ### Pylint
 
-CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; style/convention messages are intentionally out of scope.
+CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix new error-level issues in touched modules; convention, refactor, and style messages are intentionally out of scope — including `R0912`/`R0915`, which is why the thresholds in [Size and complexity](#size-and-complexity) are carried by review rather than by a gate.
 
 ### Tests (pytest)
 
@@ -116,7 +141,11 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 - `critic_agent_e2e`, `targeted_build_e2e`
 
-**Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Add unit tests for logic you introduce; do not chase coverage on omitted paths.
+**What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly (`src/hyperloom/agents/framework/tests/integration/test_e2e_execute_mock.py` drives the CLI against a fake service in a temporary directory). Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
+
+**When you replace a test,** carry its contract and failure-mode assertions across, and keep them in the default CI selection — the `*_e2e` markers above are excluded from it, so they supplement that baseline rather than stand in for it. The 90% line-coverage floor cannot show that a specific assertion survived.
+
+**Coverage:** CI enforces **90% line coverage** on measured trees (`[tool.coverage.report] fail_under`). CLI drivers, subprocess wrappers, and hardware-only paths are omitted from the denominator — see `[tool.coverage.run] omit`. Cover the logic you introduce as described under *What to test*; do not chase coverage on omitted paths, and do not pad internal plumbing with per-function tests to move the number.
 
 **Naming:** `test_<behavior>.py`, functions `test_<scenario>`, classes `Test<Component>`.
 
@@ -173,7 +202,7 @@ CI enforces this through the **REUSE Compliance** workflow.
 - Branch from `main`; keep commits logically grouped.
 - PR description: problem, approach, test evidence.
 - **Do not commit:** virtualenvs, `.coverage`, build artifacts, large logs, credentials, local `.env`.
-- **Changelog:** required. Anything an operator can observe carries a `CHANGELOG.md` entry under `[Unreleased]` in the same PR — see [`AGENTS.md`](../../AGENTS.md) § *Authoring rules of engagement* for what counts and what is exempt.
+- **Observable effect:** required. Anything an operator can observe is described in the PR that changes it, and the release cut aggregates those into the GitHub release — see [`AGENTS.md`](../../AGENTS.md) § *Authoring rules of engagement* for what counts and what is exempt.
 
 ## Local development checklist
 

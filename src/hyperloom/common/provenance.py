@@ -23,7 +23,10 @@ PROVENANCE_SOURCE = "shared_v1"
 # Env var priority per stack component (operator pins beat auto-detect).
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
     "rocm": ("ROCM_VERSION", "HIP_VERSION"),
-    "aiter": ("AITER_COMMIT", "AITER_VERSION"),
+    # ``AITER_REF`` is the tag ``install_baremetal.sh`` resolved and persisted to ``.env``; it is the only one of the
+    # three anything in this repo actually writes, and it reaches the KB even on the isolated vLLM path, where aiter
+    # lives in the framework venv and no in-process probe can see it.
+    "aiter": ("AITER_COMMIT", "AITER_VERSION", "AITER_REF"),
     "sglang": ("SGLANG_VERSION", "SGL_VERSION"),
     "vllm": ("VLLM_VERSION",),
 }
@@ -184,7 +187,11 @@ def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str
 
 def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> str:
     """Best-effort installed-package version for a stack component."""
-    dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "aiter"}.get(component)
+    # AITER renamed its distribution from ``aiter`` to ``amd-aiter`` at v0.1.8, so ``aiter`` was simply the wrong
+    # name. It is not kept as a fallback: on PyPI that name belongs to an unrelated async-iterator library, and
+    # recording its ``0.13.20191203`` as the AITER version would be worse than recording nothing, because it looks
+    # like an answer. Installs older than v0.1.8 are covered by ``AITER_REF`` instead, which is exact.
+    dist = {"sglang": "sglang", "vllm": "vllm", "aiter": "amd-aiter"}.get(component)
     if not dist:
         return ""
     if venv_path is not None:

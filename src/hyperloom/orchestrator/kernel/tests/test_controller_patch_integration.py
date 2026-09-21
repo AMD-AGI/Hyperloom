@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -159,6 +160,24 @@ def _silent_backends() -> dict[str, object]:
         "orchestration": MockBackend(silent, name="orch"),
         "critic": MockCriticBackend(),
     }
+
+
+def test_patch_directories_follow_controller_task_priority(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "cycle" / "result" / "patches"
+    alphabetical = tuple(root / name for name in ("first", "second", "third"))
+    priorities = {"first": 2, "second": 0, "third": 1}
+
+    monkeypatch.setattr(integration, "discover_controller_patch_dirs", lambda _root: alphabetical)
+    monkeypatch.setattr(
+        integration,
+        "load_task",
+        lambda path, record_state=False: SimpleNamespace(
+            task=SimpleNamespace(priority=priorities[path.name], operator_id=path.name)
+        ),
+    )
+
+    ordered = integration._priority_ordered_patch_dirs(root)
+    assert [path.name for path in ordered] == ["second", "third", "first"]
 
 
 def _coordinator(session_dir: Path, repo: Path) -> Coordinator:

@@ -937,6 +937,130 @@ sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
 #
 # Fail-soft: a pin failure must NOT abort the install — forge still runs on PMC.
 
+# Echo rocprof-compute's libexec dir, or non-zero if the tool is not installed.
+# Two layouts exist: the classic ROCm tree under $ROCM_PATH, and TheRock's pip
+# ROCm, which ships the profiler as its own `_rocm_profiler` wheel while
+# $ROCM_PATH points at the separate `_rocm_sdk_devel` package.
+_rocpc_libexec_dir() {
+  local root dir
+  for root in "${ROCM_PATH:-}" /opt/rocm; do
+    [ -n "$root" ] || continue
+    dir="${root%/}/libexec/rocprofiler-compute"
+    if [ -f "${dir}/rocprof_compute_base.py" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+  dir="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+try:
+    spec = importlib.util.find_spec("_rocm_profiler")
+except Exception:
+    spec = None
+for root in list(getattr(spec, "submodule_search_locations", None) or []):
+    path = os.path.join(root, "libexec", "rocprofiler-compute")
+    if os.path.isfile(os.path.join(path, "rocprof_compute_base.py")):
+        print(path)
+        break
+PY
+  )" || dir=""
+  [ -n "$dir" ] || return 1
+  printf '%s\n' "$dir"
+}
+
+# Echo the installed `rocm` distribution version, or non-zero when ROCm is not
+# pip-packaged. Non-empty means TheRock's wheels, where the profiler is itself a
+# wheel and apt carries no such package at all, so apt can only ever fail there.
+_rocm_wheel_version() {
+  "$PYTHON" - <<'PY' 2>/dev/null
+import importlib.metadata
+print(importlib.metadata.version("rocm"))
+PY
+}
+
+# Echo the ROCm tree carrying rocprofiler-sdk, or non-zero when there is none.
+# Pip-packaged ROCm splits this across wheels and $ROCM_PATH does not always
+# point at the one that has it.
+_rocm_sdk_runtime_root() {
+  local root
+  root="$("$PYTHON" - <<'PY' 2>/dev/null
+import importlib.util, os
+for pkg in ("_rocm_sdk_devel", "_rocm_sdk_core"):
+    try:
+        spec = importlib.util.find_spec(pkg)
+    except Exception:
+        continue
+    for root in list(getattr(spec, "submodule_search_locations", None) or []):
+        if os.path.isdir(os.path.join(root, "lib", "rocprofiler-sdk")):
+            print(root)
+            raise SystemExit(0)
+PY
+  )" || root=""
+  [ -n "$root" ] || return 1
+  printf '%s\n' "$root"
+}
+
+# rocprofiler-sdk dlopens aqlprofile by its unversioned soname, which the
+# rocm-sdk-core wheel omits while shipping the versioned file. Without the link
+# the sdk aborts on SIGABRT mid-profile and hangs instead of reporting. Images
+# that do ship the soname are left alone.
+_ensure_aqlprofile_soname() {
+  local root lib
+  root="$(_rocm_sdk_runtime_root)" || return 0
+  lib="${root%/}/lib"
+  [ -e "${lib}/libhsa-amd-aqlprofile64.so" ] && return 0
+  [ -f "${lib}/libhsa-amd-aqlprofile64.so.1" ] || return 0
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would link libhsa-amd-aqlprofile64.so -> libhsa-amd-aqlprofile64.so.1 in ${lib}"
+    return 0
+  fi
+  if ln -s libhsa-amd-aqlprofile64.so.1 "${lib}/libhsa-amd-aqlprofile64.so" 2>/dev/null; then
+    log "rocprof-compute: linked the missing libhsa-amd-aqlprofile64.so soname in ${lib}"
+  else
+    warn "rocprof-compute: could not link libhsa-amd-aqlprofile64.so in ${lib}; profiling will abort in rocprofiler-sdk"
+  fi
+}
+
+# Home of the private venv analyze mode runs in. rocpc_profile.py derives the
+# same path, so the two sides need no handshake.
+_rocpc_venv_dir() {
+  printf '%s\n' "${ROCPC_VENV:-/opt/rocprof-compute-venv}"
+}
+
+# rocprof-compute's analyze mode refuses to run unless the exact pins in its own
+# requirements.txt are installed. Meeting them in the serving image would pull
+# numpy and pandas out from under torch, so they get a venv of their own. The
+# tool's file is the only source of truth: a copy kept here goes stale the next
+# ROCm release, which is how analyze broke in the first place.
+# Fail-soft: without the venv, analyze degrades, profiling still collects.
+_ensure_rocpc_analyze_venv() {
+  local libexec="$1" reqs venv venv_py
+  reqs="${libexec}/requirements.txt"
+  if [ ! -f "$reqs" ]; then
+    log "rocprof-compute: no ${reqs}; analyze needs no private venv here"
+    return 0
+  fi
+  venv="$(_rocpc_venv_dir)"
+  venv_py="${venv}/bin/python"
+  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
+    log "would provision the rocprof-compute analyze venv at ${venv} from ${reqs}"
+    return 0
+  fi
+  if [ -x "$venv_py" ]; then
+    log "rocprof-compute: analyze venv already present at ${venv}"
+    return 0
+  fi
+  if ! "$PYTHON" -m venv "$venv" >/dev/null 2>&1; then
+    warn "rocprof-compute: could not create the analyze venv at ${venv}; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  if ! "$venv_py" -m pip install --quiet "${PIP_EXTRA[@]}" -r "$reqs"; then
+    warn "rocprof-compute: analyze venv deps from ${reqs} failed to install; analyze will degrade to the PMC path (profiling still collects counters)"
+    return 0
+  fi
+  log "rocprof-compute: analyze venv ready at ${venv}"
+}
+
 # Echo the interpreter resolve_rocpc() will run rocprof-compute under: the first
 # of $PYTHON (install-time sys.executable), /usr/bin/python3, PATH python3 that
 # can run `<libexec>/rocprof-compute --help`. Non-zero + no output if none do.
@@ -1026,9 +1150,9 @@ ensure_rocprof_compute() {
   # permanent skip: roofline profiling silently uninstalled on every pod.
   log "rocprof-compute: ensuring roofline profiling deps (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}')"
 
-  local rocm_root base
+  local rocm_root libexec rocm_ver
   rocm_root="${ROCM_PATH:-/opt/rocm}"
-  base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+  libexec="$(_rocpc_libexec_dir)" || libexec=""
 
   # --- Step 0: the profiler's Python dependencies ---
   # The tool is a Python program: without dash/kaleido/matplotlib/plotille/tqdm
@@ -1091,14 +1215,34 @@ for spec in specs:
   fi
 
   # --- Step 1: ensure the rocprof-compute tool exists ---
-  # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
-  # install when the file KernelForge's resolve_rocpc() checks is already present.
-  if [ -f "$base" ]; then
-    log "rocprof-compute already present at ${base}"
+  # Idempotent: skip the install when the tool is already present in either layout.
+  if [ -n "$libexec" ]; then
+    log "rocprof-compute already present at ${libexec}"
   elif [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute not found at ${base} (check-only; would apt-get install rocprofiler-compute). Forge profiling would degrade to the PMC path."
+    warn "rocprof-compute not found under ${rocm_root} or the _rocm_profiler wheel (check-only; would install rocprofiler-compute). Forge profiling would degrade to the PMC path."
   elif [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    if rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+      log "would run: ${PYTHON} -m pip install --extra-index-url https://stable.repo.amd.com/rocm/whl-next 'rocm-profiler==${rocm_ver}'"
+    else
+      log "would run: apt-get install -y --no-install-recommends rocprofiler-compute"
+    fi
+  elif rocm_ver="$(_rocm_wheel_version)" && [ -n "$rocm_ver" ]; then
+    # Wheel-ROCm stack. Pin the profiler to the SDK version already installed:
+    # asking for the `rocm` metapackage instead lets pip re-resolve the whole
+    # SDK and, on the py3.12 images, silently reinstall rocm-sdk-core at an
+    # older version than the one torch is built against. --extra-index-url,
+    # never --index-url: that would replace the image's own configuration,
+    # which on some images is the only route to this package.
+    log "installing rocprofiler-compute (forge profiling backend) via pip: rocm-profiler==${rocm_ver}"
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      --extra-index-url https://stable.repo.amd.com/rocm/whl-next "rocm-profiler==${rocm_ver}" \
+      || warn "rocprof-compute: pip install 'rocm-profiler==${rocm_ver}' failed; forge profiling will degrade to the PMC path. Check pip/network access to the ROCm index."
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
+    else
+      warn "rocprof-compute: pip install produced no ${rocm_root} or _rocm_profiler layout; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO)."
+    fi
   elif ! command -v apt-get >/dev/null 2>&1; then
     # No apt (RHEL/Alpine/etc.): cannot install the system package here.
     warn "rocprof-compute: apt-get unavailable; cannot install rocprofiler-compute. Forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). Bake rocprofiler-compute into the image to enable roofline profiling."
@@ -1114,10 +1258,11 @@ for spec in specs:
       apt-get install -y --no-install-recommends rocprofiler-compute >>"$apt_log" 2>&1 || true
     fi
     # Verify against the SAME path KernelForge's resolve_rocpc() checks.
-    if [ -f "$base" ]; then
-      log "rocprof-compute installed OK: ${base} present"
+    libexec="$(_rocpc_libexec_dir)" || libexec=""
+    if [ -n "$libexec" ]; then
+      log "rocprof-compute installed OK: ${libexec} present"
     else
-      warn "rocprof-compute install did not produce ${base}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
+      warn "rocprof-compute install did not produce a rocprofiler-compute layout under ${rocm_root}; forge profiling will degrade to the PMC path (no roofline; optimization-potential estimable=NO). apt output tail (check ROCm repo access / package name for this ROCm version):"
       # Guard BOTH the missing-file case and pipefail: if the redirect above never
       # created $apt_log (e.g. an unwritable TMPDIR), a bare `tail | while` exits
       # non-zero and set -euo pipefail would abort install.sh — the very
@@ -1134,9 +1279,11 @@ for spec in specs:
   # Pin in the interpreter resolve_rocpc() will actually run the tool under (probe
   # mirrors KernelForge). Runs when the tool is present; in check/dry-run we
   # surface the plan against $PYTHON even before the tool exists.
-  if [ -f "$base" ]; then
+  if [ -n "$libexec" ]; then
+    _ensure_aqlprofile_soname
+    _ensure_rocpc_analyze_venv "$libexec"
     local rocpc_py
-    if rocpc_py="$(_rocpc_effective_python "$(dirname "$base")")"; then
+    if rocpc_py="$(_rocpc_effective_python "$libexec")"; then
       [ "$rocpc_py" = "$PYTHON" ] \
         || log "rocprof-compute: resolve_rocpc will run under ${rocpc_py} (not \$PYTHON=${PYTHON}); pinning pandas there"
     else

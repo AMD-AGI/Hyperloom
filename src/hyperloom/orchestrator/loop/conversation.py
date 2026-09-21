@@ -52,7 +52,7 @@ class ConversationCollaborator:
                 analysis_reader=self._context_analysis_reader,
                 recent_outcomes_reader=self._context_recent_outcomes_reader,
                 running_tasks_reader=self._context_running_tasks_reader,
-                action_runner=self._run_action_now_sync,
+                action_runner=self._coord.dispatcher._run_action_now_wait,
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)

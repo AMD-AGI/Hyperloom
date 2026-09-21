@@ -93,16 +93,23 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     return val is not None and str(val).strip().lower() in _RUN_EVAL_FALSE_VALUES
 
 
-def request_baseline_accuracy_stop(shared_state: Any, *, context: str) -> bool:
-    """Halt the run when the baseline accuracy test produced no result."""
+def request_baseline_accuracy_stop(shared_state: Any, *, context: str, cause: str = "") -> bool:
+    """Halt the run when the baseline accuracy test produced no result.
+
+    ``cause`` names what actually went wrong, for the callers that can establish it.
+    Without one the line keeps its long-standing reading -- a missing accuracy reference
+    nobody can explain *is* a broken baseline setup -- but asserting that next to an
+    identified cause would tell the operator the opposite of what the caller just found.
+    """
     if shared_state is None:
         return False
     setter = getattr(shared_state, "set_stop_reason", None)
     if not callable(setter):
         return False
     log.warning(
-        "baseline accuracy test produced no result (%s); stopping run (broken baseline setup)",
+        "baseline accuracy test produced no result (%s); stopping run (%s)",
         context,
+        cause or "broken baseline setup",
     )
     setter(BASELINE_ACCURACY_STOP_REASON)
     return True

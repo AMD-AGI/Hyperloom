@@ -2,9 +2,9 @@
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
 [![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
-[![Version](https://img.shields.io/badge/version-1.1.1-blue)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 
 **ROCm™ Hyperloom** is a multi-agent harness that autonomously optimizes inference
 on AMD Instinct™ GPUs. It profiles each workload, searches framework and kernel
@@ -14,7 +14,7 @@ into a recipe knowledge base — without per-model human tuning.
 It supports text generation, image generation, and custom pipelines on vLLM,
 SGLang, and xDiT.
 
-<p align="center"><img width="700" alt="Hyperloom architecture" src="docs/images/Hyperloom_architecture.png" /></p>
+<p align="center"><img width="700" alt="Hyperloom architecture" src="https://raw.githubusercontent.com/AMD-AGI/Hyperloom/main/docs/images/Hyperloom_architecture.png" /></p>
 
 ## Why Hyperloom
 
@@ -49,7 +49,7 @@ framework layer from the established baseline, rather than starting over.
 | **Prelude** | Measures a stock baseline (the anchor for every later comparison), optionally replays the closest recipe from the knowledge base, then profiles and builds a roofline so later phases know where the headroom is. |
 | **Enablement** | Makes the model run at all (serving flags through targeted rebuilds), graded on runnability and accuracy. Only entered when a baseline fails; skipped on healthy runs. |
 | **Framework optimization** | Searches serving flags, precision, attention, batching, and ranked upstream diffs. |
-| **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/KernelForge) — then re-measures every accepted change end to end. Only one backend runs per phase. |
+| **Kernel optimization** | Delegates hot kernels to one AMD backend — [GEAK](https://github.com/AMD-AGI/GEAK) or [KernelForge](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/kernelforge/what-is-kernelforge.md) — then re-measures every accepted change end to end. Only one backend runs per phase. |
 | **Sweep** | Re-measures the accumulated stack across concurrency and sequence-length operating points. Skips itself when the validated gain has not moved. |
 | **Close** | Records why the run stopped, writes the recipe knowledge base, final report, and machine-readable session artifacts. |
 
@@ -59,7 +59,7 @@ speedup is held as unverified until Hyperloom re-measures it under the session
 protocol. Changes that fail validation are reverted; successful changes become
 the new baseline.
 
-See the [optimization loop](docs/conceptual/optimization-loop.md) for the runtime
+See the [optimization loop](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md) for the runtime
 contracts, enablement ladder, and phase allowlists.
 
 ### Multi-agent harness
@@ -110,9 +110,9 @@ the knowledge base are described further in
 
 | Goal | Guide |
 |------|-------|
-| Set up Hyperloom and run a demo | [Quickstart](examples/README.md) |
-| Launch and monitor an optimization | [Run an optimization](docs/how-to/optimize.md) |
-| Understand the algorithm | [Optimization loop](docs/conceptual/optimization-loop.md) |
+| Set up Hyperloom and run a demo | [Quickstart](https://github.com/AMD-AGI/Hyperloom/blob/main/examples/README.md) |
+| Launch and monitor an optimization | [Run an optimization](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/how-to/optimize.md) |
+| Understand the algorithm | [Optimization loop](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/conceptual/optimization-loop.md) |
 
 ```bash
 python -m hyperloom.inference_optimizer.cli optimize
@@ -123,13 +123,13 @@ python -m hyperloom.inference_optimizer.cli optimize
 | Topic | Link |
 |-------|------|
 | ROCm Docs | [Hyperloom](https://rocm.docs.amd.com/projects/hyperloom/en/latest/index.html) |
-| Authentication and credentials | [Authentication & credentials](docs/reference/authentication.md) |
-| Environment variables | [Environment variables](docs/reference/environment-variables.md) |
-| Components | [Components](docs/components/index.md) |
-| Compatibility | [Compatibility matrix](docs/compatibility.rst) |
-| Troubleshooting | [Troubleshooting](docs/reference/troubleshooting.md) |
-| Operations | [Operations & self-hosting](docs/reference/operations.md) |
-| Session output schema | [`session_breakdown.json`](docs/reference/session-breakdown.md) |
+| Authentication and credentials | [Authentication & credentials](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/authentication.md) |
+| Environment variables | [Environment variables](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/environment-variables.md) |
+| Components | [Components](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/components/index.md) |
+| Compatibility | [Compatibility matrix](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/compatibility.rst) |
+| Troubleshooting | [Troubleshooting](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/troubleshooting.md) |
+| Operations | [Operations & self-hosting](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/operations.md) |
+| Session output schema | [`session_breakdown.json`](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/session-breakdown.md) |
 
 ## File issues and feedback
 
@@ -143,8 +143,8 @@ feedback through the
 ## Developer entry points
 
 - Runtime package: `src/hyperloom/`
-- Contributor & AI authoring contract: [`AGENTS.md`](AGENTS.md)
-- Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
+- Contributor & AI authoring contract: [`AGENTS.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/AGENTS.md)
+- Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
 - Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
@@ -174,14 +174,14 @@ feedback through the
 [58011]: https://docs.amd.com/v/u/en-US/58011-epyc-9004-tg-bios-and-workload
 
 For contribution workflow, testing, and linting, see
-[`CONTRIBUTING.md`](CONTRIBUTING.md).
+[`CONTRIBUTING.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md).
 
 ---
 
 ## Licensing
 
 Hyperloom is released under the **MIT License**. The full license text
-is in [`LICENSE`](LICENSE).
+is in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE).
 
 You may use Hyperloom commercially, modify it, and distribute it under
 the terms of the MIT license, provided the copyright notice and the
@@ -191,13 +191,13 @@ the software.
 Third-party tools and agents (Cursor, Visual Studio, and Claude Code)
 that Hyperloom invokes are governed by their own separate license terms
 and are NOT covered by the MIT license above — see the "Third-Party
-Tools and Agents" section in [`LICENSE`](LICENSE). You are responsible
+Tools and Agents" section in [`LICENSE`](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE). You are responsible
 for reviewing and complying with each tool's individual license.
 
 A few files distributed *inside* Hyperloom are also third-party — reference
 kernels and a Triton oracle carried in forge's knowledge base and examples.
-They keep their own licences; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists them and
+They keep their own licences; [`THIRD_PARTY.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/THIRD_PARTY.md) lists them and
 `REUSE.toml` carries the machine-readable form.
 
-For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
-contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+For security-relevant issues, see [`SECURITY.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/SECURITY.md). For
+contribution conventions, see [`CONTRIBUTING.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md).
