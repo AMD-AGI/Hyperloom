@@ -32,6 +32,25 @@ Before a new model run, verify these fields match the environment:
 - `benchmark.envs.PATH`: must lead with the launcher Python's bin dir
   (`$(dirname "$PYTHON")`).
 
+## Benchmark deadlines
+
+Every actual benchmark subprocess spawn, including baseline, explore, sweep, and
+rebench, uses `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`
+seconds). It includes server boot and accuracy evaluation; output cannot extend
+it. `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default `600` seconds)
+starts only after real server readiness, never during pre-ready startup or for
+server-less scriptable workloads. Both settings must be finite and positive.
+Session `--max-hours`, cancellation, and admission/phase budgets remain separate;
+the whole-sweep budget can end a sweep before all its measurements run.
+
+`PYTHONUNBUFFERED=1` only unbuffers Python output. It does not make shell/native
+programs or upstream subprocess capture stream, and busy logs are not proof of
+useful progress. The Magpie streaming fix is local-only and unpublished; do not
+assume an installed pin includes it or infer end-to-end validation from this
+policy. Session exhaustion is cooperative, not protection against a frozen
+Coordinator. Profile, KernelForge, GEAK, LLM-call, and SGLang's own watchdog
+budgets retain their existing contracts.
+
 ## Magpie leak-path salvage (`INFERENCE_OPTIMIZER_RESCUE_PATHS`)
 
 In-loop, defense-in-depth — the launcher does not touch this. Magpie shell

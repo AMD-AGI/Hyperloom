@@ -41,9 +41,6 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_overtime_kill_ratio="bad",
-        explore_variant_timeout_sec="bad",
-        explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
         research_scout=False,
@@ -53,7 +50,6 @@ def _args(**overrides):
         enable_conc_sweep=True,
         conc_sweep_concs="1, bad, 4,,8",
         conc_sweep_total_budget_sec=120,
-        conc_sweep_timeout_sec=30,
         reference_script="",
     )
     base.update(overrides)
@@ -111,14 +107,10 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.gpu_specialist_capacity == 8
     assert state.plateau_overrides["explore_keep_gain_pct"] == 1.5
     assert state.plateau_overrides["kernel_keep_gain_pct"] == 2.5
-    assert state.explore_overtime_kill_ratio == 2.0
-    assert state.explore_variant_timeout_sec_override == 0
-    assert state.explore_variant_timeout_safety_margin == 0.5
     # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
-    assert state.conc_sweep_variant_timeout_sec == 30
     assert state.reference_server_args == "--block-size 64"
     assert json.loads((tmp_path / "state.json").read_text())["session_id"] == "session-1"
 
@@ -450,11 +442,11 @@ def test_snapshot_skeleton_and_session_dir_helpers(
     monkeypatch,
     capsys,
 ) -> None:
-    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "robustness": ""})
+    cb._snapshot_system_prompts(tmp_path, prompts={"orch": "hello", "critic": ""})
     assert (tmp_path / "agents" / "orch" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "hello"
-    assert (tmp_path / "agents" / "robustness" / "system_prompt.snapshot.md").read_text(
+    assert (tmp_path / "agents" / "critic" / "system_prompt.snapshot.md").read_text(
         encoding="utf-8",
     ) == "(empty)"
 

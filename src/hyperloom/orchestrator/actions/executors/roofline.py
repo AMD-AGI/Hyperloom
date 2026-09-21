@@ -108,7 +108,7 @@ async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
 
 async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> None:
     """Free GPUs held by an orphaned server before the next profile attempt."""
-    from .recover import probe_gpu_free_mb
+    from hyperloom.common.rocm_smi import gpu_vram_usage
 
     reaped = await _reap_session_orphans(session_dir)
 
@@ -129,8 +129,9 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
     )
     await asyncio.sleep(_GPU_RECLAIM_SETTLE_S)
     try:
-        free_mb = await asyncio.to_thread(probe_gpu_free_mb)
-        log.info("roofline: post-reclaim free VRAM: %s", free_mb)
+        usage = await asyncio.to_thread(gpu_vram_usage)
+        free_mb = [max(0.0, gpu.total_mib - gpu.used_mib) for gpu in usage] if usage is not None else None
+        log.info("roofline: post-reclaim free VRAM (MiB): %s", free_mb)
     except Exception:  # noqa: BLE001 — best-effort
         log.debug("roofline: post-reclaim probe failed", exc_info=True)
 
@@ -722,7 +723,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=None,
-                    failure={"phase": last_phase, "error_class": type(exc).__name__, "message": last_error},
+                    failure={"stage": last_phase, "error_class": type(exc).__name__, "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_EXCEPTION
                 # Only meaningful when capture was actually on. With the operator override set, a capture marker
@@ -756,7 +757,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=None,
-                    failure={"phase": last_phase, "error_class": "bad_return", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "bad_return", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_BAD_RETURN
                 continue
@@ -801,7 +802,7 @@ class RooflineExecutor:
                         status="failed",
                         result=profile_result,
                         failure={
-                            "phase": last_phase,
+                            "stage": last_phase,
                             "error_class": str(profile_result.get("error_class") or ""),
                             "message": last_error,
                         },
@@ -817,7 +818,7 @@ class RooflineExecutor:
                     status="failed",
                     result=profile_result,
                     failure={
-                        "phase": last_phase,
+                        "stage": last_phase,
                         "error_class": str(profile_result.get("error_class") or ""),
                         "message": last_error,
                     },
@@ -861,7 +862,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "no_trace", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "no_trace", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_NO_TRACE
                 continue
@@ -883,7 +884,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "capture_only", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "capture_only", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY
                 continue
@@ -904,7 +905,7 @@ class RooflineExecutor:
                 await _note_profile_run(
                     status="failed",
                     result=profile_result,
-                    failure={"phase": last_phase, "error_class": "zero_ops", "message": last_error},
+                    failure={"stage": last_phase, "error_class": "zero_ops", "message": last_error},
                 )
                 next_profile_reason = PROFILE_ATTEMPT_AFTER_ZERO_OPS
                 continue
@@ -1027,7 +1028,7 @@ class RooflineExecutor:
                 started_monotonic=_ta_t0,
                 trace_input=str(trace_path),
                 failure={
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": type(exc).__name__,
                     "message": f"trace_analyze_handler raised: {exc!r}",
                 },
@@ -1042,7 +1043,7 @@ class RooflineExecutor:
                 started_monotonic=_ta_t0,
                 trace_input=str(trace_path),
                 failure={
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": "bad_return",
                     "message": f"trace_analyze_handler returned non-dict: {type(ta_result).__name__}",
                 },
@@ -1062,7 +1063,7 @@ class RooflineExecutor:
                 None
                 if ta_result.get("status") == "ok"
                 else {
-                    "phase": "trace_analyze",
+                    "stage": "trace_analyze",
                     "error_class": str(ta_result.get("error_class") or ""),
                     "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
                 }
@@ -1130,7 +1131,7 @@ class RooflineExecutor:
                     trace_input=str(trace_path),
                     requested_mode=retry_mode,
                     failure={
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": type(exc).__name__,
                         "message": f"trace_analyze_handler raised on N26 auto-retry (mode={retry_mode}): {exc!r}",
                     },
@@ -1155,7 +1156,7 @@ class RooflineExecutor:
                     trace_input=str(trace_path),
                     requested_mode=retry_mode,
                     failure={
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": "bad_return",
                         "message": (
                             f"trace_analyze_handler returned non-dict on N26 "
@@ -1186,7 +1187,7 @@ class RooflineExecutor:
                     None
                     if retry_ok
                     else {
-                        "phase": "trace_analyze",
+                        "stage": "trace_analyze",
                         "error_class": str(ta_result.get("error_class") or ""),
                         "message": str(ta_result.get("error") or "trace_analyze sub-step failed"),
                     }
@@ -1287,7 +1288,7 @@ class RooflineExecutor:
                         status="failed",
                         result=None,
                         failure={
-                            "phase": "profile",
+                            "stage": "profile",
                             "error_class": type(exc).__name__,
                             "message": f"compute-bound re-profile raised: {exc!r}",
                         },
@@ -1301,7 +1302,7 @@ class RooflineExecutor:
                         None
                         if cb_trace
                         else {
-                            "phase": "profile_no_trace",
+                            "stage": "profile_no_trace",
                             "error_class": "no_trace",
                             "message": "compute-bound re-profile produced no trace path",
                         }
@@ -1331,7 +1332,7 @@ class RooflineExecutor:
                             started_monotonic=_cb_t0,
                             trace_input=str(cb_trace),
                             failure={
-                                "phase": "trace_analyze",
+                                "stage": "trace_analyze",
                                 "error_class": type(exc).__name__,
                                 "message": f"compute-bound re-analysis raised: {exc!r}",
                             },
@@ -1349,7 +1350,7 @@ class RooflineExecutor:
                             None
                             if _cb_ok
                             else {
-                                "phase": "trace_analyze",
+                                "stage": "trace_analyze",
                                 "error_class": "compute_bound_reanalyze",
                                 "message": str((cb_ta or {}).get("error") or "compute-bound re-analysis failed")
                                 if isinstance(cb_ta, dict)

@@ -21,10 +21,12 @@ __all__ = [
     "analysis_detail",
     "as_dict",
     "as_list",
+    "bool_or_none",
     "bounded_block",
     "clip",
     "failure_row",
     "float_or_none",
+    "graded_axes",
     "int_or_none",
     "now_iso_micros",
     "now_iso_seconds",
@@ -88,6 +90,16 @@ def float_or_none(value: Any) -> float | None:
         return None
 
 
+def bool_or_none(value: Any) -> bool | None:
+    """``bool(value)`` when a value was recorded, else ``None``.
+
+    A tri-state flag needs the coercion to stop at ``None`` rather than fold it
+    to ``False``: "the framework never answered" and "the answer was no" are
+    different facts, and ``bool(None)`` erases the difference.
+    """
+    return None if value is None else bool(value)
+
+
 def text_or_none(value: Any) -> str | None:
     """Distinguish "not recorded" from "recorded empty".
 
@@ -98,6 +110,23 @@ def text_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def graded_axes(source: Any) -> dict[str, Any]:
+    """The four graded axes a measurement carries, as explicit nulls where it carries none.
+
+    A synthetic run measures none of them and an AgentX round can be missing any one. Absent keys would leave a
+    reader unable to tell an unmeasured axis from one the framework failed to report, and zero reads as "measured,
+    and it was zero", so all four are always present.
+
+    Recorded beside a round's output-axis figures rather than instead of them: an AgentX session is ranked on the
+    slow-tail interactivity percentile with total throughput held as a guard, and none of that is recoverable from
+    the output axis -- on the canonical corpus the two throughputs differ by roughly two orders of magnitude.
+    """
+    from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, graded_axes_of
+
+    axes = graded_axes_of(source)
+    return {key: float_or_none(axes.get(key)) for key in GRADED_AXIS_KEYS}
 
 
 def summarize_hot_kernels(rows: Any) -> dict[str, Any]:
@@ -184,10 +213,29 @@ def worst_status(statuses: Iterable[Any]) -> str:
     return present[0] if present else "skipped"
 
 
-def failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict[str, Any]:
-    """Build the canonical failure row used on runs and on the event."""
+def failure_row(
+    *,
+    stage: str,
+    error_class: str = "",
+    message: Any = "",
+    exc: BaseException | None = None,
+) -> dict[str, Any]:
+    """Build the canonical failure row used on runs and on the event.
+
+    ``stage`` names the step it died at, not the phase it died in: every caller
+    passes a step -- a profiling substep, a baseline round, a phase entry -- and
+    the one consumer that surfaces the field reads it as a stage.
+
+    Pass ``exc`` when the caller has the exception in hand; ``error_class`` and
+    ``message`` fill in only what ``exc`` does not already provide. Every
+    recorder's ``record_fault`` and crash close goes through this one shape.
+    """
+    if exc is not None:
+        error_class = error_class or type(exc).__name__
+        if message in ("", None):
+            message = exc
     return {
-        "phase": str(phase or ""),
+        "stage": str(stage or ""),
         "error_class": str(error_class or ""),
         "message": clip(message, 2000),
     }

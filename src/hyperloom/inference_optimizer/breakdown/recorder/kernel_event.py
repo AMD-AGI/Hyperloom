@@ -1618,7 +1618,7 @@ class KernelEventRecorder:
             SECTION_EVENT,
             {
                 "failure": _failure_row(
-                    phase=stage,
+                    stage=stage,
                     error_class=error_class or f"{stage}_failed",
                     message=message,
                 )

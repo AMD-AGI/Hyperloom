@@ -107,7 +107,7 @@ def run_benchmark(
     framework = str(bench.get("framework") or "sglang").lower()
     model = str(bench.get("model") or os.environ.get("MODEL", ""))
     bench_envs = dict(bench.get("envs") or {})
-    timeout_s = _as_float(bench.get("timeout_seconds"), 3600.0)
+    timeout_s = float(bench["timeout_seconds"])
 
     # Scriptable (server-less) frameworks (e.g. xDiT diffusion): no server, no HTTP client.
     from hyperloom.inference_optimizer import framework_registry
@@ -821,10 +821,11 @@ def _terminate_server(proc: subprocess.Popen | None) -> None:
 
 def _run_subprocess(cmd: list[str], timeout_s: float, workspace: Path, tag: str) -> int:
     """Run a client/eval subprocess, appending logs; return its exit code."""
+    from ._subprocess_kill import run_with_session_kill
+
     try:
-        proc = subprocess.run(
+        proc = run_with_session_kill(
             cmd,
-            capture_output=True,
             text=True,
             timeout=timeout_s,
             env=build_benchmark_env(),

@@ -32,7 +32,6 @@ VALID_COMPONENTS: frozenset[str] = frozenset(
         "dynamic_action",
         "specialist",
         "critic",
-        "robustness",
         "proposal_scorer",
         "geak",
         "forge",

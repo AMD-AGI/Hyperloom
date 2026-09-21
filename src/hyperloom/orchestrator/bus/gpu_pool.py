@@ -139,10 +139,6 @@ class SpecialistGpuPool:
         ).isoformat(timespec="microseconds")
 
         async with self.db.transaction() as cur:
-            cur.execute(
-                "DELETE FROM gpu_leases WHERE expires_at <= ?",
-                (now_iso,),
-            )
             # Same-holder/task acquire is idempotent when the existing lease already satisfies the request: same count
             # and every id still in this pool.
             cur.execute(
@@ -219,10 +215,6 @@ class SpecialistGpuPool:
 
         async with self.db.transaction() as cur:
             cur.execute(
-                "DELETE FROM gpu_leases WHERE expires_at <= ?",
-                (now_iso,),
-            )
-            cur.execute(
                 "SELECT gpu_id FROM gpu_leases WHERE gpu_id >= ?",
                 (_RAY_OBS_ID_BASE,),
             )
@@ -272,16 +264,6 @@ class SpecialistGpuPool:
             cur.execute(
                 "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
                 (expires_iso, now_iso, task_id),
-            )
-            return int(cur.rowcount or 0)
-
-    async def reap_expired(self) -> int:
-        """Actively delete TTL-expired GPU leases; returns rows reaped."""
-        now_iso = _now_iso()
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "DELETE FROM gpu_leases WHERE expires_at <= ?",
-                (now_iso,),
             )
             return int(cur.rowcount or 0)
 

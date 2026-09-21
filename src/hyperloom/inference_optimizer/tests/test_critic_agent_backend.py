@@ -1346,7 +1346,6 @@ from hyperloom.inference_optimizer.cli.credentials import _resolve_agent_root
 from hyperloom.orchestrator.roles import (
     CriticAgentBackend,
     MockBackend,
-    MockRobustnessBackend,
     MockTurn,
     ScriptedPlan,
 )
@@ -1474,7 +1473,6 @@ async def test_critic_agent_real_runtime_clears_proposal(
             name="orchestration",
         ),
         "critic": critic_backend,
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
 
@@ -1558,7 +1556,6 @@ async def test_critic_agent_heartbeat_when_no_proposal(
             name="orchestration",
         ),
         "critic": critic_backend,
-        "robustness": MockRobustnessBackend(),
     }
     c = Coordinator(session_dir, backends=backends)
     try:

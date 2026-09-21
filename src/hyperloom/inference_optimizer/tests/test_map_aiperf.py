@@ -46,6 +46,74 @@ def _sample():
     }
 
 
+@pytest.fixture(params=[False, True], ids=["package", "standalone-fallback"])
+def error_rate_mapper(request, monkeypatch):
+    if not request.param:
+        return map_aiperf
+    asset = Path(__file__).parents[1] / "assets" / "agentx" / "map_aiperf.py"
+    monkeypatch.setitem(sys.modules, "hyperloom.inference_optimizer.agentx.mapping", None)
+    spec = importlib.util.spec_from_file_location("_error_rate_asset", asset)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.map_aiperf.__module__ == "_error_rate_asset"
+    return module.map_aiperf
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("success", [441, 1289, 1293])
+def test_zero_errors_from_profiling_summary(error_rate_mapper, nested, success):
+    metrics = {"request_count": {"avg": success}}
+    export = {"metrics": metrics} if nested else metrics.copy()
+    export["error_summary"] = []
+    export["request_accounting"] = {"records_error_dropped": 3}
+    assert error_rate_mapper(export)["request_error_rate"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "fields,summary,expected",
+    [
+        ({"request_count": 98, "error_request_count": 2}, None, 2.0),
+        ({"request_count": 75, "error_request_count": 25, "completed_request_count": 100}, None, 25.0),
+        ({"request_count": 0, "error_request_count": 3}, None, 100.0),
+        ({"error_request_count": 2, "completed_request_count": 100}, None, 2.0),
+        ({"request_count": 10}, None, None),
+        ({"request_count": 10}, [{"count": 3}], None),
+        ({"request_count": 0}, [], None),
+        ({}, [], None),
+        ({"request_count": 1e308, "error_request_count": 1e308}, None, None),
+        ({"request_count": 10, "error_request_count": -1}, [], None),
+        ({"request_count": 10, "error_request_count": True}, [], None),
+        ({"request_count": 10, "error_request_count": "0"}, [], None),
+        ({"request_count": 10, "error_request_count": float("nan")}, [], None),
+        ({"request_count": 10, "error_request_count": float("inf")}, [], None),
+        ({"request_count": 10, "error_request_count": None}, [], 0.0),
+        ({"request_count": {"avg": 10}, "error_request_count": {"avg": None}}, [], 0.0),
+        ({"request_count": 10, "error_request_count": 0, "completed_request_count": 9}, [], None),
+        ({"request_count": 10, "error_request_count": 0, "completed_request_count": 0}, [], None),
+        ({"request_count": 10, "error_request_count": 0, "completed_request_count": True}, [], None),
+        ({"request_count": 10, "error_request_count": 0, "completed_request_count": float("inf")}, [], None),
+        ({"request_count": 10, "request_error_rate": {"avg": 25}}, [], 25.0),
+        ({"request_count": 0, "request_error_rate": 0}, None, 0.0),
+        ({"request_count": 10, "request_error_rate": None}, [], 0.0),
+    ],
+)
+def test_error_rate_from_counts(error_rate_mapper, fields, summary, expected):
+    export = {**fields, "error_summary": summary}
+    assert error_rate_mapper(export)["request_error_rate"] == expected
+
+
+@pytest.mark.parametrize("invalid", [True, -1, "10", float("nan"), float("inf")])
+def test_invalid_success_count_is_unknown(error_rate_mapper, invalid):
+    result = error_rate_mapper({"request_count": invalid, "error_summary": []})
+    assert result["request_error_rate"] is None
+
+
+@pytest.mark.parametrize("invalid", [True, -1, 101, "0", float("nan"), float("inf")])
+def test_invalid_explicit_rate_is_unknown(error_rate_mapper, invalid):
+    result = error_rate_mapper({"request_count": 10, "error_summary": [], "request_error_rate": invalid})
+    assert result["request_error_rate"] is None
+
+
 def test_stat_reads_sub_key_and_default():
     m = {"x": {"avg": 1.0, "p99": 9.0}}
     assert stat(m, "x") == 1.0

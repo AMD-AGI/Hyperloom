@@ -102,6 +102,29 @@ def test_git_commit_all_and_discard(tmp_path):
     assert (repo / "kernel.py").read_text() == "changed\n"
 
 
+def test_git_commit_all_forces_the_approved_pathspec(monkeypatch):
+    calls = []
+
+    def fake_git(*args, **_kwargs):
+        calls.append(args)
+        if args[:3] == ("diff", "--cached", "--name-only"):
+            return subprocess.CompletedProcess(args, 0, "kernel.py\n", "")
+        if args[:2] == ("diff", "--name-only"):
+            return subprocess.CompletedProcess(args, 0, "kernel.py\n", "")
+        if args[0] == "status":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[0] == "commit":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    heads = iter(("a" * 40, "b" * 40))
+    monkeypatch.setattr(integ, "git", fake_git)
+    monkeypatch.setattr(integ, "git_head", lambda _workspace: next(heads))
+
+    assert integ._git_commit_all("/repo", "msg", allowed_paths={"kernel.py"}) == "b" * 40
+    assert ("add", "-A", "-f", "--", "kernel.py") in calls
+
+
 def test_git_discard_removes_symlink_without_touching_target(tmp_path):
     repo = _init_repo(tmp_path)
     kernel = repo / "kernel.py"

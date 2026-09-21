@@ -9,8 +9,7 @@ myst:
 This is the single authoritative reference for credentials and
 environment configuration in Hyperloom. If any other document
 (`README.md`, `src/hyperloom/inference_optimizer/SKILL.md`,
-`docs/reference/kernel-execution-path.md`,
-`src/hyperloom/agents/robustness/SKILL.md`) appears to contradict this
+`docs/reference/kernel-execution-path.md`) appears to contradict this
 page, this page wins. Open an issue against the contradicting file.
 
 ```{note}
@@ -107,8 +106,6 @@ Downstream tooling reads the side it belongs to:
   (`LLM_API_KEY` / `AMD_LLM_API_KEY`).
 * Orchestration Claude uses the Anthropic-side base URL + key, including the
   generated `~/.claude/config.json` primary key.
-* Robustness-agent uses whichever side it discovers for the optional LLM RCA
-  engine, preferring the OpenAI side and falling back to the Anthropic one.
 * Critic-agent uses the OpenAI side for KB summary / synthesis calls.
 
 You *never* need to copy a key into the internal LLM slots in `.env`;
@@ -239,22 +236,6 @@ exception: setup scrubs the whole OpenAI side there, header included, because th
 side is a second provider rather than part of the same gateway credential.
 
 ---
-
-## Optional credentials
-
-The following credentials are optional and only needed for specific backends.
-
-### LLM RCA in robustness-agent
-
-`robustness-agent`'s LLM root-cause-analysis engine activates when the
-discovered provider can actually authenticate a call. For the OpenAI side, that
-is a base URL and API key (normally through the aliases above). For the
-Anthropic side, it's a usable transport, so a `CLAUDE_CODE_OAUTH_TOKEN` host
-qualifies with neither a base URL nor a key — the Claude CLI spends the token
-itself — provided that CLI is installed.
-
-Set `ROBUSTNESS_LLM_RCA_DISABLED=1` to force-disable it even when
-credentials are present.
 
 ## Path environment
 

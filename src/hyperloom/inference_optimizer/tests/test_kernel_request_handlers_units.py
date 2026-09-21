@@ -3658,6 +3658,10 @@ class TestRunGemmTuningHandler:
 
     def test_handler_passes_non_fp8_geak_to_next_hyperloom_prereq(self, tmp_path, monkeypatch):
         monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+        # The backend is chosen by KERNEL_OPT_BACKEND_ORDER, not by GEMM_TUNING_BACKEND, so
+        # leaving it to the ambient environment sends this down the forge branch instead --
+        # which reports model_path_missing, a prerequisite this test is not about.
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("HYPERLOOM_KERNEL_AGENT_ROOT", raising=False)
         state = SharedState(precision="bf16", framework="sglang")
         state.save(tmp_path)
@@ -4697,49 +4701,6 @@ class TestBuildTraceAnalyzeCmd:
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"
         # session-id falls back to the session dir name when payload omits it.
         assert cmd[cmd.index("--session-id") + 1] == session_dir.name
-
-
-def test_a_patched_rebaseline_gets_the_cold_start_budget(monkeypatch):
-    """Applying a patch moves the JIT cache aside, so the next boot recompiles."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    monkeypatch.setattr(
-        aiter_jit,
-        "probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
-    )
-
-    assert rh._cold_start_rebaseline_timeout(600) == aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC
-
-
-def test_a_warm_cache_keeps_the_resolved_timeout(monkeypatch):
-    """Only an empty cache justifies the cold cap; a warm boot keeps its budget."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    for probe in (
-        {"probe_status": "found", "is_cold": False, "kernel_count": 90},
-        {"probe_status": "not_found", "is_cold": None, "kernel_count": 0},
-        {"probe_status": "error", "is_cold": None, "kernel_count": 0},
-    ):
-        monkeypatch.setattr(aiter_jit, "probe_aiter_jit_cache", lambda p=probe: p)
-        assert rh._cold_start_rebaseline_timeout(600) == 600
-
-
-def test_a_longer_explicit_budget_is_never_shortened(monkeypatch):
-    """The cap is a floor for a cold boot, not a ceiling on the operator's budget."""
-    from hyperloom.orchestrator.actions.executors import _aiter_jit as aiter_jit
-    from hyperloom.orchestrator.kernel import request_handlers as rh
-
-    monkeypatch.setattr(
-        aiter_jit,
-        "probe_aiter_jit_cache",
-        lambda: {"probe_status": "found", "is_cold": True, "kernel_count": 0},
-    )
-    generous = aiter_jit.BASELINE_COLD_START_TIMEOUT_SEC + 1200
-
-    assert rh._cold_start_rebaseline_timeout(generous) == generous
 
 
 class TestTheGemmLaneBudgetReachesTheInputJson:

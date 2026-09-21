@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Per-role backend construction + robustness option wiring for the CLI."""
+"""Per-role backend construction for the CLI."""
 
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from .. import framework_registry
 from hyperloom.common import llm_config
 from hyperloom.common.llm_config import has_anthropic_credential
 from hyperloom.inference_optimizer.session.session_paths import agent_dir
@@ -19,14 +18,9 @@ from hyperloom.orchestrator.roles import (
     CodexBackend,
     CriticAgentBackend,
     MockCriticBackend,
-    MockRobustnessBackend,
-    RobustnessAgentBackend,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
-
-if TYPE_CHECKING:
-    from hyperloom.orchestrator.state.shared_state import SharedState
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
@@ -83,9 +77,6 @@ def _build_backends(
     session_dir: Path,
     critic_agent_root: Path | None = None,
     critic_kb_mode: str = "inmemory",
-    robustness_choice: str = "mock",
-    robustness_agent_root: Path | None = None,
-    robustness_options: dict[str, Any] | None = None,
     codex_follows_claude: bool = False,
     critic_protocol: str = "auto",
 ) -> dict[str, Any]:
@@ -137,19 +128,6 @@ def _build_backends(
                 action_verdict_policy=_policy,
             )
 
-    if robustness_choice not in ("mock", "agent"):
-        raise ValueError(f"_build_backends: robustness_choice={robustness_choice!r} not in {{'mock','agent'}}")
-    if robustness_choice == "mock":
-        robustness_backend: Any = MockRobustnessBackend()
-    else:  # "agent"
-        if robustness_agent_root is None:
-            raise ValueError("_build_backends: robustness_choice='agent' requires robustness_agent_root")
-        robustness_backend = RobustnessAgentBackend(
-            robustness_agent_root=robustness_agent_root,
-            session_dir=session_dir,
-            options=robustness_options,
-        )
-
     if orchestration_on_codex:
         orchestration_backend: Any = CodexBackend(
             allowed_intents=default_role_registry()["orchestration"].allowed_intents,
@@ -171,7 +149,6 @@ def _build_backends(
     return {
         "orchestration": orchestration_backend,
         "critic": critic_backend,
-        "robustness": robustness_backend,
     }
 
 
@@ -193,43 +170,3 @@ def _build_proposal_scorer(
     if not models:
         return None
     return ProposalScorer(models=models, session_dir=session_dir)
-
-
-def _build_robustness_options(args: argparse.Namespace) -> dict[str, Any]:
-    """Collect non-default ``request.options`` overrides from CLI flags."""
-    options: dict[str, Any] = {}
-    llm_rca = getattr(args, "robustness_llm_rca", None)
-    if llm_rca is not None:
-        options["llm_rca_enabled"] = bool(llm_rca)
-
-    nodes = int(getattr(args, "nodes", 1) or 1)
-    multi_node = nodes >= 2
-    if nodes > 1:
-        options["nodes"] = nodes
-
-    disable_local = getattr(args, "robustness_disable_local_probe", None)
-    if disable_local is None and multi_node:
-        disable_local = True
-    if disable_local is not None:
-        options["disable_local_probe"] = bool(disable_local)
-
-    # ``auto_probe_inference_server`` controls the 127.0.0.1:8888 /health probe in LocalProbe.
-    fw = (getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")).strip()
-    scriptable_fw = framework_registry.is_scriptable(fw) if fw else False
-    disable_server_probe = getattr(args, "robustness_disable_server_probe", None)
-    if disable_server_probe is None and (multi_node or scriptable_fw):
-        disable_server_probe = True
-    if disable_server_probe is not None:
-        options["auto_probe_inference_server"] = not bool(disable_server_probe)
-
-    if multi_node:
-        # Lift the no_levers_found elapsed-time floor to 60 min for multi-node (single-node default 45.0 stays
-        # untouched).
-        options["progress_no_levers_min_minutes"] = 60.0
-
-    return options
-
-
-def resolve_robustness_options(args: argparse.Namespace, state: SharedState) -> dict[str, Any]:
-    """Layer this launch's robustness flags over the mapping persisted at launch."""
-    return {**state.robustness_options, **_build_robustness_options(args)}

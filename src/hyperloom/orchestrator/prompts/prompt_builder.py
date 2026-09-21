@@ -248,8 +248,8 @@ def _section_phase_semantics(
             "in that set — see the exception below for when it applies.",
             "`skip_to_close` is reserved, in EVERY phase, for genuine early",
             "abandonment (e.g. infra is dead and the sweep cannot run at all):",
-            "it stamps `robustness_escalated`, so emitting it on a normal finish",
-            "mislabels the run. Running low on budget is not abandonment — the",
+            "it closes the run instead of advancing a phase. Running low on",
+            "budget is not abandonment — the",
             "Coordinator prices the remaining budget itself and exits with an",
             "honest terminal stop_reason (`sweep_done` / `global_converged` /",
             "`time_exhausted`) once a further cycle cannot be funded.",
@@ -647,8 +647,8 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   phase advance -- see PHASE CONTRACT before emitting it.",
             "",
             "If you cannot move forward, emit",
-            "`send_message{topic='observation', body_md='blocked: <reason>'}` and let",
-            "Robustness escalate. NEVER stay silent.",
+            "`send_message{topic='observation', body_md='blocked: <reason>'}`.",
+            "NEVER stay silent.",
         ]
     )
     lines.extend(_failure_recovery_lines(phase=phase, transport=transport))
@@ -707,8 +707,8 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
     lines.extend(
         [
             "* **RULE F3** — repeated `error_class='subprocess_nonzero'` on `baseline`"
-            " → stop retrying baseline; send observation 'blocked: …' and let Robustness"
-            " intervene. Explore variants may be re-proposed; read the failure log first.",
+            " → stop retrying baseline; send observation 'blocked: …'."
+            " Explore variants may be re-proposed; read the failure log first.",
             "* **RULE F4** — `policy_denial_streak` is information only."
             " Change something substantive; re-emitting the identical intent wastes a tick.",
         ]
@@ -754,7 +754,7 @@ def _idea_generation_lines() -> list[str]:
         "(hard maximum 6) once the queue is drained of anything worth running.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
-        "with body_md='idea-pipeline-empty' so Robustness can intervene.",
+        "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",
     ]
 
 
