@@ -503,16 +503,22 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
     assert "NUM_PROMPTS" in bench["envs"]
 
 
-def test_profile_atom_defers(monkeypatch, tmp_path):
+def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("CONC", "16")
+    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
     )
     bench = _materialize(src, tmp_path / "out")
-    # atom defers NUM_PROMPTS to Magpie, taking the factor path.
-    assert "NUM_PROMPTS" in bench["envs"]
+    assert bench["envs"]["NUM_PROMPTS"] == 16
+    extra = str(bench["envs"].get("EXTRA_ATOM_ARGS", ""))
+    assert "--mark-trace" not in extra
+    assert "--profiler-config" not in extra
+    assert "ATOM_ENABLE_DETAILED_ANNOTATION" not in bench["envs"]
+    assert "ATOM_PROFILER_MORE" not in bench["envs"]
 
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):

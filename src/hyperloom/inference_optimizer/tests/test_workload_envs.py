@@ -443,16 +443,69 @@ def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
     assert "--profiler-config.delay_iterations 64" in args
 
 
-def test_profile_atom_defers(monkeypatch, tmp_path):
+def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("CONC", "16")
+    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
     )
     bench = _materialize(src, tmp_path / "out")
-    # atom defers NUM_PROMPTS to Magpie, taking the factor path.
-    assert "NUM_PROMPTS" in bench["envs"]
+    assert bench["envs"]["NUM_PROMPTS"] == 16
+    extra = str(bench["envs"].get("EXTRA_ATOM_ARGS", ""))
+    assert "--mark-trace" not in extra
+    assert "--profiler-config" not in extra
+    assert "ATOM_ENABLE_DETAILED_ANNOTATION" not in bench["envs"]
+    assert "ATOM_PROFILER_MORE" not in bench["envs"]
+
+
+def test_profile_atom_injects_tracelens_knobs_when_probe_hits(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("CONC", "8")
+    monkeypatch.setattr(
+        we,
+        "_atom_tracelens_caps",
+        lambda: we._AtomTracelensCaps(True, True, True),
+    )
+    src = tmp_path / "cfg.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "atom",
+                    "model": "/m",
+                    "envs": {"PROFILE": "1", "EXTRA_ATOM_ARGS": "--trust-remote-code"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    bench = _materialize(src, tmp_path / "out")
+    extra = str(bench["envs"].get("EXTRA_ATOM_ARGS", ""))
+    assert bench["envs"]["NUM_PROMPTS"] == 8
+    assert "--trust-remote-code" in extra
+    assert "--mark-trace" in extra
+    assert "--profiler-config" not in extra
+    assert bench["envs"]["ATOM_ENABLE_DETAILED_ANNOTATION"] == "1"
+    assert bench["envs"]["ATOM_PROFILER_MORE"] == "1"
+
+
+def test_atom_tracelens_caps_parses_and_fail_soft(monkeypatch):
+    we._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(we, "_resolve_probe_python", lambda fw: "python3")
+    monkeypatch.setattr(
+        we.subprocess,
+        "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout="1\n1\n0\n"),
+    )
+    assert we._atom_tracelens_caps() == we._AtomTracelensCaps(True, True, False)
+    we._atom_tracelens_caps.cache_clear()
+    monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("gone")))
+    assert we._atom_tracelens_caps() == we._ATOM_CAPS_NONE
+    we._atom_tracelens_caps.cache_clear()
 
 
 def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
