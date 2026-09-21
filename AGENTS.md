@@ -74,9 +74,10 @@ doc is the authority on where that boundary lives.
   local run belongs at the end, before you open a PR; see the style guide's local
   development checklist.
 - **Test the contract, not the plumbing.** What you export — a CLI flag, a public
-  function, a persisted schema, an artifact layout — is pinned by unit tests that state
-  the contract and its failure modes, because someone outside this repo depends on it
-  holding. Internal functions that only thread a business flow together do not each need
+  function, a persisted schema, an artifact layout — is pinned by tests that state the
+  contract and its failure modes, because someone outside this repo depends on it
+  holding; a unit test or a CLI/filesystem one, whichever pins it more directly.
+  Internal functions that only thread a business flow together do not each need
   one: per-function coverage there buys tests that assert the current implementation and
   break on the next refactor. Prefer covering those flows through their entry point, and
   unit-test an internal helper when it carries real logic of its own. When you replace a

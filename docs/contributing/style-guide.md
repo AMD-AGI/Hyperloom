@@ -65,6 +65,8 @@ Nothing enforces these today: Ruff selects `E`/`F`/`W` only (no `C901`), and CI'
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
 
+**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. The triggers cover the Python whose style we own — `src/hyperloom` and `src/kernelforge`, minus Ruff's `extend-exclude` in `pyproject.toml`, which already names the vendored SDK copies and the shipped `src/kernelforge/data` examples. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though the command below still reports them. They are not exempt from the duplication and boundary rules.
+
 Measure rather than argue:
 
 ```bash
