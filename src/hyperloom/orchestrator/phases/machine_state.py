@@ -1618,8 +1618,8 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     """Count trailing attempts that did not adopt.
 
-    Only measured attempts reach the ledger, so a specialist that never ran
-    leaves nothing here to plateau on.
+    Only resolved attempts reach the ledger — a specialist that never ran and a
+    candidate its lane will retry leave nothing here to plateau on.
     """
     streak = 0
     for row in reversed(attempts):

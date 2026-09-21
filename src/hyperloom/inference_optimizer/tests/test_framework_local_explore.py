@@ -518,3 +518,30 @@ def test_the_arms_deliverable_decides_its_lever():
 
     assert _lever(patches_applied=["001_fix.patch"]) == LEVER_SOURCE_PATCH
     assert _lever() == LEVER_CONFIG
+
+
+def test_unresolved_patch_outcomes_stay_out_of_the_ledger():
+    """A retried or pre-bench-dropped candidate is not evidence the patch lever is dry."""
+    from hyperloom.orchestrator.state.attempt_ledger import record_patch_attempt
+
+    def _rows(outcome: str, **evidence: Any) -> int:
+        state = SharedState()
+        record_patch_attempt(
+            state,
+            task_id="t-1",
+            specialist_task_id="spec-1",
+            outcome=outcome,
+            gain_pct=None,
+            before_tput=None,
+            after_tput=None,
+            error_class="",
+            evidence={"framework_agent_candidate_id": "https://pr/1", **evidence},
+        )
+        return len(state.attempts)
+
+    # The lane re-dispatches this candidate, and stamps its own terminal row at the cap.
+    assert _rows("apply_failed", lane="perf_framework") == 0
+    assert _rows("skipped") == 0
+    # An apply failure nobody will retry is resolved, and so is a bench verdict.
+    assert _rows("apply_failed") == 1
+    assert _rows("reverted") == 1

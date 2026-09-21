@@ -2813,12 +2813,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
-        # A deliverable carrying both a patch and config levers is one proposal:
-        # the specialist asserted they belong together, so they bench together.
-        config_levers = _framework_config_levers_from_done(done_payload)
-        if config_levers:
-            integrate_params["extra_server_args"] = str(config_levers.get("extra_server_args") or "")
-            integrate_params["extra_envs"] = dict(config_levers.get("extra_envs") or {})
         # FRAMEWORK authoring provenance passthrough: propagate the PR
         # candidate/batch id onto the synthetic integrate_patch task so the
         # authored-outcome bridge keys the progress row on the real candidate id.
