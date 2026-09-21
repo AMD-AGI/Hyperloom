@@ -83,7 +83,6 @@ from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from ._canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
-    DEFAULT_VARIANT_TIMEOUT_SEC,
     GridVariant,
     SessionDirField,
     VariantResult,
@@ -1708,7 +1707,6 @@ class IntegratePatchExecutor:
         *,
         session_dir: Path | str | None = None,
         default_config_path: Path | str | None = None,
-        variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
     ):
         """Initialize the integrate-patch executor.
@@ -1718,14 +1716,11 @@ class IntegratePatchExecutor:
                 auto-resolved when ``None``.
             default_config_path (Path | str | None): Fallback benchmark
                 config path, if any.
-            variant_timeout_sec (int): Per-variant benchmark hard timeout.
-                Defaults to :data:`DEFAULT_VARIANT_TIMEOUT_SEC`.
             keep_threshold_pct (float): Minimum gain to KEEP a patch.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
         """
         self.session_dir = session_dir
         self.default_config_path = Path(default_config_path) if default_config_path else None
-        self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
         self._apply_attempted: bool = False
         # Re-derived per round by _stage_apply so the revert reads this round's
@@ -4493,9 +4488,6 @@ class IntegratePatchExecutor:
                 grid=[variant],
                 output_root=output_root,
                 magpie_python=params.get("magpie_python") or None,
-                variant_timeout_sec=int(
-                    params.get("variant_timeout_sec", self.variant_timeout_sec),
-                ),
                 keep_going_on_failure=False,
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
@@ -4732,7 +4724,6 @@ class IntegratePatchExecutor:
 
 __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
-    "DEFAULT_VARIANT_TIMEOUT_SEC",
     "IntegratePatchExecutor",
     "_detect_p_level",
     "_git_apply",

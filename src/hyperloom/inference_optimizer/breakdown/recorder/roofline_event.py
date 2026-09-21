@@ -344,6 +344,70 @@ def _summarize_trace_health(profile_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summarize_trace_quality(validate: dict[str, Any]) -> dict[str, Any]:
+    """Project selfcert's measurements into scalars the event can hold.
+
+    The certificate's own tables are per-rank, per-candidate and per-chunk, so their size follows the topology and
+    they stay in the file ``certificate_path`` points at. What lands here is the fixed set of numbers a reader
+    needs to judge trace quality without opening that file, taken from the rank the probe actually analysed. Every
+    ratio is accompanied by the terms it was computed from and by the scope it was computed over, because a
+    coverage figure drawn from a truncated aggregation is a different measurement than one drawn from the whole
+    trace.
+    """
+    ranks = [row for row in _as_list(validate.get("rank_level")) if isinstance(row, dict)]
+    rank = ranks[0] if ranks else {}
+    parse = _as_dict(rank.get("parse"))
+    attribution = _as_dict(rank.get("attribution"))
+    density = _as_dict(rank.get("density"))
+    time_structure = _as_dict(rank.get("time_structure"))
+    inventory = _as_dict(validate.get("trace_dir_level"))
+    capture = _as_dict(inventory.get("capture_sidecar_probe"))
+    measures = _as_dict(_as_dict(validate.get("verdict")).get("measures"))
+    return {
+        "rank_count_certified": len(ranks),
+        "analyzed_rank": rank.get("rank"),
+        # Parse scope: what the numbers below were computed over.
+        "event_total": parse.get("event_total"),
+        "aggregation_scope": parse.get("aggregation_scope"),
+        "truncated": parse.get("truncated"),
+        "truncation_reason": parse.get("truncation_reason"),
+        # Attribution, with the terms of every ratio.
+        "attributed_pct": attribution.get("attributed_pct"),
+        "attributed_gpu_ms": attribution.get("attributed_gpu_ms"),
+        "gpu_kernel_sum_ms": attribution.get("gpu_kernel_sum_ms"),
+        "attributed_kernels": attribution.get("attributed_kernels"),
+        "unlinked_kernels": attribution.get("unlinked_kernels"),
+        "graph_attributed_kernels": attribution.get("graph_attributed_kernels"),
+        "cuda_runtime_links": attribution.get("cuda_runtime_links"),
+        "op_meta_coverage": attribution.get("op_meta_coverage"),
+        "op_meta_basis": _as_dict(attribution.get("op_meta_basis")),
+        # Graph capture density, with the threshold its boolean was compared against.
+        "kernel_count": density.get("kernel_count"),
+        "graph_mode": density.get("graph_mode"),
+        "graph_launch_count": density.get("graph_launch_count"),
+        "graph_launch_coverage": density.get("graph_launch_coverage"),
+        "graph_under_recorded": density.get("graph_under_recorded"),
+        "graph_under_recorded_threshold": density.get("graph_under_recorded_threshold"),
+        "busy_fraction": density.get("busy_fraction"),
+        "kernel_per_launch": density.get("kernel_per_launch"),
+        "idle_pct_full_trace": time_structure.get("idle_pct_full_trace"),
+        # Capture sidecars: counts and one coverage, never the per-file table.
+        "capture_sidecar_files_present": capture.get("files_present"),
+        "capture_sidecar_files_scanned": capture.get("files_scanned"),
+        "capture_sidecar_truncated_scan": capture.get("truncated_scan"),
+        "capture_op_meta_coverage": capture.get("op_meta_coverage"),
+        "capture_cpu_op_total": capture.get("cpu_op_total"),
+        "capture_kernel_count": capture.get("kernel_count"),
+        # Which file the live resolver would open, which decides whether any of the above describes production.
+        "selected_role": inventory.get("selected_role"),
+        "production_selected_role": inventory.get("production_selected_role"),
+        "production_would_analyze_split_chunk": inventory.get("production_would_analyze_split_chunk"),
+        "file_count_by_role": _as_dict(inventory.get("file_count_by_role")),
+        "chunk_count_certified": len(_as_list(validate.get("chunk_level"))),
+        "verdict_measures": measures,
+    }
+
+
 def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     """Project the structured profile-trace validation into the run row.
 
@@ -366,11 +430,18 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
         "silently_wrong": verdict.get("silently_wrong"),
         "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
         "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
+        "severity": verdict.get("severity"),
         "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
+        "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
         "modes_that_would_fail": verdict.get("modes_that_would_fail"),
         "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
         "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
         "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
+        "trace_quality": _summarize_trace_quality(validate),
+        # Where the unbounded per-rank / per-candidate / per-chunk tables live.
+        "certificate_path": str(profile_result.get("trace_validate_path") or ""),
+        "schema_version": validate.get("schema_version"),
+        "probe_version": validate.get("probe_version"),
         "probe_status": str(validate.get("probe_status") or ""),
         "probe_error": _clip(validate.get("probe_error") or ""),
         "checked_at": str(validate.get("checked_at") or ""),
@@ -461,6 +532,16 @@ class RooflineEventRecorder:
             ext={"in_flight_substep": self._substep},
         )
 
+    def record_preflight(self, payload: Mapping[str, Any]) -> None:
+        """Record the conditions the action found before it profiled anything.
+
+        These were previously log lines or nothing at all. They are facts about the starting state -- leftover
+        servers, free disk, trace files already sitting in this task's own output directory -- and they change
+        how a later reader should read the result, so the event has to carry them whether or not the run
+        succeeded.
+        """
+        self._record_action({"preflight": dict(payload)})
+
     def record_profile_run(
         self,
         *,
@@ -472,8 +553,19 @@ class RooflineEventRecorder:
         disable_cuda_graph: bool,
         profile_result: dict[str, Any] | None = None,
         failure: dict[str, Any] | None = None,
+        server_liveness: Mapping[str, Any] | None = None,
+        instrumentation: Mapping[str, Any] | None = None,
     ) -> None:
-        """Record one profile attempt."""
+        """Record one profile attempt.
+
+        ``server_liveness`` is the post-attempt process-level probe. A run whose trace exported completely and
+        whose engine then died is indistinguishable from a clean run by the result dict alone, so the row carries
+        the process outcome next to the wall clock rather than leaving it to be inferred.
+
+        ``instrumentation`` is which patchers ran on this attempt and what they returned. It is stored on the run
+        row rather than folded into ``validate`` because ``validate`` only exists once a trace was produced and
+        certified, and the attempts that never got that far are exactly the ones whose patch state is in question.
+        """
         result = _as_dict(profile_result)
         self._sink.record(
             SECTION_PROFILE_RUN,
@@ -488,13 +580,18 @@ class RooflineEventRecorder:
                 "duration_sec": duration_sec,
                 "disable_cuda_graph": bool(disable_cuda_graph),
                 "failure": failure,
+                "server_liveness": dict(server_liveness) if server_liveness else None,
+                "instrumentation": dict(instrumentation) if instrumentation else None,
                 "validate": _summarize_validate(result),
             },
             row_type=ROW_PROFILE_RUN,
             natural_ids=(self._action_id, str(int(run_index))),
         )
+        # An action-level rollup of the per-run flag. Roofline no longer falls back to eager on a capture failure,
+        # so this only latches when the arm or the operator override asked for graph capture to be off -- which
+        # still matters downstream, because kernel shapes differ between eager and captured execution.
         if disable_cuda_graph:
-            self._record_action({"eager_fallback_applied": True})
+            self._record_action({"graph_capture_disabled": True})
 
     def adopt_profile_run(
         self,
@@ -672,7 +769,7 @@ class RooflineEventRecorder:
             payload={
                 "failed_substep": SUBSTEP_ANALYSIS if analysis else SUBSTEP_PROFILE,
                 "failure": _failure_row(
-                    phase=phase,
+                    stage=phase,
                     error_class=error_class or f"{phase}_failed",
                     message=message,
                 ),
@@ -781,12 +878,13 @@ def assemble_roofline_actions(
                 "in_flight_substep": row.get("in_flight_substep"),
                 "failed_substep": row.get("failed_substep"),
                 "request": _as_dict(row.get("request")),
+                "preflight": _as_dict(row.get("preflight")),
                 "profile": {
                     "attempt_count": len(profile_runs),
                     "max_attempts": _int_or_none(row.get("max_profile_attempts")) or 0,
                     "effective_run_index": profile_index,
                     "recovered": bool(row.get("recovered")),
-                    "eager_fallback_applied": bool(row.get("eager_fallback_applied")),
+                    "graph_capture_disabled": bool(row.get("graph_capture_disabled")),
                     "runs": profile_runs,
                     "effective_run": _as_dict(row.get("profile_effective_run")),
                 },

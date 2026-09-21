@@ -27,6 +27,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -54,8 +55,6 @@ from ._aiter_jit import (
     BASELINE_COLD_START_TIMEOUT_SEC,
     COLD_START_KERNEL_THRESHOLD,
     is_aiter_jit_registry_mismatch,
-    probe_aiter_jit_cache as _probe_aiter_jit_cache,
-    sweep_stale_aiter_locks_if_dead,
 )
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
@@ -67,9 +66,9 @@ from ._grid_runner import (
     _kill_stale_servers,
     sanitize_result_dir,
     sanitize_script_name,
-    session_clamped_timeout_sec,
     session_grid_bounds,
     stopped_by_the_run,
+    sync_benchmark_timeout,
 )
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -77,6 +76,7 @@ from ._subprocess_kill import (
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
     post_ready_runtime_sec,
+    resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
@@ -86,19 +86,15 @@ from ._accuracy_gate import (
     materialized_run_eval_disabled,
 )
 from ._agentx_timeouts import (
-    AGENTX_BASELINE_OVERHEAD_SEC as AGENTX_BASELINE_OVERHEAD_SEC,
-    AGENTX_DEFAULT_DURATION_SEC as AGENTX_DEFAULT_DURATION_SEC,
     AGENTX_CANON_WARMUP_GRACE_SEC as AGENTX_CANON_WARMUP_GRACE_SEC,
     AGENTX_CANON_WARMUP_CONC as AGENTX_CANON_WARMUP_CONC,
     agentx_warmup_grace_conc as agentx_warmup_grace_conc,
     agentx_warmup_grace_sec as agentx_warmup_grace_sec,
-    agentx_baseline_timeout_sec as agentx_baseline_timeout_sec,
 )
 from ._workload_envs import (
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
     agentx_active,
-    agentx_enabled,
     default_baseline_config,
     materialize_config_with_envs,
     prepare_agentx_runtime,
@@ -447,30 +443,47 @@ def _claim_attempt_index(attempts: Path) -> int:
     return index
 
 
-def _is_cuda_graph_capture_failure(*texts: str) -> bool:
-    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+#: Capture-failure categories. ``instrumentation`` is the profiler's own shape discovery colliding with capture --
+#: the same server args capture cleanly with no profiler attached, so the fix belongs to the instrumentation.
+#: ``config`` is the server args themselves failing to capture. Roofline reports the category instead of acting on
+#: it; only baseline still uses the boolean, to decide its one-shot retry.
+CUDA_GRAPH_CAPTURE_INSTRUMENTATION = "instrumentation"
+CUDA_GRAPH_CAPTURE_CONFIG = "config"
+
+
+def _classify_cuda_graph_capture_failure(*texts: str) -> tuple[str, str]:
+    """Classify a capture failure as ``(category, matched_marker)``; empty category means no marker matched.
+
+    The marker is reported alongside the category because the match is a string heuristic: an offline reader has to
+    be able to see what fired and overrule it.
+    """
     lines = "\n".join(t for t in texts if t).splitlines()
     lowered = [ln.lower() for ln in lines]
     blob = "\n".join(lowered)
     # Profile-cuda-graph assert wins over the assertionerror gate.
     if all(m in blob for m in _CUDA_GRAPH_PROFILE_ASSERT_MARKERS):
-        return True
+        return CUDA_GRAPH_CAPTURE_INSTRUMENTATION, " + ".join(_CUDA_GRAPH_PROFILE_ASSERT_MARKERS)
     blob_has_oom = any(m in blob for m in _OOM_MARKERS)
     blob_has_non_recoverable = any(m in blob for m in _NON_RECOVERABLE_MARKERS)
     saw_pure_weak = False
     for idx, line in enumerate(lowered):
-        is_strong = any(m in line for m in _CUDA_GRAPH_STRONG_MARKERS)
-        if is_strong:
+        strong = next((m for m in _CUDA_GRAPH_STRONG_MARKERS if m in line), "")
+        if strong:
             lo = max(0, idx - _STRONG_OOM_CONTEXT_RADIUS)
             hi = min(len(lowered), idx + _STRONG_OOM_CONTEXT_RADIUS + 1)
             if not any(m in "\n".join(lowered[lo:hi]) for m in _OOM_MARKERS):
-                return True
+                return CUDA_GRAPH_CAPTURE_CONFIG, strong
             continue
         if _CUDA_GRAPH_WEAK_MARKER in line:
             saw_pure_weak = True
     if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
-        return True
-    return False
+        return CUDA_GRAPH_CAPTURE_CONFIG, _CUDA_GRAPH_WEAK_MARKER
+    return "", ""
+
+
+def _is_cuda_graph_capture_failure(*texts: str) -> bool:
+    """True when a cuda-graph capture marker is recoverable by disabling graph."""
+    return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
 # Startup-time "the GPUs are already occupied" refusals.
@@ -495,6 +508,48 @@ _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
     "vllm": "--enforce-eager",
 }
+
+
+async def _prepare_aiter_serving_so(extra_envs: dict[str, Any], output_dir: Path) -> None:
+    """Rebuild the serving ``.so`` before boot when the CSVs it loads name kernels it lacks.
+
+    sglang starts against whatever ``get_config_file`` resolves each ``AITER_CONFIG_*`` to,
+    and a kernel the compiled module never registered raises from inside graph capture. The
+    classifier downstream names that ``aiter_jit_registry_mismatch`` but cannot undo it, so
+    the round is simply lost -- and PRELUDE's first measurement and every FRAMEWORK variant
+    boot through here. The GEMM integrate lane already runs this check before its own boots.
+
+    It is not conditioned on the round carrying a tuned CSV: a variable the round leaves
+    unset is exactly the case where aiter merges the model overlays, which is where the
+    kernel that fails the boot comes from.
+
+    Args:
+        extra_envs: The round's environment, whose ``AITER_CONFIG_*`` values decide which
+            branch of aiter's resolution each table takes.
+        output_dir: Where to park the invalidated ``jit/build`` if a rebuild runs.
+    """
+    csv_envs = {
+        str(key): str(value)
+        for key, value in (extra_envs or {}).items()
+        if str(key).startswith("AITER_CONFIG_") and str(value).strip()
+    }
+    from ._aiter_jit import prepare_serving_so_for_csvs
+
+    try:
+        outcome = await asyncio.to_thread(
+            prepare_serving_so_for_csvs,
+            csv_envs,
+            backup_dir=output_dir / "aiter_jit_backup",
+        )
+    except OSError as exc:
+        # A jit directory this cannot read is not a reason to lose the measurement.
+        log.warning("baseline_executor: aiter serving .so preflight failed: %s", exc)
+        return
+    if isinstance(outcome, dict) and outcome.get("action") == "invalidate":
+        log.info(
+            "baseline_executor: the CSVs this boot loads outran the serving .so; dropped %d module(s) for rebuild",
+            len(outcome.get("removed") or []),
+        )
 
 
 def _config_framework(config_path: Path | str) -> str:
@@ -553,18 +608,6 @@ def _round_post_ready_sec(
         started_unix=started_unix,
         runtime_sec=runtime_sec,
     )
-
-
-def _logged_session_clamp(timeout_sec: int, clamped: int, *, output_dir: Path) -> int:
-    """Announce a round's cap being cut by the session budget, and return the cut."""
-    if clamped != timeout_sec:
-        log.info(
-            "baseline_executor: timeout clamped %ds -> %ds by the session budget (round=%s)",
-            timeout_sec,
-            clamped,
-            output_dir.name,
-        )
-    return clamped
 
 
 def _stopped_round_result(
@@ -695,8 +738,6 @@ def _classify_subprocess_error(
         return "fast_exit_arg_error"
     return "subprocess_nonzero"
 
-
-BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
 # from this module.
@@ -1030,16 +1071,30 @@ def _revert_warm_patch_state(
 
 #: The per-tree fields that leave this module. ``use_nogit`` stays behind: it
 #: describes how the apply ran, and the restore reads the channel off whether
-#: backups are present.
-_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups")
+#: backups are present. ``mutated`` says whether this round wrote to the tree at
+#: all, which absent restore artifacts alone cannot: a no-op apply and an apply
+#: whose artifacts were lost both record none, and only the first is safe to
+#: leave standing.
+_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups", "mutated")
 
 
 def _warm_tree_records(
     trees: Mapping[str, Mapping[str, Any]],
     order: Sequence[str],
+    *,
+    before_mutation: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return one JSON-safe record per touched tree, in apply order."""
-    return [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    """Return one JSON-safe record per touched tree, in apply order.
+
+    ``before_mutation`` stamps ``mutated`` true. A record persisted ahead of the apply is
+    the one record that cannot know what the round went on to write, so a resume that finds
+    it has to treat the tree as written-to and restore it from the snapshot taken with it.
+    """
+    records = [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+    if before_mutation:
+        for record in records:
+            record["mutated"] = True
+    return records
 
 
 def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1125,27 +1180,13 @@ def _apply_warm_patches(
             continue
         git_tree = _is_git_tree(Path(root))
         pre_sha = _git_head_sha(root) if git_tree else ""
-        # prelude promotes a required timeline's tree only against a pre_sha and a git snapshot manifest. nogit
-        # produces neither, so serving this path from it turned a successful replay into
-        # validated_recipe_checkout_incomplete -- worse than the fast failure it replaced.
-        if required_timeline and not pre_sha:
-            return {
-                "required": True,
-                "status": "failed",
-                "patches": [],
-                "applied": [],
-                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                "failure": "missing_git_head",
-                "pre_sha": "",
-                "target_repo": root,
-                "rolled_back": False,
-            }
         trees[root] = {
             "root": root,
             "pre_sha": pre_sha,
             "use_nogit": not git_tree or not pre_sha,
             "snapshot_manifest": None,
             "nogit_backups": [],
+            "mutated": False,
         }
     tree_order = [root for root in tree_order if root in trees]
     if not tree_order:
@@ -1232,9 +1273,11 @@ def _apply_warm_patches(
             return []
     snapshot_manifest = primary["snapshot_manifest"]
     if any(tree["snapshot_manifest"] for tree in trees.values()):
-        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order)
+        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order, before_mutation=True)
         params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-        if before_mutation is not None and not bool(before_mutation(_warm_tree_records(trees, tree_order))):
+        if before_mutation is not None and not bool(
+            before_mutation(_warm_tree_records(trees, tree_order, before_mutation=True))
+        ):
             return {
                 "required": required_timeline,
                 "status": "failed",
@@ -1358,7 +1401,9 @@ def _apply_warm_patches(
                 if not ok:
                     raise RuntimeError(err or "nogit patch apply failed")
                 nogit_backups.extend(backups)
-                method = "applied_nogit"
+                # A real apply backs up every file it writes, so an empty set is the
+                # applier reporting an overlay the tree already carried.
+                method = "applied_nogit" if backups else "already_present"
             else:
                 checked = subprocess.run(
                     ["git", "apply", "--check", str(patch_path)],
@@ -1441,6 +1486,8 @@ def _apply_warm_patches(
                 break
             continue
 
+        if method in ("applied", "applied_3way", "applied_nogit"):
+            tree["mutated"] = True
         item = {
             "patch_file": patch_file,
             "idx": str(idx),
@@ -1546,6 +1593,7 @@ def _rollback_warm_kernel_apply_results(
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
+    benchmark_watchdog = True
     session_dir = SessionDirField()
 
     def __init__(
@@ -1555,7 +1603,7 @@ class BaselineExecutor:
         default_config_path: Path | str | None = None,
         session_dir: Path | str | None = None,
         shared_state: Any | None = None,
-        default_timeout_sec: int = BASELINE_DEFAULT_TIMEOUT_SEC,
+        default_timeout_sec: int | None = None,
         cwd: Path | str | None = None,
     ):
         """Initialize the baseline executor with launch defaults."""
@@ -1621,100 +1669,11 @@ class BaselineExecutor:
             )
             return False
 
-    def _resolve_timeout(self, params: dict[str, Any]) -> int:
-        """Pick the subprocess timeout for this baseline launch."""
-        explicit = params.get("timeout_sec")
-        if explicit:
-            timeout_sec = int(explicit)
-            log.info(
-                "baseline_executor: timeout=%ds (explicit task param)",
-                timeout_sec,
-            )
-            return timeout_sec
-
-        # Ahead of the probe on purpose: the probe cannot answer this case.
-        if agentx_enabled():
-            timeout_sec = agentx_baseline_timeout_sec()
-            log.info(
-                "baseline_executor: timeout=%ds (AgentX: AGENTX_DURATION + overhead). "
-                "The aiter cold/warm probe is not consulted -- it counts kernels "
-                "globally and cannot see that AgentX changes the JIT signature, so "
-                "it reports WARM while the round pays a first-compile.",
-                timeout_sec,
-            )
-            return timeout_sec
-
-        cache = _probe_aiter_jit_cache()
-        cold_cap = int(
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_COLD_START_TIMEOUT_SEC",
-                BASELINE_COLD_START_TIMEOUT_SEC,
-            )
-        )
-        if cache["probe_status"] == "found" and cache["is_cold"]:
-            # Before paying the cold-start compile, reap aiter JIT locks left by a killed hipcc.
-            sweep = sweep_stale_aiter_locks_if_dead()
-            if sweep.get("skipped_live"):
-                log.info(
-                    "baseline_executor: aiter lock sweep skipped — live "
-                    "compiler process present (jit dir node-shared).",
-                )
-            elif sweep.get("deleted"):
-                log.warning(
-                    "baseline_executor: reaped %d stale aiter JIT lock(s) "
-                    "under %s (compiler_alive=%s) before cold start.",
-                    sweep["deleted"],
-                    sweep.get("dir"),
-                    sweep.get("compiler_alive"),
-                )
-                # Locks gone — re-probe so the log line below reflects reality.
-                cache = _probe_aiter_jit_cache()
-        if cache["probe_status"] == "found" and cache["is_cold"]:
-            log.warning(
-                "baseline_executor: COLD_START detected — aiter jit/build/ "
-                "at %s has %d .so (< %d threshold), %d MB. Bumping timeout "
-                "%ds -> %ds. First-time JIT compile on a new "
-                "(model, dtype, TP, max_model_len) signature can take 30+ "
-                "minutes for large FP8 / MoE models.",
-                cache["path"],
-                cache["kernel_count"],
-                COLD_START_KERNEL_THRESHOLD,
-                cache["size_mb"],
-                self.default_timeout_sec,
-                cold_cap,
-            )
-            return cold_cap
-        if cache["probe_status"] == "found":
-            log.info(
-                "baseline_executor: WARM start — aiter jit/build/ at %s has %d .so, %d MB. Using default timeout=%ds.",
-                cache["path"],
-                cache["kernel_count"],
-                cache["size_mb"],
-                self.default_timeout_sec,
-            )
-            return self.default_timeout_sec
-        log.warning(
-            "baseline_executor: aiter jit cache not located "
-            "(probe_status=%s). Using default timeout=%ds. Cold-start "
-            "auto-bump disabled for this run.",
-            cache["probe_status"],
-            self.default_timeout_sec,
-        )
-        return self.default_timeout_sec
-
-    @staticmethod
-    def _session_capped_timeout(
-        timeout_sec: int,
-        session_deadline_sec: float | None,
-        *,
-        output_dir: Path,
-    ) -> int:
-        """``timeout_sec`` reduced to what the session can still pay for."""
-        return _logged_session_clamp(
-            timeout_sec,
-            session_clamped_timeout_sec(timeout_sec, session_deadline_sec),
-            output_dir=output_dir,
-        )
+    def _resolve_timeout(self, params: dict[str, Any]) -> float:
+        """Benchmark rounds share one cap; other executor purposes keep their budgets."""
+        if self.benchmark_watchdog:
+            return resolve_benchmark_timeouts()[1]
+        return float(params.get("timeout_sec") or self.default_timeout_sec)
 
     @staticmethod
     def _inferencex_root_from_config(config_path: Path) -> str:
@@ -2623,6 +2582,7 @@ class BaselineExecutor:
         )
         if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
             base_extra_envs["RUN_EVAL"] = "false"
+        await _prepare_aiter_serving_so(base_extra_envs, output_dir)
         try:
             config_path = materialize_config_with_envs(
                 config_path,
@@ -2639,6 +2599,7 @@ class BaselineExecutor:
                 drop_moe_runner_backend=force_drop_moe_runner_backend,
                 flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
                 agentx_mode=agentx_active(live_shared_state),
+                grading=getattr(live_shared_state, "grading", None),
             )
         except FrameworkScriptMismatchError as exc:
             # Cross-framework script override: return a structured failure.
@@ -3001,8 +2962,7 @@ class BaselineExecutor:
                 "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
                 warmup_dir,
             )
-            # The warmup runs under the round's own cap, which the session clamp leaves sitting past the session
-            # deadline so the watchdog reaches it first and a budget kill is recorded as one.
+            # Each warmup starts a fresh benchmark cap; the session deadline never resets.
             warmup_result = await self._run_reported_round(
                 label=ROUND_WARMUP,
                 config_path=warmup_cfg,
@@ -3089,6 +3049,7 @@ class BaselineExecutor:
             )
             result = await self._run_reported_round(
                 label=ROUND_MEASURE,
+                server_already_ready=True,
                 config_path=measure_cfg,
                 output_dir=measure_dir,
                 recorder=recorder,
@@ -3206,22 +3167,15 @@ class BaselineExecutor:
                             port=port,
                             run_eval=True,
                         )
-                        try:
-                            accuracy_timeout_sec = int(params.get("accuracy_timeout_sec") or timeout_sec)
-                        except (TypeError, ValueError):
-                            accuracy_timeout_sec = timeout_sec
                         accuracy_result = await self._run_reported_round(
                             label=ROUND_ACCURACY,
+                            server_already_ready=True,
                             config_path=accuracy_cfg,
                             output_dir=accuracy_dir,
                             recorder=recorder,
                             run_index=run_index,
                             **{
                                 **common,
-                                "timeout_sec": max(
-                                    1,
-                                    accuracy_timeout_sec,
-                                ),
                                 "run_eval_disabled": False,
                             },
                         )
@@ -3482,6 +3436,7 @@ class BaselineExecutor:
         framework: str,
         timeout_sec: int,
         session_deadline_sec: float | None,
+        silence_timeout_sec: float | None = None,
         capture_meta: dict[str, Any],
         round_warnings: list[str],
         ctx_extra: dict[str, Any] | None = None,
@@ -3539,6 +3494,8 @@ class BaselineExecutor:
                     env=warm_env,
                     cwd=str(warm_dir),
                     timeout=timeout_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=True,
                     server_log_path=_watchdog_server_log_path(warm_dir, framework),
                     on_output=warm_activity.note,
                     session_deadline_sec=session_deadline_sec,
@@ -3671,6 +3628,7 @@ class BaselineExecutor:
         ctx: RunnerContext,
         run_eval_disabled: bool = False,
         serving_lease: Any = None,
+        server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
         cmd = build_benchmark_command(
@@ -3730,7 +3688,11 @@ class BaselineExecutor:
         # of them, and a warmup that overran has already spent budget the ones after it were counting on.
         _session_state = ctx_extra.get("shared_state") or self.shared_state
         session_deadline_sec, _ = session_grid_bounds(_session_state)
-        timeout_sec = self._session_capped_timeout(timeout_sec, session_deadline_sec, output_dir=output_dir)
+        silence_timeout_sec = None
+        if self.benchmark_watchdog:
+            silence_timeout_sec, timeout_sec = resolve_benchmark_timeouts()
+            env["PYTHONUNBUFFERED"] = "1"
+            sync_benchmark_timeout(config_path, timeout_sec)
         if not ctx_extra.get("mn_round_restarted"):
             try:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
@@ -3787,6 +3749,7 @@ class BaselineExecutor:
                 framework=framework,
                 timeout_sec=timeout_sec,
                 session_deadline_sec=session_deadline_sec,
+                silence_timeout_sec=silence_timeout_sec,
                 capture_meta=capture_meta,
                 round_warnings=round_warnings,
                 ctx_extra=ctx_extra,
@@ -3846,6 +3809,16 @@ class BaselineExecutor:
         if refusal is not None:
             return refusal
 
+        if self.benchmark_watchdog and not (server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()):
+            from ._aiter_jit import sweep_stale_aiter_locks_if_dead
+
+            lock_sweep = await asyncio.to_thread(sweep_stale_aiter_locks_if_dead)
+            if lock_sweep.get("deleted"):
+                log.warning(
+                    "baseline_executor: reaped %d orphaned aiter JIT lock(s) before server launch",
+                    lock_sweep["deleted"],
+                )
+
         try:
             if serving_lease is not None:
                 # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
@@ -3867,6 +3840,10 @@ class BaselineExecutor:
                     env=env,
                     cwd=str(output_dir),
                     timeout=timeout_sec,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=bool(
+                        server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
+                    ),
                     server_log_path=watchdog_server_log,
                     session_remaining_sec=session_deadline_to_remaining_sec(session_deadline_sec),
                 )
@@ -3882,6 +3859,10 @@ class BaselineExecutor:
                         env=env,
                         cwd=str(output_dir),
                         timeout=timeout_sec,
+                        silence_timeout_sec=silence_timeout_sec,
+                        server_already_ready=bool(
+                            server_already_ready or ctx_extra.get("server_already_ready") or _mn_imn()
+                        ),
                         server_log_path=watchdog_server_log,
                         on_output=activity.note,
                         session_deadline_sec=session_deadline_sec,
@@ -4182,7 +4163,9 @@ class BaselineExecutor:
 
         # RUN_EVAL gates ONLY the serving lm-eval GSM8K run.
         eval_scriptable = framework_registry.is_scriptable(eval_framework)
-        if run_eval_disabled and not eval_scriptable:
+        shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
+        benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
+        if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
             # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
@@ -4197,9 +4180,7 @@ class BaselineExecutor:
             eval_data = parse_eval_results(
                 eval_search_root,
                 framework=eval_framework,
-                benchmark_mode=str(
-                    getattr((getattr(ctx, "extra", None) or {}).get("shared_state"), "benchmark_mode", "") or ""
-                ),
+                benchmark_mode=benchmark_mode,
             )
             if eval_data.get("accuracy") is not None:
                 result["accuracy"] = eval_data["accuracy"]
@@ -4230,14 +4211,10 @@ baseline_executor = BaselineExecutor()
 __all__ = [
     "AITER_JIT_PROBE_PATHS",
     "BASELINE_COLD_START_TIMEOUT_SEC",
-    "AGENTX_BASELINE_OVERHEAD_SEC",
-    "AGENTX_DEFAULT_DURATION_SEC",
     "AGENTX_CANON_WARMUP_GRACE_SEC",
     "AGENTX_CANON_WARMUP_CONC",
-    "BASELINE_DEFAULT_TIMEOUT_SEC",
     "agentx_warmup_grace_conc",
     "agentx_warmup_grace_sec",
-    "agentx_baseline_timeout_sec",
     "BaselineExecutor",
     "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",

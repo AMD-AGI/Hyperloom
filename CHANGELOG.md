@@ -5,6 +5,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+- **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
+  agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
+  supervision and resume, and task/lease age expiry. Each actual benchmark spawn
+  uses a 7800-second hard deadline (including boot and accuracy), plus a
+  600-second output-silence limit only after a ready marker is observed in this
+  round's logs; both are finite positive settings. A warm-reuse hint alone does
+  not arm silence, avoiding false kills when original Magpie buffers client
+  output and the reused server writes its previous round's log. Reuse rounds
+  without a current ready marker remain bounded by the hard deadline, session
+  budget, and cancellation. Output cannot extend the hard deadline. Session
+  cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
+  offline `recover-session`, process cleanup, and historical SBDv6 readers.
+
 ### Fixed
 
 - Kernel tuning now uses a 1% default E2E KEEP threshold for GEMM integration
@@ -14,6 +27,198 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   nonexistent paths. TraceLens analysis uses the coordinator's Python interpreter
   without reinstalling dependencies on every call, and distinguishes dependency
   and splitter failures from successful splits with no steady-state output.
+
+- **A Slurm row declaring a workload shape was benchmarked at the defaults.**
+  The optimizer resolves `tp` / `conc` / `ep` / `isl` / `osl` / `precision` as
+  flag > persisted state > default and deliberately never reads them from the
+  environment, but `_incontainer.sh.in` only exported them. A row declaring
+  `tp=4` therefore materialised a `tp=1` baseline, where sglang's rank math
+  divided by zero; a row declaring `isl=8192 osl=512` silently measured
+  1024/1024, and `precision` came from the checkpoint sniffer rather than the
+  row. The whole declared shape is now passed as flags in both the python and
+  claude backends. The exports stay, because the framework recipes downstream
+  do read them -- that split is now stated where the command is spelled out,
+  since the old wording pointed the carrier at the ignored mechanism. `ep_size`
+  also gains a producer: it is a new trailing `models.tsv` column, parsed and
+  exported by `run_hyperloom.sbatch` and added to the docker backend's `-e`
+  allowlist so enroot and docker agree on the shape. It trails `target_gain` so
+  existing 13-column rows still parse, and an absent value keeps expert
+  parallelism at 1.
+
+- **A cancelled job's container kept its GPUs and broke the next job on that
+  node.** `docker run --rm` cleans up when its client exits normally, but a
+  `scancel` or NODE_FAIL kills the client and leaves the container running, so
+  `--rm` never fires and the weights stay resident. The next job then failed in
+  whichever way its framework noticed first: sglang sat in
+  `wait_for_amd_gpu_clean` for the full fifteen minutes because that gate maxes
+  VRAM% over every GPU on the box, while vLLM was refused outright with
+  `Free memory on device cuda:N ... is less than desired GPU memory
+  utilization`. Observed on two nodes at once, where a container from a job
+  cancelled three hours earlier still held ~168 GiB on each of GPU 0-3 --
+  exactly where the next tp=4 server wanted to land, because the container gets
+  no ROCR mask and every framework starts from GPU 0. The launcher now reclaims
+  those containers first, deciding ownership by liveness rather than by name or
+  image: `docker run` carries `-e CLAW_SESSION_ID=`, so a container whose
+  session id has no live client is ours and orphaned, and a co-tenant job that
+  still has its client is left alone. `docker run` also gains `--init`, without
+  which the container's pid 1 becomes an unreapable zombie once the client is
+  killed and even the daemon refuses to remove it (`PID <n> is zombie and can
+  not be killed. Use the --init option ...`); the reclaim keeps a cgroup-level
+  SIGKILL fallback for containers already in that state. `--name
+  hl-<key>-<jobid>` makes a running container traceable back to its job.
+
+- **A vLLM profile round had its profiler bounds dropped before launch.** The
+  argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
+  `--profiler-config.profiler torch` and a trace directory of its own
+  afterwards. `ProfilerConfig` refuses the iteration bounds this layer injects
+  unless both are present in the same fragment, so the probe rejected an argv
+  that is valid once the launcher's flags are appended, and the round then ran
+  with no bound on the capture window. Both flags are now asserted alongside
+  the bounds so the probed fragment is self-consistent on its own. The trace
+  directory is a placeholder: the launcher's own value has to win vLLM's
+  last-wins dotted-flag merge, so the bypass backend now emits its profiler
+  flags after `EXTRA_VLLM_ARGS` the way Magpie's launcher already does, rather
+  than before it where the placeholder would have won and sent the trace
+  somewhere trace discovery never looks. An operator-set profiler flag is left
+  untouched.
+- **A campaign the host killed cost the next task in the same repository.**
+  Every in-place task is handed the same `forge_experiments` directory, and the
+  release archives it -- but a run that was killed never reaches the release.
+  The leftover then did two things: forge-loop refused the workspace outright
+  ("already contains a Forge campaign; pass --resume to continue it"), failing
+  the next task at dispatch, and recovery read the stale manifest as that
+  task's own best result, reporting the dead campaign's commit as a missing
+  base commit -- a reason with nothing to do with the task it lost. Measured: a
+  session lost a `chunk_gated_delta_rule` task to a fusion campaign left behind
+  at a timeout an hour earlier. A leftover is now archived on the way in as
+  well as on the way out, kept rather than deleted because it is the only
+  account of what that run did, and a trusted manifest has to name a commit the
+  repository still has before it is read as this task's result. An archive that
+  cannot be made says so, since the dispatch refusal that follows is otherwise
+  undiagnosable.
+- **A campaign killed mid-search lost a fusion it had already published.**
+  `run_campaign` publishes each winning iteration to the shadow repo's
+  `forge_experiments/best/` and points `forge_loop_<stem>.json` at it, but the
+  exported patch and the aggregate manifest only land once the campaign
+  returns. A wrapper timeout while it was still iterating therefore reported
+  REVERT with `patch: null` even though correctness had passed. Measured: a
+  session lost a 5.011x fusion of qkvgate split + QK norm + RoPE with its
+  experiment still running when the 5400s timeout fired. Salvage now falls back
+  to the per-campaign artifacts, and each salvaged row carries the env flag its
+  fused path is gated behind -- read back from the driver the campaign wrote,
+  since the patch does not carry it and without it the re-baseline server boots
+  un-gated, measures the eager path and rejects the win one stage later. A
+  campaign whose flag cannot be read is not salvaged at all, rather than queued
+  to fail that way. Artifacts a previous run left in the same output directory
+  are swept before the run starts, so they cannot be salvaged as its own.
+- **A KB recipe carrying code overlays could not be replayed into a framework
+  installed from a wheel.** A Recipe whose patch timeline is non-empty replays
+  as required, and that path refused any tree without a git HEAD -- which a
+  pip-installed framework never has. Every code-level optimization a session
+  published therefore became unreplayable the moment it reached the KB: warm
+  replay failed before booting a server, and the recorded gain could only be
+  re-earned from scratch. What promotion needs is a way to unwind the tree if
+  the replay is rejected, not a sha, so it now accepts either channel: a git
+  checkout's snapshot, or the backups a nogit apply records as it writes. An
+  overlay the tree already carried applies as a no-op and records neither,
+  which is not the same as an apply whose artifacts were lost, so each tree now
+  states whether the round wrote to it -- a no-op tree promotes and is skipped
+  by the rollback, a written-to tree still has to answer with a channel, and a
+  record persisted ahead of the apply reads as written-to so a resume restores
+  it. Framework-agnostic; the shape of the checkout decides the channel.
+- **A shipped aiter tuned CSV naming a kernel this host never compiled failed
+  every boot of the session.** aiter resolves its tuned tables two ways: a
+  pinned `AITER_CONFIG_*` env is taken as the exact `:`-joined list, and an
+  unset one falls back to the shipped default plus every `model_configs`
+  overlay whose name matches. A round that tunes one operator sets only that
+  operator's variable, so the others take the unset branch and pull in overlays
+  cut on another host -- tables whose `kernelName`s are absent from this
+  machine's compiled `module_*.so`. Serving then aborted at load with a
+  registry mismatch, and because the table is shipped rather than produced by
+  the run, every retry hit the same wall: the whole session failed at boot with
+  nothing to roll back. The CSV set a boot will actually load is now resolved
+  by aiter's own two-branch rule and checked against the compiled modules
+  before the config is materialized; an uncovered module is unlinked so the
+  next boot rebuilds it. On integrate, a registry mismatch also drops the
+  modules the error names, not only the ones the round's environment mapped.
+  Framework-agnostic; it is the aiter install that is repaired, not the server.
+- **An author whose transport died took the whole fusion lane with it.** A lane
+  costs hours and an authoring call costs minutes, but a provider that never
+  delivered an answer -- a stream stalled mid-response, a connection reset --
+  ended the lane on the first failure. The classification that tells "the model
+  never answered" apart from "the model answered nothing" already exists in
+  `llm_failure`, so authoring now consults it where the exception is still in
+  hand and retries only the transport, with backoff and against a deadline. A
+  provider safety stop is still never retried, because retrying one is the
+  anti-pattern the session-resume allowlist already refuses; neither is a
+  timeout, which has just spent a full attempt's budget. The deadline defaults
+  to what the configured attempts can legitimately cost, since the generic
+  1800s LLM default is shorter than a single 7200s authoring attempt and would
+  have made the retry unreachable.
+- **A fusion campaign killed before it returned reported REVERT while proven
+  work sat on disk.** `fusion_manifest.json` is the only artifact that points
+  at a keeper, and it was written once every campaign had returned. `on_keep`
+  exports the patch and smokes it the moment a recipe is kept, so a wrapper
+  killed between the last keeper and the aggregate reported `patch: null` even
+  though a sibling had already passed correctness and a serving smoke.
+  Measured: a session lost a 5.011x fusion of qkvgate split + QK norm + RoPE
+  this way, the iteration having published 44 minutes before the timeout fired.
+  The manifest is now published as each keeper is proved, so it is never
+  missing -- only as complete as the run got -- and the existing salvage path
+  reads it unchanged. The end-of-run write still overwrites it with the final
+  loop, compile-pass and error fields before any exit, and a sibling the smoke
+  rejected has its patch unlinked so no reader can find work the run refused.
+- **AgentX baselines retain request-quality grading with `RUN_EVAL=false`.**
+  Missing AIPerf error-rate metrics are derived from profiling request counts;
+  zero errors are inferred only with successful requests and an explicitly empty
+  error summary. Warmup accounting is excluded, and invalid or unknown evidence
+  remains fail-closed. Valid zero-error baselines no longer lose their quality
+  signal merely because serving lm-eval is disabled.
+- **Honor concurrency-sweep budgets without treating the hard cap as a start cost.**
+  Admission uses the measured expected duration when available; unknown-duration
+  work may start while budget remains. Boot retries, reuse and fallback share
+  the earlier sweep/session deadline, and reports retain the actual stop source.
+  The manual sweep driver no longer passes or advertises the retired
+  `--variant-timeout-sec` option.
+- **Complete cooperative build and specialist cancellation without accepting
+  unconfirmed cleanup.** Cancellation reaches pending work and running workers;
+  confirmed cleanup records a cancelled outcome, while unknown cleanup retains
+  ownership. Completed outcomes remain in task history for diagnosis even when
+  cleanup fails, without publishing them for promotion or retry. Completion
+  callback failures after confirmed cleanup no longer retain execution entries,
+  and repeated inline calls return stored terminal results instead of rerunning.
+- **Refuse unsafe session resumes explicitly.** Legacy or foreign execution
+  ownership and unproven historical cancellations now produce bounded task/lane
+  diagnostics before resume writes or dispatch. Resume admission itself clears
+  no ownership. After independently verifying that a task's complete process tree,
+  remote workers and Ray actor have stopped, operators can use
+  `recover-session --confirm-stopped TASK_ID --confirmation-reason TEXT` to record
+  that confirmation, cancel an unfinished task, and release only its unattributed
+  execution/GPU records under the POSIX session lock. This explicit operation preserves rounds
+  and other tasks, rejects nonempty owner scopes, and neither stops workers nor
+  accepts old results or starts a resume. Existing `--force` remains report-only.
+  Resume admission and
+  round reconciliation honor the latest recorded cleanup outcome, including
+  results recorded after an earlier terminal transition. A Ray worker whose root
+  exited is not treated as proof that detached descendants exited, and a missing
+  stop acknowledgment no longer destroys the specialist actor's cleanup channel.
+  Specialist cleanup makes one bounded follow-up confirmation on the same lease
+  before retaining unconfirmed ownership; a late acknowledgment is consumed by
+  the existing completion path rather than requiring a new background reaper.
+- **Restore safe AITER lock cleanup at baseline startup.** Stale locks are cleaned
+  only when compiler absence is established. Unreadable live-process identity
+  leaves locks untouched; known zombies do not block cleanup.
+
+- **AgentX grading failures no longer fall back to throughput KEEP.** When an
+  AgentX session cannot grade on interactivity because either side is missing
+  the axis pair, explore, ``_lift_to_current_best``, and
+  ``resolve_graded_comparison`` fail closed instead of promoting on the
+  diagnostic output figure. The removed ``ANCHOR_DEGRADED`` round-local output
+  fallback is part of the same rule. ``degrade_reason`` still travels on the
+  explore, stack-validation and integrate rows that record a refused
+  comparison, so the breakdown can still name why a variant did not KEEP; an
+  *adoption* row can no longer carry one, because the resolver now returns
+  REVERT on a degraded pair and a REVERT never reaches the adoption writeback.
 
 - **A partitioned card is now a different machine in the KB key, so a warm-start
   hit can no longer replay a config tuned on a differently shaped one.** The
@@ -63,6 +268,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   says fingerprint and whose behaviour would have been workload shape.
 
 ### Changed
+
+- **breaking: the SBD V6 concurrency-sweep comparison rows are named for the
+  axis they carry rather than for throughput.** `baseline_throughput` →
+  `baseline_value` and `optimized_throughput` → `optimized_value` in each
+  `conc_sweep` event's `comparison` rows. The old names were a lie on an AgentX
+  session: the figure they held is whatever `result.metric` names, which is the
+  slow-tail interactivity percentile (`e2e_norm_intvty_p90`, milliseconds)
+  whenever the session grades on one, so a consumer reading `*_throughput` was
+  plotting latencies as throughputs against rungs measured in tokens/s. No
+  alias is kept — an alias would preserve exactly the misreading the rename
+  exists to stop. External parsers of `reports/sbd_v6/` must be updated.
+
+  The rows also gained `baseline_guard`, `optimized_guard` and `guard_holds`,
+  and the roll-up gained `guard_axis` and `best_conc_guard_holds`: the throughput
+  the session would have held a promotion to, reported beside the ranked axis
+  rather than enforced, so a rung that bought interactivity by giving up
+  throughput is visible as such instead of reading as a clean win. All are null
+  off the interactivity objective. `guard_holds` is tri-state — `null` means the
+  framework never answered, which is not the same fact as `false`.
+
+- **SBD V6 publishes the axis a session graded on, at the session level and on
+  each settled figure.** Three additions to the wire shape, all of them facts no
+  consumer could previously recover:
+
+  - `metadata.grading` — `{benchmark_mode, objective, tput_guard: {enabled,
+    noise_pct}}`. An AgentX replay is ranked on `e2e_norm_intvty_p90` with total
+    throughput held as a guard; a synthetic run is ranked on output throughput
+    alone. Every throughput field elsewhere in the document is the output axis by
+    construction and `benchmark_mode` never reached the breakdown at all, so
+    without this block the two kinds of session are indistinguishable — and on
+    the canonical corpus the two axes differ by roughly two orders of magnitude,
+    which is enough for a consumer to sort one against the other and never
+    notice. Recorded from `SharedState.grading` rather than re-derived at export:
+    the axis is settled once at seed, where the run can still see its own
+    configuration, and re-deriving it here would read the exporting subprocess's
+    environment. `tput_guard.noise_pct` is `null` on a session seeded before the
+    band was recorded — the band that session applied is unknown, and today's
+    default is not evidence of it.
+  - `outcome.baseline.perf` and `outcome.final.perf` — the four graded axes the
+    measurement reported (`e2e_norm_intvty_p90`, `total_throughput`,
+    `input_throughput`, `tpot_p90_ms`), each an explicit `null` where nothing
+    measured it. All four keys are always present: absent would be
+    indistinguishable from an axis the framework failed to report, and zero reads
+    as "measured, and it was zero". A synthetic run publishes four nulls.
+  - `outcome.final.graded_on` and `outcome.validation.graded_on` — the axis the
+    gain beside them is on. The stack reconciliation has to be single-axis, since
+    an attributed figure on one axis against an unattributed figure on another
+    makes the gap meaningless, and `graded_on` is what names it.
+    `outcome.validation.perf` carries the settled measurement's own axes on the
+    same row as the gain they produced, because a revalidation moves the
+    cumulative figure without re-promoting the recipe.
+
+- **Roofline CUDA graph capture failures are classified instead of retried in
+  eager mode.** When profiling cannot capture a graph, the executor records a
+  structured failure category and writes a diagnosis artifact rather than
+  rebooting the server in eager mode and retrying. Timeline rows now publish
+  ``graph_capture_disabled`` instead of ``eager_fallback_applied``. Blocking
+  filesystem and liveness probes run in ``asyncio.to_thread`` so the roofline
+  action no longer stalls the coordinator event loop.
 
 - **ENABLEMENT is the sixth phase of the optimization loop.** Bring-up used to
   run inside FRAMEWORK_AGENT, which left it a lane with no lifecycle of its

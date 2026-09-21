@@ -31,7 +31,6 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
-from .backends import _build_robustness_options
 from ..session.paths import _SESSION_SKELETON
 from ..session.session_paths import agent_prompt_snapshot
 from .model_gate import _load_model_arch, _load_model_config_tags
@@ -60,6 +59,33 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
 AGENTX_MEASUREMENT_EPOCH = 1
+
+
+def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
+    """Resolve the grading axis and its noise band once, at seed, so they can be recorded.
+
+    The resolution reads ``HYPERLOOM_PERF_METRIC`` and ``HYPERLOOM_PERF_NOISE_PCT``. Deriving it again later -- in a
+    resumed process, a re-baseline subprocess, or the breakdown export CLOSE drives from a subprocess that often did
+    not inherit them -- can name an axis the session never graded on. This is the same reasoning that put
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_INTVTY,
+        GRADED_OUTPUT,
+        intvty_serving_grading_enabled,
+        parse_intvty_noise_pct,
+    )
+
+    from .. import framework_registry
+
+    on_intvty = intvty_serving_grading_enabled(
+        scriptable=framework_registry.is_scriptable(framework),
+        benchmark_mode=benchmark_mode,
+    )
+    return {
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        "noise_pct": parse_intvty_noise_pct(),
+    }
 
 
 def agentx_state_is_stale(state: Any) -> str:
@@ -184,49 +210,6 @@ def _seed_shared_state(
         # Treat the failure-slug as "no info".
         return "" if detected == DEFAULT_FRAMEWORK_VERSION_SLUG else detected
 
-    # --explore-overtime-kill-ratio mirror; <=0 disables the gate.
-    explore_overtime_kill_ratio_raw = getattr(
-        args,
-        "explore_overtime_kill_ratio",
-        None,
-    )
-    try:
-        explore_overtime_kill_ratio = (
-            float(explore_overtime_kill_ratio_raw) if explore_overtime_kill_ratio_raw is not None else 2.0
-        )
-    except (TypeError, ValueError):
-        explore_overtime_kill_ratio = 2.0
-
-    # --explore-variant-timeout-sec mirror; 0 (default) auto-derives the cap, positive pins it.
-    explore_variant_timeout_raw = getattr(
-        args,
-        "explore_variant_timeout_sec",
-        None,
-    )
-    try:
-        explore_variant_timeout_sec_override = max(
-            0,
-            int(explore_variant_timeout_raw) if explore_variant_timeout_raw is not None else 0,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_sec_override = 0
-
-    # --explore-variant-timeout-safety-margin mirror: auto-derive headroom over the soft kill ratio (neg -> 0).
-    explore_variant_timeout_safety_margin_raw = getattr(
-        args,
-        "explore_variant_timeout_safety_margin",
-        None,
-    )
-    try:
-        explore_variant_timeout_safety_margin = max(
-            0.0,
-            float(explore_variant_timeout_safety_margin_raw)
-            if explore_variant_timeout_safety_margin_raw is not None
-            else 0.5,
-        )
-    except (TypeError, ValueError):
-        explore_variant_timeout_safety_margin = 0.5
-
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
@@ -291,7 +274,6 @@ def _seed_shared_state(
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
-        robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
         warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
@@ -299,7 +281,6 @@ def _seed_shared_state(
         research_lane_capacity=research_lane_capacity,
         gpu_specialist_capacity=gpu_specialist_capacity,
         plateau_overrides=plateau_overrides,
-        explore_overtime_kill_ratio=explore_overtime_kill_ratio,
         enable_roofline=bool(
             getattr(args, "enable_roofline", True),
         ),
@@ -310,8 +291,6 @@ def _seed_shared_state(
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
         eval_disabled=bool(getattr(args, "no_eval", False)),
-        explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
-        explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
         research_scout_interval=max(1, int(getattr(args, "research_scout_interval", 3) or 3)),
         static_recon_enabled=bool(getattr(args, "static_recon", True)),
@@ -323,12 +302,10 @@ def _seed_shared_state(
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
-        ),
-        conc_sweep_variant_timeout_sec=int(
-            getattr(args, "conc_sweep_timeout_sec", 1800) or 1800,
         ),
     )
     state.save(session_dir)
