@@ -1621,9 +1621,8 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
 
 
 def config_arm_round_count(state: Any) -> int:
-    """How many distinct config-arm rounds this cycle has benched."""
-    rows = _lever_attempts(state, LEVER_CONFIG)
-    return len({str(r.get("round_id") or "") for r in rows if r.get("round_id")})
+    """How many rounds the config arm has benched this cycle."""
+    return len(_fold_config_rounds(_lever_attempts(state, LEVER_CONFIG)))
 
 
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
@@ -1642,20 +1641,48 @@ def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     return streak
 
 
+def _fold_config_rounds(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse per-variant config attempts into one row per benched round.
+
+    A ``run_grid`` call benches a whole grid against one anchor, so the round is
+    the unit the config lever succeeds or fails at: it adopted if any variant in
+    it did, and its gain is what those variants banked. Counting variants instead
+    would let a single grid of eight cross a five-deep streak floor, and would
+    read a round as dry whenever its KEEP happened not to be the last variant.
+
+    A row with no ``round_id`` is its own round — the local-exploration arm
+    delivers server args one attempt at a time, outside any grid.
+    """
+    rounds: list[dict[str, Any]] = []
+    index: dict[str, int] = {}
+    for row in attempts:
+        round_id = str(row.get("round_id") or "")
+        pos = index.get(round_id) if round_id else None
+        if pos is None:
+            pos = len(rounds)
+            rounds.append({"round_id": round_id, "adopted": False, "gain_pct": 0.0})
+            if round_id:
+                index[round_id] = pos
+        if row.get("adopted"):
+            rounds[pos]["adopted"] = True
+            rounds[pos]["gain_pct"] = float(rounds[pos]["gain_pct"]) + float(row.get("gain_pct") or 0.0)
+    return rounds
+
+
 def _config_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     """Whether the config lever has stopped paying.
 
-    Two conditions, both required: the recent adopted gain is below the floor,
-    and a run of attempts has produced nothing. A grid that is still landing
-    small wins has not plateaued.
+    Judged per benched round, not per variant. Two conditions, both required:
+    the recent adopted gain is below the floor, and a run of rounds has produced
+    nothing. A grid that is still landing small wins has not plateaued.
     """
     lookback = int(overrides.get("explore_lookback", DEFAULT_PLATEAU_EXPLORE_LOOKBACK))
     gain_floor = float(overrides.get("explore_keep_gain_pct", DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT))
     streak_floor = int(overrides.get("explore_empty_streak", DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK))
 
-    attempts = _lever_attempts(state, LEVER_CONFIG)
-    recent_gain = sum(float(r.get("gain_pct") or 0.0) for r in attempts[-lookback:] if r.get("adopted"))
-    streak = _trailing_no_keep(attempts)
+    rounds = _fold_config_rounds(_lever_attempts(state, LEVER_CONFIG))
+    recent_gain = sum(float(r.get("gain_pct") or 0.0) for r in rounds[-lookback:] if r.get("adopted"))
+    streak = _trailing_no_keep(rounds)
     return (recent_gain < gain_floor and streak >= streak_floor), {
         "recent_keep_gain_pct": round(recent_gain, 4),
         "keep_gain_threshold_pct": gain_floor,

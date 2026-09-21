@@ -26,6 +26,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
+    config_arm_round_count,
     compute_plateau_kernel,
     exit_normal_optimize,
     exit_normal_kernel,
@@ -109,6 +110,60 @@ def test_config_lever_dry_short_empty_streak_blocks_trigger():
     triggered, ev = _config_lever_dry(state, {})
     assert triggered is False
     assert ev["empty_streak"] == 0
+
+
+def _grid_round(round_id: str, *, variants: int, keep_at: int | None = None, gain: float = 0.1):
+    """One ``run_grid`` round's worth of per-variant rows."""
+    rows = []
+    for i in range(variants):
+        adopted = i == keep_at
+        rows.append(
+            {
+                "lever_kind": LEVER_CONFIG,
+                "outcome": "KEEP" if adopted else "REVERT",
+                "adopted": adopted,
+                "gain_pct": gain if adopted else None,
+                "round_id": round_id,
+                "cycle": 0,
+            }
+        )
+    return rows
+
+
+def test_config_lever_dry_counts_a_grid_round_once():
+    """A single grid is one attempt, however many variants it benched."""
+    state = SimpleNamespace(macro_cycle=0, attempts=_grid_round("r1", variants=8))
+    triggered, ev = _config_lever_dry(state, {})
+    assert triggered is False
+    assert ev["empty_streak"] == 1
+
+
+def test_config_lever_dry_triggers_after_streak_floor_rounds():
+    rows: list[dict] = []
+    for i in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
+        rows += _grid_round(f"r{i}", variants=4)
+    state = SimpleNamespace(macro_cycle=0, attempts=rows)
+    triggered, ev = _config_lever_dry(state, {})
+    assert triggered is True
+    assert ev["empty_streak"] == DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK
+
+
+def test_config_lever_dry_round_that_kept_is_not_dry():
+    """A round that landed a KEEP has made progress, wherever in the grid it fell."""
+    rows: list[dict] = []
+    for i in range(DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK):
+        rows += _grid_round(f"r{i}", variants=4)
+    rows += _grid_round("r-last", variants=8, keep_at=0)
+    state = SimpleNamespace(macro_cycle=0, attempts=rows)
+    triggered, ev = _config_lever_dry(state, {})
+    assert triggered is False
+    assert ev["empty_streak"] == 0
+
+
+def test_config_arm_round_count_counts_rounds_not_variants():
+    rows = _grid_round("r1", variants=8) + _grid_round("r2", variants=3)
+    state = SimpleNamespace(macro_cycle=0, attempts=rows)
+    assert config_arm_round_count(state) == 2
 
 
 def test_config_lever_dry_ignores_prior_macro_cycle_rows():
