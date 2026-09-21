@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging as _logging
-from datetime import datetime, timezone
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
@@ -214,31 +213,6 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             state.reset_per_cycle_plateau_state()
         except Exception:  # noqa: BLE001 — resets are best-effort
             log.exception("Coordinator: per-cycle reset failed on reloop")
-        # Mark a macro-cycle boundary in the preserved progress ledger so the
-        # consecutive-no-keep plateau gate ignores the prior cycle's trailing
-        # no-KEEP streak.
-        try:
-            progress = getattr(state, "framework_agent_phase_progress", None)
-            if not isinstance(progress, list):
-                progress = []
-                state.framework_agent_phase_progress = progress
-            if not (
-                progress
-                and isinstance(progress[-1], dict)
-                and str(progress[-1].get("status") or "") == "cycle_boundary"
-            ):
-                progress.append(
-                    {
-                        "candidate_id": "",
-                        "status": "cycle_boundary",
-                        "kept": False,
-                        "gain_pct": 0.0,
-                        "cycle": int(getattr(state, "macro_cycle", 0) or 0),
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
-        except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
-            log.exception("Coordinator: cycle_boundary marker append failed")
         try:
             self._record_cycle_strategy_for_current_cycle()
         except Exception:  # noqa: BLE001 — focus is advisory only

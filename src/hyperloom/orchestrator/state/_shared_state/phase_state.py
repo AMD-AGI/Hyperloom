@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``_PhaseStateMixin`` — explore / gap / specialist-ledger mutators for :class:`..shared_state.SharedState`."""
+"""``_PhaseStateMixin`` — the phase ledgers :class:`..shared_state.SharedState` mutates: explore search, attempts, specialist rounds and verdicts, and per-domain counters."""
 
 from __future__ import annotations
 

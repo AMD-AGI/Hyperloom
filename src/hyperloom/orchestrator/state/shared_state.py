@@ -430,7 +430,7 @@ def _stamp_cycle_on_rejected(
 from ._shared_state.render import _RenderMixin
 
 
-from ._shared_state.explore_state import _PhaseStateMixin
+from ._shared_state.phase_state import _PhaseStateMixin
 from .gaps import GapsStateMixin
 
 
@@ -697,7 +697,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         default_factory=list,
     )
     # One row per measured attempt on any lever; the per-lever dryness judgment
-    # reads it. Writeback is the sole writer.
+    # reads it. One writer per lever: writeback for config, the dispatcher for
+    # patches, both through ``attempt_ledger``.
     attempts: list[dict[str, Any]] = field(default_factory=list)
     # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(

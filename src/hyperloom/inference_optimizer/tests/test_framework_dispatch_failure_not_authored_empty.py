@@ -93,51 +93,31 @@ def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
 
 
-def _patch_attempts(*rows: dict) -> SimpleNamespace:
-    """Build a minimal state with the given attempts on the source_patch lever."""
-    return SimpleNamespace(
-        macro_cycle=0,
-        attempts=list(rows),
+def test_dispatch_failure_leaves_no_attempt_for_the_plateau_to_count(tmp_path: Path):
+    """The dispatch row settles on the progress ledger; the plateau reads attempts, and finds none."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    stub = _Stub(tmp_path, authoring=True)
+
+    Coordinator._record_framework_agent_authoring_empty_outcome(  # type: ignore[arg-type]
+        stub,
+        task=_task("local_explore:3"),
+        done_payload={},
+        run_error=_GATE_ERROR,
     )
 
-
-def test_dispatch_failures_do_not_trip_the_plateau():
-    """The streak walks past infrastructure rows instead of counting them."""
-    state = _patch_attempts(
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-    )
-    assert _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH)) == 0
+    assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
+    assert _lever_attempts(stub.shared_state, LEVER_SOURCE_PATCH) == []
 
 
 def test_real_outcomes_still_trip_the_plateau():
     """The behaviour the plateau exists for is unchanged."""
-    state = _patch_attempts(
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+    state = SimpleNamespace(
+        macro_cycle=0,
+        attempts=[
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+            {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
+        ],
     )
     assert _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH)) == 3
-
-
-def test_dispatch_failures_do_not_mask_real_outcomes():
-    """Skipped rows are transparent: real no-KEEPs on either side still add up."""
-    state = _patch_attempts(
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
-    )
-    assert _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH)) == 2
-
-
-def test_a_keep_still_breaks_the_streak_through_a_dispatch_failure():
-    """A KEEP behind an infrastructure row must still reset the streak."""
-    state = _patch_attempts(
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "KEEP", "adopted": True},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "dispatch_failed", "adopted": False},
-        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "REVERT", "adopted": False},
-    )
-    assert _trailing_no_keep(_lever_attempts(state, LEVER_SOURCE_PATCH)) == 1

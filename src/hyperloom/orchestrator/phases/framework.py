@@ -2755,11 +2755,8 @@ class FrameworkPhase(CoordinatorCollaborator):
                 )
             return
         # Already ruled on by the Critic (e.g. after resume) — nothing to do.
-        try:
-            if self.shared_state.get_specialist_patch_verdict(sid):
-                return
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        if self.shared_state.get_specialist_patch_verdict(sid):
+            return
         # A synthetic review for this specialist is already in flight.
         for p in self.state.pending_proposals.values():
             try:
@@ -2958,11 +2955,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         if config_levers and self._config_lever_known_bad(config_levers):
             return
         # Already ruled on (e.g. after resume) — nothing to do.
-        try:
-            if self.shared_state.get_specialist_patch_verdict(sid):
-                return
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        if self.shared_state.get_specialist_patch_verdict(sid):
+            return
         # A synthetic review for this specialist is already in flight.
         for p in self.state.pending_proposals.values():
             try:

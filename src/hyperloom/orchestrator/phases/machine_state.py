@@ -1609,11 +1609,6 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
-# A specialist that never ran produced no search result, so it is not evidence
-# that the lever is exhausted.
-_FRAMEWORK_DISPATCH_FAILED_STATUS = "dispatch_failed"
-
-
 def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
     """This cycle's attempts on the given levers, in the order they were recorded."""
     rows = _rows_for_current_cycle(getattr(state, "attempts", None) or [], state)
@@ -1623,13 +1618,11 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     """Count trailing attempts that did not adopt.
 
-    A dispatch failure is skipped: the specialist never ran, so it produced no
-    search result to plateau on.
+    Only measured attempts reach the ledger, so a specialist that never ran
+    leaves nothing here to plateau on.
     """
     streak = 0
     for row in reversed(attempts):
-        if str(row.get("outcome") or "") == _FRAMEWORK_DISPATCH_FAILED_STATUS:
-            continue
         if row.get("adopted"):
             break
         streak += 1
