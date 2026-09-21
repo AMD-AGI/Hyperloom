@@ -665,6 +665,7 @@ class _LeaseFakeRay:
 
     def __init__(self):
         self.killed: list = []
+        self.cancelled: list = []
         self.shutdown_called = 0
 
     def cluster_resources(self) -> dict:
@@ -677,6 +678,12 @@ class _LeaseFakeRay:
         ):
             raise ref
         return ref
+
+    def wait(self, refs, *, num_returns=1, timeout=None):
+        return list(refs)[:num_returns], list(refs)[num_returns:]
+
+    def cancel(self, ref, **_kw):
+        self.cancelled.append(ref)
 
     def kill(self, actor):
         self.killed.append(actor)
@@ -744,6 +751,105 @@ def test_serving_lease_actor_death_marks_ray_backend_unhealthy(monkeypatch: pyte
     assert "ray_actor_error" in err
     assert fake.shutdown_called == 1
     assert backend._ensured is False
+
+
+class _StepMethod(_FakeMethod):
+    """``_FakeMethod`` that also records the fact of the call, for ordering assertions."""
+
+    def __init__(self, ret, steps: list[str], name: str):
+        super().__init__(ret)
+        self._steps = steps
+        self._name = name
+
+    def remote(self, *a, **kw):
+        self._steps.append(self._name)
+        return super().remote(*a, **kw)
+
+
+class _CooperativeFakeActor(_FakeActor):
+    """Actor that answers ``cancel_round``, so the submitter's cooperative step is observable."""
+
+    def __init__(self, ret, steps: list[str]):
+        super().__init__(ret)
+        self.cancel_round = _StepMethod(True, steps, "ask_actor_to_cancel")
+
+
+class _PendingFakeRay(_LeaseFakeRay):
+    """Fake ``ray`` whose submitted round never becomes ready -- the PENDING_NODE_ASSIGNMENT case."""
+
+    #: Poll budget, so a submitter with no deadline fails this test instead of hanging it forever.
+    _MAX_POLLS = 50
+
+    def __init__(self):
+        super().__init__()
+        self.polls = 0
+        #: Teardown steps, in the order the submitter took them.
+        self.steps: list[str] = []
+
+    def wait(self, refs, *, num_returns=1, timeout=None):
+        self.polls += 1
+        assert self.polls <= self._MAX_POLLS, "the submitter is still polling a round that will never be ready"
+        time.sleep(timeout or 0)
+        return [], list(refs)
+
+    def cancel(self, ref, **_kw):
+        self.steps.append("cancel_ref")
+        super().cancel(ref, **_kw)
+
+    def kill(self, actor):
+        self.steps.append("kill_actor")
+        super().kill(actor)
+
+
+def test_serving_lease_round_that_never_schedules_times_out(monkeypatch: pytest.MonkeyPatch):
+    """A round Ray never schedules is abandoned, not waited on forever (2026-09-21 stall)."""
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    # Shortened so the test spends its time on the order of the steps, not on their real budgets.
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+
+    assert time.monotonic() - started < 30.0
+    assert "ray_round_wait_timeout" in (excinfo.value.stderr or "")
+    # The headline number names the ceiling that was crossed, not the round's own (larger, uncrossed) cap.
+    assert excinfo.value.timeout == pytest.approx(0.2)
+    # Cooperative stop FIRST: ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing ahead of the
+    # actor's own CancelScope would strand a genuinely running server tree on its GPUs.
+    assert fake.steps == ["ask_actor_to_cancel", "cancel_ref", "kill_actor"]
+    # The lease is released rather than held by a round nobody will ever collect.
+    assert actor in fake.killed
+    assert lease._actor is None
+    assert fake.cancelled
+
+
+def test_round_wait_ceiling_derives_from_the_rounds_own_cap(monkeypatch: pytest.MonkeyPatch):
+    """Unset env must not cut a legitimately slow round short, nor invent a cap the caller declined."""
+    monkeypatch.delenv(rs.ROUND_WAIT_TIMEOUT_ENV, raising=False)
+    assert rs._round_wait_timeout_sec(1800) == 1800 + rs.ROUND_WAIT_SLACK_SEC
+    # An uncapped round gets no ceiling: "no limit" must not quietly become "killed after the slack".
+    assert rs._round_wait_timeout_sec(None) == 0.0
+    assert rs._round_wait_timeout_sec(0) == 0.0
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "not-a-number"])
+def test_round_wait_ceiling_rejects_values_that_would_disable_it(raw: str, monkeypatch: pytest.MonkeyPatch):
+    """``nan > 0`` is False, so a nan override would silently restore the unbounded wait."""
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, raw)
+    with pytest.raises(ValueError, match=rs.ROUND_WAIT_TIMEOUT_ENV):
+        rs._round_wait_timeout_sec(60)
+
+
+def test_await_or_cancel_requires_an_explicit_round_cap():
+    """A caller that forgets the cap must fail loudly, not inherit a ceiling it never asked for."""
+    with pytest.raises(TypeError):
+        ServingLease(num_gpus=1)._await_or_cancel(object(), cmd=["x"], cancel_scope=None)
 
 
 def test_serving_lease_close_idempotent(monkeypatch: pytest.MonkeyPatch):
@@ -1834,6 +1940,9 @@ class _NoTimeoutCapturingFakeRay:
         if isinstance(ref, _NoTimeoutCapturingFakeRay.exceptions.RayActorError):
             raise ref
         return ref
+
+    def wait(self, refs, *, num_returns=1, timeout=None):
+        return list(refs)[:num_returns], list(refs)[num_returns:]
 
     def kill(self, actor):
         self.killed.append(actor)

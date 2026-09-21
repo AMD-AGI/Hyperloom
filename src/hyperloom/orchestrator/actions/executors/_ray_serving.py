@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -38,6 +39,26 @@ CANCEL_ROUND_GRACE_SEC: float = COOPERATIVE_REAP_BUDGET_SEC + _CANCEL_POLL_SEC
 # How long releasing a lease waits for the actor to reap its served process before killing the actor anyway.
 CLOSE_STOP_TIMEOUT_SEC: float = 10.0
 
+# Wall-clock ceiling on how long the submitter blocks on one round, over and above the round's own hard cap.
+# ``ray.wait`` only times out its poll, so the loop around it had no deadline at all: on 2026-09-21 two warmup
+# rounds whose tasks Ray never scheduled -- 8/8 GPUs held by ghost reservations from a specialist that died
+# without releasing them -- sat in PENDING_NODE_ASSIGNMENT for over an hour, parking their pool threads and
+# leaving their lane leases to expire unreclaimed.
+#
+# The slack covers only what the round spends OUTSIDE its own cap, which is less than it looks: server bringup is
+# inside it, because ``_grid_runner.sync_benchmark_timeout`` writes the same ``timeout_sec`` into the benchmark's
+# ``server_lifecycle.server_ready_timeout_s``, and both submitters run that before submitting. What is genuinely
+# outside is Ray dispatching the method onto an actor ``ensure()`` already created, the cooperative reap the actor
+# performs once the cap fires (``COOPERATIVE_REAP_BUDGET_SEC``), and shipping the round's captured stdout/stderr
+# back through the object store -- seconds to a few minutes. An hour is a deliberately wide margin over that, so a
+# loaded head node can be slow by two orders of magnitude before a real round is cut short.
+ROUND_WAIT_SLACK_SEC: float = 3600.0
+
+# Absolute override for the ceiling above, in seconds; unset means ``round timeout + ROUND_WAIT_SLACK_SEC``.
+# ``<= 0`` disables the ceiling, which is also what a round with no cap of its own gets.
+ROUND_WAIT_TIMEOUT_ENV: str = "INFERENCE_OPTIMIZER_RAY_ROUND_WAIT_SEC"
+
+
 # Method slots the serving actor runs at once: the round, plus room for the cancel that has to reach it.
 _SERVING_ACTOR_CONCURRENCY: int = 2
 
@@ -65,6 +86,46 @@ def _assert_cluster_feasible(*, num_gpus: float, serving_slot: bool) -> None:
             "existing Ray head has no serving_slot resource; "
             "restart with --resources='{\"serving_slot\":1}' or set INFERENCE_OPTIMIZER_RAY_EXEC=0"
         )
+
+
+def _round_wait_timeout_sec(timeout: int | float | None) -> float:
+    """Return the wall-clock ceiling for blocking on one round; ``<= 0`` disables the ceiling.
+
+    Args:
+        timeout: The round's own hard cap in seconds, or ``None`` when it has none.
+
+    Returns:
+        float: Seconds to allow, or ``0.0`` for no ceiling.
+
+    Raises:
+        ValueError: The override is set to something other than a finite number.
+    """
+    raw = os.environ.get(ROUND_WAIT_TIMEOUT_ENV, "").strip()
+    if raw:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{ROUND_WAIT_TIMEOUT_ENV} must be a finite number, got {raw!r}") from exc
+        if not math.isfinite(value):
+            # Rejected rather than tolerated, the way ``_subprocess_kill.resolve_benchmark_timeouts`` rejects its
+            # own overrides: ``nan > 0`` is False, so a nan here would switch the ceiling off altogether and one
+            # ops typo would silently reinstate the stall this ceiling exists to bound.
+            raise ValueError(f"{ROUND_WAIT_TIMEOUT_ENV} must be a finite number, got {raw!r}")
+        return value
+    if timeout is None or timeout <= 0:
+        # A round the caller chose not to cap gets no ceiling either. Deriving one from a zero cap would mean
+        # "no limit" silently became "killed after ROUND_WAIT_SLACK_SEC".
+        return 0.0
+    return float(timeout) + ROUND_WAIT_SLACK_SEC
+
+
+def _round_wait_timeout_stderr(waited: float, ceiling: float) -> str:
+    """Explain a round abandoned at the wall-clock ceiling, and how to widen it."""
+    return (
+        f"ray_round_wait_timeout: the Ray round did not return within {waited:.0f}s "
+        f"(ceiling {ceiling:.0f}s, raise it with {ROUND_WAIT_TIMEOUT_ENV}); its task was most likely never "
+        "schedulable -- check for held GPU/serving_slot resources with no live process behind them"
+    )
 
 
 def _pdeathsig_preexec() -> None:
@@ -410,10 +471,9 @@ class ServingLease:
         _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
         _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
         try:
-            if cancel_scope is None:
-                rc, out, err = ray.get(ref)
-            else:
-                rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
+            # Even an uncancellable round goes through the polling wait: a bare ``ray.get`` has no wall-clock
+            # deadline, which is exactly how a never-scheduled task parked a pool thread for an hour.
+            rc, out, err = self._await_or_cancel(ref, cmd=cmd, timeout=timeout, cancel_scope=cancel_scope)
         except _actor_err as exc:  # type: ignore[misc]
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
@@ -441,37 +501,96 @@ class ServingLease:
             raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
         return rc, out, err
 
-    def _await_or_cancel(self, ref: Any, *, cancel_scope: Any) -> tuple[int, str, str]:
-        """Block on a round, asking the actor to stop it if the scope is cancelled."""
+    def _await_or_cancel(
+        self,
+        ref: Any,
+        *,
+        cmd: list[str],
+        timeout: int | float | None,
+        cancel_scope: Any,
+    ) -> tuple[int, str, str]:
+        """Block on a round, asking the actor to stop it if the scope is cancelled or the ceiling passes.
+
+        Args:
+            ref: The submitted ``run_blocking`` object ref.
+            cmd: The round's argv, for the :exc:`subprocess.TimeoutExpired` raised at the ceiling.
+            timeout: The round's own hard cap in seconds, or ``None``; the ceiling is derived from it.
+            cancel_scope: Scope to watch for an orchestrator cancel, or ``None`` for an uncancellable round.
+
+        Returns:
+            tuple[int, str, str]: The round's ``(rc, stdout, stderr)``.
+
+        Raises:
+            subprocess.TimeoutExpired: The round did not return inside the wall-clock ceiling.
+        """
         import ray  # noqa: PLC0415
 
         from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE  # noqa: PLC0415
 
+        started_at = time.monotonic()
+        wait_ceiling = _round_wait_timeout_sec(timeout)
         asked_at: float | None = None
+        # Set when the ceiling, rather than the scope, is what asked the actor to stop. The two share the teardown
+        # below -- cooperative stop, then kill -- but owe the caller different outcomes.
+        timed_out = False
         while True:
             ready, _ = ray.wait([ref], num_returns=1, timeout=_CANCEL_POLL_SEC)
             if ready:
-                return ray.get(ref)
-            if asked_at is None:
-                if not cancel_scope.cancelled:
-                    continue
-                reason = cancel_scope.reason or "orchestrator_cancelled"
-                asked_at = time.monotonic()
-                log.warning(
-                    "ServingLease: asking the actor to stop the round in flight (%s)",
-                    reason,
+                rc, out, err = ray.get(ref)
+                if not timed_out:
+                    return rc, out, err
+                # The actor did come back, but only because the ceiling made us ask it to: the caller is owed the
+                # timeout, not whatever returncode a stopped round reports.
+                raise subprocess.TimeoutExpired(
+                    cmd,
+                    wait_ceiling,
+                    output=out or None,
+                    stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
                 )
+            if asked_at is None:
+                waited = time.monotonic() - started_at
+                if wait_ceiling > 0 and waited >= wait_ceiling:
+                    # Nobody is going to cancel this scope: a task Ray never schedules stays 'running' forever and
+                    # the lease it holds is never released. Go through the cancel path's cooperative step first --
+                    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing an actor whose round is
+                    # genuinely still running would strand the served process tree on its GPUs.
+                    timed_out = True
+                    reason = f"ray_round_wait_timeout after {waited:.0f}s"
+                    log.warning(
+                        "ServingLease: the round has not returned in %.0fs (ceiling %.0fs); asking the actor to "
+                        "stop it -- its task was most likely never schedulable",
+                        waited,
+                        wait_ceiling,
+                    )
+                elif cancel_scope is not None and cancel_scope.cancelled:
+                    reason = cancel_scope.reason or "orchestrator_cancelled"
+                    log.warning(
+                        "ServingLease: asking the actor to stop the round in flight (%s)",
+                        reason,
+                    )
+                else:
+                    continue
+                asked_at = time.monotonic()
                 if not self._ask_actor_to_cancel(reason):
                     # The actor never took the round, or cannot be reached to be told about it.
                     asked_at -= CANCEL_ROUND_GRACE_SEC
             elif time.monotonic() - asked_at >= CANCEL_ROUND_GRACE_SEC:
                 log.warning(
-                    "ServingLease: the actor did not return its cancelled round within %.0fs; "
+                    "ServingLease: the actor did not return its round within %.0fs of being asked to stop; "
                     "killing it to release the lease",
                     CANCEL_ROUND_GRACE_SEC,
                 )
                 # Straight to the kill: an actor that has not answered is not going to answer a graceful stop either,
                 # and waiting for one would spend the rest of the window the caller is owed.
+                if timed_out:
+                    # Drop the round before the handle goes, so Ray stops holding a task nobody will ever collect.
+                    self._abandon_ref(ref)
+                    self._kill_actor()
+                    raise subprocess.TimeoutExpired(
+                        cmd,
+                        wait_ceiling,
+                        stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
+                    )
                 self._kill_actor()
                 return (
                     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -479,6 +598,17 @@ class ServingLease:
                     "the orchestrator cancelled this action; its Ray actor was killed after "
                     f"{CANCEL_ROUND_GRACE_SEC:.0f}s without returning the round",
                 )
+
+    def _abandon_ref(self, ref: Any) -> None:
+        """Drop a round this lease will never collect. Never raises."""
+        try:
+            import ray  # noqa: PLC0415
+
+            # Recoverable cancels only: a task still queued for an actor we are about to kill has nothing to
+            # interrupt, and ``force=True`` is rejected for actor tasks.
+            ray.cancel(ref)
+        except Exception as exc:  # noqa: BLE001 — the actor kill below is what actually frees the resources
+            log.warning("ServingLease: could not cancel the abandoned round: %r", exc)
 
     def _ask_actor_to_cancel(self, reason: str) -> bool:
         """Tell the actor to stop the round it is running. Never raises."""
