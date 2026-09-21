@@ -120,8 +120,8 @@ The following inference frameworks are supported:
      - ROCm version
      - Notes
    * - SGLang
-     - 10.0
-     - Default framework; recommended docker stack uses ``rocm10`` SGLang images (see below)
+     - 10.0 (docker) / 7.2.4 (bare-metal wheel)
+     - Default framework. Validated ``docker`` images use ROCm 10.0 (``rocm10`` tags below). On a ROCm 7.2.x bare-metal host the installer still derives ``SGLANG_ROCM_EXTRA=rocm724`` from ``torch.version.hip`` (see below).
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
@@ -185,8 +185,8 @@ Hyperloom does not install ROCm or torch itself.
      - Ubuntu 24.04
      - Recommended bare-metal baseline. vLLM 0.28.0+ ROCm wheels require glibc >= 2.39, so Ubuntu 22.04 hosts must downgrade vLLM (for example ``VLLM_VERSION=0.27.1``) or use ``docker`` mode instead.
    * - ROCm
-     - 7.2.x
-     - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
+     - 7.2.x (bare metal) / 10.0 (SGLang docker)
+     - Patch levels differ by framework and setup mode. vLLM uses ROCm 7.2.3 (``rocm723``). On a ROCm 7.2.x bare-metal host, SGLang resolves ``SGLANG_ROCM_EXTRA=rocm724`` (ROCm 7.2.4 layer). The validated SGLang ``docker`` stack uses ROCm 10.0 user space (``rocm10`` images below), not the 7.2.4 bare-metal wheel path.
    * - Python
      - 3.12
      - Required by the vLLM ROCm wheel.

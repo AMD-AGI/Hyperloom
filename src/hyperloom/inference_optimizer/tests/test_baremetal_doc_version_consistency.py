@@ -49,6 +49,9 @@ def test_baremetal_defaults_match_compat_doc():
     assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
 
     sglang_pretend = _default("SGLANG_PRETEND_VERSION", sh)
+    assert sglang_pretend == "0.5.20", (
+        "SGLANG_PRETEND_VERSION must name the release the pinned commit fits; got %s" % sglang_pretend
+    )
     assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"' in sh, (
         "install_baremetal.sh must export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG from SGLANG_PRETEND_VERSION"
     )
