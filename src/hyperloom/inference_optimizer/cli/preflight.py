@@ -1138,8 +1138,14 @@ def _probe_missing_lm_eval_deps(python_exe: str) -> list[str] | None:
 
 
 # The harness the single-node path ends up on: InferenceX's benchmark_lib.sh force-reinstalls this commit over
-# whatever pip resolved.
-_LM_EVAL_PINNED_REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
+# whatever pip resolved, so the two have to name the same one.
+#
+# v0.4.13. The ref this held before was a 2025-12-02 commit whose accuracy path crashes on the first refused
+# connection: the handler for a failed request logs ``outputs``, which is only assigned once a response has
+# been parsed, so a connect that fails raises UnboundLocalError over the real error and takes the eval with it
+# (EleutherAI/lm-evaluation-harness#3293, fixed upstream 2026-02-24). That ref predates the fix by three
+# months, so every single-node accuracy round carried the crash.
+_LM_EVAL_PINNED_REF = "ddd67220430a2470529f25fd5c05a576ca1057a0"
 _LM_EVAL_REPO = "github.com/EleutherAI/lm-evaluation-harness"
 # git first, then the archive, because the sandbox may not ship a git binary.
 _LM_EVAL_PINNED_SPECS = (
