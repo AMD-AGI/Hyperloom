@@ -1079,3 +1079,71 @@ def test_baseline_hook_skips_the_anchor_check_when_eval_is_off(tmp_path, monkeyp
     )
 
     assert out is None
+
+
+# SemiAnalysisAI/InferenceX#3022 moved the Python tools into ``infx/`` and left
+# ``utils/bench_serving/benchmark_serving.py`` behind as a forwarding shim that
+# carries none of the text this patch matches on.
+_BS_FORWARDING_SHIM = (
+    '"""Compatibility entrypoint for :mod:`infx.bench_serving.benchmark_serving`."""\n'
+    "import importlib\n"
+    "import sys\n"
+    'sys.modules[__name__] = importlib.import_module("infx.bench_serving.benchmark_serving")\n'
+)
+
+
+def _write_infx_layout(root: Path) -> tuple[Path, Path]:
+    """Lay out a post-#3022 checkout: implementation under ``infx/``, shim under ``utils/``."""
+    real_dir = root / "infx" / "bench_serving"
+    real_dir.mkdir(parents=True)
+    real = real_dir / "benchmark_serving.py"
+    real.write_text(_BS_UPSTREAM_FIXTURE, encoding="utf-8")
+
+    shim_dir = root / "utils" / "bench_serving"
+    shim_dir.mkdir(parents=True)
+    shim = shim_dir / "benchmark_serving.py"
+    shim.write_text(_BS_FORWARDING_SHIM, encoding="utf-8")
+    return real, shim
+
+
+def test_benchmark_serving_patch_follows_the_infx_move(tmp_path: Path) -> None:
+    """A post-#3022 checkout is patched where the implementation lives, not at the shim."""
+    real, shim = _write_infx_layout(tmp_path)
+
+    assert ensure_benchmark_serving_patched(tmp_path) is True
+    assert "PROFILE_EXTRA_BODY" in real.read_text(encoding="utf-8")
+    assert _BS_LEGACY_LINE not in real.read_text(encoding="utf-8")
+    assert "PROFILE_EXTRA_BODY" not in shim.read_text(encoding="utf-8")
+
+
+def test_anchor_check_reads_the_infx_copy_not_the_shim(tmp_path: Path) -> None:
+    """The shim holds no anchor, so a fixed path would report an intact contract broken."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        failed_patch_anchors,
+        failed_patch_anchors_in,
+        verify_patch_anchors,
+    )
+
+    real, _shim = _write_infx_layout(tmp_path)
+
+    status = next(s for s in verify_patch_anchors(tmp_path) if s.name == "profile_extra_body")
+    assert status.path == real
+    assert status.ok
+    assert "profile_extra_body" not in {s.name for s in failed_patch_anchors(tmp_path)}
+    assert "profile_extra_body" not in {s.name for s in failed_patch_anchors_in(tmp_path)}
+
+
+def test_benchmark_serving_legacy_layout_is_still_resolved(tmp_path: Path) -> None:
+    """A checkout from before the move keeps being patched at the old path."""
+    from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
+        benchmark_serving_path_in,
+    )
+
+    bench_dir = tmp_path / "utils" / "bench_serving"
+    bench_dir.mkdir(parents=True)
+    legacy = bench_dir / "benchmark_serving.py"
+    legacy.write_text(_BS_UPSTREAM_FIXTURE, encoding="utf-8")
+
+    assert benchmark_serving_path_in(tmp_path) == legacy
+    assert ensure_benchmark_serving_patched(tmp_path) is True
+    assert "PROFILE_EXTRA_BODY" in legacy.read_text(encoding="utf-8")
