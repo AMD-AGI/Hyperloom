@@ -32,9 +32,11 @@ from hyperloom.common.env_safety import (
     is_python_package_root,
 )
 from hyperloom.common.llm_config import (
+    AGENT_BACKEND_DEEPSEEK,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
+    ORCHESTRATION_BACKEND_ENV,
     anthropic_synthesizable_key,
     deepseek_compat_env,
     has_anthropic_credential,
@@ -499,6 +501,10 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )
+    # The third runtime does not ship by default: no role selects it on a
+    # credential shape, so only a launch that named it needs it installed.
+    if (os.environ.get(ORCHESTRATION_BACKEND_ENV) or "").strip().lower() == AGENT_BACKEND_DEEPSEEK:
+        candidates = (*candidates, ("deepseek_harness", "deepseek-harness-sdk>=0.1.5"))
     installed: list[str] = []
     already_present: list[str] = []
     for module_name, pip_spec in candidates:

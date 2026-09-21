@@ -18,12 +18,21 @@ from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
     CriticAgentBackend,
+    DeepSeekBackend,
     MockCriticBackend,
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS, ProposalScorer
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
+
+ORCHESTRATION_BACKEND_ENV = llm_config.ORCHESTRATION_BACKEND_ENV
+
+ORCHESTRATION_BACKEND_CHOICES: tuple[str, ...] = (
+    llm_config.AGENT_BACKEND_CLAUDE,
+    llm_config.AGENT_BACKEND_CODEX,
+    llm_config.AGENT_BACKEND_DEEPSEEK,
+)
 
 
 def _any_env_set(names: tuple[str, ...]) -> bool:
@@ -38,6 +47,24 @@ def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_co
     return (not codex_follows_claude) and (
         claude_follows_codex or llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
     )
+
+
+def _resolve_orchestration_backend(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> str:
+    """Pick the agent CLI that runs the orchestration role."""
+    requested = (os.environ.get(ORCHESTRATION_BACKEND_ENV) or "").strip().lower()
+    if requested:
+        if requested not in ORCHESTRATION_BACKEND_CHOICES:
+            raise ValueError(f"{ORCHESTRATION_BACKEND_ENV}={requested!r} not in {set(ORCHESTRATION_BACKEND_CHOICES)}")
+        if requested == llm_config.AGENT_BACKEND_DEEPSEEK and not llm_config.deepseek_harness_sdk_installed():
+            raise ValueError(
+                f"{ORCHESTRATION_BACKEND_ENV}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra"
+            )
+        return requested
+    if orchestration_runs_on_codex(
+        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    ):
+        return llm_config.AGENT_BACKEND_CODEX
+    return llm_config.AGENT_BACKEND_CLAUDE
 
 
 def _resolve_critic_protocol(requested: str, *, orchestration_on_codex: bool) -> str:
@@ -102,6 +129,7 @@ class ModelRouting:
     codex_model: str
     codex_follows_claude: bool = False
     claude_follows_codex: bool = False
+    deepseek_model: str = llm_config.DEFAULT_DEEPSEEK_HARNESS_MODEL
 
 
 @dataclass(frozen=True)
@@ -118,12 +146,16 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
     """Construct all per-role backends."""
     critic_choice, critic_agent_root = critic.choice, critic.agent_root
     claude_model, codex_model = models.claude_model, models.codex_model
+    deepseek_model = models.deepseek_model
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
     # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
     # second reading of the endpoint shape.
     orchestration_on_codex = orchestration_runs_on_codex(
+        codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
+    )
+    orchestration_backend_name = _resolve_orchestration_backend(
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
 
@@ -159,12 +191,22 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
                 action_verdict_policy=_policy,
             )
 
-    if orchestration_on_codex:
+    if orchestration_backend_name == llm_config.AGENT_BACKEND_CODEX:
         orchestration_backend: Any = CodexBackend(
             allowed_intents=default_role_registry()["orchestration"].allowed_intents,
             model=codex_model,
             # Scratch only.
             cwd=agent_dir(session_dir, "orchestration") / "codex_workspace",
+        )
+    elif orchestration_backend_name == llm_config.AGENT_BACKEND_DEEPSEEK:
+        orchestration_backend = DeepSeekBackend(
+            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+            model=deepseek_model,
+            # Scratch only.
+            cwd=agent_dir(session_dir, "orchestration") / "deepseek_workspace",
+            # The role reads state and answers with intents; it writes no files,
+            # so the harness gets no write permission to confine.
+            permission_mode="read-only",
         )
     else:
         # Orchestration is stateless: every tick opens a fresh session and

@@ -157,9 +157,16 @@ _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 # A managed gateway carries the credential itself, so it can drive the Claude CLI without naming a key.
 _ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
 
-# The two agent CLIs that can drive this repository's agentic roles.
+# The agent CLIs that can drive this repository's agentic roles.
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
+AGENT_BACKEND_DEEPSEEK = "deepseek"
+
+#: Names the agent CLI that runs the orchestration role, overriding the shared
+#: credential-ranked rule. The DeepSeek Harness is reachable only this way: it
+#: returns its intents in the reply body with no schema enforcing them, so it is
+#: a route an operator asks for rather than one a credential shape can select.
+ORCHESTRATION_BACKEND_ENV = "INFERENCE_OPTIMIZER_ORCHESTRATION_BACKEND"
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
@@ -167,6 +174,9 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 # The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
 # behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
 DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+# The harness route mounts DeepSeek's own models only, so this names one of
+# those rather than a gateway deployment.
+DEFAULT_DEEPSEEK_HARNESS_MODEL = "deepseek-v4-flash"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
@@ -231,6 +241,13 @@ def codex_agent_sdk_installed() -> bool:
     from importlib.util import find_spec
 
     return find_spec("openai_codex") is not None
+
+
+def deepseek_harness_sdk_installed() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("deepseek_harness") is not None
 
 
 def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int, int]:
@@ -1075,6 +1092,7 @@ def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> Non
 __all__ = [
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
+    "AGENT_BACKEND_DEEPSEEK",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
@@ -1088,9 +1106,11 @@ __all__ = [
     "DEFAULT_ANTHROPIC_VERSION",
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_MODEL",
+    "DEFAULT_DEEPSEEK_HARNESS_MODEL",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
+    "ORCHESTRATION_BACKEND_ENV",
     "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
@@ -1110,6 +1130,7 @@ __all__ = [
     "claude_sdk_env_options",
     "codex_agent_sdk_installed",
     "deepseek_compat_env",
+    "deepseek_harness_sdk_installed",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
