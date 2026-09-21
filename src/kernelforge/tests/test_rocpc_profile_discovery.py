@@ -122,9 +122,7 @@ def _make_sdk_pkg(site: Path, name: str, *, profiler: bool = False, amdsmi: bool
     return root
 
 
-def test_profiler_env_points_rocm_path_at_the_package_holding_the_sdk(
-    rocpc_profile, tmp_path, monkeypatch
-) -> None:
+def test_profiler_env_points_rocm_path_at_the_package_holding_the_sdk(rocpc_profile, tmp_path, monkeypatch) -> None:
     """The runtime-only wheel stack ships no _rocm_sdk_devel, so ROCM_PATH is
     unset and rocprof-compute cannot resolve its rocprofiler-sdk tool at all --
     it aborts before profiling anything."""
@@ -138,9 +136,7 @@ def test_profiler_env_points_rocm_path_at_the_package_holding_the_sdk(
     assert env["ROCM_PATH"] == str(core)
 
 
-def test_profiler_env_keeps_a_rocm_path_that_already_has_the_sdk(
-    rocpc_profile, tmp_path, monkeypatch
-) -> None:
+def test_profiler_env_keeps_a_rocm_path_that_already_has_the_sdk(rocpc_profile, tmp_path, monkeypatch) -> None:
     site = tmp_path / "site"
     _make_sdk_pkg(site, "_rocm_sdk_core", profiler=True)
     devel = tmp_path / "devel"
