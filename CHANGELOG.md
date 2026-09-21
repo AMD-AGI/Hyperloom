@@ -20,6 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Inline MCP actions no longer block the coordinator's event loop.** The
+  `run_action_now` context tool awaits the action's result without blocking the
+  loop or occupying the thread pool needed by database operations. Action
+  execution, timers and caller cancellation can proceed concurrently. Direct
+  calls to the synchronous bridge on the coordinator loop now fail immediately
+  without scheduling work. Existing inline wait limits and registered-action
+  completion after a caller timeout remain unchanged.
+
 - Kernel tuning now uses a 1% default E2E KEEP threshold for GEMM integration
   and fusion siblings, while preserving explicit fusion threshold overrides.
   MoE tuning collects candidates from the producer's actual temporary directory,
