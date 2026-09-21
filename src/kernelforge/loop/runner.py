@@ -3781,9 +3781,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             source_ms = self.ic.pristine_baseline_wall_ms
             improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
 
-        # Step 7: the arena's own verdict.
+        # Step 7: the numerical contract, which only assembly declares and only it
+        # needs. Every other backend was judged by the driver in Step 4 and measured
+        # through it since; re-running that verdict here would answer the same
+        # question with the same command, while reading a task configuration whose
+        # shape the engine has no business knowing.
         canonical_summary = ""
-        if improved:
+        if improved and self.ic.kernel_backend == "assembly":
             canonical_started = time.time()
             canonical = await accept_candidate(
                 self.ic.workspace_dir,

@@ -1521,7 +1521,6 @@ def forge_loop(
                 source_files=source_files_list,
                 operator_name=operator_name,
                 bench_repeat=bench_repeat,
-                canonical_timeout_cap_sec=(iter_config.validate_stage_timeout_sec),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")

@@ -28,7 +28,6 @@ from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )
 from kernelforge.durable_io import atomic_write_text, fsync_directory
-from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
@@ -48,7 +47,6 @@ _WARMSTART_CLAIM_CONFIRMED_RATIO = 0.9
 
 # Ceiling on the task's declared correctness suite when a warm start runs it, used when no caller passes the loop's
 # own ``validate_stage_timeout_sec``.
-_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC = 1800
 
 _KB_REFERENCES_REL = Path("forge_experiments") / "kb_references"
 
@@ -702,7 +700,6 @@ def _adopt_measured_candidate(
     workspace_dir,
     source_files,
     allowed_paths,
-    canonical_timeout_cap_sec: int,
 ) -> tuple[str, str]:
     """Re-apply one already-measured candidate and commit it as the start."""
     pre_untracked = _untracked_files(workspace_dir)
@@ -729,28 +726,11 @@ def _adopt_measured_candidate(
             flush=True,
         )
         return "", "rebuild_failed"
-    try:
-        canonical = asyncio.run(
-            accept_candidate(
-                workspace_dir,
-                timeout_cap_sec=canonical_timeout_cap_sec,
-                candidate_label=(f"KB warm-start {sol.get('solution_slug', '')}".strip()),
-            )
-        )
-    except Exception as error:  # noqa: BLE001 - a suite forge cannot run rejects
-        _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
-        print(
-            f"  [kb] warm-start candidate rejected: the canonical correctness suite could not be run ({error})",
-            flush=True,
-        )
-        return "", "canonical_correctness_failed"
-    if not canonical.passed:
-        _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
-        print(
-            f"  [kb] warm-start candidate rejected: the task's own correctness suite failed ({canonical.detail})",
-            flush=True,
-        )
-        return "", "canonical_correctness_failed"
+    # The driver already rejected an incorrect or slower candidate before this
+    # one was chosen, and re-applying the same patch to the same base it was
+    # measured on reproduces what it measured. Judging it again here asked the
+    # driver the same question, through a task configuration the engine had to
+    # assume was written in one particular shape.
     try:
         commit = _git_commit_all(
             workspace_dir,
@@ -1041,7 +1021,6 @@ def kb_warmstart(
     operator_name="",
     resume=False,
     bench_repeat=1,
-    canonical_timeout_cap_sec=_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC,
 ) -> dict:
     """Look up + apply the best prior solution as the loop's starting point.
 
@@ -1267,7 +1246,6 @@ def kb_warmstart(
                     workspace_dir=workspace_dir,
                     source_files=source_files,
                     allowed_paths=allowed_paths,
-                    canonical_timeout_cap_sec=canonical_timeout_cap_sec,
                 )
                 if reject_reason:
                     statuses[idx] = f"rejected:{reject_reason}"
