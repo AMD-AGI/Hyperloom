@@ -276,6 +276,16 @@ import os as _os_env  # noqa: E402
 # non-benchmarked terminal outcomes), the source arm is dry.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
+# Per-lever dryness thresholds (C6: replaces the two per-arm predicates).
+# The config lever reuses the explore plateau shape (keep_gain + empty_streak);
+# the patch levers use the framework candidate shape (consecutive no-keep).
+# These seed the respective _plateau_overrides keys; per-lever constants must not be shared.
+DEFAULT_PLATEAU_CONFIG_LEVER_KEEP_GAIN_PCT: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT  # 0.5
+DEFAULT_PLATEAU_CONFIG_LEVER_EMPTY_STREAK: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK      # 5
+DEFAULT_PLATEAU_CONFIG_LEVER_LOOKBACK: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK              # 5
+DEFAULT_PLATEAU_SOURCE_PATCH_NO_KEEP_STREAK: int = DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK  # 5
+DEFAULT_PLATEAU_UPSTREAM_PR_NO_KEEP_STREAK: int = DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK   # 5
+
 
 # R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT for a new macro-cycle while budget remains and the run
 # hasn't globally converged.
@@ -1722,8 +1732,115 @@ def source_arm_plateaued(state: Any) -> tuple[bool, dict[str, Any]]:
     return (streak >= threshold or exhausted), evidence
 
 
+def _lever_dry(
+    state: Any,
+    lever_kind: str,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Whether one lever has stopped paying, judged over SharedState.attempts.
+
+    The config lever uses a (recent_keep_gain + empty_streak) shape; the patch
+    levers use a consecutive-no-keep shape. Thresholds are per-lever — not shared
+    across levers and not re-using the KERNEL thresholds.
+
+    Args:
+        state: The SharedState.
+        lever_kind: One of ``"config"``, ``"source_patch"``, ``"upstream_pr"``.
+        overrides: Optional plateau_overrides dict for operator tuning.
+
+    Returns:
+        ``(dry, evidence)`` pair.
+    """
+    ov = dict(overrides or {})
+    attempts = [
+        a for a in (_rows_for_current_cycle(getattr(state, "attempts", None) or [], state))
+        if isinstance(a, dict) and str(a.get("lever_kind") or a.get("arm") or "") in (lever_kind,)
+    ]
+
+    if lever_kind == "config":
+        lookback = int(ov.get("config_lever_lookback", DEFAULT_PLATEAU_CONFIG_LEVER_LOOKBACK))
+        keep_gain_threshold = float(ov.get("config_lever_keep_gain_pct", DEFAULT_PLATEAU_CONFIG_LEVER_KEEP_GAIN_PCT))
+        empty_streak_threshold = int(ov.get("config_lever_empty_streak", DEFAULT_PLATEAU_CONFIG_LEVER_EMPTY_STREAK))
+
+        recent = attempts[-lookback:] if lookback > 0 else []
+        recent_keep_gain = sum(
+            float(a.get("gain_pct") or 0.0)
+            for a in recent
+            if _is_kept_str(str(a.get("outcome") or a.get("verdict") or ""))
+        )
+        # Trailing empty streak: attempts that produced no keep in a row.
+        streak = 0
+        for a in reversed(attempts):
+            if _is_kept_str(str(a.get("outcome") or a.get("verdict") or "")):
+                break
+            streak += 1
+        triggered = recent_keep_gain < keep_gain_threshold and streak >= empty_streak_threshold
+        return triggered, {
+            "lever_kind": lever_kind,
+            "recent_keep_gain_pct": round(recent_keep_gain, 4),
+            "keep_gain_threshold_pct": keep_gain_threshold,
+            "empty_streak": streak,
+            "empty_streak_threshold": empty_streak_threshold,
+            "lookback": lookback,
+        }
+
+    # Patch levers (source_patch, upstream_pr): consecutive-no-keep shape.
+    no_keep_threshold = int(ov.get(
+        f"{lever_kind.replace('_', '-')}_no_keep_streak",
+        DEFAULT_PLATEAU_SOURCE_PATCH_NO_KEEP_STREAK if lever_kind == "source_patch"
+        else DEFAULT_PLATEAU_UPSTREAM_PR_NO_KEEP_STREAK,
+    ))
+    streak = 0
+    for a in reversed(attempts):
+        if str(a.get("outcome") or a.get("verdict") or "").lower() == "cycle_boundary":
+            break
+        if _is_kept_str(str(a.get("outcome") or a.get("verdict") or "")):
+            break
+        streak += 1
+    triggered = streak >= no_keep_threshold
+    return triggered, {
+        "lever_kind": lever_kind,
+        "consecutive_no_keep": streak,
+        "no_keep_threshold": no_keep_threshold,
+    }
+
+
+def _is_kept_str(outcome: str) -> bool:
+    """True when outcome is a KEEP in either casing convention."""
+    return outcome in ("KEEP", "kept")
+
+
+def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
+    """Whether all active levers have run dry, using the unified attempts ledger.
+
+    Replaces the (source_arm_plateaued, compute_plateau_explore) pair.
+    One arm going dry raises switch_bottleneck; all levers dry advances the phase.
+    """
+    overrides = dict(getattr(state, "plateau_overrides", None) or {})
+    config_dry, config_ev = _lever_dry(state, "config", overrides=overrides)
+    source_dry, source_ev = _lever_dry(state, "source_patch", overrides=overrides)
+    upstream_dry, upstream_ev = _lever_dry(state, "upstream_pr", overrides=overrides)
+    # The phase stays open while any patch lever still has candidates from
+    # discovery or authoring that haven't exhausted.
+    source_arm_exhausted = bool(getattr(state, "framework_agent_phase_done", False))
+    patch_dry = (source_dry and upstream_dry) or source_arm_exhausted
+    all_dry = config_dry and patch_dry
+    evidence = {
+        **config_ev,
+        "config_lever_dry": config_dry,
+        "patch_lever_dry": patch_dry,
+        "source_patch_ev": source_ev,
+        "upstream_pr_ev": upstream_ev,
+        "switch_bottleneck": bool(config_dry or patch_dry),
+    }
+    return all_dry, evidence
+
+
 def _optimize_did_work_this_cycle(state: Any) -> bool:
     """Whether either arm has dispatched or benched anything this macro-cycle."""
+    if _rows_for_current_cycle(getattr(state, "attempts", None) or [], state):
+        return True
     if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
         return True
     explore_search = getattr(state, "explore_search", None) or {}
@@ -1742,22 +1859,46 @@ def exit_normal_optimize(
     plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
 ) -> tuple[str, dict[str, Any]] | None:
-    """OPTIMIZE normal exit."""
-    source_dry, source_ev = source_arm_plateaued(state)
-    config_dry, config_ev = compute_plateau_explore(
-        state,
-        lookback=plateau_lookback,
-        keep_gain_threshold_pct=plateau_keep_gain_threshold_pct,
-        empty_streak_threshold=plateau_empty_streak_threshold,
-    )
-    arms = {
-        **source_ev,
-        **config_ev,
-        "source_arm_plateaued": source_dry,
-        "config_arm_plateaued": config_dry,
-        # Either arm running dry is enough to redirect the next cycle.
-        "switch_bottleneck": bool(source_dry or config_dry),
-    }
+    """OPTIMIZE normal exit.
+
+    When ``SharedState.attempts`` has entries for this cycle, dryness is
+    evaluated per lever via ``per_lever_dryness``. When attempts is empty
+    (legacy sessions or first tick before any measurement) the function falls
+    back to the legacy arm predicates so existing sessions resume cleanly.
+    """
+    # C6: use per-lever dryness when the unified ledger has data.
+    cycle_attempts = _rows_for_current_cycle(getattr(state, "attempts", None) or [], state)
+    if cycle_attempts:
+        all_dry, lev_ev = per_lever_dryness(state)
+        # Keep backward-compatible evidence key names for the recorder.
+        arms: dict[str, Any] = {
+            **lev_ev,
+            # Legacy aliases consumed by the timeline recorder and tests.
+            "source_arm_plateaued": lev_ev.get("patch_lever_dry", False),
+            "config_arm_plateaued": lev_ev.get("config_lever_dry", False),
+            "switch_bottleneck": lev_ev.get("switch_bottleneck", False),
+            # Preserve legacy evidence keys read by breakdown recorder.
+            "source_consecutive_no_keep": (lev_ev.get("source_patch_ev") or {}).get("consecutive_no_keep", 0),
+            "source_threshold": (lev_ev.get("source_patch_ev") or {}).get("no_keep_threshold", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
+            "source_candidates_exhausted": bool(getattr(state, "framework_agent_phase_done", False)),
+        }
+    else:
+        # Legacy fallback: no attempts recorded yet.
+        source_dry, source_ev = source_arm_plateaued(state)
+        config_dry, config_ev = compute_plateau_explore(
+            state,
+            lookback=plateau_lookback,
+            keep_gain_threshold_pct=plateau_keep_gain_threshold_pct,
+            empty_streak_threshold=plateau_empty_streak_threshold,
+        )
+        all_dry = source_dry and config_dry
+        arms = {
+            **source_ev,
+            **config_ev,
+            "source_arm_plateaued": source_dry,
+            "config_arm_plateaued": config_dry,
+            "switch_bottleneck": bool(source_dry or config_dry),
+        }
 
     hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
@@ -1768,7 +1909,7 @@ def exit_normal_optimize(
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
 
-    if source_dry and config_dry:
+    if all_dry:
         return "optimize_no_more_leverage", {**arms, "evidence": "both_arms_plateaued", "plateau": True}
 
     remaining = phase_budget_remaining_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
@@ -2301,7 +2442,13 @@ __all__ = [
     "framework_agent_plateau_streak_threshold",
     "compute_plateau_kernel",
     "exit_normal_optimize",
+    "per_lever_dryness",
     "source_arm_plateaued",
+    "DEFAULT_PLATEAU_CONFIG_LEVER_KEEP_GAIN_PCT",
+    "DEFAULT_PLATEAU_CONFIG_LEVER_EMPTY_STREAK",
+    "DEFAULT_PLATEAU_CONFIG_LEVER_LOOKBACK",
+    "DEFAULT_PLATEAU_SOURCE_PATCH_NO_KEEP_STREAK",
+    "DEFAULT_PLATEAU_UPSTREAM_PR_NO_KEEP_STREAK",
     "exit_normal_kernel",
     "exit_cold_anchor_prelude",
     "exit_normal_prelude",

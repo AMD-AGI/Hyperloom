@@ -274,32 +274,36 @@ class FrameworkEventRecorder:
 
     def record_policy(self, **fields: Any) -> None:
         """Record the thresholds the entry runs under, as it resolves them, so
-        the event says what the phase used rather than what survived."""
+        the event says what the phase used rather than what survived.
+
+        The ``config`` / ``source`` sub-objects are retained for backward
+        compatibility. New callers may also pass ``per_lever`` for per-lever
+        thresholds from ``per_lever_dryness``.
+        """
         config = _as_dict(fields.get("config"))
         source = _as_dict(fields.get("source"))
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "policy": {
-                    "keep_threshold_pct": _float_or_none(fields.get("keep_threshold_pct")),
-                    "variant_timeout_sec": _int_or_none(fields.get("variant_timeout_sec")),
-                    "overtime_kill_ratio": _float_or_none(fields.get("overtime_kill_ratio")),
-                    "force_exit_budget_pct": _float_or_none(fields.get("force_exit_budget_pct")),
-                    ARM_CONFIG: {
-                        "keep_gain_threshold_pct": _float_or_none(config.get("keep_gain_threshold_pct")),
-                        "empty_streak_threshold": _int_or_none(config.get("empty_streak_threshold")),
-                        "lookback": _int_or_none(config.get("lookback")),
-                    },
-                    ARM_SOURCE: {
-                        "no_keep_streak_threshold": _int_or_none(source.get("no_keep_streak_threshold")),
-                        "discovery_retry_limit": _int_or_none(source.get("discovery_retry_limit")),
-                        "authoring_enabled": None
-                        if source.get("authoring_enabled") is None
-                        else bool(source.get("authoring_enabled")),
-                    },
-                },
+        policy: dict[str, Any] = {
+            "keep_threshold_pct": _float_or_none(fields.get("keep_threshold_pct")),
+            "variant_timeout_sec": _int_or_none(fields.get("variant_timeout_sec")),
+            "overtime_kill_ratio": _float_or_none(fields.get("overtime_kill_ratio")),
+            "force_exit_budget_pct": _float_or_none(fields.get("force_exit_budget_pct")),
+            ARM_CONFIG: {
+                "keep_gain_threshold_pct": _float_or_none(config.get("keep_gain_threshold_pct")),
+                "empty_streak_threshold": _int_or_none(config.get("empty_streak_threshold")),
+                "lookback": _int_or_none(config.get("lookback")),
             },
-        )
+            ARM_SOURCE: {
+                "no_keep_streak_threshold": _int_or_none(source.get("no_keep_streak_threshold")),
+                "discovery_retry_limit": _int_or_none(source.get("discovery_retry_limit")),
+                "authoring_enabled": None
+                if source.get("authoring_enabled") is None
+                else bool(source.get("authoring_enabled")),
+            },
+        }
+        per_lever = fields.get("per_lever")
+        if isinstance(per_lever, dict):
+            policy["per_lever"] = per_lever
+        self._sink.record(SECTION_EVENT, {"policy": policy})
 
     # ---- plateau ---------------------------------------------------------
 
