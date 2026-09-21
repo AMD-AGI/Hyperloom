@@ -235,7 +235,7 @@ Kernel-agent paths (`MAGPIE_PATH`, `INFERENCEX_PATH`, `TRACELENS_ROOT`,
 `GEAK_ROOT`) are added later by the workload skill's `install.sh`.
 
 Specialist subprocesses inherit a minimal environment including LLM provider
-credentials (`ANTHROPIC_API_KEY`, `LLM_GATEWAY_KEY`, AWS Bedrock vars, etc.)
+credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
 by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
 and KB tokens are never forwarded. To suppress credential forwarding when the
 `claude` CLI is authenticated through its own config, set

@@ -65,12 +65,12 @@ ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
-# The same for the OpenAI side: the names a Codex session authenticates with there, highest precedence first. The
-# Anthropic-side keys resolve_openai_client_config() also falls back to are not listed, because a box carrying one of
-# those is credentialed on the Anthropic side and ranks there.
-OPENAI_AGENT_KEY_ENV_ORDER: tuple[str, ...] = (
+# What may authenticate an OpenAI-protocol client, highest precedence first. The Anthropic-side keys come last
+# because an Anthropic-only deployment fronts both protocols behind one gateway token.
+_OPENAI_CLIENT_KEY_ENV_ORDER: tuple[str, ...] = (
     "OPENAI_API_KEY",
-    "LLM_GATEWAY_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
 )
 
 
@@ -110,7 +110,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
 )
 
 # Retired provider-specific variables.
@@ -173,14 +172,14 @@ def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
 def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side can authenticate an agent CLI run.
 
-    Reads the same OpenAI-side names :mod:`hyperloom.common.codex_session`
-    authenticates with, so the side cannot rank as uncredentialed against a key
-    the session would have accepted. A bare ``OPENAI_BASE_URL`` with none of
-    them set is an endpoint hint, not a credential, and treating the URL alone
+    ``OPENAI_API_KEY`` is the only name that authenticates one, which is the
+    same name :mod:`hyperloom.common.codex_session` resolves and the same one
+    ``_validate_credentials`` admits a run on. A bare ``OPENAI_BASE_URL`` with
+    it unset is an endpoint hint, not a credential, and treating the URL alone
     as configured is what sends an unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
-    return bool(_first_set_value(OPENAI_AGENT_KEY_ENV_ORDER, source))
+    return bool((source.get("OPENAI_API_KEY") or "").strip())
 
 
 def is_anthropic_only(env: Mapping[str, str] | None = None) -> bool:
@@ -423,27 +422,10 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("OPENAI_API_KEY") or "").strip()
-        or (source.get("LLM_GATEWAY_KEY") or "").strip()
-        # Anthropic-only deployments: one gateway token authenticates both protocols.
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-    )
+    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
+    api_key = _first_set_value(candidates, source)
     if not api_key:
-        key_names = " / ".join(
-            dict.fromkeys(
-                [
-                    api_key_env,
-                    "OPENAI_API_KEY",
-                    "LLM_GATEWAY_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                ]
-            )
-        )
-        raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
 
     explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
@@ -1112,7 +1094,6 @@ __all__ = [
     "DEFAULT_ANTHROPIC_VERSION",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
-    "OPENAI_AGENT_KEY_ENV_ORDER",
     "OpenAIClientConfig",
     "ResponsesResult",
     "UNRUNNABLE_AGENT_RANK",

@@ -200,9 +200,10 @@ def test_explicit_openai_side_wins_key_and_url_independently():
     assert url_only["base_url"] == "https://explicit.example.invalid/v1"
 
 
-def test_llm_gateway_key_still_outranks_the_anthropic_fallback():
+def test_retired_gateway_key_loses_to_the_anthropic_fallback():
+    """``LLM_GATEWAY_KEY`` is no longer a credential, so the Anthropic side answers instead."""
     env = {**_ANTHROPIC_ONLY_ENV, "LLM_GATEWAY_KEY": "gw-key"}
-    assert openai_client_kwargs(env=env)["api_key"] == "gw-key"
+    assert openai_client_kwargs(env=env)["api_key"] == "gateway-token"
 
 
 _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
@@ -256,9 +257,9 @@ def test_openai_agent_credential_requires_a_key_not_a_bare_base_url():
     assert llm_config.openai_agent_credentialed({"OPENAI_API_KEY": "sk-test"})
 
 
-def test_a_gateway_key_alone_credentials_the_openai_side():
-    """Codex authenticates with it, so ranking the side uncredentialed sends a runnable box to Claude."""
-    assert llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
+def test_a_retired_gateway_key_does_not_credential_the_openai_side():
+    """`_validate_credentials` admits a run on OPENAI_API_KEY alone, so the ranking names the same one name."""
+    assert not llm_config.openai_agent_credentialed({"LLM_GATEWAY_KEY": "gw-test"})
 
 
 @pytest.mark.parametrize("gateway", ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])
@@ -280,8 +281,8 @@ def test_a_managed_gateway_drives_the_claude_cli_without_naming_a_key(gateway):
         (True, True, {"ANTHROPIC_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CLAUDE),
         (True, False, {"OPENAI_API_KEY": "sk"}, llm_config.AGENT_BACKEND_CODEX),
         (False, True, {"OPENAI_BASE_URL": "https://gw/v1"}, llm_config.AGENT_BACKEND_CODEX),
-        # A gateway deployment names no OPENAI_API_KEY, and Claude cannot authenticate on it at all.
-        (True, True, {"OPENAI_BASE_URL": "https://gw/v1", "LLM_GATEWAY_KEY": "gw"}, llm_config.AGENT_BACKEND_CODEX),
+        # A retired key names no credential on either side, so the tie falls back to the SDK and Claude keeps it.
+        (True, True, {"OPENAI_BASE_URL": "https://gw/v1", "LLM_GATEWAY_KEY": "gw"}, llm_config.AGENT_BACKEND_CLAUDE),
         # The one shape a managed gateway decides: it holds the Anthropic side
         # against a real OpenAI key that would otherwise win on its own.
         (
@@ -331,7 +332,7 @@ def test_openai_kwargs_error_names_every_searched_key():
     with pytest.raises(LLMConfigError) as excinfo:
         openai_client_kwargs(env={"ANTHROPIC_BASE_URL": "https://llm.example.invalid/anthropic"})
     message = str(excinfo.value)
-    for name in ("OPENAI_API_KEY", "LLM_GATEWAY_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
         assert name in message
 
 
