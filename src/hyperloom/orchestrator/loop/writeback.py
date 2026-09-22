@@ -530,7 +530,7 @@ class WritebackCollaborator:
             if terminal or (now - self._lifecycle_last_save >= self._lifecycle_save_min_interval_s):
                 self.shared_state.save(self.session_dir)
                 self._coord._lifecycle_last_save = now
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug(
                 "Coordinator: lifecycle emit failed (step=%s status=%s)",
                 step,
@@ -937,7 +937,7 @@ class WritebackCollaborator:
                 server_launch_flags=str(measurement.get("resolved_server_launch_flags") or ""),
                 workspace=measurement.get("workspace"),
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("stack validation record failed", exc_info=True)
             # Losing this one costs the export its only independent check on
             # the ledger: with no promoted figure to compare against, the
@@ -1428,8 +1428,8 @@ class WritebackCollaborator:
                     stopped_by_the_run=stopped_by_the_run,
                 )
                 any_changed = True
-            from ..actions.executors._accuracy_gate import eval_enablement_allowed  # noqa: PLC0415
-            from ..actions.executors._multi_node_env import is_multi_node  # noqa: PLC0415
+            from ..actions.executors._accuracy_gate import eval_enablement_allowed
+            from ..actions.executors._multi_node_env import is_multi_node
 
             # Single-node eval-pending failure: throughput measured fine and the
             # eval is expected to re-run under enablement, so do not spend the
@@ -1626,7 +1626,7 @@ class WritebackCollaborator:
                         source_session_id=source_session_id,
                         variant_outcome=vo,
                     )
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "fact-write per-variant failed (task=%s)",
                         task.task_id,
@@ -1639,14 +1639,14 @@ class WritebackCollaborator:
                     result_dict=result_dict,
                     kept=kept,
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "fact-write per-task failed (task=%s)",
                     task.task_id,
                 )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive; never crash on save
+        except Exception:
             log.exception("fact-write SharedState.save failed")
 
     def _ensure_journal(self) -> Journal:
@@ -2439,7 +2439,7 @@ class WritebackCollaborator:
                 make_parents=True,
                 sort_keys=True,
             )
-        except Exception:  # noqa: BLE001 - audit cannot break finalization
+        except Exception:
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
 
     def ensure_recipe_finalized(
@@ -2462,7 +2462,7 @@ class WritebackCollaborator:
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — publication can still proceed
+        except Exception:
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -2473,7 +2473,7 @@ class WritebackCollaborator:
                 "attempt": attempts,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             }
-        except Exception as exc:  # noqa: BLE001 — persist retryable failure
+        except Exception as exc:
             log.exception("Recipe finalize raised")
             outcome = {
                 "status": "error",
@@ -2491,7 +2491,7 @@ class WritebackCollaborator:
         self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — T4 can still retry in-process
+        except Exception:
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -2583,7 +2583,7 @@ class WritebackCollaborator:
                 final_throughput=final_tput if final_tput > 0 else None,
                 total_gain_pct=total_gain,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("optimization_journal.finalize failed")
 
         if bool(getattr(getattr(self, "knowledge_plane", None), "kb_disabled", False)):
@@ -2599,7 +2599,7 @@ class WritebackCollaborator:
 
         try:
             config = getattr(getattr(self, "knowledge_plane", None), "config", None) or KnowledgeConfig.from_env()
-        except Exception as exc:  # noqa: BLE001 - KB remains best-effort
+        except Exception as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return {
                 "status": "error",
@@ -2662,7 +2662,7 @@ class WritebackCollaborator:
                     "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
                     "result_type": _remote_result_type(remote_result.status, remote_result.reason),
                 }
-            except Exception as exc:  # noqa: BLE001 - remote transport is best-effort
+            except Exception as exc:
                 self._record_remote_recipe_audit(
                     source=source,
                     status="error",
@@ -2796,7 +2796,7 @@ class WritebackCollaborator:
                 "result_type": _close_out.RESULT_WRITTEN,
             }
         # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:
             log.exception("update_recipe raised unexpectedly")
             return {
                 "status": "error",
@@ -2843,7 +2843,7 @@ class WritebackCollaborator:
                 tags=round_entry.get("tags") or [],
                 **product,
             )
-        except Exception:  # noqa: BLE001 — a round outranks its own record
+        except Exception:
             log.debug("specialist bookkeeping: phase round product record failed", exc_info=True)
 
     async def _record_specialist_result(
@@ -2915,14 +2915,14 @@ class WritebackCollaborator:
                             task.task_id,
                             input_err,
                         )
-            except Exception:  # noqa: BLE001 — advisory; never block
+            except Exception:
                 log.exception(
                     "specialist bookkeeping: proposal scoring failed for task=%s (continuing without scores)",
                     task.task_id,
                 )
         try:
             self.shared_state.record_specialist_round(round_entry)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "specialist bookkeeping: record_specialist_round failed for task=%s",
                 task.task_id,
@@ -2935,7 +2935,7 @@ class WritebackCollaborator:
         try:
             self.shared_state.bump_domain_round_counters()
             self.shared_state.note_specialist_dispatched(domain)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "specialist bookkeeping: domain round-counter update failed for task=%s",
                 task.task_id,
@@ -2956,7 +2956,7 @@ class WritebackCollaborator:
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "specialist bookkeeping: update_last_specialist failed for task=%s",
                 task.task_id,
@@ -2965,7 +2965,7 @@ class WritebackCollaborator:
         # Persist so a resume picks up the bookkeeping without re-running the specialist.
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,
@@ -2981,7 +2981,7 @@ class WritebackCollaborator:
                 domain=domain,
                 proposals=proposals,
             )
-        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
+        except Exception:
             log.exception(
                 "mn_auto_materialize: bridge raised for task=%s (continuing)",
                 task.task_id,
@@ -2991,7 +2991,7 @@ class WritebackCollaborator:
         if done_payload.get("new_findings"):
             try:
                 await self._coord._harvest_specialist_findings(done_payload)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "specialist findings harvest failed for task=%s",
                     task.task_id,
@@ -3002,7 +3002,7 @@ class WritebackCollaborator:
         if domain == "static_recon_specialist":
             try:
                 self._coord._consume_static_recon(done_payload)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "static-recon consume failed for task=%s",
                     task.task_id,
@@ -3014,7 +3014,7 @@ class WritebackCollaborator:
         # (already harvested above). Fail-soft.
         try:
             self._coord._aggregate_research_evidence(done_payload)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "research evidence aggregation failed for task=%s",
                 task.task_id,
@@ -3033,14 +3033,14 @@ class WritebackCollaborator:
                         "proposals_total": len(proposals),
                     },
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "specialist bookkeeping: append_gap_attempt failed for gap=%s",
                     gap_cid,
                 )
         try:
             await self._refresh_gaps(reason="specialist_done")
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "specialist bookkeeping: _refresh_gaps failed for task=%s",
                 task.task_id,
@@ -3051,7 +3051,7 @@ class WritebackCollaborator:
                     task_id=str(task.task_id or ""),
                     payload=done_payload,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception(
                     "specialist build request failed for task=%s",
                     task.task_id,
@@ -3062,7 +3062,7 @@ class WritebackCollaborator:
                 task=task,
                 done_payload=done_payload,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "B3: specialist patch autosubmit failed for task=%s",
                 task.task_id,
@@ -3075,7 +3075,7 @@ class WritebackCollaborator:
                 task=task,
                 done_payload=done_payload,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "FRAMEWORK config autosubmit failed for task=%s",
                 task.task_id,
@@ -3103,7 +3103,7 @@ class WritebackCollaborator:
             return
         try:
             added = self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "depth: register_seen_pr_ids failed during research aggregation",
             )
@@ -3140,7 +3140,7 @@ class WritebackCollaborator:
                     "research-scout: dropped %d sourceless hint(s)",
                     dropped,
                 )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: append_hints failed")
             added = 0
         # Share inspected PR ids with the FRAMEWORK dedup set.
@@ -3159,12 +3159,12 @@ class WritebackCollaborator:
                         pr_ids.extend(refs)
         try:
             self.shared_state.register_seen_pr_ids(pr_ids)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: register_seen_pr_ids failed")
         # Seed high-priority hints as gaps[] so the config arm tries them early.
         try:
             self._seed_gaps_from_research_hints()
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("specialist findings: gap seeding failed")
         log.info(
             "specialist findings harvested: hints_added=%d seen_pr_ids=%d",
@@ -3738,7 +3738,7 @@ class WritebackCollaborator:
                 # Parse workload-shape extras from the YAML for lesson/pitfall attrs.
                 try:
                     parsed = _parse_baseline_workload_extra(materialized)
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "baseline workload extra parsing failed for %s",
                         materialized,
@@ -3870,7 +3870,7 @@ class WritebackCollaborator:
             # History injection (fires regardless of --no-warm-replay).
             try:
                 self._inject_warm_recipe_history_into_ledger()
-            except Exception as exc:  # noqa: BLE001 — defensive
+            except Exception as exc:
                 log.exception(
                     "PRELUDE: warm-recipe history injection failed: %r",
                     exc,
@@ -3880,7 +3880,7 @@ class WritebackCollaborator:
                 await self._maybe_enqueue_warm_replay(
                     baseline_tput=float(self.shared_state.baseline_tput or tput),
                 )
-            except Exception as exc:  # noqa: BLE001 — defensive
+            except Exception as exc:
                 log.exception(
                     "PRELUDE: failed to enqueue warm-replay task: %r",
                     exc,
@@ -3914,7 +3914,7 @@ class WritebackCollaborator:
                 reason=reason,
                 exclude_task_ids=spared,
             )
-        except Exception:  # noqa: BLE001 — draining is best-effort
+        except Exception:
             log.exception("baseline drain: cancel_family failed")
             return []
         if not cancelled:
@@ -3949,7 +3949,7 @@ class WritebackCollaborator:
                     continue
                 if (getattr(task, "params", None) or {}).get("reason") == ENABLEMENT_REVALIDATION_REASON:
                     spared.add(str(getattr(task, "task_id", "") or ""))
-        except Exception:  # noqa: BLE001 — fall back to the tracked id alone
+        except Exception:
             log.exception("baseline drain: queued-task scan failed")
         return {t for t in spared if t}
 
@@ -3962,7 +3962,7 @@ class WritebackCollaborator:
         """Separate promote path so replay doesn't overwrite baseline_tput/current_best."""
         try:
             self._promote_warm_replay(result, task=task)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("warm-replay promote failed")
         # PRELUDE initial roofline was deferred while replay ran.
         await self._maybe_enqueue_prelude_initial_analysis_after_baseline()
@@ -4499,7 +4499,7 @@ class WritebackCollaborator:
                                 "measured_tput": (float(measured) if isinstance(measured, (int, float)) else None),
                             },
                         )
-                    except Exception:  # noqa: BLE001 - observation is best-effort
+                    except Exception:
                         log.exception("geak orphan rebench: observation emit failed")
                     decision = "ignored"
                 elif decision == "validated" and stale_measurement:
@@ -4568,7 +4568,7 @@ class WritebackCollaborator:
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
                         )
-                    except Exception:  # noqa: BLE001 - observation is best-effort
+                    except Exception:
                         log.exception("geak no_material: observation emit failed")
                     # Stamp the drop on geak_result (always, so an empty {} is
                     # distinguishable from never-populated on resume/debug and
@@ -4589,7 +4589,7 @@ class WritebackCollaborator:
                             provenance="geak_no_material",
                             rejection_reason="geak_no_material_product",
                         )
-                    except Exception:  # noqa: BLE001 - journey reject is best-effort
+                    except Exception:
                         log.exception("geak no_material: journey rejection failed")
                     self.shared_state.geak_pending = {}
                     # ``resume_pending_revalidation`` tracks the accepted stack,
@@ -4620,7 +4620,7 @@ class WritebackCollaborator:
                                 "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
                             },
                         )
-                    except Exception:  # noqa: BLE001 - observation is best-effort
+                    except Exception:
                         log.exception("geak no_promote: observation emit failed")
                     # Persist the closed verdict so a later KERNEL entry does
                     # not recover stale result.json and re-enqueue this already
@@ -4650,7 +4650,7 @@ class WritebackCollaborator:
                         # ``coordinator._validate_geak_via_geak_harness`` still wins
                         # (bare-name delegation resolves it back onto this class).
                         fallback_result = await self._coord._validate_geak_via_geak_harness(reason="2b_inconclusive")
-                    except Exception as exc:  # noqa: BLE001 - defensive
+                    except Exception as exc:
                         log.exception("geak 2a GEAK-harness fallback failed")
                         fallback_result = {
                             "validated": False,
@@ -4755,7 +4755,7 @@ class WritebackCollaborator:
                 if prov.startswith("specialist:"):
                     try:
                         self.shared_state.note_domain_keep(prov.split(":", 1)[1].strip())
-                    except Exception:  # noqa: BLE001 — defensive
+                    except Exception:
                         log.exception(
                             "depth: note_domain_keep failed for provenance=%r",
                             prov,
@@ -4784,7 +4784,7 @@ class WritebackCollaborator:
             changed = True
         try:
             self.shared_state.note_explore_outcome(promoted=promoted)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("depth: note_explore_outcome failed")
         # A round with no measured variant is not a data point for the plateau window.
         if not is_revalidation_task and (winners or result.get("losers")):
@@ -5530,7 +5530,7 @@ class WritebackCollaborator:
         resume_state_durable = True
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             resume_state_durable = False
             log.exception("Coordinator: pre-outbox resume save failed")
             report["warnings"].append({"kind": "resume_pre_outbox_save_failed"})
@@ -5573,13 +5573,13 @@ class WritebackCollaborator:
             try:
                 fix = await self._enqueue_internal_stack_rebench(reason="resume_unvalidated_keeps")
                 report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("Coordinator: failed to enqueue resume stack rebench")
                 report["warnings"].append({"kind": "resume_stack_rebench_enqueue_failed"})
 
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("Coordinator: resume consistency save failed")
         await self._record_observation("coordinator", "observation", {"kind": "resume_consistency", **report})
         return report
@@ -5768,7 +5768,7 @@ class WritebackCollaborator:
                     kept_res = res
                     break
             scanned = True
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("Coordinator: pending_integrate kept-result scan failed")
         if not scanned:
             report["warnings"].append({"kind": "pending_integrate_scan_failed", "task_id": task_id})
@@ -5918,7 +5918,7 @@ class WritebackCollaborator:
 
                 sweep_stale_aiter_locks_if_dead(aiter_jit_dir=Path(jit_dir))
                 summary["swept_jit_dir"] = jit_dir
-            except Exception:  # noqa: BLE001 — sweep is best-effort
+            except Exception:
                 log.debug("resume: targeted-build jit sweep failed for %s", jit_dir, exc_info=True)
 
         state.enablement.last_build_failure = {
@@ -5931,7 +5931,7 @@ class WritebackCollaborator:
                 if getattr(task, "state", "") == "running":
                     await self.tasks.transition(task_id, "failed", evidence={"failure_class": "resume_interrupted"})
                     summary["failed_row"] = True
-            except Exception:  # noqa: BLE001 — reclaim backstop still applies
+            except Exception:
                 log.debug("resume: targeted-build row fail raced for %s", task_id, exc_info=True)
 
         state.pending_targeted_build = {}
@@ -5988,7 +5988,7 @@ class WritebackCollaborator:
                 "resume: cleared stale enablement_validation_pending for terminal revalidation task %s",
                 tracked_tid,
             )
-        except Exception:  # noqa: BLE001 — best-effort
+        except Exception:
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _resume_recover_orphaned_keeps(self, report: dict[str, Any]) -> None:
@@ -6090,7 +6090,7 @@ class WritebackCollaborator:
                             "variant": variant,
                         },
                     )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
     async def _enqueue_internal_stack_rebench(
@@ -6479,7 +6479,7 @@ class WritebackCollaborator:
             )
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 - defensive
+            except Exception:
                 log.exception("geak 2a: SharedState.save failed")
             if not accepted:
                 return {
@@ -6555,7 +6555,7 @@ class WritebackCollaborator:
                 state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_SWEEP)
                 try:
                     state.save(self.session_dir)
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception("resume: save after re-arming skip_to_sweep failed")
                 log.info(
                     "resume: KERNEL GEAK already completed this phase; "
@@ -6568,7 +6568,7 @@ class WritebackCollaborator:
         )
         try:
             await self._on_enter_kernel(from_phase="resume")
-        except Exception:  # noqa: BLE001 — resume re-entry must never kill the session
+        except Exception:
             log.exception("resume: KERNEL re-entry hook failed")
 
     @property

@@ -59,7 +59,7 @@ def snapshot_state_sections(
     ):
         try:
             fn(rec, state)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("snapshot section %s failed", name, exc_info=True)
             trace_skip(reason="writer raised", section=name, error=exc)
 
@@ -285,7 +285,7 @@ def record_backend_versions_and_timeline(
                     producer=producer,
                 )
         _mirror_backend_attempts_to_kernel_timeline(result)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record_backend_versions_and_timeline failed", exc_info=True)
         trace_skip(reason="writer raised", section="versions", error=exc)
 

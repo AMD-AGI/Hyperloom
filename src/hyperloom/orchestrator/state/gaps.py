@@ -120,12 +120,12 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
         try:
             for entry in self._extract_gaps_from_baseline():
                 state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("gaps refresh: baseline extraction failed")
         try:
             for entry in self._extract_gaps_from_attempts():
                 state.upsert_gap(entry)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("gaps refresh: attempts extraction failed")
 
         plane = getattr(self, "knowledge_plane", None)
@@ -142,7 +142,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                             entry = dict(entry)
                             entry.setdefault("source", "recipe_kb")
                             state.upsert_gap(entry)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.warning(
                     "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
                     reason,
@@ -285,7 +285,7 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
                         "provenance": str(hint.get("source") or ""),
                     }
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "research-scout: upsert_gap failed for %s",
                     cid,

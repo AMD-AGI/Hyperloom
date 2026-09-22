@@ -473,7 +473,7 @@ def _build_arm_grid(
     return out
 
 
-async def _sweep_one_arm_single_server(  # noqa: PLR0913
+async def _sweep_one_arm_single_server(
     arm_name: str,
     concs_desc: list[int],
     *,
@@ -569,7 +569,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         framework = str(lc_params.get("framework") or "")
         lc_eligible = bool(lc_params.get("eligible"))
         lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
         if recorder is not None:
             # Named per arm: both arms resolve, and two faults reading alike
@@ -980,7 +980,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Safety teardown — idempotent, no-op if already torn down.
         try:
             teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # The last word on this arm's server: a teardown that failed here
             # leaves it alive past the arm that owned it.
             log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
@@ -993,7 +993,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     return arm_results
 
 
-async def _sweep_arm_option_b(  # noqa: PLR0913
+async def _sweep_arm_option_b(
     arm_name: str,
     grid: list[GridVariant],
     *,
@@ -1137,13 +1137,13 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exce
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
         return exc
     return None
 
 
-def _flush_partial_conc_sweep_report(  # noqa: PLR0913
+def _flush_partial_conc_sweep_report(
     *,
     results: list[VariantResult],
     state: SharedState,
@@ -1216,7 +1216,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
             if budget_remaining_sec is not None:
                 p["budget_remaining_sec"] = round(float(budget_remaining_sec), 2)
         _flush_conc_sweep_report(p, session_dir)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("conc_sweep: _flush_partial_conc_sweep_report failed", exc_info=True)
 
 
@@ -1507,7 +1507,7 @@ async def run_conc_sweep(
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             try:
                 await asyncio.to_thread(_kill_stale_servers)
-            except Exception as exc:  # noqa: BLE001 - best-effort safety net
+            except Exception as exc:
                 # Recorded below rather than here: servers this sweep may have
                 # left alive outlive the sweep, and a log line does not.
                 cleanup_error = exc

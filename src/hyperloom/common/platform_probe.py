@@ -172,16 +172,16 @@ def platform_fingerprint(
             partition = published_shape()
             if partition:
                 record["gpu"]["compute_partition"] = partition
-        except Exception:  # noqa: BLE001 - one degraded field, not a dropped record
+        except Exception:
             log.warning("platform fingerprint: GPU block unreadable", exc_info=True)
             record["gpu"] = {"status": "error"}
         try:
             record["stack"] = detect_stack_fingerprint(os.environ)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("platform fingerprint: stack block unreadable", exc_info=True)
             record["stack"] = {"status": "error"}
         return record
-    except Exception as exc:  # noqa: BLE001 - never break the caller
+    except Exception as exc:
         # Warning, not debug: this record is provenance, and a silent hole in it is only discovered when someone needs
         # it and it is too late to re-run.
         log.warning("platform fingerprint failed: %s", exc, exc_info=True)

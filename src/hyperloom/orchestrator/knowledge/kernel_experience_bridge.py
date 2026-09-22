@@ -104,7 +104,7 @@ class KernelExperienceBridge:
             return
         try:
             self.audit_hook(event)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Audit is observational and cannot break a forge attempt.
             return
 

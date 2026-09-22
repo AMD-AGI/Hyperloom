@@ -34,7 +34,7 @@ def _absolute_path(value: Any) -> str:
 def _workload_context(state: Any) -> dict[str, Any]:
     try:
         context = state.current_profile_workload_context()
-    except Exception:
+    except Exception:  # noqa: BLE001 - state accessor shape varies across resumes
         context = {}
     return dict(context) if isinstance(context, Mapping) else {}
 

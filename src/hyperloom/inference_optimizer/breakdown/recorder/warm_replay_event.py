@@ -629,7 +629,7 @@ def make_warm_replay_recorder(
             kernel_count=kernel_count,
             recipe_suppressed=recipe_suppressed,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change replay behavior
+    except Exception:
         log.warning(
             "warm replay timeline: recorder construction failed; this replay's whole event "
             "will be missing from the breakdown",

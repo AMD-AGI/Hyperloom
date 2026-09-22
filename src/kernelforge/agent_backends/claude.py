@@ -620,7 +620,7 @@ class ClaudeBackend:
                                             getattr(block, "input", {}) or {},
                                         )
                                     )
-            except Exception as exc:  # noqa: BLE001 - convert to a resumable result
+            except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
                     if not session_id:
@@ -663,7 +663,7 @@ class ClaudeBackend:
                 # ``async for`` does not close its iterator on exit (PEP 533 was deferred), so close it to tear the
                 # CLI down, then reap any detached benchmark child that outlived it -- an orphan holding the GPU
                 # corrupts the canonical measurement that follows.
-                with suppress(Exception):
+                with suppress(Exception):  # broad-suppress: SDK generator close; the reap below is what matters
                     await agen.aclose()
                 report = await _reap_workspace_processes(spec.cwd)
                 if report.contended:
@@ -705,7 +705,7 @@ class ClaudeBackend:
         except Exception:
             # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
             # must not mask them.
-            with suppress(Exception):
+            with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
                 guard.rollback()
             raise
         result.target_edit_count = guard.count_target_edits()

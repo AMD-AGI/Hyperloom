@@ -2384,14 +2384,11 @@ def _section_pd_disaggregation(inp: SpecialistPromptInputs) -> list[str]:
         list[str]: The PD-disaggregation section lines, or ``[]`` when not
         disaggregated.
     """
-    try:
-        from hyperloom.orchestrator.actions.executors._multi_node_env import (
-            pd_topology_from_state,
-        )
+    from hyperloom.orchestrator.actions.executors._multi_node_env import (
+        pd_topology_from_state,
+    )
 
-        pd = pd_topology_from_state()
-    except Exception:
-        return []
+    pd = pd_topology_from_state()
     if not pd:
         return []
     tb = pd.get("transfer_backend") or "the KV transfer backend"

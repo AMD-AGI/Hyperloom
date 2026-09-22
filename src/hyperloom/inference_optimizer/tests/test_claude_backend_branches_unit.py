@@ -378,8 +378,8 @@ def test_parse_tool_use_block_invalid_returns_none():
 
 # ---- mcp_emit_intent: handler + validation branches -----------------------
 
-from hyperloom.orchestrator.roles import mcp_emit_intent as mei  # noqa: E402
-from hyperloom.inference_optimizer.protocol.intent import (  # noqa: E402
+from hyperloom.orchestrator.roles import mcp_emit_intent as mei
+from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
 )
 

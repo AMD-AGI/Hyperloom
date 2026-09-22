@@ -80,6 +80,12 @@ jobs:
         id: ruff_format
         run: ruff format --check .
 
+      # BLE001 does not see contextlib.suppress(Exception); without this the
+      # gate above only moves broad swallowing into the form it cannot flag.
+      - name: Check for unjustified contextlib.suppress(Exception)
+        id: broad_suppress
+        run: python scripts/check_broad_suppress.py src scripts
+
   compile:
     name: byte-compile (syntax check)
     runs-on: ubuntu-latest

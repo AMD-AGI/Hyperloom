@@ -834,7 +834,7 @@ class CriticAgentBackend:
                         "referenced_in_verdict": bool(kb_priors.get("referenced_in_verdict")),
                     },
                 )
-        except Exception:  # noqa: BLE001 — trace must never break the review
+        except Exception:
             log.debug("critic_agent: langfuse kb mirror failed", exc_info=True)
 
     def _record_review_evidence(
@@ -1078,7 +1078,7 @@ class CriticAgentBackend:
                 operation="review",
                 **kwargs,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Codex API call failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
@@ -1110,7 +1110,7 @@ class CriticAgentBackend:
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
                 latency_ms=int((time.perf_counter() - _t0) * 1000),
@@ -1199,7 +1199,7 @@ class CriticAgentBackend:
                 reviewed_msg_ids=self._trace_reviewed_msg_ids,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call append failed",
                 exc_info=True,
@@ -1235,7 +1235,7 @@ class CriticAgentBackend:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic llm_call failure append failed",
                 exc_info=True,
@@ -1264,7 +1264,7 @@ class CriticAgentBackend:
                 response=response or "",
             )
             append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break review
+        except Exception:
             log.debug(
                 "full-trace: critic conversation append failed",
                 exc_info=True,

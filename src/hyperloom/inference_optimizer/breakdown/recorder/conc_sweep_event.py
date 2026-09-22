@@ -1003,7 +1003,7 @@ def make_conc_sweep_recorder(
             reason=reason,
             params=params,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
+    except Exception:
         log.warning(
             "conc_sweep timeline: recorder construction failed; this sweep's facts will be missing from the event",
             exc_info=True,

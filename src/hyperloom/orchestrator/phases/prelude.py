@@ -209,7 +209,7 @@ class PreludePhase(PhaseHandler):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort record
+        except Exception:
             log.exception("PRELUDE: failed to persist the dropped-arm record for %r", arm)
 
     def _warm_recipe_proven_items(self) -> list[dict[str, str]]:
@@ -318,7 +318,7 @@ class PreludePhase(PhaseHandler):
         for column, reader, list_key in readers:
             try:
                 data = reader() or {}
-            except Exception:  # noqa: BLE001 — a bad column must not block others
+            except Exception:
                 log.warning("warm-kernel KB: reading %s column failed", column, exc_info=True)
                 continue
             rows = data.get(list_key) if isinstance(data, dict) else None
@@ -622,7 +622,7 @@ class PreludePhase(PhaseHandler):
                             or f"kernel revert status={reverted.get('status')}"
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning("warm-kernel KB: revert failed", exc_info=True)
                 errors.append(f"{type(exc).__name__}:{exc}")
         if snapshots:
@@ -766,7 +766,7 @@ class PreludePhase(PhaseHandler):
         # resume.
         try:
             state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning(
                 "warm-kernel KB: one-shot state save failed",
                 exc_info=True,
@@ -780,7 +780,7 @@ class PreludePhase(PhaseHandler):
         if kb is None:
             try:
                 kb = self._open_warm_kernel_section()
-            except Exception as exc:  # noqa: BLE001 — advisory; never block PRELUDE
+            except Exception as exc:
                 log.warning("warm-kernel KB: opening Recipe section failed", exc_info=True)
                 return self._set_warm_kernel_outcome(
                     {
@@ -797,7 +797,7 @@ class PreludePhase(PhaseHandler):
             outcome = self._set_warm_kernel_outcome({"status": "empty"})
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug(
                     "warm-kernel KB: empty-state save failed",
                     exc_info=True,
@@ -889,7 +889,7 @@ class PreludePhase(PhaseHandler):
                     "kernel_apply_results": list(applied),
                 }
                 state.save(self.session_dir)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning(
                     "warm-kernel KB: pre-mutation snapshot persist failed for %s",
                     targets,
@@ -901,7 +901,7 @@ class PreludePhase(PhaseHandler):
                 break
             try:
                 apply_result = self._apply_warm_kernel_patch(entry, anchor_target)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.warning(
                     "warm-kernel KB: apply failed for %s",
                     anchor_target,
@@ -981,7 +981,7 @@ class PreludePhase(PhaseHandler):
         )
         try:
             state.save(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning(
                 "warm-kernel KB: prepared state save failed",
                 exc_info=True,
@@ -1016,7 +1016,7 @@ class PreludePhase(PhaseHandler):
             self._set_warm_kernel_outcome(outcome)
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "warm-kernel KB: rollback state save failed",
                     exc_info=True,
@@ -1169,7 +1169,7 @@ class PreludePhase(PhaseHandler):
                 if current_remote
                 else await self._prepare_warm_kernel_kb()
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("PRELUDE: warm-kernel preparation failed", exc_info=True)
             kernel = {
                 "status": "error",
@@ -1581,7 +1581,7 @@ class PreludePhase(PhaseHandler):
         }
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("combined warm replay pending save failed", exc_info=True)
         # Opened after the outcome is persisted so the request block reads the
         # donor identity the outcome just stamped, and a session killed between
@@ -2565,7 +2565,7 @@ class PreludePhase(PhaseHandler):
                         tick=int(state.tick or 0),
                     )
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("warm-replay journal append failed")
         else:
             if not self._require_combined_warm_rollback(result, task, outcome, recorder):
@@ -2643,7 +2643,7 @@ class PreludePhase(PhaseHandler):
                 rl_task.kind,
                 rl_task.task_id,
             )
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:
             log.exception(
                 "PRELUDE: failed to enqueue initial analysis task after baseline: %r",
                 exc,

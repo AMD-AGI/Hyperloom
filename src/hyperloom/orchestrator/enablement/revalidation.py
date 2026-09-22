@@ -94,7 +94,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
 

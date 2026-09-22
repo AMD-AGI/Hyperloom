@@ -69,7 +69,7 @@ from _task_group_contract import _strip_dispatch_decoration
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
-except Exception:
+except ImportError:
     _aiter_jit_core = None
 
 from tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
@@ -1024,7 +1024,7 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     """
     try:
         payload = open_json(trace_file)
-    except Exception:
+    except ValueError:
         return 0
     events = payload.get("traceEvents") if isinstance(payload, dict) else None
     if not isinstance(events, list):
@@ -2134,7 +2134,7 @@ def is_vendor_dispatch_wrapper(name: str, source_file: str) -> bool:
         if p.stat().st_size > 16 * 1024:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return any(sig in text for sig in _VENDOR_DISPATCH_SIGS)
 
@@ -2460,7 +2460,7 @@ def _grep_for_keyword(keyword: str, root: Path) -> list[Path]:
     ]
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, timeout=15)
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         _GREP_CACHE[cache_key] = []
         return []
     if proc.returncode not in (0, 1):
@@ -3315,7 +3315,7 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
                     capture_output=True,
                     timeout=15,
                 )
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 continue
             if proc.returncode not in (0, 1):
                 continue
@@ -3391,7 +3391,7 @@ def _is_pybind_shim(source_file: str) -> bool:
         if p.stat().st_size > 2048:
             return False
         text = p.read_text(encoding="utf-8", errors="replace")
-    except Exception:
+    except OSError:
         return False
     return "PYBIND11_MODULE" in text or "pybind11" in text
 
@@ -3447,7 +3447,7 @@ def upgrade_pybind_shim_source(source_file: str, kernel_name: str, kernel_repo: 
                     if sym in f.read_text(encoding="utf-8", errors="replace"):
                         if f.stat().st_size > 2048:
                             return str(f)
-                except Exception:
+                except OSError:
                     continue
     return source_file
 
@@ -3703,7 +3703,7 @@ def analyze_trace_files(
     for trace_file in trace_files:
         try:
             payload = open_json(trace_file)
-        except Exception:
+        except ValueError:
             continue
 
         if isinstance(payload.get("kernels"), list):
@@ -4888,7 +4888,7 @@ def _runtime_server_args_from_config(config_path: str) -> str:
     if not str(config_path or "").strip():
         return ""
     try:
-        import yaml  # type: ignore[import-untyped]  # noqa: PLC0415
+        import yaml  # type: ignore[import-untyped]
 
         payload = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - runtime context is advisory
@@ -5028,7 +5028,7 @@ def _resolve_trace_launchers(
     if not wanted:
         return {}
     try:
-        from _trace_launcher_resolver import resolve_launchers_from_trace  # noqa: PLC0415
+        from _trace_launcher_resolver import resolve_launchers_from_trace
 
         file_errors: list[str] = []
         found = resolve_launchers_from_trace(
@@ -5806,7 +5806,7 @@ def load_roofline_results(path: str | None) -> dict[str, dict[str, Any]]:
         return {}
     try:
         payload = json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return {}
     rows = payload.get("results") if isinstance(payload, dict) else payload
     if not isinstance(rows, list):
@@ -6023,7 +6023,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
         if isinstance(_hit, str):
             candidates.append(Path(_hit))
-    except Exception:
+    except Exception:  # noqa: BLE001 - hub cache probe is optional
         pass
     out: list[Path] = []
     seen: set[str] = set()
@@ -6051,7 +6051,7 @@ def load_model_kernel_params(model_name: str) -> dict[str, Any]:
             continue
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, ValueError):
             continue
         params: dict[str, Any] = {
             "MODEL_CONFIG_PATH": str(config_path),
@@ -8033,7 +8033,7 @@ def main() -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - top-level barrier; logged and reported
         append_log(log_path, f"[error] {type(exc).__name__}: {exc}")
         update_status(
             status_path,

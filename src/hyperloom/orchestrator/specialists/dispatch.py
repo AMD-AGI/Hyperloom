@@ -157,7 +157,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if "target_gap_notes" not in params:
             try:
                 _gap_notes = self._target_gap_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: specialist target gap advisory failed")
                 _gap_notes = ""
             if _gap_notes:
@@ -170,7 +170,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 _hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
                 )
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: specialist research hints failed")
                 _hints_block = ""
             if _hints_block:
@@ -335,7 +335,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     int(ttl or 0),
                     params=retry_params,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("specialist auto-retry: gpu_research_lane TTL re-source failed; using registry default")
 
         # Stable base key across attempts: strip any prior ``-autoretryN`` suffix.
@@ -517,7 +517,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 specialist_threshold=spec_thr,
                 keep_threshold=keep_thr,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("stalled-domain force: stalled_domains() failed")
             return None
         if not stalled:
@@ -570,7 +570,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                         )
                         try:
                             state.save(self.session_dir)
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             log.exception("stalled-domain force: source-patch prune save failed")
                         log.error(
                             "stalled-domain force: pruned %s after deterministic failure: %s",
@@ -589,14 +589,14 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             # Zero the counter up-front so a slow enqueue can't re-fire next tick.
             try:
                 state.note_specialist_dispatched(anchor)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception(
                     "stalled-domain force: counter reset failed for %s",
                     anchor,
                 )
             try:
                 await self._handle_intent("orchestration", intent)
-            except Exception:  # noqa: BLE001 — defensive, never crash the tick
+            except Exception:
                 log.exception(
                     "stalled-domain force: dispatch failed for anchor=%s domain=%s gap=%s",
                     anchor,
@@ -606,7 +606,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 continue
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("stalled-domain force: state save failed")
             log.info(
                 "stalled-domain force: dispatched domain=%s anchor=%s gap=%s round=%d (spec_thr=%d keep_thr=%d)",

@@ -300,7 +300,7 @@ def _record_source_attempt(
             run_ref=specialist_task_id,
             outcome=status,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change write-back
+    except Exception:
         log.debug("framework timeline: source attempt record failed", exc_info=True)
 
 
@@ -365,7 +365,7 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
                 verdict=verdict,
             )
             recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
-    except Exception:  # noqa: BLE001 — observability cannot change the harvest
+    except Exception:
         log.debug("framework timeline: discovered proposals record failed", exc_info=True)
 
 
@@ -396,7 +396,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         try:
             recorder.record_policy(**self._framework_policy_fields())
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except Exception:
             log.debug("framework timeline: policy record failed", exc_info=True)
 
     def _framework_policy_fields(self) -> dict:
@@ -452,7 +452,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         facts = dict(evidence or {})
         try:
             self._record_framework_exit_plateau(recorder, facts)
-        except Exception:  # noqa: BLE001 — observability cannot change the transition
+        except Exception:
             log.debug("framework timeline: exit plateau record failed", exc_info=True)
         try:
             recorder.finish(
@@ -461,7 +461,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 hint=str(facts.get("hint") or ""),
                 switch_bottleneck=facts.get("switch_bottleneck"),
             )
-        except Exception:  # noqa: BLE001 — observability cannot change the transition
+        except Exception:
             log.debug("framework timeline: finish failed", exc_info=True)
 
     @staticmethod
@@ -519,7 +519,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         # and before the pump so the entry's first dispatch is inside the event.
         try:
             self._open_framework_timeline()
-        except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+        except Exception:
             log.debug("framework timeline: open failed", exc_info=True)
         try:
             await self._pump_framework_agent_phase()
@@ -691,7 +691,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return True
         try:
             recovered = await self._recover_framework_agent_authoring_outcome(specialist_task=spec_task)
-        except Exception:  # noqa: BLE001 — never wedge the pump
+        except Exception:
             log.exception("FRAMEWORK %s: terminal outcome recovery failed candidate=%s", label, cand_id)
             recovered = False
         if not recovered:
@@ -723,7 +723,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort provenance
+        except Exception:
             log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
         return spec_tid
 
@@ -783,7 +783,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         }
         try:
             await self._warm_specialist_params(params)
-        except Exception:  # noqa: BLE001 — best-effort warmup
+        except Exception:
             log.debug(
                 "FRAMEWORK authoring: warm specialist params failed",
                 exc_info=True,
@@ -909,7 +909,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             )
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug("authored_lane: save after cap stamp failed", exc_info=True)
             return
 
@@ -933,7 +933,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         state.apply_fail_retry_pending = pending
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
     async def _enqueue_author_specialist(
@@ -1017,7 +1017,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     reauthor_attempt=attempt,
                     critic_feedback=merged_feedback if merged_feedback else None,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception(
                     "_enqueue_author_specialist: perf_framework dispatch failed cand=%s attempt=%d",
                     cand_id,
@@ -1088,7 +1088,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 side_effects=["writes_results", "writes_patches"],
                 lease_ttl_sec=ttl,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "_enqueue_author_specialist: perf_explore dispatch failed gap=%s attempt=%d",
                 gap_cid,
@@ -1133,7 +1133,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     retry_feedback=retry_feedback,
                     vetting_drops=vetting_drops or None,
                 )
-            except Exception:  # noqa: BLE001 — never wedge the dispatcher
+            except Exception:
                 log.exception(
                     "_drain_apply_fail_retry_pending: dispatch failed lane=%s attempt=%d",
                     lane,
@@ -1141,7 +1141,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("drain_apply_fail: save failed", exc_info=True)
 
     @staticmethod
@@ -1204,7 +1204,7 @@ class FrameworkPhase(CoordinatorCollaborator):
 
             document = _json.loads(Path(path).read_text(encoding="utf-8"))
             return summarize_for_prompt(document)
-        except Exception:  # noqa: BLE001 — advisory only
+        except Exception:
             log.warning("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
             return ""
 
@@ -1259,7 +1259,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 profile_kernel_breakdown_path=getattr(state, "last_profile_kernel_breakdown", None),
                 rewrite_evidence_path=getattr(state, "last_framework_rewrite_evidence", None),
             )
-        except Exception:  # noqa: BLE001 — advisory only
+        except Exception:
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
             return "", []
 
@@ -1297,7 +1297,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                     "source": "coordinator_internal",
                 }
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("FRAMEWORK local-explore: upsert_gap failed", exc_info=True)
         prior_attempts: list[dict[str, Any]] = []
         try:
@@ -1330,7 +1330,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         }
         try:
             await self._warm_specialist_params(params)
-        except Exception:  # noqa: BLE001 — best-effort warmup
+        except Exception:
             log.debug("FRAMEWORK local-explore: warm specialist params failed", exc_info=True)
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         create_kwargs: dict[str, Any] = {
@@ -1733,7 +1733,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "save after framework_agent candidate submit failed for candidate=%s",
                 cand_id,
@@ -1847,7 +1847,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         try:
             state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
                 cand_id,
@@ -2012,7 +2012,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 reauthor_attempt=attempt,
                 critic_feedback=critic_feedback,
             )
-        except Exception:  # noqa: BLE001 — never wedge the verdict handler
+        except Exception:
             log.exception(
                 "re-author dispatch failed candidate=%s attempt=%s",
                 cand_id,
@@ -2021,7 +2021,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
@@ -2051,7 +2051,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         """
         try:
             await self._pump_framework_agent_phase()
-        except Exception as exc:  # noqa: BLE001 — a raising pump must not end the tick
+        except Exception as exc:
             log.exception("FRAMEWORK pump (%s) failed", caller)
             self._record_coordinator_exception(stage=f"framework_pump:{caller}", exc=exc)
 
@@ -2299,7 +2299,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
                 if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
                     return
-        except Exception:  # noqa: BLE001 — defensive; fall through to stamp
+        except Exception:
             log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
@@ -2682,7 +2682,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 domain,
                 was_existing,
             )
-        except Exception:  # noqa: BLE001 — defensive; never block bookkeeping
+        except Exception:
             log.exception(
                 "mn_auto_materialize: failed to enqueue explore from specialist=%s domain=%s",
                 task.task_id,
@@ -2832,7 +2832,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                         merged_setup.append(sc)
                 if merged_setup:
                     integrate_params["enablement_setup_commands"] = merged_setup
-        except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
+        except Exception:
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
                 sid,
@@ -2877,7 +2877,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "save after specialist patch autosubmit failed for task=%s",
                 sid,
@@ -3030,7 +3030,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "FRAMEWORK: save after config autosubmit failed for task=%s",
                 sid,
@@ -3062,7 +3062,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True
-        except Exception:  # noqa: BLE001 — advisory gate must never block dispatch
+        except Exception:
             # Warning, not debug: swallowing this re-dispatches config levers
             # that already lost an accuracy gate, so it must be visible.
             log.warning("FRAMEWORK: config-lever ledger check failed", exc_info=True)

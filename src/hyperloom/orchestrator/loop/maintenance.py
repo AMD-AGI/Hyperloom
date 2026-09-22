@@ -32,7 +32,7 @@ async def run_lease_and_db_reclaim(
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
@@ -40,7 +40,7 @@ async def run_lease_and_db_reclaim(
         res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("%s: DB retention failed", reason)
 
 
@@ -65,7 +65,7 @@ class MaintenanceCollaborator:
             disk = self._maybe_prune_runs_for_disk()
             if disk is not None:
                 summary["disk"] = disk
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("maintenance: disk monitor failed")
         log.info("maintenance tick %d: %s", tick, summary)
         return summary

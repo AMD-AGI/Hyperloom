@@ -121,7 +121,7 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
 
         report = parse_log_file(path)
         moe = (report.get("dispatch") or {}).get("moe") or {}
-    except Exception:  # noqa: BLE001 - detection must never break routing
+    except Exception:
         log.debug("MoE stage parse failed for %s", path, exc_info=True)
         return {}
     by_stage = moe.get("by_stage") or {}

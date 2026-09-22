@@ -56,6 +56,6 @@ async def offload(
             budget,
         )
         return default
-    except Exception:  # noqa: BLE001 — returning ``default`` on a raise is the contract
+    except Exception:
         log.exception("offload: %s raised", label)
         return default

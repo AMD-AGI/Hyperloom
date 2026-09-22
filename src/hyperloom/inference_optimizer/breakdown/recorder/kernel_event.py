@@ -2392,7 +2392,7 @@ def make_kernel_recorder(
             resumed=resumed,
             code_revision=code_revision,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+    except Exception:
         log.warning(
             "kernel timeline: recorder construction failed; this phase entry's whole event "
             "will be missing from the breakdown",

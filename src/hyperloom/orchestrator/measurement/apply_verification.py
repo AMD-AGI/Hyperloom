@@ -63,7 +63,7 @@ def _parse(server_log: Path) -> dict | None:
         return None
     try:
         return parse_log_file(server_log)
-    except Exception:  # noqa: BLE001 - a parse failure must not fail the run
+    except Exception:
         log.debug("apply verification parse failed for %s", server_log, exc_info=True)
         return None
 

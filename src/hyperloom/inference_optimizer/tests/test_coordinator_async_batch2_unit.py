@@ -2155,7 +2155,7 @@ async def test_autosubmit_patch_carries_atomic_config_lever(coord: Coordinator) 
 
     sid = "spec-atomic-lever"
     _make_real_patch(coord, sid)
-    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")  # noqa: E501
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-atomic")
     await coord._maybe_autosubmit_specialist_patches(
         task=task,
         done_payload={

@@ -384,22 +384,22 @@ class DispatcherCollaborator:
                     len(dead_tasks),
                     ", ".join(t[:12] for t in dead_tasks),
                 )
-        except Exception:  # noqa: BLE001 — self-heal never aborts the pump
+        except Exception:
             log.exception("dispatcher: dead-running task reclaim failed")
         report = getattr(getattr(self, "reconciler", None), "last_report", None)
         dead_tasks.extend(getattr(report, "failed_tasks", ()))
         if dead_tasks:
             try:
                 await self._account_dead_holder_failures(dead_tasks, reason="dead_holder_pump")
-            except Exception:  # noqa: BLE001 — bookkeeping never aborts the pump
+            except Exception:
                 log.exception("dispatcher: dead-holder failure accounting failed")
         try:
             await self.locks.reap_dead_holders()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("dispatcher: dead-holder lease reap failed")
         try:
             await self._reconcile_cancelled_policy_denied_integrate_tasks()
-        except Exception:  # noqa: BLE001 — reconcile must not abort the pump
+        except Exception:
             log.exception("dispatcher: cancelled policy-denied integrate_patch reconcile failed")
 
     async def _pump_dispatcher_once(self) -> None:
@@ -485,7 +485,7 @@ class DispatcherCollaborator:
         created: list[str] = []
         try:
             cancelled = await self.tasks.by_state("cancelled")
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("dispatcher: reconcile could not list cancelled tasks")
             return []
 
@@ -937,7 +937,7 @@ class DispatcherCollaborator:
                 tick=int(getattr(self.shared_state, "tick", 0) or 0),
                 dispatched_unix=time.time(),
             )
-        except Exception:  # noqa: BLE001 — an action outranks its own record
+        except Exception:
             log.debug("dispatcher: phase dispatch record failed", exc_info=True)
 
         async def release_resources() -> bool:
@@ -1167,7 +1167,7 @@ class DispatcherCollaborator:
             self._dead_holder_accounted.add(task_id)
             try:
                 task = await self.tasks.get(task_id)
-            except Exception:  # noqa: BLE001 — a missing row must not abort the pump
+            except Exception:
                 log.exception(
                     "dispatcher: dead-holder accounting could not load task=%s",
                     task_id,
@@ -1234,7 +1234,7 @@ class DispatcherCollaborator:
                 try:
                     if await self._maybe_auto_retry_specialist(task, result):
                         continue
-                except Exception:  # noqa: BLE001 — never block the dispatch loop
+                except Exception:
                     log.exception(
                         "specialist auto-retry hook failed for task=%s",
                         task.task_id,
@@ -1258,7 +1258,7 @@ class DispatcherCollaborator:
                         },
                     )
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception(
                     "dispatcher: failed to append delegated_result for task=%s",
                     task.task_id,
@@ -1280,7 +1280,7 @@ class DispatcherCollaborator:
                             source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
                             run_error=str(result.error or ""),
                         )
-                    except Exception:  # noqa: BLE001 — defensive
+                    except Exception:
                         log.exception(
                             "specialist bookkeeping hook failed for task=%s",
                             task.task_id,
@@ -1295,7 +1295,7 @@ class DispatcherCollaborator:
                             done_payload=done_payload,
                             run_error=str(result.error or ""),
                         )
-                    except Exception:  # noqa: BLE001 — defensive
+                    except Exception:
                         log.exception(
                             "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
                             task.task_id,
@@ -1308,7 +1308,7 @@ class DispatcherCollaborator:
                             done_payload=done_payload,
                             run_error=str(result.error or ""),
                         )
-                    except Exception:  # noqa: BLE001 — defensive
+                    except Exception:
                         log.exception(
                             "FRAMEWORK: candidate discovery ingest failed for task=%s",
                             task.task_id,
@@ -1317,7 +1317,7 @@ class DispatcherCollaborator:
             if task.kind in ("explore", "integrate_patch"):
                 try:
                     self._record_intervention_for_task(task, result.result)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.exception(
                         "intervention ledger update failed for task=%s",
                         task.task_id,
@@ -1331,7 +1331,7 @@ class DispatcherCollaborator:
                             task=task,
                             result=result,
                         )
-                    except Exception:  # noqa: BLE001 — defensive
+                    except Exception:
                         log.exception(
                             "FRAMEWORK authored-outcome bridge failed for task=%s",
                             task.task_id,
@@ -1341,7 +1341,7 @@ class DispatcherCollaborator:
                 res_dict = getattr(result, "result", None)
                 try:
                     await self._maybe_rearm_authored_lane(res_dict)
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "AUTHORED_LANE rearm failed for task=%s",
                         task.task_id,
@@ -1349,7 +1349,7 @@ class DispatcherCollaborator:
                 # Drain pending apply-failure retries queued by _maybe_rearm_authored_lane.
                 try:
                     await self._drain_apply_fail_retry_pending()
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "apply_fail retry drain failed for task=%s",
                         task.task_id,
@@ -1386,7 +1386,7 @@ class DispatcherCollaborator:
                     macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                     action=str(task.kind or ""),
                 )
-            except Exception:  # noqa: BLE001 — a verdict outranks its own record
+            except Exception:
                 log.debug("dispatcher: phase settle record failed", exc_info=True)
             if result.state == "cancelled":
                 continue
@@ -1408,7 +1408,7 @@ class DispatcherCollaborator:
                     if result.error_class and not unpromotable_result.get("error_class"):
                         unpromotable_result["error_class"] = result.error_class
                     await self._handle_unpromotable_result(task, unpromotable_result)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception(
                     "dispatcher: promotion/unpromotable handling failed for task=%s",
                     task.task_id,
@@ -1423,7 +1423,7 @@ class DispatcherCollaborator:
             if task.kind != "replay_warm_recipe":
                 try:
                     await self._fact_write_hook(task=task, result=result, kept=kept)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     log.exception(
                         "dispatcher: fact-write hook failed for task=%s",
                         task.task_id,
@@ -1440,7 +1440,7 @@ class DispatcherCollaborator:
                         task=task,
                         result=result_dict,
                     )
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "gaps refresh: explore-round update failed for task=%s",
                         task.task_id,
@@ -1450,14 +1450,14 @@ class DispatcherCollaborator:
                         task=task,
                         result=result_dict,
                     )
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "explore: per-variant failure recording failed for task=%s",
                         task.task_id,
                     )
                 try:
                     await self._refresh_gaps(reason="explore_round")
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception(
                         "gaps refresh: _refresh_gaps after explore failed for task=%s",
                         task.task_id,
@@ -1662,7 +1662,7 @@ class DispatcherCollaborator:
                 "cancelled",
                 evidence={"reason": "time_budget", "error": str(denied)},
             )
-        except Exception:  # noqa: BLE001 — a lost row must not abort the pump
+        except Exception:
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,
@@ -1687,7 +1687,7 @@ class DispatcherCollaborator:
                     "hint": getattr(denied, "hint", ""),
                 },
             )
-        except Exception:  # noqa: BLE001 — observability must not block dispatch
+        except Exception:
             log.exception(
                 "dispatcher: could not record time-budget denial for task=%s",
                 task.task_id,
@@ -1697,7 +1697,7 @@ class DispatcherCollaborator:
         if str(task.kind or "") == "conc_sweep":
             try:
                 self._record_session_budget_conc_sweep_skip(denied=denied)
-            except Exception:  # noqa: BLE001 — a stamp miss must not abort the pump
+            except Exception:
                 log.exception(
                     "dispatcher: could not record conc_sweep time-budget skip for task=%s",
                     task.task_id,
@@ -1893,7 +1893,7 @@ class DispatcherCollaborator:
             return (
                 f"(run_action_now: {name!r} was cancelled — the session is shutting down or out of wall-clock budget)"
             )
-        except Exception as exc:  # noqa: BLE001 — never crash the turn
+        except Exception as exc:
             log.exception("run_action_now: inline run of %r failed", name)
             return f"(run_action_now: {name!r} errored: {exc!r})"
 
@@ -2042,7 +2042,7 @@ class DispatcherCollaborator:
                     {**result_payload, "inline": True},
                 )
             )
-        except Exception:  # noqa: BLE001 — audit best-effort
+        except Exception:
             log.exception(
                 "run_action_now: failed to append delegated_result for %s",
                 task.task_id,

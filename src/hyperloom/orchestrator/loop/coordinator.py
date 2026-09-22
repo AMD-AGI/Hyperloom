@@ -61,7 +61,7 @@ from ..bus.message_bus import Message, MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
 from ..policy.gate import (
     PolicyGate,
-    SPECIALIST_FROM_AGENT_PREFIX,  # noqa: F401 - re-exported for callers/tests
+    SPECIALIST_FROM_AGENT_PREFIX,
 )
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
@@ -464,7 +464,7 @@ class CoordinatorState:
 class _CoordinatorMeta(type):
     """Class-level delegation for extracted collaborator methods."""
 
-    def __getattr__(cls, name):  # noqa: N805 - metaclass first arg is the class
+    def __getattr__(cls, name):
         prop = cls._DELEGATED.get(name)
         if prop is not None:
             import importlib
@@ -603,7 +603,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             cap = int(self.shared_state.research_lane_capacity or 0)
             if cap >= 0:
                 _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:  # noqa: BLE001 — non-fatal; default seed wins
+        except Exception:
             log.exception("failed to sync research_lane_capacity to leases DB")
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
@@ -1247,7 +1247,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                     phase,
                     reaped,
                 )
-        except Exception:  # noqa: BLE001 - cleanup must never be fatal
+        except Exception:
             log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
@@ -1285,7 +1285,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         self._stop.set()
         try:
             await self.dispatcher.cancel_inflight_actions(reason="coordinator_stop")
-        except Exception:  # noqa: BLE001 — teardown proceeds even if cancellation misbehaves
+        except Exception:
             log.exception("Coordinator.stop: cancelling in-flight actions raised")
         for t in self._tasks_running:
             if not t.done():
@@ -1296,7 +1296,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             except asyncio.CancelledError:
                 # Expected: we just cancelled these tasks.
                 pass
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("reactor task raised on shutdown")
         await self.dispatcher.close_db_after_executions()
 
@@ -1363,11 +1363,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 if not sid:
                     return
             self.ensure_recipe_finalized(source="t4_fallback")
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("recipe KB T4 fact_finalize fallback failed")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("recipe KB T4 SharedState.save failed")
 
     # Statuses that mean the candidate was ADOPTED; everything else is a negative signal for the ranker.
@@ -1456,7 +1456,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to persist Coordinator exception metadata")
 
     def _fault_open_phase_event(self, *, stage: str, exc: BaseException) -> None:
@@ -1627,7 +1627,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                                 self._advance_phase_if_needed,
                                 stage="advance_phase_hint",
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance before reactors (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase_pre_reactor",
@@ -1657,7 +1657,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                             self._advance_phase_if_needed,
                             stage="advance_phase",
                         )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception("phase advance (run) failed")
                         self._record_coordinator_exception(
                             stage="advance_phase",
@@ -1670,11 +1670,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         if now - self._last_maintenance_ts >= MAINTENANCE_INTERVAL_SEC:
                             await self._run_maintenance(tick=tick_n)
                             self._last_maintenance_ts = now
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception("maintenance tick raised")
                 except (asyncio.CancelledError, KeyboardInterrupt):
                     raise
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     last_tick_exc = exc
                     log.exception("Coordinator.run: tick %d body raised", tick_n)
                     self._record_coordinator_exception(
@@ -1745,7 +1745,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         finally:
             try:
                 await self._await_kernel_entry_task()
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
@@ -1764,7 +1764,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             self.shared_state.save(self.session_dir)
             try:
                 await self.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            except (asyncio.CancelledError, Exception):
                 log.exception("Coordinator: terminal close sequence did not finish")
             await self._recipe_kb_t4_hook()
             log.info(
@@ -1793,7 +1793,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 continue
             try:
                 await closer()
-            except Exception:  # noqa: BLE001 — teardown must not mask the stop reason
+            except Exception:
                 log.exception("Coordinator: closing the %s backend failed", name)
 
     # Reactor
@@ -1847,7 +1847,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
             )
             await self._advance_rendered_cursor(agent_name)
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Catch-all so one agent's bad turn never stops the loop.
             log.exception("reactor pass for %s raised", agent_name)
             await self._record_observation(
@@ -1887,7 +1887,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 setup = setup_getter()
                 if isinstance(setup, dict):
                     write_mcp_setup_once(session_dir=self.session_dir, setup=setup)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("orchestration mcp setup trace failed", exc_info=True)
 
     def _trace_reactor_llm_call(
@@ -1921,7 +1921,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call append failed for %s",
                 agent_name,
@@ -1947,7 +1947,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor llm_call failure append failed for %s",
                 agent_name,

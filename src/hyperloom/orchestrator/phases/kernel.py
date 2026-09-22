@@ -329,7 +329,7 @@ class KernelPhase(PhaseHandler):
                 )
                 return
             await self.run_task_registered(reprofile_task)
-        except Exception:  # noqa: BLE001 — never block the phase on a reprofile failure
+        except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
                 ran=True,
@@ -632,7 +632,7 @@ class KernelPhase(PhaseHandler):
                 },
                 session_dir=self.session_dir,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("KERNEL entry GEMM tuning failed")
             result = {
                 "status": "failed",
@@ -678,7 +678,7 @@ class KernelPhase(PhaseHandler):
                 cfg = yaml.safe_load(Path(recipe_path).read_text(encoding="utf-8")) or {}
                 envs = ((cfg.get("benchmark") or {}).get("envs")) or {}
                 return dict(envs) if isinstance(envs, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("geak handoff: could not read recipe %r", recipe_path, exc_info=True)
         return {}
 
@@ -743,7 +743,7 @@ class KernelPhase(PhaseHandler):
                 return {}
             bench = cfg.get("benchmark") or {}
             return bench if isinstance(bench, dict) else {}
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("recipe: could not read %r", recipe_path, exc_info=True)
             return {}
 
@@ -834,7 +834,7 @@ class KernelPhase(PhaseHandler):
                 # best available replay result rather than a confirmed same-run one.
                 "observed_tput_match_err": round(err, 6),
             }
-        except Exception:  # noqa: BLE001 — shape enrichment is strictly additive
+        except Exception:
             log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
             return {}
 
@@ -875,7 +875,7 @@ class KernelPhase(PhaseHandler):
             if Path(str(bench.get("benchmark_script") or "").strip()).name != AGENTX_CLIENT_SCRIPT:
                 return ""
             return resolve_launch_server_script(bench)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning("launch_server_script: could not resolve from the recipe", exc_info=True)
             return ""
 
@@ -1294,7 +1294,7 @@ class KernelPhase(PhaseHandler):
                         task=settled_task,
                     )
                     return True
-            except Exception:  # noqa: BLE001 - recovery is best-effort
+            except Exception:
                 log.exception(
                     "geak: failed to replay delegated result for succeeded rebench %s",
                     task_id,
@@ -1330,7 +1330,7 @@ class KernelPhase(PhaseHandler):
 
             try:
                 summary = await self._enqueue_internal_stack_rebench(reason=reason)
-            except Exception as exc:  # noqa: BLE001 - defensive
+            except Exception as exc:
                 log.exception("geak: enqueue same-harness revalidation failed")
                 summary = {"skipped": True, "reason": repr(exc)}
 
@@ -1353,7 +1353,7 @@ class KernelPhase(PhaseHandler):
                 )
                 try:
                     fb = await self._validate_geak_via_geak_harness(reason=str(summary.get("reason") or "2b_declined"))
-                except Exception as exc:  # noqa: BLE001 - defensive
+                except Exception as exc:
                     log.exception("geak: GEAK-harness validation failed")
                     fb = {"validated": False, "reason": repr(exc)}
                 if bool(fb.get("validated")):
@@ -1452,7 +1452,7 @@ class KernelPhase(PhaseHandler):
 
         try:
             runner = _kernel_agent_tool_path("backends/geak_runner.py")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("GEAK runner not resolvable; skipping KERNEL")
             _finish_skip({"status": "error", "error_class": "runner_not_found", "error": repr(exc)})
             return
@@ -1601,7 +1601,7 @@ class KernelPhase(PhaseHandler):
                 kill_timeout_s=kill_timeout,
             )
             return
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("GEAK runner crashed")
             _finish_skip(
                 {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
@@ -2319,7 +2319,7 @@ class KernelPhase(PhaseHandler):
                     root=str(meta.get("root_dir") or "") or None,
                     version=str(meta.get("version") or meta.get("commit") or "") or None,
                 )
-            except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+            except Exception:
                 log.debug("kernel timeline: geak tool version record failed", exc_info=True)
 
     def _reject_geak_kernel_journey(
@@ -2366,7 +2366,7 @@ class KernelPhase(PhaseHandler):
         """Report whether the validated aiter CSV was reachable by the server."""
         try:
             return self._gemm_tuned_config_coverage_impl(tuner_name, envs)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning(
                 "tuned-config coverage failed for %s; treating it as undetermined",
                 tuner_name,
@@ -2624,7 +2624,7 @@ class KernelPhase(PhaseHandler):
                 hit_logging=hit_logging,
                 runtime_table_names=table_names,
             ).to_dict()
-        except Exception:  # noqa: BLE001 - verification must never fail the run
+        except Exception:
             log.warning("apply verification failed for %s", tuner_name, exc_info=True)
             return None
 
@@ -3064,7 +3064,7 @@ class KernelPhase(PhaseHandler):
         self.shared_state.record_gemm_tuning(result)
         try:
             await self._validate_gemm_tuning_e2e(result)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Validation spans server restarts, log parsing and CSV merges, and is reached from two entrypoints that
             # only guard the tuning call itself.
             log.exception("gemm E2E validation raised; recording it as a fault")
@@ -3134,7 +3134,7 @@ class KernelPhase(PhaseHandler):
                     metrics=metrics,
                 )
             )
-        except Exception:  # noqa: BLE001 — journaling is best-effort
+        except Exception:
             log.exception("gemm_tuning journal append failed")
 
     def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
@@ -3741,14 +3741,14 @@ class KernelPhase(PhaseHandler):
                     "KERNEL entry: sealed campaign baselines %s",
                     {repo: baseline.commit for repo, baseline in baselines.items()},
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
             try:
                 env_spec = self.build_env_spec()
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("KERNEL entry: could not build Forge serving environment")
                 env_spec = {}
             handoff_dir = write_forge_handoff(
@@ -3759,7 +3759,7 @@ class KernelPhase(PhaseHandler):
                 baselines=baselines,
             )
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("KERNEL entry: Forge handoff generation failed")
         await self._run_kernel_rewrite_controller(handoff_dir, attempt_dir, baselines)
 
@@ -3809,7 +3809,7 @@ class KernelPhase(PhaseHandler):
                         budget_minutes=controller_budget_sec / 60.0,
                         hard_timeout_sec=hard_timeout_sec,
                     )
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     log.exception("KERNEL entry: kernel rewrite controller failed")
                     result = {
                         "status": "failed",
@@ -3840,7 +3840,7 @@ class KernelPhase(PhaseHandler):
                 reclaimed = reclaim_campaign_repositories(baselines or {})
                 if reclaimed:
                     result["reclaimed_repositories"] = reclaimed
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("KERNEL entry: reclaiming the campaign repositories failed")
             if int(result.get("patch_count") or 0) > 0:
                 try:
@@ -3855,7 +3855,7 @@ class KernelPhase(PhaseHandler):
                         record_keep=self._record_integrate_keep,
                     )
                     result["integration"] = integration.to_dict()
-                except Exception as error:  # noqa: BLE001
+                except Exception as error:
                     log.exception("KERNEL entry: Controller patch integration failed")
                     result["integration"] = {
                         "status": "failed",
@@ -3957,7 +3957,7 @@ class KernelPhase(PhaseHandler):
                 {"task_id": "kernel_entry_fusion", "reason": "kernel_entry_auto"},
                 session_dir=self.session_dir,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("KERNEL entry forge-fusion failed")
             result = {
                 "status": "failed",
@@ -4024,7 +4024,7 @@ class KernelPhase(PhaseHandler):
                     },
                 )
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("failed to post run_fusion_done bus message")
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if isinstance(result, dict) and result.get("kept") and result.get("requires_e2e_validation"):
@@ -4168,7 +4168,7 @@ class KernelPhase(PhaseHandler):
             return False
         try:
             task = await self._enqueue_internal_analysis_task(reason=reason)
-        except Exception as exc:  # noqa: BLE001 — defensive
+        except Exception as exc:
             log.exception(
                 "watermark-roofline (%s): failed to enqueue: %r",
                 reason,

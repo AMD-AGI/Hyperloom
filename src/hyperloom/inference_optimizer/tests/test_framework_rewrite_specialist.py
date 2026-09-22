@@ -300,7 +300,7 @@ class _Tasks:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
 
-    async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+    async def create_or_return_existing(self, **kwargs: Any):
         """Record the dispatch and return a fresh-task sentinel."""
         self.created.append(kwargs)
         from types import SimpleNamespace
@@ -335,7 +335,7 @@ class _DispatchStub:
         """Macro-cycle 0, as the Coordinator would report it."""
         return ""
 
-    def _render_framework_memory_for_prompt(self, _memory) -> str:  # noqa: ANN001
+    def _render_framework_memory_for_prompt(self, _memory) -> str:
         """Suppress the working-memory block; not under test here."""
         return ""
 
@@ -347,11 +347,11 @@ class _DispatchStub:
         """Provide no GPU params; not under test here."""
         return {}
 
-    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:  # noqa: ANN001
+    def _framework_authoring_lanes_ttl(self, _params, *, base_ttl_sec: int) -> tuple[list[str], int]:
         """Provide fixed lanes/TTL; lane accounting is not under test here."""
         return [], base_ttl_sec
 
-    async def _warm_specialist_params(self, _params) -> None:  # noqa: ANN001
+    async def _warm_specialist_params(self, _params) -> None:
         """Skip warm-start enrichment; not under test here."""
         return None
 

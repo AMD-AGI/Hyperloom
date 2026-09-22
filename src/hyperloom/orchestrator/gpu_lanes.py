@@ -25,7 +25,7 @@ class GpuLanes(CoordinatorCollaborator):
 
             if is_multi_node():
                 return {}
-        except Exception:  # noqa: BLE001 — treat probe failure as single-node
+        except Exception:
             # Loud enough to notice: this swallowed a wrong-depth relative import once, which read as "single-node"
             # and handed a multi-node run the whole machine.
             log.warning("gpu_lanes: multi-node probe failed; assuming single-node", exc_info=True)
@@ -42,7 +42,7 @@ class GpuLanes(CoordinatorCollaborator):
             lanes.append("gpu_research_lane")
             try:
                 ttl = self._gpu_lease_ttl_sec(ttl, params=params)
-            except Exception:  # noqa: BLE001 — fall back to the base TTL
+            except Exception:
                 log.exception(
                     "framework GPU: gpu_research_lane TTL re-source failed; using base TTL",
                 )

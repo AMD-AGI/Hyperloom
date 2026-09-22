@@ -187,7 +187,7 @@ def _build_failure_summary(
                 from ._subprocess_kill import server_log_death_excerpt
 
                 excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:  # noqa: BLE001 — excerpt enrichment is best-effort
+            except Exception:
                 log.debug("server_log_death_excerpt failed", exc_info=True)
                 excerpt = None
             if excerpt:
@@ -218,7 +218,7 @@ def _build_failure_summary(
         if suppressed:
             summary["suppressed_benign"] = suppressed[:5]
         return summary
-    except Exception:  # noqa: BLE001 — report must never crash on the summary
+    except Exception:
         log.warning(
             "report_executor: failed to build failure_summary",
             exc_info=True,
@@ -337,7 +337,7 @@ def _explain_conc_sweep_skip(state) -> str:
         return ""
     # Imported here, not at module scope: ``kernel.conc_sweep`` imports the grid runner in this same package, so a
     # top-level import is the edge CodeQL reports as a cycle.
-    from ...kernel.conc_sweep import conc_sweep_declined_to_run  # noqa: PLC0415
+    from ...kernel.conc_sweep import conc_sweep_declined_to_run
 
     detail = str(last.get("skip_reason") or "").strip() or "no reason recorded"
     if conc_sweep_declined_to_run(last):
@@ -1286,7 +1286,7 @@ class ReportExecutor:
                 output_dir=output_dir,
                 state=state,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.debug("report_executor: conc_sweep curve render failed", exc_info=True)
         if conc_sweep_curve_png is not None:
             try:
@@ -1372,7 +1372,7 @@ class ReportExecutor:
                 "stdout": proc.stdout[-4000:],
                 "stderr": proc.stderr[-4000:],
             }
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             log.warning("report_executor: result publish failed: %s", e)
             return {"enabled": True, "error": str(e)}
 

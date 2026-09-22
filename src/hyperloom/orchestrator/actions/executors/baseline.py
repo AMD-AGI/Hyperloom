@@ -1653,7 +1653,7 @@ class BaselineExecutor:
         try:
             state = self._resolve_shared_state(shared_state)
             return bool(getattr(state, "baseline_eager_fallback", False))
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
+        except Exception:
             log.debug(
                 "baseline_executor: eager-fallback flag peek failed",
                 exc_info=True,
@@ -1669,7 +1669,7 @@ class BaselineExecutor:
             state.baseline_eager_fallback = False
             state.save(self.session_dir)
             return True
-        except Exception:  # noqa: BLE001 — fallback must never break baseline
+        except Exception:
             log.debug(
                 "baseline_executor: eager-fallback flag check failed",
                 exc_info=True,
@@ -1942,7 +1942,7 @@ class BaselineExecutor:
                         measured,
                     )
             result["baseline_convergence"] = record
-        except Exception:  # noqa: BLE001 - observability must never break a baseline
+        except Exception:
             log.debug("baseline convergence record failed", exc_info=True)
 
     @staticmethod
@@ -2030,7 +2030,7 @@ class BaselineExecutor:
         # Only a context that names its session binds one.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -2086,7 +2086,7 @@ class BaselineExecutor:
                 int(getattr(state, "macro_cycle", 0) or 0),
             )
             return make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+        except Exception:
             log.warning(
                 "baseline timeline: could not resolve an event to record into; this "
                 "measurement's whole event will be missing from the breakdown",
@@ -2109,7 +2109,7 @@ class BaselineExecutor:
             tuple[int | None, int | None]: The consecutive-failure streak and
                 the session total, or ``(None, None)`` when no state is bound.
         """
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return (
                 int(getattr(state, "baseline_failure_streak", 0) or 0),
@@ -2120,7 +2120,7 @@ class BaselineExecutor:
     def _resolve_framework(self, ctx: RunnerContext) -> str:
         """Name the serving framework this measurement runs against."""
         params = ctx.task.params or {}
-        with suppress(Exception):
+        with suppress(AttributeError, TypeError, ValueError):
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             return str(
                 params.get("framework") or getattr(state, "framework", "") or os.environ.get("FRAMEWORK", "")
@@ -2518,7 +2518,7 @@ class BaselineExecutor:
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             try:
                 shared_state.baseline_accuracy = acc_val
-            except Exception:  # noqa: BLE001 — salvage must never break baseline
+            except Exception:
                 log.debug("baseline_executor: salvage could not set shared_state", exc_info=True)
         return acc_val
 
@@ -2538,7 +2538,7 @@ class BaselineExecutor:
             from ._accuracy_gate import _finite_score, parse_eval_results
 
             eval_data = parse_eval_results(runs_root, framework=framework)
-        except Exception:  # noqa: BLE001 — salvage must never break the stop path
+        except Exception:
             log.debug("baseline_executor: sibling-accuracy salvage scan failed", exc_info=True)
             return None
         if _finite_score(eval_data.get("accuracy")) is None:
@@ -2684,7 +2684,7 @@ class BaselineExecutor:
                 _cfg_envs = _cfg_bench.setdefault("envs", {})
                 apply_runtime_override(_cfg_envs, _rt_from_params)
                 config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:  # noqa: BLE001 — runtime overlay is best-effort
+            except Exception:
                 log.debug("baseline_executor: runtime_override application failed", exc_info=True)
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
@@ -2692,16 +2692,15 @@ class BaselineExecutor:
         # their say by here, and after the launch the same answer can only be
         # guessed at by parsing the server's own log back.
         if recorder is not None:
-            with suppress(Exception):
-                recorder.record_invocation(
-                    run_index=run_index,
-                    framework_args=effective_extra_server_args,
-                    extra_envs=base_extra_envs,
-                    config_path=materialized_config_path,
-                    framework=fw,
-                    model_path=resolved_model,
-                    args_mode=str(params.get("args_mode") or "append"),
-                )
+            recorder.record_invocation(
+                run_index=run_index,
+                framework_args=effective_extra_server_args,
+                extra_envs=base_extra_envs,
+                config_path=materialized_config_path,
+                framework=fw,
+                model_path=resolved_model,
+                args_mode=str(params.get("args_mode") or "append"),
+            )
         # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
         # capability-preflight aiperf before Magpie runs the materialized config.
         # Baseline/profile shell out here (not via _run_magpie), so without this the
@@ -2818,7 +2817,7 @@ class BaselineExecutor:
             live_shared_state.warm_replay_pending = pending
             try:
                 live_shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.warning(
                     "combined warm replay recipe snapshot persist failed",
                     exc_info=True,
@@ -2888,7 +2887,7 @@ class BaselineExecutor:
                             live_shared_state.set_stop_reason("warm_replay_rollback_failed")
                     try:
                         live_shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.warning(
                             "combined warm replay cleanup persist failed",
                             exc_info=True,
@@ -2920,7 +2919,7 @@ class BaselineExecutor:
                 live_shared_state.warm_replay_pending = pending
                 try:
                     live_shared_state.save(self.session_dir)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     log.debug(
                         "combined warm replay pending persist failed",
                         exc_info=True,
@@ -3356,7 +3355,7 @@ class BaselineExecutor:
             session_dir = Path(str(extra.get("session_dir") or self.session_dir))
             state = SharedState.load_or_init(session_dir)
             return bool(getattr(state, "baseline_double_run", False))
-        except Exception:  # noqa: BLE001 - keep baseline fallback double-run.
+        except Exception:
             log.debug(
                 "baseline_executor: could not resolve baseline_double_run from session state",
                 exc_info=True,

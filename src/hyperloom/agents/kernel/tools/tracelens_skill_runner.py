@@ -34,11 +34,11 @@ from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODE
 
 # Sibling import works whether run as a script or loaded via importlib.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _capture_shapes import is_capture_dir_name  # noqa: E402
-from _io_utils import safe_float  # noqa: E402
-from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS  # noqa: E402
-from _literal_utils import safe_literal_eval as _safe_literal_eval  # noqa: E402
-from _task_group_contract import (  # noqa: E402
+from _capture_shapes import is_capture_dir_name
+from _io_utils import safe_float
+from _literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
+from _literal_utils import safe_literal_eval as _safe_literal_eval
+from _task_group_contract import (
     build_operator_identity,
     build_task_group_shape_cases,
     legacy_operator_identity_keys,
@@ -448,7 +448,7 @@ def _should_use_codex_runner() -> bool:
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
-    from hyperloom.common.claude_oneshot import message_text  # noqa: PLC0415
+    from hyperloom.common.claude_oneshot import message_text
 
     yield from (t for t in message_text(message) if t)
 
@@ -1227,7 +1227,7 @@ def parse_analysis_md(md_path: Path, top_k: int = 10) -> list[dict[str, Any]]:
         return []
     try:
         text = md_path.read_text(encoding="utf-8")
-    except Exception:
+    except OSError:
         return []
 
     pitems = _extract_pitem_categories(text)

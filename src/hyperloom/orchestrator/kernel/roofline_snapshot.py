@@ -738,6 +738,6 @@ def build_profiler_digest(
             lines.append(f"reusable_native_kernel_ids={[str(r) for r in reusable[:12]]}")
 
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001 — prompt enrichment must never crash
+    except Exception:
         log.debug("build_profiler_digest failed", exc_info=True)
         return ""

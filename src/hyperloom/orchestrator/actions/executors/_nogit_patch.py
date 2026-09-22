@@ -484,7 +484,7 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
             except OSError:
                 # Best-effort scan: skip unreadable/racing .rej files.
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
     return "\n\n".join(parts)
 

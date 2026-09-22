@@ -214,7 +214,7 @@ def _record_phase_proposal(router: Any, pending: Any) -> None:
             candidate_id=payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
             variant_name=payload.get("variant_name") or params.get("variant_name"),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal row failed for %s", proposal_id, exc_info=True)
 
 
@@ -256,7 +256,7 @@ def _record_phase_proposal_review(
             alternative_action=advice.get("alternative_action"),
             variants=variants,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
 
 
@@ -353,7 +353,7 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
             reauthored=bool(outcome.get("reauthored")),
             patch_verdict_key=outcome.get("patch_verdict_key"),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
+    except Exception:
         log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
 
 
@@ -462,7 +462,7 @@ class IntentRouter:
                 )
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("intent handler for %s raised", source)
             self._record_coordinator_exception(
                 stage="handle_intent",
@@ -480,7 +480,7 @@ class IntentRouter:
                         "error": format_exc_brief(exc, limit=500),
                     },
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("failed to record handle_intent_exception observation")
             return
 
@@ -734,7 +734,7 @@ class IntentRouter:
                     patch_verdict,
                 )
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — best-effort mirror
+            except Exception:
                 log.exception(
                     "failed to mirror critic verdict for specialist task=%s",
                     sid_candidate,
@@ -777,7 +777,7 @@ class IntentRouter:
                 await self._coord._maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
                 )
-            except Exception:  # noqa: BLE001 — accounting must never wedge the loop
+            except Exception:
                 log.exception(
                     "enablement rearm on critic-reject failed for task=%s",
                     sid_candidate,
@@ -875,7 +875,7 @@ class IntentRouter:
                     )
                     try:
                         self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception("delegate specialist: source-patch prune save failed")
                 return
         # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
@@ -914,7 +914,7 @@ class IntentRouter:
                             int(ttl or 0),
                             params=params,
                         )
-                    except Exception:  # noqa: BLE001 — fall back to registry ttl
+                    except Exception:
                         log.exception(
                             "failed to re-source gpu_research_lane TTL; using registry default",
                         )
@@ -1172,7 +1172,7 @@ class IntentRouter:
                                 merged_payload,
                                 **handler_kwargs,
                             )
-                    except Exception as exc:  # noqa: BLE001
+                    except Exception as exc:
                         log.exception(
                             "kernel_request_handler[%s] crashed for source=%s",
                             kind,
@@ -1294,7 +1294,7 @@ class IntentRouter:
             started = _parse_iso_unix(task.updated_at)
             if started > 0:
                 running_sec = max(0.0, time.time() - started)
-        except Exception:  # noqa: BLE001 — fall back to the full TTL
+        except Exception:
             log.exception("extend_lease: could not read running age for task=%s", task_id)
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
@@ -1302,7 +1302,7 @@ class IntentRouter:
         gpu_error = ""
         try:
             gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
-        except Exception as exc:  # noqa: BLE001 — lane extension already landed
+        except Exception as exc:
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
@@ -1313,7 +1313,7 @@ class IntentRouter:
             from ..specialists.subprocess_ import grant_wall_budget_extension
 
             grant_wall_budget_extension(task_id, extra_sec)
-        except Exception as exc:  # noqa: BLE001 — lease rows already moved
+        except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
         # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
@@ -1360,7 +1360,7 @@ class IntentRouter:
                     reason=f"prune_branch:{family}",
                 ):
                     self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — prune must not fail on bookkeeping
+            except Exception:
                 log.exception("prune_branch: GEAK pending settle failed")
         await self.bus.append_and_seq(
             Message.new(
@@ -1470,7 +1470,7 @@ class IntentRouter:
             tmp = inbox.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(existing[-32:], indent=2), encoding="utf-8")
             tmp.replace(inbox)
-        except Exception:  # noqa: BLE001 — steering is best-effort
+        except Exception:
             log.exception("failed to deliver inbox message to %s", to_agent)
 
     async def _handle_alert(self, source: str, intent: Intent) -> None:

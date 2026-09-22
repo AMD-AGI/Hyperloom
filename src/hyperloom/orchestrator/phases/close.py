@@ -143,7 +143,7 @@ class ClosePhase(PhaseHandler):
                         "failed",
                         {"reason": "close_post_opt_roofline_timeout"},
                     )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.debug(
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
@@ -261,7 +261,7 @@ class ClosePhase(PhaseHandler):
                 cumulative_gain_pct=state.cumulative_gain_validated,
                 failure_streak=state.roofline_failure_streak,
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: roofline progress record failed", exc_info=True)
 
     def _close_stack_ledger(self) -> None:
@@ -275,7 +275,7 @@ class ClosePhase(PhaseHandler):
             from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
             stack_event.finish()
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: stack ledger close failed", exc_info=True)
 
     def _record_close_baseline_progress(self) -> None:
@@ -288,7 +288,7 @@ class ClosePhase(PhaseHandler):
                 total_failures=state.baseline_total_failures,
                 arg_error_streak=state.baseline_arg_error_streak,
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: baseline progress record failed", exc_info=True)
 
     def _record_close_final_recipe(self) -> None:
@@ -313,7 +313,7 @@ class ClosePhase(PhaseHandler):
                 extra_server_args=config.get("extra_server_args") or "",
                 extra_envs=config.get("extra_envs") or {},
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: final recipe record failed", exc_info=True)
 
     def _record_close_geak_candidate(self) -> None:
@@ -325,7 +325,7 @@ class ClosePhase(PhaseHandler):
                 pending=state.geak_pending if isinstance(getattr(state, "geak_pending", None), dict) else {},
                 revalidation_pending=getattr(state, "resume_pending_revalidation", False),
             )
-        except Exception:  # noqa: BLE001 — the record must not outrank the close-out
+        except Exception:
             log.debug("CLOSE: geak candidate record failed", exc_info=True)
 
     async def _drain_geak_rebench_for_close(self, *, reason: str = "close_sequence") -> None:
@@ -354,7 +354,7 @@ class ClosePhase(PhaseHandler):
                 log.info("%s: settled a GEAK revalidation slot that can no longer land", reason)
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("%s: geak_pending settle save failed", reason)
             await self._record_observation(
                 "coordinator",
@@ -366,7 +366,7 @@ class ClosePhase(PhaseHandler):
                     "pending_settled": bool(settled),
                 },
             )
-        except Exception:  # noqa: BLE001 — wind-down must proceed even if this fails
+        except Exception:
             log.exception("%s: GEAK rebench drain failed (non-fatal)", reason)
             await self._record_close_step(
                 "geak_rebench_drain",
@@ -390,7 +390,7 @@ class ClosePhase(PhaseHandler):
             self.shared_state.set_stop_reason(derived)
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("CLOSE: early stop_reason persist failed; step 5 will retry")
 
         # Ahead of the roofline and every close-section record, so they all
@@ -443,7 +443,7 @@ class ClosePhase(PhaseHandler):
                 status=close_status,
                 detail=detail,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 0.5 (fact_finalize) failed")
             await self._record_close_step(
                 "fact_finalize",
@@ -505,7 +505,7 @@ class ClosePhase(PhaseHandler):
                     task_id=report_task.task_id,
                     detail=detail,
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 1 (report) failed")
             self._emit_lifecycle(
                 step="report",
@@ -537,7 +537,7 @@ class ClosePhase(PhaseHandler):
                     task_id=bd_task.task_id,
                     detail=f"task_state={terminal_state!r}",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 2 (session_breakdown) failed")
             await self._record_close_step(
                 "session_breakdown",
@@ -561,7 +561,7 @@ class ClosePhase(PhaseHandler):
             # Attach the final breakdown JSON to the trace as a ``session_breakdown`` observation (no-op when live
             # push is disabled).
             record_session_breakdown(self.session_dir)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.debug("CLOSE step 2.5 (langfuse flush) failed", exc_info=True)
             await self._record_close_step(
                 "langfuse_flush",
@@ -600,7 +600,7 @@ class ClosePhase(PhaseHandler):
                     status="skipped",
                     detail="no artifacts matched or dest unwritable",
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("CLOSE step 2.6 (artifact_package) failed")
             await self._record_close_step(
                 "artifact_package",
@@ -618,7 +618,7 @@ class ClosePhase(PhaseHandler):
             self.shared_state.set_stop_reason(self._derive_close_stop_reason())
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
@@ -663,7 +663,7 @@ class ClosePhase(PhaseHandler):
                         "nothing; %s still carries the pre-refresh close section",
                         pkg_path,
                     )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.warning(
                 "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
                 "the pre-refresh close section",
@@ -756,7 +756,7 @@ class ClosePhase(PhaseHandler):
             self.shared_state.closing_report_task_id = task.task_id
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 log.exception("internal-report: closing_report_task_id save failed")
         return task
 
@@ -913,7 +913,7 @@ class ClosePhase(PhaseHandler):
             return
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "close_step save failed for step=%r status=%r",
                 step,
@@ -950,7 +950,7 @@ class ClosePhase(PhaseHandler):
                     "cancelled",
                     evidence={"reason": "closing_phase"},
                 )
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )
@@ -975,7 +975,7 @@ class ClosePhase(PhaseHandler):
                 lease_ttl_sec=120,
             )
             task_id = task.task_id
-        except Exception:  # noqa: BLE001 — the closing phase is already armed in persisted state
+        except Exception:
             # A blank id is the honest record of a failed enqueue, and the
             # closing check reads it as "nothing to wait for".
             log.exception("closing_phase: enqueueing the report task failed; the close sequence will write it")

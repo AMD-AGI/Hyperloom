@@ -935,7 +935,7 @@ def _resolve_mn_effective_server_args(
         _variant_envs = _variant_bench.get("envs") or {}
         _variant_framework_env = server_args_env_name(_variant_bench.get("framework"))
         return str(_variant_envs.get(_variant_framework_env) or "")
-    except Exception:  # noqa: BLE001 - restart path still reports validation errors
+    except Exception:
         log.debug(
             "grid_runner: failed to read materialized variant args from %s",
             cfg_path,

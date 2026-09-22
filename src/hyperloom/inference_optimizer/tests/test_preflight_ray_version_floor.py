@@ -103,7 +103,7 @@ class _InstallRecorder:
         self.pinned_install_ok = pinned_install_ok
         self.install_specs: list[list[str]] = []
 
-    def __call__(self, argv, **kwargs):  # noqa: ANN001, ANN003
+    def __call__(self, argv, **kwargs):
         specs = [arg for arg in argv if arg.startswith(("ray[", "click"))]
         self.install_specs.append(specs)
         pinned = any(spec.startswith("ray[default]==") for spec in specs)

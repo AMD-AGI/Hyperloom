@@ -57,7 +57,7 @@ class KernelStackPhase(PhaseHandler):
                     if str(result.get("decision") or "").upper() == "KEEP":
                         await self._record_integrate_keep(result)
                 state.save(self.session_dir)
-            except Exception as exc:  # noqa: BLE001 — never block SWEEP entry
+            except Exception as exc:
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
@@ -350,7 +350,7 @@ class KernelStackPhase(PhaseHandler):
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
         # Lazy (re-)import so tests can monkeypatch it on the source module.
-        from ..actions.executors.benchmark_result import is_valid_measurement  # noqa: F811
+        from ..actions.executors.benchmark_result import is_valid_measurement
         from ..kernel.patch_lifecycle import cleanup_verdict, lifecycle_complete
         from ..kernel.request_handlers import (
             KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,

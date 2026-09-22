@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-import bypass_trace_analysis as bta  # noqa: E402
-import diffusion_roofline as dr  # noqa: E402
+import bypass_trace_analysis as bta
+import diffusion_roofline as dr
 
 _TRACE_EVENTS = [
     {"cat": "cpu_op", "name": "aten::paged_attn", "args": {"External id": 100}},
@@ -698,7 +698,7 @@ def test_csv_artifacts_written_and_paths_exposed(tmp_path, capsys, monkeypatch):
 
 
 # --- _maybe_build_shape_manifest: enabled-path coverage (WP-1) --------------
-import argparse as _argparse  # noqa: E402
+import argparse as _argparse
 
 
 def _mk_args(**kw):

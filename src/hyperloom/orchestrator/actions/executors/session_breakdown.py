@@ -33,7 +33,7 @@ class SessionBreakdownExecutor:
 
         try:
             target = write_breakdown_json(session_dir, output_path=output_path)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("session_breakdown export failed")
             return {
                 "status": "failed",

@@ -268,7 +268,7 @@ def _merge_established_server_args(inherited_args: str, round_args: str) -> str:
         return inherited_args
     merged = merge_server_args(inherited_args, round_args)
     if tokenize_server_args_preserving_json(merged) is not None:
-        from ...loop.coordinator_helpers import _dedupe_extra_server_args  # noqa: PLC0415
+        from ...loop.coordinator_helpers import _dedupe_extra_server_args
 
         return _dedupe_extra_server_args(merged)
     # The combined string carries a quoted value with embedded whitespace, which
@@ -530,7 +530,7 @@ def _execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path
     """
     log.info("integrate_patch: enablement setup replay: %s", cmd)
     try:
-        proc = subprocess.run(  # noqa: S602  # nosec B602 - allowlisted install-only shell command.
+        proc = subprocess.run(  # nosec B602 - allowlisted install-only shell command.
             cmd,
             shell=True,
             cwd=str(cwd),
@@ -627,7 +627,7 @@ def _run_setup_commands(
             # round installed into the shared venv at all.
             try:
                 on_execution(row)
-            except Exception:  # noqa: BLE001 - the ledger must not fail the install
+            except Exception:
                 log.debug("integrate_patch: durable setup ledger append failed", exc_info=True)
 
     with cancel_scope_listener():
@@ -2514,7 +2514,7 @@ class IntegratePatchExecutor:
 
         try:
             result = await asyncio.to_thread(_provision_and_probe)
-        except Exception as exc:  # noqa: BLE001 — provision failure is a clean revert, not a crash
+        except Exception as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2562,7 +2562,7 @@ class IntegratePatchExecutor:
         try:
             if attempt_dir.exists():
                 shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001 — GC is best-effort
+        except Exception:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(
@@ -2618,7 +2618,7 @@ class IntegratePatchExecutor:
                 fetch_pr_patches=lambda slug, num: _gh.pr_patches(slug, num),
                 fetch_raw_file=lambda slug, ref, path: _gh.fetch_raw_file(slug, ref, path),
             )
-        except Exception as exc:  # noqa: BLE001 — fetch failure is a clean revert
+        except Exception as exc:
             log.exception("integrate_patch: localization fetch raised")
             return _base_reverted("localization_fetch_failed", f"localization fetch raised: {exc!r}")
 
@@ -2998,7 +2998,7 @@ class IntegratePatchExecutor:
                     "ts": _now_iso(),
                 }
                 shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — sentinel is best-effort
+            except Exception:
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         # Normally already recorded before the setup commands; a root that
@@ -4271,8 +4271,8 @@ class IntegratePatchExecutor:
             fw = str(getattr(action, "framework", "") or "")
             argv = get_adapter(fw).editable_refresh_argv(venv_py, str(framework_root)) if venv_py else None
             if argv:
-                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)  # noqa: S603
-        except Exception:  # noqa: BLE001 — refresh is best-effort
+                subprocess.run(argv, capture_output=True, text=True, timeout=600, check=False)
+        except Exception:
             log.debug("integrate_patch: localization editable-refresh failed", exc_info=True)
         # Manifest via the existing snapshot mechanism.
         try:
@@ -4297,7 +4297,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:  # noqa: BLE001 — manifest is best-effort durability
+        except Exception:
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -4717,7 +4717,7 @@ class IntegratePatchExecutor:
                             rel_paths,
                             Path(source_snapshot_dir) / "realized.patch",
                         )
-        except Exception:  # noqa: BLE001 — snapshot is best-effort durability
+        except Exception:
             log.exception("integrate_patch: source-layer snapshot failed")
 
         return _with_stash_restore(
@@ -5427,7 +5427,7 @@ class IntegratePatchExecutor:
                     if target.exists():
                         target.unlink()
                 reverted.append(str(rec.get("rel_target") or target))
-            except OSError as exc:  # noqa: BLE001 — best-effort restore
+            except OSError as exc:
                 log.warning("integrate_patch: failed to revert artifact %s: %r", target, exc)
         return reverted
 
@@ -5662,7 +5662,7 @@ class IntegratePatchExecutor:
                 ).get("accuracy")
                 if isinstance(measured, (int, float)):
                     measured_accuracy = float(measured)
-            except Exception:  # noqa: BLE001 — advisory value only
+            except Exception:
                 log.debug("integrate_patch: accuracy parse for KB record failed", exc_info=True)
 
         # Enablement path: surface the raw accuracy so the branch can apply a floor.
@@ -5680,7 +5680,7 @@ class IntegratePatchExecutor:
                     enablement_accuracy = float(acc)
                 enablement_accuracy_task = str(eval_results.get("task") or "")
                 enablement_accuracy_metric = str(eval_results.get("metric") or "")
-            except Exception:  # noqa: BLE001 — eval may not produce a result
+            except Exception:
                 log.debug("integrate_patch: enablement eval parse failed", exc_info=True)
 
         # Guarded: an empty root would send the recursive scan over the cwd.
@@ -5796,7 +5796,7 @@ class IntegratePatchExecutor:
                 )
             else:
                 log.warning("integrate_patch: variant produced no accuracy result; gate skipped")
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
         return None
 

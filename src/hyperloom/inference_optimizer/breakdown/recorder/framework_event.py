@@ -1007,7 +1007,7 @@ def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder |
             make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
             macro_cycle=int(macro_cycle or 0),
         )
-    except Exception:  # noqa: BLE001 — observability cannot change phase behavior
+    except Exception:
         log.warning(
             "framework timeline: recorder construction failed; this phase entry's whole event "
             "will be missing from the breakdown",

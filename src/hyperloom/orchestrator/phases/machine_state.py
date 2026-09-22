@@ -1221,13 +1221,9 @@ def kernel_work_pending(state: Any) -> bool:
             return True
         return False
 
-    try:
-        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-        if callable(untried_hot) and bool(untried_hot()):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+    if callable(untried_hot) and bool(untried_hot()):
+        return True
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
     integrated_entries: list[dict[str, Any]] = []

@@ -56,7 +56,7 @@ class ConversationCollaborator:
                 reference_reader=self._context_reference_reader,
             )
             setter(provider)
-        except Exception:  # noqa: BLE001 — context pull is best-effort
+        except Exception:
             log.exception("Coordinator: failed to attach orchestration context tools")
 
     def _context_reference_reader(self, name: str = "") -> str:
@@ -209,7 +209,7 @@ class ConversationCollaborator:
             blob = self.shared_state._format_analysis_md_full()
             if blob and blob.strip():
                 return blob
-        except Exception:  # noqa: BLE001 — fall through to path read
+        except Exception:
             log.exception("Coordinator: _format_analysis_md_full failed")
         # Fallback: read the path recorded on last_trace_analyze.
         lta = getattr(self.shared_state, "last_trace_analyze", {}) or {}
@@ -249,7 +249,7 @@ class ConversationCollaborator:
                 response=response or "",
             )
             append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: reactor conversation append failed for %s",
                 agent_name,
@@ -268,7 +268,7 @@ class ConversationCollaborator:
             phase_block = self.shared_state.to_phase_status_summary(
                 budget_pct=self._phase_budget_pct,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("Coordinator: phase status summary failed")
             phase_block = ""
         if phase_block:
@@ -283,7 +283,7 @@ class ConversationCollaborator:
             sections.append(self.shared_state.to_mission_summary())
             try:
                 cycle_strategy_block = self._cycle_strategy_block()
-            except Exception:  # noqa: BLE001 — advisory only
+            except Exception:
                 log.exception("Coordinator: cycle strategy render failed")
                 cycle_strategy_block = ""
             if cycle_strategy_block:
@@ -323,7 +323,7 @@ class ConversationCollaborator:
         if agent_name == "orchestration":
             try:
                 warm_block = self.shared_state.to_warm_start_summary()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: warm_start_summary failed")
                 warm_block = ""
             if warm_block:
@@ -331,7 +331,7 @@ class ConversationCollaborator:
                 sections.append(warm_block)
             try:
                 gaps_block = self.shared_state.to_gaps_summary()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: gaps_summary failed")
                 gaps_block = ""
             if gaps_block:
@@ -339,14 +339,14 @@ class ConversationCollaborator:
                 sections.append(gaps_block)
             try:
                 research_block = self._specialist_findings_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: specialist findings render failed")
                 research_block = ""
             if research_block:
                 sections.append(research_block)
             try:
                 gap_block = self._target_gap_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: target gap advisory failed")
                 gap_block = ""
             if gap_block:
@@ -355,7 +355,7 @@ class ConversationCollaborator:
             # Advisory multi-model proposal scores (ProposalScorer); not a ranking directive.
             try:
                 scores_block = self.shared_state.to_proposal_scores_summary()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: proposal_scores_summary failed")
                 scores_block = ""
             if scores_block:
@@ -364,7 +364,7 @@ class ConversationCollaborator:
             # Priors-match: recently proposed variants aligning with research hints/external gap (advisory only).
             try:
                 priors_block = self._priors_match_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: priors-match advisory failed")
                 priors_block = ""
             if priors_block:
@@ -374,7 +374,7 @@ class ConversationCollaborator:
             # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
             try:
                 mix_block = self.shared_state.to_intervention_mix_summary()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: intervention_mix_summary failed")
                 mix_block = ""
             if mix_block:
@@ -383,7 +383,7 @@ class ConversationCollaborator:
 
             try:
                 plateau_block = self._plateau_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: plateau advisory failed")
                 plateau_block = ""
             if plateau_block:
@@ -399,7 +399,7 @@ class ConversationCollaborator:
                         self.session_dir,
                         self.shared_state,
                     )
-                except Exception:  # noqa: BLE001 — defensive
+                except Exception:
                     log.exception("Coordinator: trajectory review failed")
                     trajectory_block = ""
                 if trajectory_block:
@@ -409,7 +409,7 @@ class ConversationCollaborator:
             # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
             try:
                 redirect_block = self._bottleneck_redirect_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: bottleneck redirect advisory failed")
                 redirect_block = ""
             if redirect_block:
@@ -419,7 +419,7 @@ class ConversationCollaborator:
             # Decaying acceptance bar + prior variants now re-testable under it.
             try:
                 accept_block = self._acceptance_threshold_advisory_block()
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("Coordinator: acceptance threshold advisory failed")
                 accept_block = ""
             if accept_block:

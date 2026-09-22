@@ -65,7 +65,7 @@ def _resolve_aiter_jit_dir_dynamic() -> list[str]:
     """Locate aiter's ``jit/`` dir via Python's import machinery."""
     try:
         spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):  # noqa: BLE001 — aiter not importable
+    except (ImportError, ValueError):
         return []
     if spec is None or not spec.origin:
         return []

@@ -788,7 +788,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call append failed for task_id=%s turn=%s",
                 task_id,
@@ -834,7 +834,7 @@ class SpecialistRunner:
                 phase=phase,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist llm_call failure append failed for task_id=%s turn=%s",
                 task_id,
@@ -875,7 +875,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -924,7 +924,7 @@ class SpecialistRunner:
                 response=response or "",
             )
             append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break the run
+        except Exception:
             log.debug(
                 "full-trace: specialist conversation append failed for task_id=%s turn=%s",
                 task_id,

@@ -73,7 +73,7 @@ def read_patch_source_context(
     """Extract a source-code window near the first failing hunk in a patch."""
     try:
         return _read_source_context_impl(patch_text, framework_root, radius=radius)
-    except Exception:  # noqa: BLE001 — best-effort
+    except Exception:
         log.debug("apply_feedback: source-context extraction failed", exc_info=True)
         return ""
 
@@ -143,7 +143,7 @@ def source_context_for_file(
     """Extract a source window centred on the first occurrence of *symbol*."""
     try:
         return _source_context_for_file_impl(filepath, symbol=symbol, window=window, search_roots=search_roots)
-    except Exception:  # noqa: BLE001 — grounding is best-effort
+    except Exception:
         log.debug("apply_feedback: source-context-for-file failed for %s", filepath, exc_info=True)
         return ""
 

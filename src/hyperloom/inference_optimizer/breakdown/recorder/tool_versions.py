@@ -189,7 +189,7 @@ def record_tool_version(
     try:
         meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
         recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record_tool_version failed for %s", name, exc_info=True)
         trace_skip(reason="writer raised", section=SECTION, entity=name, error=exc)
 

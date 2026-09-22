@@ -358,7 +358,7 @@ class ProposalScorer:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
+        except Exception:
             log.debug(
                 "full-trace: proposal_scorer llm_call append failed for model=%s",
                 model,
@@ -391,7 +391,7 @@ class ProposalScorer:
                 latency_ms=latency_ms,
             )
             append_llm_call(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
+        except Exception:
             log.debug(
                 "full-trace: proposal_scorer llm_call failure append failed for model=%s",
                 model,
@@ -428,7 +428,7 @@ class ProposalScorer:
                 response=response or "",
             )
             append_conversation(session_dir=self.session_dir, record=record)
-        except Exception:  # noqa: BLE001 — trace must never break scoring
+        except Exception:
             log.debug(
                 "full-trace: proposal_scorer conversation append failed for model=%s",
                 model,

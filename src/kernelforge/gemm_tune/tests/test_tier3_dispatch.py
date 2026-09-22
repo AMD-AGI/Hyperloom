@@ -72,7 +72,7 @@ class _FakeCuda:
         def wait_stream(self, _other):
             return None
 
-    def Stream(self):  # noqa: N802 - mirrors torch.cuda.Stream
+    def Stream(self):
         return self._Stream()
 
     def current_stream(self):
@@ -91,7 +91,7 @@ class _FakeCuda:
     def synchronize(self):
         self.synchronised += 1
 
-    def CUDAGraph(self):  # noqa: N802 - mirrors torch.cuda.CUDAGraph
+    def CUDAGraph(self):
         if self.capture_raises:
             raise RuntimeError("capture unsupported here")
         outer = self

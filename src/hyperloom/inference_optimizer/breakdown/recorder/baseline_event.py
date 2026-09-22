@@ -933,7 +933,7 @@ def make_baseline_recorder(
             total_failures_before=total_failures_before,
             owns_event=owns_event,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
+    except Exception:
         log.warning(
             "baseline timeline: recorder construction failed; this measurement's facts will be missing from the event",
             exc_info=True,

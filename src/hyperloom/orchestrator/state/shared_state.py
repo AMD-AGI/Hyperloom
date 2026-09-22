@@ -1346,7 +1346,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     text,
                     encoding="utf-8",
                 )
-        except Exception:  # noqa: BLE001 — derived artifact, never fatal
+        except Exception:
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
             try:
@@ -1359,7 +1359,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from ..trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
-        except Exception:  # noqa: BLE001 — status mirror must never block save
+        except Exception:
             log.debug("langfuse status mirror failed", exc_info=True)
 
     def _backfill_scriptable_latency(self) -> None:
@@ -1415,7 +1415,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 summary["explore_ratio"] = (
                     round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
                 )
-        except Exception:  # noqa: BLE001 - status telemetry must stay best-effort
+        except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
         tput = cb.get("tput") if isinstance(cb, dict) else None
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):

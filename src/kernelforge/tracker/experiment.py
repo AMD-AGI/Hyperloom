@@ -51,7 +51,7 @@ class ExperimentTracker:
         if not transitioned:
             return exp
         for cb in self._on_complete_callbacks:
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # broad-suppress: caller-supplied observer
                 cb(exp)
         return exp
 

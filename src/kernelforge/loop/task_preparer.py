@@ -849,7 +849,7 @@ def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
     for p in paths:
         try:
             snap[p] = p.read_bytes() if p.is_file() else None
-        except Exception:
+        except OSError:
             snap[p] = None
     return snap
 
@@ -863,7 +863,7 @@ def _restore(snapshot: dict[Path, bytes | None]) -> None:
                     p.unlink()
             else:
                 p.write_bytes(original)
-        except Exception:
+        except OSError:
             continue
 
 
@@ -986,7 +986,7 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
     for cand in sorted(ref_dir.rglob("graph_harness.py")):
         try:
             text = cand.read_text()
-        except Exception:
+        except OSError:
             continue
         if "def cuda_graph_bench" in text and "dirty" in text:
             return text
@@ -1003,7 +1003,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         if examples and Path(examples).is_dir():
             shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)
             return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
 
     # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
@@ -1013,7 +1013,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
         (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
         (ref_dir / "driver_template.py").write_text(REFERENCE_DRIVER_TEMPLATE.lstrip("\n"))
         return ref_dir
-    except Exception:
+    except OSError:
         _safe_rmtree(ref_dir)
         return None
 
@@ -1308,7 +1308,7 @@ async def _run_prepare_agent(
 def _read_limited(path: Path, limit: int = 16000) -> str:
     try:
         return path.read_text(errors="replace")[:limit]
-    except Exception:
+    except OSError:
         return ""
 
 
@@ -1891,7 +1891,7 @@ async def prepare_task(
         if provided_harness and not driver_external:
             try:
                 uses_harness = "graph_harness" in driver_path.read_text()
-            except Exception:
+            except OSError:
                 uses_harness = True
             if not uses_harness:
                 _safe_unlink(harness_path)

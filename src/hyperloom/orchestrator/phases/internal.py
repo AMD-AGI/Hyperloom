@@ -92,7 +92,7 @@ class InternalTasksPhase(PhaseHandler):
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+        except Exception:
             log.exception(
                 "research-scout: enqueue failed (round=%d)",
                 int(round_id),
@@ -117,7 +117,7 @@ class InternalTasksPhase(PhaseHandler):
             from ..knowledge import research_hints as _research_hints
 
             _research_hints.write_hints_skeleton(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: hints skeleton write failed")
         if not bool(getattr(self.shared_state, "research_scout_enabled", True)):
             return
@@ -126,7 +126,7 @@ class InternalTasksPhase(PhaseHandler):
                 reason="prelude_initial",
                 round_id=0,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: PRELUDE dispatch failed")
 
     async def _maybe_enqueue_explore_research_scout(self) -> None:
@@ -145,7 +145,7 @@ class InternalTasksPhase(PhaseHandler):
                 reason="explore_periodic",
                 round_id=round_id,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("research-scout: re-dispatch failed")
 
     async def _enqueue_internal_static_recon_task(
@@ -191,7 +191,7 @@ class InternalTasksPhase(PhaseHandler):
             _dicts = _src_recon.checklist_as_dicts(_entries)
             if _dicts:
                 params["static_recon_checklist_entries"] = _dicts
-        except Exception:  # noqa: BLE001 — advisory; never block dispatch
+        except Exception:
             log.exception("static-recon: checklist seeding failed")
         await self._warm_specialist_params(params)
         try:
@@ -203,14 +203,14 @@ class InternalTasksPhase(PhaseHandler):
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+        except Exception:
             log.exception("static-recon: enqueue failed")
             return None
         if not was_existing:
             try:
                 state.static_recon_runs = int(getattr(state, "static_recon_runs", 0) or 0) + 1
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive bookkeeping
+            except Exception:
                 log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
@@ -227,7 +227,7 @@ class InternalTasksPhase(PhaseHandler):
             await self._enqueue_internal_static_recon_task(
                 reason="prelude_initial",
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("static-recon: PRELUDE dispatch failed")
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
@@ -283,7 +283,7 @@ class InternalTasksPhase(PhaseHandler):
                 side_effects=["writes_results"],
                 lease_ttl_sec=1800,
             )
-        except Exception:  # noqa: BLE001 — TaskRegistry edge cases
+        except Exception:
             log.exception("trajectory-review: enqueue failed (cycle=%d)", cycle)
             return
         if not was_existing:
@@ -341,11 +341,11 @@ class InternalTasksPhase(PhaseHandler):
                     }
                 )
                 seeded += 1
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("static-recon: upsert_gap failed for %s", cid)
         if seeded:
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.exception("static-recon: SharedState.save after seeding failed")
         log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)

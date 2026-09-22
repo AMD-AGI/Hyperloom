@@ -50,7 +50,7 @@ class RecipeKB:
             return
         try:
             hook(event)
-        except Exception:  # noqa: BLE001 - audit must never break Recipe KB
+        except Exception:
             log.debug("recipe_kb: audit_hook raised", exc_info=True)
 
     def _read_event(
@@ -263,7 +263,7 @@ class RecipeKB:
             return
         try:
             close()
-        except Exception:  # noqa: BLE001 - lifecycle cleanup is best-effort
+        except Exception:
             log.exception("recipe_kb: local store close raised")
 
 

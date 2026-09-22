@@ -347,7 +347,7 @@ def _settle_warm_start_event(
                 pitfalls=pitfalls,
             )
         recorder.finish(match_status=match_status, matched=matched)
-    except Exception:  # noqa: BLE001 — defensive; the record is advisory
+    except Exception:
         log.debug("warm_start event settle failed", exc_info=True)
 
 
@@ -1152,7 +1152,7 @@ def run_t0_anchor(
                     "details": {"sid": sid},
                 },
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception("T0 anchor put_recipe raised unexpectedly")
 
     else:
@@ -1268,7 +1268,7 @@ def run_t0_anchor(
             source=warm_source,
             recipe=warm_point or None,
         )
-    except Exception:  # noqa: BLE001 — defensive; context is advisory
+    except Exception:
         log.exception("warm_start_context build failed")
 
     # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
@@ -1335,7 +1335,7 @@ def run_t0_anchor(
     if save_state:
         try:
             shared_state.save(sd)
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
             log.exception(
                 "Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)",
                 sid,

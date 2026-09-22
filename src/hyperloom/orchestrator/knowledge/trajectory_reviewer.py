@@ -121,7 +121,7 @@ def build_trajectory_digest(
             return ""
         lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
         return "\n".join(lines)
-    except Exception:  # noqa: BLE001 — review must never crash
+    except Exception:
         log.exception("trajectory_reviewer: build_trajectory_digest failed")
         return ""
 

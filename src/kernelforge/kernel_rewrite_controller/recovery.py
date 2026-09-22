@@ -75,7 +75,7 @@ def _trusted_manifest(workspace: Path, repo_root: Path) -> dict[str, Any] | None
             iteration=iteration,
             commit_hash=commit,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - publisher shape varies by backend
         complete = False
     if (
         not commit
@@ -246,7 +246,7 @@ def recover_task_result(
             patch_dir=patch_dir,
             best_commit=best_commit,
         )
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - recovery must not mask the original failure
         log.warning(
             "could not publish result for %s: %s",
             task.operator_id,

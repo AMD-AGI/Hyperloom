@@ -60,7 +60,7 @@ class ConcSweepExecutor:
         # worse than not recording.
         named = (getattr(ctx, "extra", None) or {}).get("session_dir")
         with ExitStack() as stack:
-            with suppress(Exception):
+            with suppress(OSError, RuntimeError):
                 session = Path(named).resolve() if named else None
                 if session is not None and bound_session_or_none() != session:
                     stack.enter_context(session_scope(session))
@@ -162,7 +162,7 @@ class ConcSweepExecutor:
                 macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
             )
             sink = make_sink(event, producer=_RECORDER_PRODUCER)
-        except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
+        except Exception:
             log.warning(
                 "conc_sweep timeline: could not resolve an event to record into; this "
                 "sweep's whole event will be missing from the breakdown",

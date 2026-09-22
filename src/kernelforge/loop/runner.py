@@ -678,7 +678,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.experiment.experiment_id,
                     self.llm_usage,
                 )
-        except Exception:  # noqa: BLE001 - accounting must never break the loop
+        except Exception:
             log.debug("failed to checkpoint LLM usage", exc_info=True)
 
     def _git(self, *args: str) -> str:
@@ -1255,7 +1255,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not p.is_absolute():
                 p = Path(self.ic.workspace_dir) / p
             return p.read_text()
-        except Exception as e:
+        except OSError as e:
             log.debug("could not read source file %s: %s", path, e)
             return ""
 
@@ -1320,7 +1320,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         try:
             return git("diff", f"{commit_hash}~1", commit_hash, cwd=self.ic.workspace_dir).stdout
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - git wrapper does not export its error type here
             log.debug("could not diff commit %s: %s", commit_hash, e)
             return ""
 
@@ -1493,7 +1493,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 round_budget=self._round_budget_summary(),
             )
             return True
-        except Exception as error:  # noqa: BLE001 - keep commit remains authoritative
+        except Exception as error:
             first_failure = not self.persistence_degraded
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish best iteration {result.iteration}: {error}")
@@ -2193,7 +2193,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 result.commit_hash,
                 result=result,
             )
-        except Exception as error:  # noqa: BLE001 - derived view is rebuildable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"rebuild candidate archive iteration {result.iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2321,7 +2321,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 events=events,
                 candidate_metadata=metadata,
             )
-        except Exception as error:  # noqa: BLE001 - structured history remains durable
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2396,7 +2396,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: round cost record failed", exc_info=True)
 
     def _round_budget_summary(self) -> dict:
@@ -2458,7 +2458,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     **event_fields,
                 )
             )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: round admission append failed", exc_info=True)
         return decision.lanes if decision.admitted else None
 
@@ -2483,7 +2483,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     floored=decision.floored,
                 )
             )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: round dispatch append failed", exc_info=True)
         if decision.admitted:
             return True
@@ -2587,7 +2587,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             self.run_state.baseline_case_times = dict(case_times)
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist pristine baseline case timings")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -2605,7 +2605,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if self.search_start_mean_case_speedup is not None:
                 self.run_state.search_start_mean_case_speedup = self.search_start_mean_case_speedup
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - persistence is best-effort
+        except Exception:
             self.persistence_degraded = True
             self.persistence_errors.append("persist scoring state")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -3040,7 +3040,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                 )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort; never break the loop
+        except Exception:
             log.debug("run_state: seed/hydrate failed", exc_info=True)
 
     def _validate_pre_published_warm_start(
@@ -3306,7 +3306,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ):
                     raise RuntimeError(f"iteration {result.iteration} checkpoint was not durable")
             return True
-        except Exception as error:  # noqa: BLE001 - best-effort unless required
+        except Exception as error:
             if require_durable:
                 raise RuntimeError(f"failed to finalize iteration {result.iteration} checkpoint") from error
             log.debug("run_state: iteration reduce/save failed", exc_info=True)
@@ -3421,7 +3421,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 ),
             )
             return self.handoff_store.write(handoff)
-        except Exception as error:  # noqa: BLE001 - handoff is best-effort
+        except Exception as error:
             self.persistence_degraded = True
             self.persistence_errors.append(f"persist handoff iteration {iteration}: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
@@ -3534,7 +3534,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     print(
                         f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
                     )
-            except Exception as error:  # noqa: BLE001 - never break the loop
+            except Exception as error:
                 summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
                 log.debug("lessons: summarizer step failed", exc_info=True)
                 print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
@@ -3557,7 +3557,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if fallback and store.write(iteration, fallback) is not None:
                     has_narrative = True
                     print(f"  [lesson] machine-recorded iter {iteration} from gate findings: {len(fallback)} chars")
-            except Exception:  # noqa: BLE001 - best-effort
+            except Exception:
                 log.debug("lessons: fallback document failed", exc_info=True)
 
         try:
@@ -3601,7 +3601,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     f"  [lesson] scope not recorded for iter {iteration}: "
                     f"the document renders unscoped and closes nothing"
                 )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("lessons: scope append failed", exc_info=True)
 
         try:
@@ -3619,7 +3619,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     summary_failure=(summary_failure if not has_narrative else ""),
                 ),
             )
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("lessons: outcome append failed", exc_info=True)
 
     async def run_one_iteration(
@@ -3880,7 +3880,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - policy remains available in memory
+        except Exception:
             log.debug("search policy persistence failed", exc_info=True)
         # A window that has not filled yet is the ordinary state of a young campaign.
         fault = window_gain.unavailable
@@ -4653,7 +4653,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             if getattr(self, "archive", None) is not None:
                 try:
                     digest = self.archive.render_digest()
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - digest render is third-party
                     log.debug("could not render lineage digest: %s", e)
                     digest = ""
 
@@ -4753,7 +4753,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             iteration=iteration,
                             evidence_context=evidence_context,
                         )
-                    except Exception as e:
+                    except Exception as e:  # noqa: BLE001 - supervisor memo is optional
                         print(f"  [supervisor] failed ({e}); continuing without a memo")
                     finally:
                         self._checkpoint_llm_usage()
@@ -4786,7 +4786,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                     ),
                                 )
                             )
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug("run_state: supervisor event append failed", exc_info=True)
                     else:
                         print("  [supervisor] no new ruling returned; continuing without an active ruling")
@@ -4799,7 +4799,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                                 stall_threshold=self.ic.supervise_after,
                             )
                             self.state_store.save(self.run_state)
-                        except Exception:  # noqa: BLE001 - best-effort
+                        except Exception:
                             log.debug(
                                 "run_state: supervisor reset/save failed",
                                 exc_info=True,
@@ -4833,7 +4833,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         phase=self.run_state.phase,
                     )
                 )
-            except Exception:  # noqa: BLE001 - best-effort
+            except Exception:
                 log.debug("run_state: iteration_started append failed", exc_info=True)
 
             # Agent proposes modification
@@ -5020,7 +5020,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             current_cases=self._scored_case_ids(),
                             kernel_source=self._kernel_source_for_scope(),
                         )
-                    except Exception:  # noqa: BLE001 - best-effort
+                    except Exception:
                         log.debug("lessons: prompt render failed", exc_info=True)
 
                 ledger_txt = ""
@@ -5123,7 +5123,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         **extra_kwargs,
                     )
                     print(f"  [agent] Rationale: {rationale[:200]}")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
                     agent_error = e
                     print(f"  [agent] ERROR: {e}")
                     rationale = f"agent session ended with error after edits: {e}"
@@ -5337,7 +5337,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                         plan=session_sink.get("plan", ""),
                         **run_kwargs,
                     )
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
                     # verdict/ledger/archive path.
                     print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
@@ -5401,7 +5401,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             )
                             self._persist_pending_keep(pending_keep)
                             commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                        except Exception as e:
+                        except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
                             result.kept = False
                             result.validation_passed = False
                             result.crashed = True
@@ -5588,7 +5588,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                     if keep_checkpoint_finalized and archived_path is None:
                         raise RuntimeError("candidate archive returned no published path")
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     if keep_checkpoint_finalized:
                         self.persistence_degraded = True
                         self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
@@ -5644,7 +5644,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-        except Exception:  # noqa: BLE001 - best-effort
+        except Exception:
             log.debug("run_state: terminal save failed", exc_info=True)
         self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
         self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
@@ -5747,7 +5747,7 @@ def _long_horizon_header(
             outcomes,
             include_handoffs=bool(handoff_store and handoff_store.latest()),
         )
-    except Exception:  # noqa: BLE001 - best-effort
+    except Exception:
         log.debug("run_state: prompt view render failed", exc_info=True)
         return ""
 

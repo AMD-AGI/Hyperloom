@@ -90,7 +90,7 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
             materialized=True,
             task_id=str(task_id),
         )
-    except Exception:  # noqa: BLE001 — observability cannot break the loop
+    except Exception:
         log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
 
 
@@ -286,7 +286,7 @@ class ProposalsCollaborator:
             return
         try:
             cid = self._workload_canonical_id()
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception("_kb_amend_recipe: cid derivation failed")
             return
 
@@ -407,7 +407,7 @@ class ProposalsCollaborator:
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
             self._coord._local_recipe_cache = None
-        except Exception:  # noqa: BLE001
+        except Exception:
             log.exception(
                 "_kb_amend_recipe: put_recipe failed for cid=%s",
                 cid,
@@ -497,7 +497,7 @@ class ProposalsCollaborator:
                     )
                     try:
                         self.shared_state.save(self.session_dir)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception(
                             "failed to persist terminal owner-missing verdict for specialist=%s",
                             specialist_task_id,
@@ -607,7 +607,7 @@ class ProposalsCollaborator:
                 "task_id": str(task_id),
             }
             append_jsonl(path, row, make_parents=True, sort_keys=True)
-        except Exception:  # noqa: BLE001 — trace must never break the loop
+        except Exception:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,
