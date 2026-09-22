@@ -78,6 +78,9 @@ VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/
 VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
 VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
 VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
+# The source checkout is a depth-1 fetch of a commit SHA and carries no tags, so
+# setuptools_scm would otherwise stamp the build 0.1.dev1 instead of the release.
+VLLM_PRETEND_VERSION="${VLLM_PRETEND_VERSION:-${VLLM_VERSION}}"
 VLLM_ROOT="${VLLM_ROOT:-/opt/hyperloom/vllm}"
 # Index publishing the TheRock ROCm SDK wheels these images are built from;
 # rocm-sdk-devel is pulled from here to supply source-build headers.
@@ -747,6 +750,18 @@ install_aiter_ref_with_constraints() {
   check_torch_triton_alignment "$py" || return 1
 }
 
+# Both engines need AITER: SGLang routes GEMM through it, and kernelforge's
+# fusion validation runs vLLM with VLLM_ROCM_USE_AITER=1.
+ensure_aiter_for_python() {
+  local py="$1" aiter_root="$2"
+  if "$py" -c "import aiter" >/dev/null 2>&1; then
+    log "aiter already importable; skipping AITER source install"
+    return 0
+  fi
+  ensure_rocm_devel_headers "$py"
+  install_compatible_aiter "$py" "$aiter_root"
+}
+
 install_compatible_aiter() {
   local py="$1" aiter_root="$2" constraint_file ref tried=0
   constraint_file="$(mktemp)"
@@ -911,12 +926,7 @@ PY
     log "sglang + sgl_kernel already importable; skipping amd-sglang install"
   fi
 
-  if ! "$py" -c "import aiter" >/dev/null 2>&1; then
-    ensure_rocm_devel_headers "$py"
-    install_compatible_aiter "$py" "$aiter_root"
-  else
-    log "aiter already importable; skipping AITER source install"
-  fi
+  ensure_aiter_for_python "$py" "$aiter_root"
 
   "$py" -c "import sglang" >/dev/null || die "sglang not importable after install"
   "$py" -c "import sgl_kernel" >/dev/null || die "sgl_kernel not importable after install"
@@ -1205,7 +1215,7 @@ PY
 }
 
 install_vllm_from_source() {
-  local base_py="$1" py="${VLLM_VENV_ROOT}/bin/python" state arch constraint_file
+  local base_py="$1" py="${VLLM_VENV_ROOT}/bin/python" state arch constraint_file aiter_root
   export VLLM_TARGET_DEVICE=rocm
   [[ "$VLLM_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]] || die "VLLM_SOURCE_REF must be a full 40-character commit SHA"
   check_vllm_source_python "$base_py"
@@ -1226,6 +1236,7 @@ install_vllm_from_source() {
   if [ -e "$VLLM_VENV_ROOT" ] && ! vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
     die "existing VLLM_VENV_ROOT is not a system-site-packages venv: ${VLLM_VENV_ROOT}"
   fi
+  aiter_root="${AITER_ROOT:-$(framework_deps_root)/aiter}"
   state="$(ensure_vllm_checkout "$VLLM_ROOT")" || return $?
   if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
     inherit_vllm_base_site_packages "$base_py" "$py"
@@ -1233,6 +1244,7 @@ install_vllm_from_source() {
   if [ "$state" = exact ] && vllm_overlay_is_valid "$VLLM_VENV_ROOT" &&
      verify_vllm_source "$base_py" "$py"; then
     export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+    ensure_aiter_for_python "$py" "$aiter_root"
     link_vllm_into_shared_bin "$base_py" "$py"
     log "reusing verified vLLM source overlay"
     return 0
@@ -1254,11 +1266,13 @@ install_vllm_from_source() {
     -r "$VLLM_ROOT/requirements/rocm.txt" ||
     { rm -f "$constraint_file"; die "failed to install vLLM ROCm source requirements"; }
   (cd "$VLLM_ROOT" && VLLM_TARGET_DEVICE=rocm PYTORCH_ROCM_ARCH="$arch" \
+    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$VLLM_PRETEND_VERSION" \
     PIP_CONSTRAINT="$constraint_file" "$py" setup.py develop --no-deps) ||
     { rm -f "$constraint_file"; die "vLLM source build failed"; }
   rm -f "$constraint_file"
   verify_vllm_source "$base_py" "$py" || die "vLLM source install failed runtime verification"
   export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+  ensure_aiter_for_python "$py" "$aiter_root"
   link_vllm_into_shared_bin "$base_py" "$py"
   log "vLLM source install complete (${VLLM_ROOT})"
 }
@@ -2463,6 +2477,25 @@ resolve_credentials() {
   fi
 }
 
+# vLLM gates every aiter kernel behind VLLM_ROCM_USE_AITER and defaults it off,
+# unlike the SGLang images that ship SGLANG_USE_AITER pre-set.
+enable_vllm_aiter_when_available() {
+  local framework="$1" py
+  [ "$framework" = vllm ] || return 0
+  if [ "$FRAMEWORK_ENV" = "isolated" ] && [ -x "${VLLM_VENV_ROOT}/bin/python" ]; then
+    py="${VLLM_VENV_ROOT}/bin/python"
+  else
+    py="$(resolve_python 2>/dev/null)" || return 0
+  fi
+  # Turning the gate on without a matching aiter fails at serve time, so a
+  # missing module leaves vLLM on its built-in kernels instead.
+  if [ -z "$py" ] || ! "$py" -c "import aiter" >/dev/null 2>&1; then
+    warn "aiter is not importable for vLLM; leaving VLLM_ROCM_USE_AITER unset"
+    return 0
+  fi
+  upsert_dotenv_var VLLM_ROCM_USE_AITER "${VLLM_ROCM_USE_AITER:-1}"
+}
+
 # Persist bare-metal runtime env to .env (single source of truth). PATH-class
 # values are NOT written here; preflight derives them from ROCM_PATH /
 # VIRTUAL_ENV / VLLM_VENV_ROOT at launch (_derive_runtime_paths).
@@ -2494,6 +2527,7 @@ write_runtime_dotenv() {
   [ -n "${HYPERLOOM_WHEEL_TAG:-}" ] && upsert_dotenv_var HYPERLOOM_WHEEL_TAG "$HYPERLOOM_WHEEL_TAG"
   [ -n "${HYPERLOOM_SKILL_PATH:-}" ] && upsert_dotenv_var HYPERLOOM_SKILL_PATH "$HYPERLOOM_SKILL_PATH"
   [ -n "${SGLANG_USE_AITER:-}" ] && upsert_dotenv_var SGLANG_USE_AITER "$SGLANG_USE_AITER"
+  enable_vllm_aiter_when_available "$detected_framework"
   upsert_dotenv_var HYPERLOOM_FRAMEWORK_ENV "$FRAMEWORK_ENV"
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"

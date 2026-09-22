@@ -125,7 +125,9 @@ def _source_stubs(tmp_path: Path, checkout: str) -> str:
     (venv / "bin").mkdir(parents=True)
     fake_py = venv / "bin" / "python"
     fake_py.write_text(
-        '#!/bin/sh\necho "PY:$* CONSTRAINT=${PIP_CONSTRAINT:-} TARGET=${VLLM_TARGET_DEVICE:-}" >> "$CALLS"\n'
+        '#!/bin/sh\necho "PY:$* CONSTRAINT=${PIP_CONSTRAINT:-}'
+        " TARGET=${VLLM_TARGET_DEVICE:-}"
+        ' SCM=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-}" >> "$CALLS"\n'
     )
     fake_py.chmod(0o755)
     (venv / "pyvenv.cfg").write_text("include-system-site-packages = true\n")
@@ -142,9 +144,12 @@ detect_rocm_gfx_arch() {{ echo gfx950; }}
 write_rocm_torch_constraints() {{ echo torch==2.12.0 > "$2"; echo triton==3.6.0 >> "$2"; }}
 inherit_vllm_base_site_packages() {{ echo BASE_SITE >> "$CALLS"; }}
 link_vllm_into_shared_bin() {{ echo LINK >> "$CALLS"; }}
+framework_deps_root() {{ echo "{tmp_path}/deps"; }}
+ensure_aiter_for_python() {{ echo "AITER:$2" >> "$CALLS"; }}
 export CALLS="{tmp_path}/calls"; DRY_RUN=0; CHECK_ONLY=0; VLLM_SOURCE_REF={_REF}
 VLLM_ROOT="{tmp_path}/src"; VLLM_VENV_ROOT="{venv}"; VLLM_REPO=https://example.invalid/vllm.git
 ROCM_SDK_INDEX_URL=https://stable.repo.amd.com/rocm/whl-next
+VLLM_PRETEND_VERSION=0.29.0
 mkdir -p "$VLLM_ROOT/requirements"; : > "$VLLM_ROOT/requirements/rocm.txt"
 """
 
@@ -156,7 +161,7 @@ def test_source_exact_checkout_fast_path_skips_build(tmp_path: Path) -> None:
         env={**os.environ},
     )
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "calls").read_text() == "BASE_SITE\nLINK\n"
+    assert (tmp_path / "calls").read_text() == f"BASE_SITE\nAITER:{tmp_path}/deps/aiter\nLINK\n"
 
 
 def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
@@ -172,6 +177,10 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     assert "--extra-index-url https://stable.repo.amd.com/rocm/whl-next" in calls
     assert "setup.py develop --no-deps CONSTRAINT=/tmp/" in calls
     assert "TARGET=rocm" in calls
+    # A depth-1 checkout has no tags, so the build must be told its version or
+    # setuptools_scm stamps it 0.1.dev1.
+    assert "SCM=0.29.0" in calls
+    assert f"AITER:{tmp_path}/deps/aiter" in calls
 
 
 def test_source_route_requires_isolated_framework_env(tmp_path: Path) -> None:
@@ -230,6 +239,40 @@ write_runtime_dotenv
     assert "VLLM_ROOT=/src/vllm" in result.stdout
     assert "FRAMEWORK_REPO_PATH=/src/vllm" in result.stdout
     assert "VLLM_TARGET_DEVICE=rocm" in result.stdout
+
+
+def _aiter_gate_body(tmp_path: Path, framework: str, has_aiter: bool) -> str:
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    py = venv / "bin" / "python"
+    py.write_text(f"#!/bin/sh\nexit {0 if has_aiter else 1}\n")
+    py.chmod(0o755)
+    return f"""
+warn() {{ echo "$*" >&2; }}
+upsert_dotenv_var() {{ echo "$1=$2"; }}
+resolve_python() {{ echo "{py}"; }}
+FRAMEWORK_ENV=isolated; VLLM_VENV_ROOT="{venv}"
+enable_vllm_aiter_when_available "{framework}"
+"""
+
+
+@pytest.mark.parametrize(
+    ("framework", "has_aiter", "expected"),
+    [
+        ("vllm", True, "VLLM_ROCM_USE_AITER=1"),
+        ("vllm", False, ""),
+        ("sglang", True, ""),
+    ],
+)
+def test_vllm_aiter_gate(tmp_path: Path, framework: str, has_aiter: bool, expected: str) -> None:
+    result = _bash(
+        ("enable_vllm_aiter_when_available",),
+        _aiter_gate_body(tmp_path, framework, has_aiter),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+    if framework == "vllm" and not has_aiter:
+        assert "aiter is not importable" in result.stderr
 
 
 def test_wheel_torch_index_resolution_failure_is_fatal(tmp_path: Path) -> None:
