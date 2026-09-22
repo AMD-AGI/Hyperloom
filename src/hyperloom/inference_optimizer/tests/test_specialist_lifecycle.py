@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -417,15 +418,21 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
 
 # 7. Point 2 — stalled-domain hard-trigger
 @pytest.fixture
-def force_coord(tmp_path: Path):
+def force_coord(tmp_path: Path, monkeypatch):
     """Coordinator stand-in with a real SharedState + mocked _handle_intent."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.specialists.dispatch import SpecialistDispatchCollaborator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState()
     c.shared_state.phase = "FRAMEWORK_AGENT"
+    source_root = tmp_path / "framework"
+    (source_root / ".git").mkdir(parents=True)
+    c.shared_state.framework_repo_path = str(source_root)
+    c.tasks = SimpleNamespace(find_by_idempotency_key=AsyncMock(return_value=None))
+    monkeypatch.setattr(SpecialistDispatchCollaborator, "_warm_specialist_params", AsyncMock())
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
 
@@ -480,6 +487,75 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
 
     _, intent = force_coord._handle_intent.call_args.args
     assert intent.payload["idempotency_key"].endswith("-c2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_state", ["running", "failed"])
+async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord, task_state):
+    state = force_coord.shared_state
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+    force_coord.tasks.find_by_idempotency_key.return_value = SimpleNamespace(state=task_state)
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_not_awaited()
+    force_coord.tasks.find_by_idempotency_key.assert_awaited_once_with("forced-stalled-framework-round0")
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_coord):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    for _ in range(10):
+        state.bump_domain_round_counters()
+    state.upsert_gap(
+        {
+            "canonical_id": "gap.framework.scheduler.s1",
+            "domain_hint": "serving_specialist",
+            "severity": "high",
+        }
+    )
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_not_awaited()
+    assert state.pruned_families == ["source_patch"]
+    failures = [
+        (row["action"], row["task_id"], row["error_class"], row["error_excerpt"])
+        for row in state.last_action_failures
+    ]
+    assert failures == [
+        (
+            "specialist",
+            "forced-stalled-framework-round0",
+            "no_git_framework_source_root",
+            "no_git_framework_source_root",
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
+    state = force_coord.shared_state
+    state.framework_repo_path = ""
+    state.add_pruned_family("source_patch")
+    state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
+    state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
+
+    await force_coord._maybe_force_stalled_domain_specialist()
+
+    force_coord._handle_intent.assert_awaited_once()
+    _, intent = force_coord._handle_intent.call_args.args
+    assert intent.payload["params"]["domain"] == "candidate_discovery_specialist"
 
 
 @pytest.mark.asyncio

@@ -306,6 +306,9 @@ class Recorder:
         prefix = f"{_slug(section)}__{self._producer}__{slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
         filename = f"{prefix}-{digest}.json"
+        if len(filename.encode("utf-8")) > 180:
+            short_digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            return f"{_slug(section)}__{self._producer}__id-{short_digest}.json"
         legacy = self._dir / f"{prefix}.json"
         if slug != key:
             if legacy.exists():
