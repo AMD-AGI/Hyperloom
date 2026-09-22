@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import json
 import os
 import re
@@ -1048,24 +1047,19 @@ def kb_warmstart(
             kernel_source = Path(kernel).read_text(errors="replace")
 
         try:
-            read_kwargs = {
-                "config": config,
-                "kernel_path": kernel,
-                "kernel_source": kernel_source,
-                "kernel_backend": kernel_backend,
-                "target_functions": target_functions,
-                "framework": framework,
-                "top_k": warmstart_policy.top_k(),
-                "source_files": source_files,
-                "workspace": workspace_dir,
-                "operator_name": operator_name,
-            }
-            reader_parameters = inspect.signature(read_top_solutions).parameters
-            if "read_status" in reader_parameters or any(
-                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in reader_parameters.values()
-            ):
-                read_kwargs["read_status"] = read_status
-            sols = read_top_solutions(**read_kwargs)
+            sols = read_top_solutions(
+                config=config,
+                kernel_path=kernel,
+                kernel_source=kernel_source,
+                kernel_backend=kernel_backend,
+                target_functions=target_functions,
+                framework=framework,
+                top_k=warmstart_policy.top_k(),
+                source_files=source_files,
+                workspace=workspace_dir,
+                operator_name=operator_name,
+                read_status=read_status,
+            )
         except Exception:
             _clear_kb_references(workspace_dir)
             raise
