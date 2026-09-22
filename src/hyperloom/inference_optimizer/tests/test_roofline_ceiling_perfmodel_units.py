@@ -147,6 +147,14 @@ def test_perfmodel_decode_sits_between_its_own_memory_and_compute_ceilings():
     assert out.bound_kind == slower
 
 
+def test_perfmodel_uses_vendor_peak_when_achievable_spec_is_absent():
+    out = _perfmodel(gpu_type="mi355x")
+
+    assert out is not None
+    assert out.hbm_bw_gbps == pytest.approx(8000.0)
+    assert out.peak_achievable_tflops == pytest.approx(2516.6)
+
+
 def test_perfmodel_routes_a_moe_model_through_the_fused_expert_op():
     """A MoE model replaces the three dense FFN GEMMs with one fused op."""
     out = _perfmodel(_dense_meta(num_experts=8, experts_per_tok=2, moe_intermediate_size=256))
@@ -441,7 +449,7 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
             num_attention_heads=8,
         )
         b = rc.compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi300x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="bf16"
+            meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="mxfp4"
         )
         return next(o for o in b.ops if o.name == "moe_fused")
 
@@ -489,7 +497,7 @@ def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
     expert_elems = 4 * 512 * 3 * 512 * 2048
     meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
     breakdown = rc.compute_roofline_from_perfmodel(
-        meta=meta, gpu_type="mi300x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="bf16"
+        meta=meta, gpu_type="mi355x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="mxfp4"
     )
 
     ops = {o.name: o.pct_time for o in breakdown.ops}

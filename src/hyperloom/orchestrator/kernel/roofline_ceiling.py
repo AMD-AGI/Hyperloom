@@ -1312,14 +1312,17 @@ def compute_roofline_from_perfmodel(
         return None
     if not meta.hidden_size or not meta.num_attention_heads:
         return None
-    spec = HW_SPECS_ACHIEVABLE.get((gpu_type or "").strip().lower())
+    gpu_key = (gpu_type or "").strip().lower()
+    spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
     bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
     tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = _resolve_achievable_tflops(gpu_type, tag) * max(num_gpus, 1)
+    f_peak_tflops = (
+        _resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)
+    ) * max(num_gpus, 1)
     if f_peak_tflops <= 0:
         return None
     f_peak = f_peak_tflops * 1e12
