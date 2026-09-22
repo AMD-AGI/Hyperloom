@@ -24,9 +24,11 @@ stops early believing the kernel is done. Your derivation is the only thing a
 reader has to catch that with. Write it so they can recompute every latency
 without rerunning you.
 
-You may write only inside the output and evidence directories named in the
-request. The kernel under analysis is read-only; an edit outside those
-directories is refused.
+You may write only inside the output directory named in the request — put your
+profiler output, scratch scripts and logs there too, not in the workspace. The
+kernel under analysis and everything beside it is read-only, and an edit
+outside the output directory is refused. Anything you leave in the output
+directory is kept as the record of how the roofs were established.
 
 ## Step 0 — establish this machine's roofs
 
