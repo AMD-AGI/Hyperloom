@@ -2389,7 +2389,8 @@ class WritebackCollaborator:
         status: str,
         canonical_id: str,
         session_id: str,
-        optimized_throughput: float = 0.0,
+        primary_metric: str = "",
+        primary_value: float = 0.0,
         reason: str = "",
         error_type: str = "",
     ) -> None:
@@ -2420,13 +2421,21 @@ class WritebackCollaborator:
                     "canonical_id": canonical_id,
                     "session_id": session_id,
                     "created": status == "written",
-                    "best_throughput": optimized_throughput,
                 },
                 "provenance": {
                     "component": "remote_recipe",
                     "source": source,
                 },
             }
+            if primary_metric:
+                row["result"].update(
+                    {
+                        "primary_metric": primary_metric,
+                        "primary_value": primary_value,
+                    }
+                )
+            if primary_metric == "optimized_throughput":
+                row["result"]["best_throughput"] = primary_value
             if error_type:
                 row["error"] = {"type": error_type}
             append_jsonl(
@@ -2607,9 +2616,7 @@ class WritebackCollaborator:
         from hyperloom.common.perf_metric import agentx_active
 
         if (
-            agentx_active(
-                benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")
-            )
+            agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", ""))
             and config.mode is not KnowledgeStoreMode.REMOTE
         ):
             return {
@@ -2648,7 +2655,14 @@ class WritebackCollaborator:
                     status=remote_result.status,
                     canonical_id=remote_cid,
                     session_id=remote_result.session_id,
-                    optimized_throughput=remote_result.optimized_throughput,
+                    primary_metric=str(getattr(remote_result, "primary_metric", "") or "optimized_throughput"),
+                    primary_value=float(
+                        getattr(
+                            remote_result,
+                            "primary_value",
+                            remote_result.optimized_throughput,
+                        )
+                    ),
                     reason=remote_result.reason,
                 )
                 return {

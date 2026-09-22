@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -724,7 +725,9 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
                 reason="",
                 canonical_id=canonical_id,
                 session_id=session_id,
-                optimized_throughput=20.0,
+                optimized_throughput=0.0,
+                primary_metric="interactivity_gain_pct",
+                primary_value=20.0,
             )
 
     monkeypatch.setattr(
@@ -734,6 +737,14 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
     out = coord.finalize_recipe_and_journal(source="close")
     assert out["status"] == "written"
     assert calls and calls[0][0].startswith("agentx:")
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert audit["result"]["primary_metric"] == "interactivity_gain_pct"
+    assert audit["result"]["primary_value"] == 20.0
+    assert "best_throughput" not in audit["result"]
 
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:

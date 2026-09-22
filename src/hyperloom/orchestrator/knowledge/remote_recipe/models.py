@@ -87,9 +87,7 @@ class RecipeScope:
         backend = "forge" if optimizer in {"native", "forge", "kernel_agent_forge"} else optimizer
         from hyperloom.common.perf_metric import agentx_active
 
-        is_agentx = agentx_active(
-            benchmark_mode=getattr(state, "benchmark_mode", "")
-        )
+        is_agentx = agentx_active(benchmark_mode=getattr(state, "benchmark_mode", ""))
         scope = cls(
             kernel_optimizer=backend,
             tp=int(getattr(state, "tp", 0) or 0),
@@ -131,9 +129,7 @@ class RecipeScope:
         """True when a View's recorded scope is exactly this one."""
         expected = self.as_dict()
         comparable = (
-            {key: item for key, item in value.items() if key != "scope_schema"}
-            if isinstance(value, dict)
-            else value
+            {key: item for key, item in value.items() if key != "scope_schema"} if isinstance(value, dict) else value
         )
         return (
             isinstance(comparable, dict)
@@ -183,8 +179,7 @@ class KBSelectionProfile:
             gain = gain_pct(candidate_i, baseline_i)
             if gain is None or not math.isfinite(gain) or total <= 0:
                 raise RemoteRecipeValidationError(
-                    "AgentX write needs baseline-relative interactivity gain "
-                    "and positive total_throughput"
+                    "AgentX write needs baseline-relative interactivity gain and positive total_throughput"
                 )
             return cls(
                 scope=scope,
@@ -196,22 +191,21 @@ class KBSelectionProfile:
                     "total_throughput": total,
                     "baseline_interactivity": baseline_i,
                     "candidate_interactivity": candidate_i,
-                    "baseline_total_throughput": float(
-                        baseline.get("total_throughput") or 0.0
-                    ),
+                    "baseline_total_throughput": float(baseline.get("total_throughput") or 0.0),
                 },
             )
         throughput = float(current.get("tput") or 0.0)
         if not math.isfinite(throughput) or throughput <= 0:
-            raise RemoteRecipeValidationError(
-                "InferenceX write needs positive optimized_throughput"
-            )
+            raise RemoteRecipeValidationError("InferenceX write needs positive optimized_throughput")
         return cls(
             scope=scope,
             primary_metric="optimized_throughput",
             primary_value=throughput,
             objective_schema="single_throughput",
-            metrics={"optimized_throughput": throughput},
+            metrics={
+                "optimized_throughput": throughput,
+                "validated_e2e_gain": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
+            },
         )
 
 
@@ -344,8 +338,10 @@ class RemoteWriteResult:
     reason: str = ""
     canonical_id: str = ""
     session_id: str = ""
-    # Compatibility field; AgentX stores its primary score here.
+    # Compatibility field for existing InferenceX audit consumers.
     optimized_throughput: float = 0.0
+    primary_metric: str = ""
+    primary_value: float = 0.0
 
 
 __all__ = [

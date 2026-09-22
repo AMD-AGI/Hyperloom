@@ -1081,6 +1081,7 @@ def build_remote_knowledge(
     files_dir: str | Path,
     *,
     sections: Any,
+    metrics: Mapping[str, float] | None = None,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree."""
     if sections is None:
@@ -1127,9 +1128,6 @@ def build_remote_knowledge(
         for item in stack
     ):
         required_columns.add(PATCH_SECTION)
-    current_best = _mapping(getattr(state, "current_best", {}))
-    optimized_throughput = _number(current_best.get("tput"))
-    validated_gain = _number(getattr(state, "cumulative_gain_validated", 0.0))
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
 
@@ -1159,8 +1157,7 @@ def build_remote_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            "optimized_throughput": optimized_throughput,
-            "validated_e2e_gain": validated_gain,
+            **dict(metrics or {}),
             "workload_shape": workload_shape(state),
             "value": value,
             "what_worked": worked,
@@ -1238,9 +1235,7 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     session_id = str(document.get("session_id") or "")
     interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
     validated_gain = (
-        interactivity_gain
-        if "interactivity_gain_pct" in knowledge
-        else _number(knowledge.get("validated_e2e_gain"))
+        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
     )
     view = _mapping(document.get("view"))
     replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True

@@ -193,13 +193,7 @@ class ProposalsCollaborator:
             precision=precision,
             model_type=model_type,
             architectures=architectures,
-            scheme=(
-                "agentx"
-                if agentx_active(
-                    benchmark_mode=getattr(ss, "benchmark_mode", "")
-                )
-                else "inference"
-            ),
+            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
@@ -302,9 +296,7 @@ class ProposalsCollaborator:
             return
         from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_active(
-            benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")
-        ):
+        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
         try:
             cid = self._workload_canonical_id()

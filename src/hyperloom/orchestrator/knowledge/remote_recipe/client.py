@@ -461,9 +461,19 @@ class RemoteRecipeClient:
         """Write files, replace knowledge, then promote on the mode's primary metric."""
         score = primary_value if primary_value is not None else optimized_throughput
         if score is None or not math.isfinite(score):
-            raise RemoteRecipeValidationError(
-                f"{primary_metric} must be finite, got {score!r}"
+            raise RemoteRecipeValidationError(f"{primary_metric} must be finite, got {score!r}")
+
+        def outcome(status: str, reason: str = "") -> RemoteWriteResult:
+            return RemoteWriteResult(
+                status=status,
+                reason=reason,
+                canonical_id=canonical_id,
+                session_id=session_id,
+                optimized_throughput=(score if primary_metric == "optimized_throughput" else 0.0),
+                primary_metric=primary_metric,
+                primary_value=score,
             )
+
         # Defense in depth at the final shared-store boundary.
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
@@ -475,26 +485,12 @@ class RemoteRecipeClient:
                 primary_metric,
                 score,
             )
-            return RemoteWriteResult(
-                "skipped",
-                "empty_replay_material",
-                canonical_id,
-                session_id,
-                score,
-            )
+            return outcome("skipped", "empty_replay_material")
         scope_payload = scope.as_dict()
         rollup = self.store.get_rollup(canonical_id, scope=scope_payload)
-        _, prior, _ = _champion(
-            rollup, validate_metric=True, expected_metric=primary_metric
-        )
+        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=primary_metric)
         if score <= prior:
-            return RemoteWriteResult(
-                "skipped",
-                "not_better_than_champion",
-                canonical_id,
-                session_id,
-                score,
-            )
+            return outcome("skipped", "not_better_than_champion")
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
             refs = self.store.put_dir(canonical_id, session_id, files_dir)
@@ -541,20 +537,8 @@ class RemoteRecipeClient:
                     scope=scope_payload,
                 )
             else:
-                return RemoteWriteResult(
-                    "written",
-                    "champion_not_promoted",
-                    canonical_id,
-                    session_id,
-                    score,
-                )
-        return RemoteWriteResult(
-            "written",
-            "",
-            canonical_id,
-            session_id,
-            score,
-        )
+                return outcome("written", "champion_not_promoted")
+        return outcome("written")
 
 
 __all__ = [

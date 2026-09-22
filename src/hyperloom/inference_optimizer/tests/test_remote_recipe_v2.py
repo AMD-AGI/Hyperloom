@@ -43,6 +43,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     MAX_FILE_BYTES,
     MAX_PATH_BYTES,
     Artifact,
+    KBSelectionProfile,
     KnowledgeBundle,
     RecipeScope,
     RemoteRecipeValidationError,
@@ -87,7 +88,12 @@ def _build(state, files_dir, *, sections=None):
     files_dir = Path(files_dir)
     if sections is None:
         sections = KnowledgeSections(files_dir.with_name(f"{files_dir.name}-draft"))
-    return build_remote_knowledge(state, files_dir, sections=sections)
+    return build_remote_knowledge(
+        state,
+        files_dir,
+        sections=sections,
+        metrics=KBSelectionProfile.from_state(state).metrics,
+    )
 
 
 def _state(tmp_path: Path) -> SimpleNamespace:
@@ -1299,6 +1305,9 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     assert audit_rows[-1]["status"] == "written"
     assert audit_rows[-1]["generator"] == "close"
     assert audit_rows[-1]["result"]["canonical_id"] == ("inference:m:h:f:mt:a:v:p")
+    assert audit_rows[-1]["result"]["primary_metric"] == "optimized_throughput"
+    assert audit_rows[-1]["result"]["primary_value"] == 10.0
+    assert audit_rows[-1]["result"]["best_throughput"] == 10.0
 
 
 def test_remote_close_transport_failure_is_nonfatal(
@@ -1845,9 +1854,7 @@ def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:
 
 
 def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
-    query = kb_store_client.KBStoreClient._scope_query(
-        {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
-    )
+    query = kb_store_client.KBStoreClient._scope_query({"kernel_optimizer": "forge", "tp": 8, "conc": 64})
     assert "kernel_optimizer=forge" in query
     assert "tp=8" in query
     assert "conc=64" in query
@@ -2478,13 +2485,12 @@ def test_invalid_inference_scope_keeps_scope_error_reason(tmp_path: Path) -> Non
     assert store.calls == []
 
 
-def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
+def test_nonfinite_selection_metrics_are_rejected(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.current_best["tput"] = float("nan")
     state.cumulative_gain_validated = float("inf")
-    bundle = _build(state, tmp_path / "finite-knowledge")
-    assert bundle.knowledge["optimized_throughput"] == 0.0
-    assert bundle.knowledge["validated_e2e_gain"] == 0.0
+    with pytest.raises(RemoteRecipeValidationError, match="optimized_throughput"):
+        KBSelectionProfile.from_state(state)
 
 
 def _current_knowledge(*, timeline: list[str] | None = None) -> dict:
