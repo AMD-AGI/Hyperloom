@@ -70,9 +70,22 @@ the current implementation happens to execute.
 
 Account separately for activation functions, SFU work (softmax, exp, sigmoid,
 tanh, rsqrt), reductions and comparisons, quantize/dequantize and scale
-handling, and any cross-token recurrence. Do not price scalar or SFU work at the
-MFMA rate: the request supplies vector paths as well, and where it does not,
-say which proxy you used.
+handling, and any cross-token recurrence. Do not price any of it at the MFMA
+rate: the request supplies vector and integer paths as well.
+
+Two substitutions are expected, and both must be named in your derivation.
+
+**Transcendental work has no roof of its own.** No profiler measures one and no
+card states one, so nothing supplies it. Price it against the vector roof of
+its dtype. That roof bounds what the transcendental unit can retire rather than
+describing it, so the term comes out too small and the ceiling too loose: say
+so, and lower `confidence` when a case is dominated by it. Attention decode at
+short context is the shape where this matters most.
+
+**Integer work goes on the integer roofs.** Routing, expert sorting, index
+arithmetic, and quantize/dequantize packing run on `int8_valu`, `int32_valu` or
+`int64_valu`, not on `fp32_valu`. Pricing them against a float roof is the same
+error as pricing softmax against the matrix cores, one level down.
 
 **Bytes.** Count the traffic a best legal implementation must move, and say
 which memory level you are counting it against.
