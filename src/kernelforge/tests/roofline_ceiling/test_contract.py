@@ -10,14 +10,13 @@ from kernelforge.roofline_ceiling.contract import (
     BOUNDS,
     SCHEMA_VERSION,
     CeilingContractError,
-    Hardware,
     build_report,
     load_report,
     response_schema,
 )
 from kernelforge.roofline_ceiling.specs import (
     PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_REFERENCE,
+    PEAK_SOURCE_MEASURED,
 )
 
 _ANALYSIS = """# Performance ceiling analysis
@@ -33,20 +32,23 @@ the 1.19 ms the same case needs at the bf16 MFMA roof.
 """
 
 
-def _hardware(**overrides) -> Hardware:
+def _hardware(**overrides) -> dict:
+    """The block the analyst reports after measuring the machine."""
     base = {
-        "arch": "gfx950",
-        "peak_flops": {"bf16_mfma": 1.686e15},
+        "peak_source": PEAK_SOURCE_MEASURED,
+        # Below the gfx950 datasheet on every path, as a measurement must be.
+        "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
         "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12, "l2": 34.5e12},
-        "peak_source": PEAK_SOURCE_REFERENCE,
         "dispatch_floor_s": 3.0e-6,
+        "method": "rocprof-compute 3.4.0 --roof-only, column MFMAF16Flops",
     }
     base.update(overrides)
-    return Hardware(**base)
+    return base
 
 
 def _payload(**overrides) -> dict:
     payload = {
+        "hardware": _hardware(),
         "cases": [{"case_id": "c0", "t_ideal_ms": 12.8, "bound": "memory"}],
         "confidence": "high",
         "analysis_md": _ANALYSIS,
@@ -58,7 +60,7 @@ def _payload(**overrides) -> dict:
 def _build(payload, **kwargs):
     defaults = {
         "canonical_id": "roofline-ceiling:op:gfx950",
-        "hardware": _hardware(),
+        "arch": "gfx950",
         "expected_case_ids": ["c0"],
     }
     defaults.update(kwargs)
@@ -74,12 +76,14 @@ def test_a_well_formed_answer_is_published_as_given():
     assert report.analysis_md.startswith("# Performance ceiling analysis")
 
 
-def test_the_schema_asks_for_a_latency_a_bound_and_a_derivation():
+def test_the_schema_asks_for_the_roofs_a_latency_a_bound_and_a_derivation():
     schema = response_schema()
 
-    assert set(schema["required"]) == {"cases", "confidence", "analysis_md"}
+    assert set(schema["required"]) == {"hardware", "cases", "confidence", "analysis_md"}
     case = schema["properties"]["cases"]["items"]
     assert set(case["required"]) == {"case_id", "t_ideal_ms", "bound"}
+    hardware = schema["properties"]["hardware"]
+    assert set(hardware["required"]) == {"peak_source", "peak_flops", "bandwidth", "dispatch_floor_s"}
 
 
 def test_the_derivation_is_required_because_nothing_else_records_the_reasoning():
@@ -178,26 +182,85 @@ def test_a_missing_confidence_is_refused():
         _build(payload)
 
 
-def test_datasheet_peaks_add_the_caveat_that_says_so():
-    report = _build(_payload(), hardware=_hardware(peak_source=PEAK_SOURCE_DATASHEET))
+def test_recalled_datasheet_peaks_add_the_caveat_that_says_so():
+    report = _build(_payload(hardware=_hardware(peak_source=PEAK_SOURCE_DATASHEET)))
 
-    assert any("not measured on any card" in caveat for caveat in report.caveats)
-    assert any("absolute lower bound" in caveat for caveat in report.caveats)
+    assert any("measured on no card" in caveat for caveat in report.caveats)
+    assert any("not a fixed discount" in caveat for caveat in report.caveats)
 
 
-def test_profile_peaks_say_they_were_not_taken_on_this_box_today():
-    """Measured, so not the datasheet warning -- but committed, so not silence either."""
-    report = _build(_payload(), hardware=_hardware(peak_source=PEAK_SOURCE_REFERENCE))
+def test_peaks_measured_on_this_box_carry_no_datasheet_warning():
+    report = _build(_payload())
 
-    assert any("not from this box on this day" in caveat for caveat in report.caveats)
-    assert not any("absolute lower bound" in caveat for caveat in report.caveats)
     assert report.hardware.is_measured
+    assert not any("measured on no card" in caveat for caveat in report.caveats)
 
 
 def test_an_unmeasured_dispatch_floor_is_declared_rather_than_absorbed():
-    report = _build(_payload(), hardware=_hardware(dispatch_floor_s=0.0))
+    report = _build(_payload(hardware=_hardware(dispatch_floor_s=0.0)))
 
     assert any("Dispatch floor was not measured" in caveat for caveat in report.caveats)
+
+
+def test_paths_with_no_roof_are_named_so_a_substitute_is_visible():
+    report = _build(_payload())
+
+    gap = next(caveat for caveat in report.caveats if "No roof was established" in caveat)
+    assert "fp8_mfma" in gap and "int32_valu" in gap
+
+
+# --- the roofs the analyst reports ---------------------------------------------
+
+
+def test_a_roof_above_the_vendor_peak_cannot_be_a_measurement():
+    """A column read by the wrong name, or a unit left unscaled."""
+    with pytest.raises(CeilingContractError, match="above the published gfx950 peak"):
+        _build(_payload(hardware=_hardware(peak_flops={"bf16_mfma": 9.9e15})))
+
+
+def test_a_bandwidth_above_the_vendor_peak_is_refused_too():
+    with pytest.raises(CeilingContractError, match="above the published gfx950 peak"):
+        _build(_payload(hardware=_hardware(bandwidth={"hbm": 9.0e12})))
+
+
+def test_the_bf16_halving_artifact_is_refused_rather_than_shipped():
+    """Left in, every bf16 ceiling is twice as loose as it should be."""
+    with pytest.raises(CeilingContractError, match="runs both at one rate"):
+        _build(_payload(hardware=_hardware(peak_flops={"bf16_mfma": 0.6e15, "fp16_mfma": 1.2e15})))
+
+
+def test_an_instruction_path_nobody_can_check_is_refused():
+    with pytest.raises(CeilingContractError, match="not an instruction path this build knows"):
+        _build(_payload(hardware=_hardware(peak_flops={"tf32_mfma": 1.0e14})))
+
+
+def test_a_memory_level_outside_the_vocabulary_is_refused():
+    with pytest.raises(CeilingContractError, match="memory level"):
+        _build(_payload(hardware=_hardware(bandwidth={"hbm": 6.0e12, "scalar_cache": 1.0e12})))
+
+
+def test_a_report_with_no_hbm_roof_is_refused():
+    with pytest.raises(CeilingContractError, match="needs an 'hbm' figure"):
+        _build(_payload(hardware=_hardware(bandwidth={"l2": 34.0e12})))
+
+
+def test_a_response_without_a_hardware_block_is_refused():
+    payload = _payload()
+    del payload["hardware"]
+
+    with pytest.raises(CeilingContractError, match="hardware"):
+        _build(payload)
+
+
+def test_an_invented_peak_source_is_refused():
+    with pytest.raises(CeilingContractError, match="peak_source"):
+        _build(_payload(hardware=_hardware(peak_source="vibes")))
+
+
+def test_how_the_roofs_were_obtained_is_kept_on_the_record():
+    report = _build(_payload())
+
+    assert "MFMAF16Flops" in report.hardware.provenance["method"]
 
 
 def test_the_analysts_own_caveats_survive_alongside_the_frameworks():
@@ -236,7 +299,7 @@ def test_a_published_report_round_trips():
     assert restored.ideal_ms() == original.ideal_ms()
     assert restored.analysis_md == original.analysis_md
     assert restored.hardware.bandwidth == original.hardware.bandwidth
-    assert restored.hardware.peak_source == PEAK_SOURCE_REFERENCE
+    assert restored.hardware.peak_source == PEAK_SOURCE_MEASURED
 
 
 def test_a_report_from_the_stage_model_era_is_refused_rather_than_misread():

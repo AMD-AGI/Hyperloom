@@ -12,15 +12,25 @@ import click
 import pytest
 
 from kernelforge import cli as cli_module
-from kernelforge.roofline_ceiling.contract import Hardware, build_report
+from kernelforge.roofline_ceiling.contract import build_report
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR, publish
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_REFERENCE
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_MEASURED
 from kernelforge.loop.runner import IterationConfig, IterationLoop
+
+
+_HARDWARE = {
+    "peak_source": PEAK_SOURCE_MEASURED,
+    "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
+    "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12},
+    "dispatch_floor_s": 3.0e-6,
+    "method": "rocprof-compute --roof-only",
+}
 
 
 def _report(cases=(("decode-t1", 12.8),)):
     payload = {
         "cases": [{"case_id": case_id, "t_ideal_ms": ideal, "bound": "memory"} for case_id, ideal in cases],
+        "hardware": _HARDWARE,
         "confidence": "high",
         "analysis_md": "# Performance ceiling analysis\n\n"
         + "\n".join(f"Case `{case_id}`: 8e10 B / 6.24 TB/s = {ideal} ms." for case_id, ideal in cases),
@@ -28,13 +38,7 @@ def _report(cases=(("decode-t1", 12.8),)):
     return build_report(
         payload,
         canonical_id="roofline-ceiling:op:gfx950",
-        hardware=Hardware(
-            arch="gfx950",
-            peak_flops={"bf16_mfma": 1.686e15},
-            bandwidth={"hbm": 6.24e12},
-            peak_source=PEAK_SOURCE_REFERENCE,
-            dispatch_floor_s=3.0e-6,
-        ),
+        arch="gfx950",
         expected_case_ids=[case_id for case_id, _ in cases],
     )
 

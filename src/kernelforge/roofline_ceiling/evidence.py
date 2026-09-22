@@ -1,26 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Deterministic inputs to the ceiling: the machine's roofs, the case set, the trace.
+"""Deterministic inputs to the ceiling: the case set, the machine's identity, the trace.
 
-No agent, and no shared state with the optimization loop. This settles
-everything the analyst cannot answer by reading source -- how fast the machine
-is, which shapes are scored, and what the kernel really dispatches -- before
-the analyst session starts, so the numbers it reasons over are the numbers the
-framework will divide by.
+No agent here. This settles what must not vary between runs -- which shapes are
+scored, what the kernel really dispatches, and which machine this is -- before
+the analyst session starts.
 
-The roofs are looked up, never measured here. They are a property of the
-machine, not of the day: a shipped device profile keyed on architecture, device
-name and partition mode, and the vendor datasheet behind it when no profile
-covers the machine. Measuring at run time bought a figure that moved with the
-box's mood and needed a profiler installed; committing it buys one that has
-been reviewed and that two campaigns a month apart both divide by. A machine
-gets a profile by being measured once and having the result committed to
-:mod:`~kernelforge.roofline_ceiling.device_profile`.
+The roofs are deliberately *not* settled here. The analyst measures them itself
+during its session, because getting a profiler onto an arbitrary image is
+open-ended work that code cannot enumerate, and because no measured figure is
+then written to any artifact this module owns. What it reports is validated
+against the vendor's published peaks in
+:func:`~kernelforge.roofline_ceiling.contract.build_hardware`, which rejects a
+roof no card could reach.
 
-``peak_source`` is a required field rather than a nicety. A ceiling against a
-measured profile and one against a datasheet differ by roughly a factor of two,
-so a consumer that cannot tell which it is holding has no number at all.
+``peak_source`` is still a required field on the result. A ceiling against
+roofs measured on the box and one against recalled datasheet figures differ by
+an amount that varies per instruction path, so a consumer that cannot tell
+which it is holding has no number at all.
 """
 
 from __future__ import annotations
@@ -33,19 +31,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
-from kernelforge.roofline_ceiling.contract import Hardware
-from kernelforge.roofline_ceiling.device_profile import (
-    DeviceIdentity,
-    describe_device,
-    load_reference,
-)
-from kernelforge.roofline_ceiling.specs import (
-    PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_REFERENCE,
-    arch_spec,
-    supported_arches,
-)
-from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
+from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe_device
+from kernelforge.roofline_ceiling.specs import arch_spec, supported_arches
+from kernelforge.fusion.gpu_arch import canon_arch
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
@@ -60,7 +48,9 @@ OBSERVED_CAMPAIGN = "campaign_median"
 class EvidenceBundle:
     """Everything the deterministic side settled for one ceiling run."""
 
-    hardware: Hardware
+    #: Which machine this is, so the analyst measures and names the right one
+    #: and the contract can check its roofs against the right published peaks.
+    identity: DeviceIdentity
     artifacts_dir: Path
     #: ``case_id -> latency`` the kernel was seen reaching, a sanity reference
     #: for the analyst and the divisor of the report's overshoot check.
@@ -166,78 +156,22 @@ def capture_kernel_trace(
     return {"captured": False, "detail": "no kernel-trace profiler produced output; tried rocprofv3, rocprof"}
 
 
-def resolve_hardware(
-    *,
-    arch: str = "",
-    identity: DeviceIdentity | None = None,
-    provenance: dict[str, Any] | None = None,
-    allow_reference: bool = True,
-) -> Hardware:
-    """Look up the roofs for this machine, best available source first.
+def resolve_identity(arch: str = "") -> DeviceIdentity:
+    """Name the machine the ceiling is for, so the analyst measures the right one.
 
-    A committed device profile for this exact configuration, then the vendor
-    datasheet. Sources are never blended: in a record half measured and half
-    datasheet one term would be roughly twice as generous as the next and no
-    field could say which, so a profile that does not cover the machine yields
-    to the datasheet whole rather than filling its gaps.
+    Raises when the architecture is one this build carries no published peaks
+    for: those peaks are what :func:`build_hardware` checks the analyst's
+    measurements against, and an unchecked roof is the one failure mode that
+    stops a campaign early with the work half done.
     """
-    resolved_arch = canon_arch(arch) or detect_arch() or canon_arch(arch)
-    notes = dict(provenance or {})
-    notes["arch_resolved_from"] = "caller" if canon_arch(arch) else "rocminfo"
-
-    device = identity or describe_device(resolved_arch)
-    if allow_reference:
-        reference = load_reference(device)
-        if reference is not None:
-            notes["device_profile"] = {
-                "origin": reference.origin,
-                "measurement": reference.measurement,
-                "source_by_figure": reference.source_by_figure,
-                "notes": list(reference.notes),
-                "matched_device": {
-                    "arch": device.arch,
-                    "device_name": device.device_name,
-                    "compute_partition": device.compute_partition,
-                    "memory_partition": device.memory_partition,
-                },
-            }
-            return Hardware(
-                arch=resolved_arch or device.arch,
-                peak_flops=dict(reference.peak_flops),
-                bandwidth=dict(reference.bandwidth),
-                peak_source=PEAK_SOURCE_REFERENCE,
-                dispatch_floor_s=float(reference.dispatch_floor_s),
-                provenance=notes,
-            )
-
-    spec = arch_spec(resolved_arch)
-    if spec is None:
+    identity = describe_device(arch)
+    resolved = identity.arch or canon_arch(arch)
+    if arch_spec(resolved) is None:
         raise ValueError(
-            f"no device profile and no datasheet peaks for arch {resolved_arch or '<undetected>'}; "
-            "pass --arch with one of: " + ", ".join(sorted(supported_arches()))
+            f"no published peaks for arch {resolved or '<undetected>'}, so a measured roof could not "
+            "be checked against anything; pass --arch with one of: " + ", ".join(sorted(supported_arches()))
         )
-    notes.setdefault("datasheet_source", spec.source)
-    notes.setdefault(
-        "no_device_profile_for",
-        {
-            "arch": device.arch,
-            "device_name": device.device_name,
-            "compute_partition": device.compute_partition,
-            "memory_partition": device.memory_partition,
-        },
-    )
-    return Hardware(
-        arch=spec.arch,
-        peak_flops=dict(spec.peak_flops),
-        bandwidth=spec.bandwidth(),
-        peak_source=PEAK_SOURCE_DATASHEET,
-        # The datasheet quotes no launch cost. Zero leaves every latency term
-        # out of the estimate, which the report states as a caveat rather than
-        # absorbing silently: a latency-bound shape whose dispatch floor is
-        # missing reads as memory-bound and nearly free.
-        dispatch_floor_s=0.0,
-        provenance=notes,
-    )
+    return identity
 
 
 def discover_scored_cases(
@@ -295,9 +229,10 @@ def collect_evidence(
 ) -> tuple[EvidenceBundle, list[str]]:
     """Settle every deterministic input one ceiling run needs.
 
-    Returns ``(bundle, scored_case_ids)``. Each step degrades independently and
-    records why, so a machine no device profile covers still produces a labelled
-    answer instead of no answer or, worse, an unlabelled one.
+    Returns ``(bundle, scored_case_ids)``. The roofs are not among them: the
+    analyst measures those itself and reports them back. What is settled here
+    is what must not vary between runs -- the case set, the machine's identity,
+    and the trace.
 
     ``known_case_ids`` and ``known_case_ms`` let a caller that has already
     benched the kernel skip the discovery run. A campaign has: it measured its
@@ -307,7 +242,7 @@ def collect_evidence(
     """
     artifacts = Path(artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
-    identity = describe_device(arch)
+    identity = resolve_identity(arch)
 
     if known_case_ids:
         scored = [str(case_id) for case_id in dict.fromkeys(known_case_ids)]
@@ -335,25 +270,11 @@ def collect_evidence(
     )
     if not trace_provenance.get("captured"):
         notes.append("kernel trace unavailable: " + str(trace_provenance.get("detail") or "unknown"))
-
-    hardware = resolve_hardware(
-        arch=arch,
-        identity=identity,
-        provenance={"kernel_trace": trace_provenance},
-    )
-    if hardware.peak_source == PEAK_SOURCE_REFERENCE:
-        origin = (hardware.provenance.get("device_profile") or {}).get("origin", "a device profile")
-        notes.append(f"roofs read from {origin}")
-    else:
-        notes.append(
-            f"no device profile covers this machine ({identity.slug()}), so the roofs are vendor datasheet "
-            "figures: every ceiling is an absolute lower bound and attainment reads far below what the "
-            "kernel deserves. Add a profile for this configuration to get a usable target."
-        )
+    notes.append(f"machine identified as {identity.slug()}; the analyst measures its roofs itself")
 
     return (
         EvidenceBundle(
-            hardware=hardware,
+            identity=identity,
             artifacts_dir=artifacts,
             observed_ms=observed,
             observed_origin=observed_origin,
@@ -370,5 +291,5 @@ __all__ = [
     "capture_kernel_trace",
     "collect_evidence",
     "discover_scored_cases",
-    "resolve_hardware",
+    "resolve_identity",
 ]

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -15,7 +14,6 @@ from kernelforge.roofline_ceiling.attainment import measure_attainment
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport, load_report
 from kernelforge.roofline_ceiling.specs import peak_source_meaning
 from kernelforge.durable_io import atomic_write_text
-from kernelforge.resources import default_project_root
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
@@ -28,63 +26,6 @@ EVIDENCE_DIRNAME = "evidence"
 WORKSPACE_SUBDIR = "forge_experiments/roofline_ceiling"
 
 
-def case_set_hash(case_ids: Sequence[str]) -> str:
-    """A short, order-independent digest of the scored case set."""
-    joined = "\n".join(sorted({str(case_id) for case_id in case_ids}))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
-
-
-def roofs_hash(
-    peak_flops: Mapping[str, float] | None,
-    bandwidth: Mapping[str, float] | None,
-) -> str:
-    """A digest of the exact roofs a ceiling was divided by."""
-    figures = [f"{name}={float(value):.6g}" for name, value in sorted((peak_flops or {}).items())]
-    figures += [f"bw.{name}={float(value):.6g}" for name, value in sorted((bandwidth or {}).items())]
-    return hashlib.sha256("\n".join(figures).encode("utf-8")).hexdigest()[:16]
-
-
-def cache_key(
-    *,
-    canonical_id: str,
-    case_ids: Sequence[str],
-    arch: str,
-    peak_source: str,
-    peak_flops: Mapping[str, float] | None = None,
-    bandwidth: Mapping[str, float] | None = None,
-) -> str:
-    """Identity of one ceiling answer.
-
-    The peak source is part of the key, not metadata on it. A datasheet ceiling
-    and an empirical one are different answers to different questions, and
-    serving the first from cache when the caller asked for the second is exactly
-    the silent degrade this module exists to prevent.
-
-    The roof *values* are in the key for the same reason one step down. Nothing
-    recomputes a published ceiling, so a cached one cannot be brought up to date
-    after the box is re-measured -- and the source label does not change when it
-    is, so the key would not notice. Keying on the figures themselves retires
-    the stale answer instead of serving a latency derived from peaks that no
-    longer hold.
-    """
-    material = "|".join(
-        [
-            canonical_id,
-            case_set_hash(case_ids),
-            arch,
-            peak_source,
-            roofs_hash(peak_flops, bandwidth),
-        ]
-    )
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:24]
-
-
-def cache_path(key: str, project_root: str | Path | None = None) -> Path:
-    """Location of one cached ceiling under the writable state root."""
-    root = Path(project_root) if project_root is not None else default_project_root()
-    return root / "roofline_ceiling" / f"{key}.json"
-
-
 def publish(report: CeilingReport, output_dir: str | Path) -> Path:
     """Write the report and its human-readable companion; return the JSON path."""
     destination = Path(output_dir)
@@ -93,25 +34,6 @@ def publish(report: CeilingReport, output_dir: str | Path) -> Path:
     atomic_write_text(json_path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
     atomic_write_text(destination / DOCUMENT_FILENAME, render_document(report))
     return json_path
-
-
-def store_in_cache(report: CeilingReport, key: str, project_root: str | Path | None = None) -> Path:
-    """Cache one report so a later campaign on the same kernel does not re-derive it."""
-    path = cache_path(key, project_root)
-    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
-    return path
-
-
-def read_cached(key: str, project_root: str | Path | None = None) -> CeilingReport | None:
-    """Return a cached report, or ``None`` when absent or unreadable."""
-    path = cache_path(key, project_root)
-    if not path.is_file():
-        return None
-    try:
-        return load_report(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, CeilingContractError) as exc:
-        log.warning("ignoring unreadable cached ceiling at %s: %s", path, exc)
-        return None
 
 
 def read_report(path: str | Path) -> CeilingReport:
@@ -279,14 +201,8 @@ __all__ = [
     "EVIDENCE_DIRNAME",
     "REPORT_FILENAME",
     "WORKSPACE_SUBDIR",
-    "cache_key",
-    "cache_path",
-    "case_set_hash",
     "publish",
-    "read_cached",
     "read_report",
     "render_document",
     "render_for_prompt",
-    "roofs_hash",
-    "store_in_cache",
 ]

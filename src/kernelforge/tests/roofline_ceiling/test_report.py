@@ -6,21 +6,24 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.roofline_ceiling.contract import Hardware, build_report
+from kernelforge.roofline_ceiling.contract import build_report
 from kernelforge.roofline_ceiling.report import (
     DOCUMENT_FILENAME,
     REPORT_FILENAME,
-    cache_key,
-    cache_path,
-    case_set_hash,
     publish,
-    read_cached,
     read_report,
     render_document,
     render_for_prompt,
-    store_in_cache,
 )
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_REFERENCE
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_MEASURED
+
+_HARDWARE = {
+    "peak_source": PEAK_SOURCE_MEASURED,
+    "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
+    "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12},
+    "dispatch_floor_s": 3.0e-6,
+    "method": "rocprof-compute --roof-only",
+}
 
 _ANALYSIS = """# Performance ceiling analysis
 
@@ -36,18 +39,9 @@ are counted once, for the experts this case actually activates.
 """
 
 
-def _hardware(peak_source: str = PEAK_SOURCE_REFERENCE) -> Hardware:
-    return Hardware(
-        arch="gfx950",
-        peak_flops={"bf16_mfma": 1.686e15},
-        bandwidth={"hbm": 6.24e12, "mall": 8.49e12},
-        peak_source=peak_source,
-        dispatch_floor_s=3.0e-6,
-    )
-
-
-def _report(peak_source: str = PEAK_SOURCE_REFERENCE, case_ids=("c0",)):
+def _report(peak_source: str = PEAK_SOURCE_MEASURED, case_ids=("c0",)):
     payload = {
+        "hardware": {**_HARDWARE, "peak_source": peak_source},
         "cases": [{"case_id": case_id, "t_ideal_ms": 12.8, "bound": "memory"} for case_id in case_ids],
         "confidence": "medium",
         "analysis_md": _ANALYSIS + "\n" + "\n".join(f"Case `{case_id}` covered." for case_id in case_ids),
@@ -56,7 +50,7 @@ def _report(peak_source: str = PEAK_SOURCE_REFERENCE, case_ids=("c0",)):
     return build_report(
         payload,
         canonical_id="roofline-ceiling:op:gfx950",
-        hardware=_hardware(peak_source),
+        arch="gfx950",
         expected_case_ids=list(case_ids),
     )
 
@@ -76,46 +70,6 @@ def test_a_published_report_is_readable_by_a_consumer(tmp_path):
     restored = read_report(path)
     assert restored.ideal_ms() == original.ideal_ms()
     assert restored.analysis_md == original.analysis_md
-
-
-def test_the_cache_key_separates_a_measured_ceiling_from_a_datasheet_one():
-    """Serving a datasheet answer to a caller who asked for a measured one is the
-    silent degrade the whole module is built to prevent."""
-    common = {"canonical_id": "roofline-ceiling:op:gfx950", "case_ids": ["c0"], "arch": "gfx950"}
-
-    assert cache_key(**common, peak_source=PEAK_SOURCE_REFERENCE) != cache_key(
-        **common, peak_source=PEAK_SOURCE_DATASHEET
-    )
-
-
-def test_the_cache_key_moves_when_the_scored_case_set_does():
-    common = {"canonical_id": "roofline-ceiling:op:gfx950", "arch": "gfx950", "peak_source": PEAK_SOURCE_REFERENCE}
-
-    assert cache_key(**common, case_ids=["c0"]) != cache_key(**common, case_ids=["c0", "c1"])
-
-
-def test_the_case_set_hash_ignores_the_order_the_driver_happened_to_print():
-    assert case_set_hash(["b", "a"]) == case_set_hash(["a", "b"])
-
-
-def test_a_cached_report_round_trips(tmp_path):
-    store_in_cache(_report(), "key0", tmp_path)
-
-    restored = read_cached("key0", tmp_path)
-
-    assert restored is not None
-    assert restored.ideal_ms() == _report().ideal_ms()
-
-
-def test_a_corrupt_cache_entry_is_ignored_rather_than_raised(tmp_path):
-    store_in_cache(_report(), "key0", tmp_path)
-    cache_path("key0", tmp_path).write_text("{not json", encoding="utf-8")
-
-    assert read_cached("key0", tmp_path) is None
-
-
-def test_an_absent_cache_entry_is_simply_absent(tmp_path):
-    assert read_cached("never-written", tmp_path) is None
 
 
 def test_the_document_leads_with_the_answer_and_carries_the_derivation_verbatim():
@@ -138,21 +92,22 @@ def test_the_document_states_every_figure_the_estimate_was_taken_against():
     assert "Dispatch floor" in rendered
 
 
-def test_the_document_says_when_its_peaks_are_only_a_datasheet():
+def test_the_document_says_when_its_peaks_were_only_recalled():
     rendered = render_document(_report(PEAK_SOURCE_DATASHEET))
 
-    assert "not an achievable target" in rendered
+    assert "measured on no card" in rendered
 
 
 def test_validator_findings_reach_the_document_rather_than_only_the_json():
     report = build_report(
         {
+            "hardware": _HARDWARE,
             "cases": [{"case_id": "c0", "t_ideal_ms": 99.0, "bound": "memory"}],
             "confidence": "low",
             "analysis_md": "case `c0` is estimated at 99 ms",
         },
         canonical_id="roofline-ceiling:op:gfx950",
-        hardware=_hardware(),
+        arch="gfx950",
         expected_case_ids=["c0"],
         observed_ms={"c0": 10.0},
     )

@@ -6,23 +6,75 @@ scored test shape, on the specific accelerator described in the request.
 That number is an optimistic lower bound under hardware limits and legal
 algorithm constraints. It does not claim an implementation reaching it exists.
 
-## What you own, and the one thing you do not
+## What you own
 
-You own the whole estimate: the minimum legal work, how that work composes into
-a latency, and the resulting number. Nobody downstream recomputes it, so nobody
-downstream can correct it either.
-
-You do **not** own the hardware figures. Every peak, bandwidth and launch cost
-is measured on this box and handed to you in the request. Use those and only
-those. A figure you recall from a datasheet or a knowledge-base card is roughly
-twice what this box sustains, and a ceiling divided by it would be wrong while
-the report claimed it was measured. If a memory level or instruction path you
-need is missing from the supplied tables, it was not measured: say so in
-`caveats` and lower `confidence` rather than substituting one.
+You own the whole estimate: the roofs of the machine, the minimum legal work,
+how that work composes into a latency, and the resulting number. Nobody
+downstream recomputes any of it, so nobody downstream can correct it either.
 
 Because nothing verifies your arithmetic, `analysis_md` is not documentation —
 it is the artifact. Write it so a reader can recompute every latency without
 rerunning you.
+
+Two things are checked, and both reject the answer rather than repair it: a
+roof above the vendor's published peak, and two instruction paths the vendor
+rates as one arriving apart. Everything else stands as you report it.
+
+## Step 0 — establish this machine's roofs
+
+Measure them. Do not recall them. A peak you remember is the datasheet, and the
+datasheet is not a fixed discount away from a real card: on gfx950 the gap runs
+from 1.2% for FP32 matrix to 50.8% for FP16 matrix. A ceiling divided by a
+recalled figure is wrong by an amount that changes per dtype, which makes cases
+of different dtypes stop being comparable.
+
+```bash
+rocprof-compute profile --roof-only --name ceiling --path <evidence_dir>/roofs \
+  --device 0 -- <a short GPU workload>
+```
+
+If `rocprof-compute` is not on PATH, get it before falling back. It ships with
+ROCm at `/opt/rocm/libexec/rocprofiler-compute/`; the usual failure is not that
+it is absent but that its Python dependencies are, which
+`pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt` fixes.
+Report `datasheet` as your `peak_source` only after that has failed too.
+
+Seven things about this measurement are easy to get wrong, and each has been
+seen:
+
+1. **The exit code lies.** The tool exits non-zero when its PDF export cannot
+   find Kaleido, having already written a complete `roofline.csv`. Judge by the
+   file, not the status.
+2. **Find the CSV, do not construct its path.** It nests under
+   `<path>/<name>/<SoC>/` and that layout has moved between releases.
+3. **The first column is a device id.** Drop it before pairing the header with
+   a row, or every column name shifts by one.
+4. **Units are `G`-prefixed.** GFLOP/s, GIOP/s, GB/s. Multiply by `1e9`.
+5. **Low-precision matrix column names move.** Some builds report a merged
+   `MFMA_FLOPs_F6F4`, others separate `MFMAF4Flops` and `MFMAF6Flops`.
+6. **bf16 comes back halved.** `MFMABF16Flops` reads exactly half
+   `MFMAF16Flops` on chips that run both MFMA paths at one rate. Report the
+   fp16 figure for `bf16_mfma` and say so in `method`. Left uncorrected, every
+   bf16 ceiling is twice as loose as it should be — and the contract rejects it.
+7. **Time the dispatch floor from a captured graph, never eagerly.** Eager
+   timing also pays the framework's per-op host submission, which a graph-timed
+   driver never pays: 4.27 us against 1.55 us for the same kernel on an MI355X.
+
+Map columns to paths: `MFMAF16Flops`→`fp16_mfma` (and `bf16_mfma`, corrected),
+`MFMAF8Flops`→`fp8_mfma`+`mxfp8_scaled_mfma`, `MFMAF6Flops`→`fp6_mfma`+
+`mxfp6_scaled_mfma`, `MFMAF4Flops`→`fp4_mfma`+`mxfp4_scaled_mfma`,
+`MFMAI8Ops`→`int8_mfma`, `MFMAF32Flops`/`MFMAF64Flops`→`fp32_matrix`/
+`fp64_matrix`, `FP16Flops`/`BF16Flops`/`FP8Flops`/`FP32Flops`/`FP64Flops`→the
+matching `*_valu`, `I8Ops`/`I32Ops`/`I64Ops`→`int8_valu`/`int32_valu`/
+`int64_valu`. Bandwidth: `HBMBw`→`hbm`, `MALLBw`→`mall`, `L2Bw`→`l2`,
+`L1Bw`→`l1`, `LDSBw`→`lds`. Record all five levels — a working set resident in
+Infinity Cache rides a roof well above HBM.
+
+Report what you established in `hardware`, with `method` carrying the tool
+version, the command, the column behind each figure, and any correction you
+applied. Omit a path you could not establish rather than guessing it; the
+report states the gap and you should lower `confidence` when a case depended
+on one.
 
 ## Step 1 — fix the measurement contract before estimating anything
 
