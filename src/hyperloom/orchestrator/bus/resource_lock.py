@@ -247,56 +247,6 @@ def _last_cleanup_evidence(history_json: str) -> dict:
     return {}
 
 
-def _ended_holder_rows(cur: sqlite3.Cursor, lanes: list[str], *, extra_where: str, extra_params: tuple) -> list[dict]:
-    """Select lane rows whose holder task the registry already wrote terminal.
-
-    The join is an inner one on purpose: a holder with no ``tasks`` row is left
-    alone. Absence is silence, not a finished holder, and
-    :meth:`SqliteLeaseBackend.reap_dead_holders` already covers the rows a
-    crashed process leaves behind.
-
-    A lane records its coordinator, not the specialist's GPU worker: a holder
-    still on the cards is still working, whatever the coordinator task row says.
-    Same exemption ``reap_dead_holders`` makes.
-
-    Args:
-        cur: Cursor of the caller's transaction.
-        lanes: Lanes to look at; empty means every lane but the round lane.
-        extra_where: An additional SQL predicate, already parameterised.
-        extra_params: Its parameters.
-
-    Returns:
-        list[dict]: The matching rows, each carrying the holder's ``history``
-        as ``holder_history``.
-    """
-    terminal = sorted(TERMINAL_STATES)
-    states = ",".join("?" * len(terminal))
-    where = (
-        f"{extra_where} "
-        "AND leases.task_id NOT IN (SELECT task_id FROM gpu_leases) "
-        f"AND tasks.state IN ({states})"  # nosec B608 - generated placeholders only.
-    )
-    params: tuple = (*extra_params, *terminal)
-    if lanes:
-        # Callers pass a ``_expand_lanes`` result, which is drawn from
-        # KNOWN_LANES and so never names BRINGUP_ROUND_LANE.
-        placeholders = ",".join("?" * len(lanes))
-        where = f"leases.lane IN ({placeholders}) AND {where}"  # nosec B608 - generated placeholders only.
-        params = (*lanes, *params)
-    else:
-        # A round outlives its holder on purpose: only RoundStore may say a
-        # round is over, and its holder going terminal is the very input
-        # ``Reconciler._advance_or_expire`` weighs before handing off.
-        where = f"leases.lane != ? AND {where}"  # nosec B608 - generated placeholders only.
-        params = (BRINGUP_ROUND_LANE, *params)
-    cur.execute(
-        "SELECT leases.*, tasks.history AS holder_history FROM leases "
-        f"JOIN tasks ON tasks.task_id = leases.task_id WHERE {where}",  # nosec B608 - generated placeholders only.
-        params,
-    )
-    return [dict(r) for r in cur.fetchall()]
-
-
 def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
     """Retained rows whose holder ended and which nothing can show unused.
 
@@ -319,14 +269,13 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
     Returns:
         list[dict]: One entry per unverifiable row, each with a ``reason``.
     """
-    # Deliberately NOT _ended_holder_rows: that query is shaped for reclamation,
-    # and two of its filters would silence exactly the rows an operator most
-    # needs to see. Its INNER JOIN on ``tasks`` drops a row whose holder was
-    # pruned (bus/db_maintenance.py prune_tasks does not spare a task that still
-    # holds a lease), and its gpu_leases exemption drops the GPU path -- which
-    # is the one dispatcher.py's release_resources() fails on, i.e. the shape of
-    # the 2026-09-21 incident. Reclamation must respect both filters; reporting
-    # must not.
+    # A LEFT JOIN, and no gpu_leases exemption: both of those filters belong to
+    # reclamation, and either would silence exactly the rows an operator most
+    # needs to see. An inner join drops a row whose holder was pruned
+    # (bus/db_maintenance.py prune_tasks does not spare a task that still holds
+    # a lease), and the exemption drops the GPU path -- the one
+    # dispatcher.py's release_resources() fails on, i.e. the shape of the
+    # 2026-09-21 incident.
     rows = [
         dict(r)
         for r in cur.execute(

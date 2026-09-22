@@ -603,21 +603,43 @@ class ServingLease:
                 # 2026-09-21 wedged a whole session. Reaping a tree the actor would not give up belongs to the
                 # process-tree machinery, not to a timeout path; say plainly what may have been left behind so an
                 # operator can look.
-                log.warning(
-                    "ServingLease: killing the actor for round %s after it ignored the stop request; any "
-                    "subprocess tree that round still owned is NOT reaped by this kill and may still hold its "
-                    "GPUs -- check for surviving server processes if the next round cannot get its devices",
-                    _round_label(cmd),
-                )
                 if timed_out:
-                    # Drop the round before the handle goes, so Ray stops holding a task nobody will ever collect.
+                    # Deliberately NOT killing the actor. ``ray.kill`` runs
+                    # neither ``__ray_terminate__`` nor atexit, so a round that
+                    # really is still running keeps its server subprocesses --
+                    # but killing the actor hands its GPUs straight back to the
+                    # scheduler, and the next round would be placed on cards a
+                    # live server still maps. That trades a bounded wait for
+                    # concurrent GPU use, which corrupts quietly.
+                    #
+                    # Leaving the actor alive keeps those devices reserved, so
+                    # nothing else can be placed on them. The cost is that they
+                    # stay out of circulation until the session ends or an
+                    # operator intervenes -- the same asymmetry the lane leases
+                    # settle on: a resource stuck is recoverable, a resource
+                    # shared is not.
                     self._abandon_ref(ref)
-                    self._kill_actor()
+                    log.warning(
+                        "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
+                        "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
+                        "rather than being returned to the scheduler. They will not be reusable until this session "
+                        "ends; if you need them sooner, confirm no server of that round survives and kill the actor "
+                        "by hand",
+                        _round_label(cmd),
+                        time.monotonic() - started_at,
+                    )
                     raise subprocess.TimeoutExpired(
                         cmd,
                         wait_ceiling,
                         stderr=_round_wait_timeout_stderr(time.monotonic() - started_at, wait_ceiling),
                     )
+                # The cancel path keeps the behaviour it had on main: an operator
+                # or a shutdown asked for this, and the caller is waiting on the
+                # teardown rather than on a round.
+                log.warning(
+                    "ServingLease: killing the actor for round %s after it ignored the stop request",
+                    _round_label(cmd),
+                )
                 self._kill_actor()
                 return (
                     ORCHESTRATOR_CANCELLED_RETURNCODE,

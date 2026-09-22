@@ -121,18 +121,13 @@ class SubAgentResult:
 
 class ExecutionCleanupUnconfirmed(RuntimeError):
     """Physical cleanup did not acknowledge release of an execution's resources.
-
-    Raising this is what keeps the task's lane held: processes may still be
-    running, and holding the lane is what stops conflicting work from starting.
-    That retention has to end the moment they do, and nothing observes that
-    moment -- so a raise site that knows which process GROUP it failed to
-    confirm passes ``tree_pgid``, which :meth:`SubAgentRunner.run_task` records
-    on the terminal row for a later reaper to probe. A group id is what is
-    carried rather than a pid because it outlives the root process: both launch
-    sites spawn with ``start_new_session=True``, so the root begins as its own
-    group leader and the number keeps naming the group after the root exits.
-    Without it the lane is held for good, since nothing then distinguishes a
-    finished execution from a working one.
+    Recorded on the terminal row as a LEAD FOR AN OPERATOR, not as something a
+    reaper acts on. Nothing probes it: a served process is setsid'd by design,
+    so it leaves the group its spawn created, and three attempts to prove a lane
+    free from identities like this one were refuted in review. What it is still
+    good for is telling a human where to start looking when a lane is reported
+    held -- see :func:`~hyperloom.orchestrator.bus.resource_lock._report_unverifiable`,
+    which prints it with exactly that caveat.
 
     Attributes:
         result: The executor's own outcome, for the terminal row.
@@ -426,12 +421,13 @@ class SubAgentRunner:
                             evidence["cleanup_error"] = (
                                 repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
                             )
-                            # The lane this path deliberately retains can only
-                            # ever come back if a later reaper can show nothing
-                            # of the execution is left, and this row is the only
-                            # durable place its process group survives. Recorded
-                            # as a number rather than left to be dug back out of
-                            # the repr above.
+                            # The lane this path deliberately retains is not
+                            # taken back by anything: no reaper inspects this
+                            # number, because a served process setsid's out of
+                            # the group it names. It is recorded so the operator
+                            # who has to clear that lane by hand has somewhere
+                            # to start -- as a number, rather than left to be
+                            # dug back out of the repr above.
                             pgid = getattr(cleanup_error, "tree_pgid", None)
                             if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 0:
                                 evidence[CLEANUP_TREE_PGID_KEY] = pgid

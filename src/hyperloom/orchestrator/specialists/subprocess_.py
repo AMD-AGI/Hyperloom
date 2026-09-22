@@ -798,27 +798,31 @@ class _RayLeaseProcess:
 
 
 def _local_tree_pgid(proc: Any) -> int | None:
-    """The process group a later reaper may probe for this specialist, or None.
+    """The process group to name in an operator's log for this specialist, or None.
+
+    Nothing probes this number. A served process is setsid'd by design, so it
+    leaves the group its spawn created, and every attempt to decide from such an
+    identity whether a lane was free was refuted in review. What the number is
+    still worth is a starting point for the human who has to clear a retained
+    lane by hand.
 
     A local specialist is spawned with ``start_new_session=True``, so its root
     pid is also the id of the group and session it leads, and that number keeps
-    naming the group once the root itself has exited. It is the group, not the
-    root, that the lane reaper asks about.
+    naming the group once the root itself has exited.
 
-    A group id is an identity only inside the PID namespace that issued it, and
-    a Ray actor's ids come from whichever node Ray placed the actor on, so they
-    name nothing here. Recording one would hand the lane reaper a number that
-    reads as "nothing there" on this host while the actor is still running. Such
-    a specialist holds GPU cards for its whole run, and the ``gpu_leases``
-    exemption in the lane sweep is what speaks for its lane instead.
+    A group id means something only inside the PID namespace that issued it, and
+    a Ray actor's ids come from whichever node Ray placed the actor on. Printing
+    one of those would point the operator at a process on a different host, so
+    an actor names nothing here.
 
     Args:
         proc: The specialist's process handle, which may be absent when the
             cleanup that failed never spawned one.
 
     Returns:
-        int | None: A local process group to record, or None when there is none
-        to name -- in which case the lane is simply never reclaimed.
+        int | None: A local process group to record for an operator's benefit,
+        or None when there is none to name. Either way the lane is retained:
+        nothing reclaims it from this number.
     """
     if proc is None or isinstance(proc, _RayLeaseProcess):
         return None

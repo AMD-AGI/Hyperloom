@@ -820,12 +820,15 @@ def test_serving_lease_round_that_never_schedules_times_out(monkeypatch: pytest.
     assert "ray_round_wait_timeout" in (excinfo.value.stderr or "")
     # The headline number names the ceiling that was crossed, not the round's own (larger, uncrossed) cap.
     assert excinfo.value.timeout == pytest.approx(0.2)
-    # Cooperative stop FIRST: ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so killing ahead of the
-    # actor's own CancelScope would strand a genuinely running server tree on its GPUs.
-    assert fake.steps == ["ask_actor_to_cancel", "cancel_ref", "kill_actor"]
-    # The lease is released rather than held by a round nobody will ever collect.
-    assert actor in fake.killed
-    assert lease._actor is None
+    # Cooperative stop first, then the round is dropped -- but the actor is NOT killed.
+    # ``ray.kill`` runs neither ``__ray_terminate__`` nor atexit, so a round that really is
+    # still running keeps its server subprocesses; killing the actor would hand their GPUs
+    # back to the scheduler and let the next round be placed on cards a live server maps.
+    # Keeping the actor alive keeps those devices reserved. A stuck resource is recoverable,
+    # a shared one is not.
+    assert fake.steps == ["ask_actor_to_cancel", "cancel_ref"]
+    assert actor not in fake.killed
+    assert lease._actor is actor
     assert fake.cancelled
 
 
