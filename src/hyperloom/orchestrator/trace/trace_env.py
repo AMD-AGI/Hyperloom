@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 
+from hyperloom.common.env import env_flag
+
 # Master switch for live Langfuse push.
 ENV_LANGFUSE_ENABLE = "HYPERLOOM_LANGFUSE_ENABLE"
 
@@ -18,22 +20,6 @@ ENV_LANGFUSE_SECRET_KEY = "LANGFUSE_SECRET_KEY"
 # SDK batch-flush cadence (official langfuse SDK variable names).
 ENV_LANGFUSE_FLUSH_INTERVAL = "LANGFUSE_FLUSH_INTERVAL"
 _DEFAULT_FLUSH_INTERVAL = "1"
-
-_TRUE_TOKENS: frozenset[str] = frozenset({"1", "true", "yes", "on"})
-_FALSE_TOKENS: frozenset[str] = frozenset({"0", "false", "no", "off"})
-
-
-def env_flag(name: str, default: bool = False) -> bool:
-    """Read a boolean env var with the project-standard token vocabulary."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    token = raw.strip().lower()
-    if token in _TRUE_TOKENS:
-        return True
-    if token in _FALSE_TOKENS:
-        return False
-    return default
 
 
 def langfuse_live_enabled() -> bool:

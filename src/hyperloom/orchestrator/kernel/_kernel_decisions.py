@@ -11,7 +11,7 @@ import logging
 import os
 from typing import Any
 
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import env_flag
 
 from .patch_landing import (
     DEFAULT_PATCH_BUDGET,
@@ -30,7 +30,6 @@ from ..state.kernel_decision_settings import (
     effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
 )
-from ..trace.trace_env import env_flag
 
 
 log = logging.getLogger(__name__)
@@ -52,7 +51,7 @@ _HONEST_E2E_UMBRELLA_ENV = "HL_HONEST_E2E"
 
 def _honest_flag(specific_env: str) -> bool:
     """Resolve a per-fix honest-E2E flag against the umbrella flag."""
-    return env_flag(specific_env, default=env_bool(_HONEST_E2E_UMBRELLA_ENV, True))
+    return env_flag(specific_env, default=env_flag(_HONEST_E2E_UMBRELLA_ENV, default=True))
 
 
 def _stable_kernel_task_key(
