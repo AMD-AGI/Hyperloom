@@ -450,6 +450,15 @@ def test_an_unreadable_trace_yields_no_backend(tmp_path):
     assert _prov.detect_kineto_backend(tmp_path / "absent.trace.json.gz") == ""
 
 
+def test_a_workspace_directory_resolves_to_the_trace_inside_it(tmp_path):
+    """Profile executors record the workspace directory, so reading the file directly finds nothing."""
+    workspace = tmp_path / "torch_trace"
+    workspace.mkdir()
+    _trace_with_head(workspace / "r.trace.json.gz", '  "roctracer_version": 4.1,\n')
+    assert _prov.detect_kineto_backend(workspace) == "roctracer 4.1"
+    assert _prov.detect_kineto_backend(tmp_path / "empty") == ""
+
+
 def test_explicit_versions_outrank_distribution_probes(monkeypatch, tmp_path):
     venv_root = tmp_path / "vllm-venv"
     python_exe = _installed(venv_root, "vllm", "0.29.0+rocm723")

@@ -206,6 +206,12 @@ def detect_kineto_backend(trace_path: str | Path) -> str:
     yields empty rather than a guess, because this is recorded as provenance.
     """
     path = Path(trace_path)
+    if path.is_dir():
+        # Profile executors record the workspace, not the file; the backend is named inside the trace.
+        traces = sorted(path.glob("*.trace.json.gz")) or sorted(path.glob("*.trace.json"))
+        if not traces:
+            return ""
+        path = traces[-1]
     try:
         opener = gzip.open if path.suffix == ".gz" else open
         with opener(path, "rb") as handle:  # type: ignore[operator]
