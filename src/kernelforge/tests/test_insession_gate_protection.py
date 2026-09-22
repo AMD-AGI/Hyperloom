@@ -69,38 +69,38 @@ def test_non_target_implementation_edits_are_counted(tmp_path: Path):
 def test_bash_allows_readonly_diagnostics_with_dev_null(tmp_path: Path):
     gate, _workspace = _gate(tmp_path)
 
-    assert not gate._bash_may_modify_protected('find / -name "*.hsaco" -newermt "-20 min" 2>/dev/null | head')
-    assert not gate._bash_may_modify_protected('grep -R "task_runner.py" aiter/csrc 2>/dev/null | head')
+    assert not gate._bash_deny_reason('find / -name "*.hsaco" -newermt "-20 min" 2>/dev/null | head')
+    assert not gate._bash_deny_reason('grep -R "task_runner.py" aiter/csrc 2>/dev/null | head')
 
 
 def test_bash_allows_tmp_outputs_but_blocks_protected_writes(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
 
-    assert not gate._bash_may_modify_protected("python probe.py > /tmp/probe.log")
-    assert gate._bash_may_modify_protected("echo hacked > config.yaml")
-    assert gate._bash_may_modify_protected("echo hacked 2>>forge_driver.py")
-    assert gate._bash_may_modify_protected("echo hacked &>> forge_driver.py")
-    assert gate._bash_may_modify_protected("sed -i s/pass/fail/ scripts/task_runner.py")
-    assert gate._bash_may_modify_protected(f"python - <<'PY'\nopen('{workspace / 'config.yaml'}', 'w').write('x')\nPY")
+    assert not gate._bash_deny_reason("python probe.py > /tmp/probe.log")
+    assert gate._bash_deny_reason("echo hacked > config.yaml")
+    assert gate._bash_deny_reason("echo hacked 2>>forge_driver.py")
+    assert gate._bash_deny_reason("echo hacked &>> forge_driver.py")
+    assert gate._bash_deny_reason("sed -i s/pass/fail/ scripts/task_runner.py")
+    assert gate._bash_deny_reason(f"python - <<'PY'\nopen('{workspace / 'config.yaml'}', 'w').write('x')\nPY")
 
 
 def test_bash_blocks_a_write_hidden_behind_a_wrapper_option(tmp_path: Path):
     """The verb that acts is what a rule has to be matched against."""
     gate, _workspace = _gate(tmp_path)
 
-    assert gate._bash_may_modify_protected("env FOO=bar tee forge_driver.py")
-    assert gate._bash_may_modify_protected("env -u FOO tee forge_driver.py")
-    assert gate._bash_may_modify_protected("timeout --signal=KILL 60 tee forge_driver.py")
-    assert gate._bash_may_modify_protected("env FOO=1 timeout 60 sudo tee forge_driver.py")
+    assert gate._bash_deny_reason("env FOO=bar tee forge_driver.py")
+    assert gate._bash_deny_reason("env -u FOO tee forge_driver.py")
+    assert gate._bash_deny_reason("timeout --signal=KILL 60 tee forge_driver.py")
+    assert gate._bash_deny_reason("env FOO=1 timeout 60 sudo tee forge_driver.py")
 
 
 def test_bash_still_allows_running_the_driver_under_a_wrapper(tmp_path: Path):
     """Reading every word of a wrapped command as a verb must not deny the run."""
     gate, _workspace = _gate(tmp_path)
 
-    assert not gate._bash_may_modify_protected("timeout 300 python3 forge_driver.py --warmup 3 --bench-mode")
-    assert not gate._bash_may_modify_protected("env FOO=1 python3 forge_driver.py")
-    assert not gate._bash_may_modify_protected("./configure --prefix=/usr")
+    assert not gate._bash_deny_reason("timeout 300 python3 forge_driver.py --warmup 3 --bench-mode")
+    assert not gate._bash_deny_reason("env FOO=1 python3 forge_driver.py")
+    assert not gate._bash_deny_reason("./configure --prefix=/usr")
 
 
 def test_bash_allows_kernel_heredoc_followed_by_driver_read(tmp_path: Path):
@@ -114,7 +114,7 @@ PY
 python3 forge_driver.py
 """
 
-    assert not gate._bash_may_modify_protected(command)
+    assert not gate._bash_deny_reason(command)
 
 
 def test_bash_allows_dynamic_csv_write_followed_by_driver_benchmark(
@@ -131,7 +131,7 @@ PY
 python3 forge_driver.py --warmup 10 --iters 30 --bench-mode
 """
 
-    assert not gate._bash_may_modify_protected(command)
+    assert not gate._bash_deny_reason(command)
 
 
 def test_bash_blocks_protected_heredoc_write_with_resolved_variable(
@@ -144,7 +144,7 @@ open(p, 'w').write('hacked')
 PY
 """
 
-    assert gate._bash_may_modify_protected(command)
+    assert gate._bash_deny_reason(command)
 
 
 def test_bash_keeps_ambiguous_inline_protected_write_conservative(
@@ -158,7 +158,7 @@ print('forge_driver.py')
 PY
 """
 
-    assert gate._bash_may_modify_protected(command)
+    assert gate._bash_deny_reason(command)
 
 
 def test_safe_heredoc_does_not_allow_a_later_python_payload(tmp_path: Path):
@@ -169,7 +169,7 @@ PY
 python3 -c "open({str(workspace / "forge_driver.py")!r}, mode='wb').write(b'x')"
 """
 
-    assert gate._bash_may_modify_protected(command)
+    assert gate._bash_deny_reason(command)
 
 
 def test_safe_python_payload_does_not_allow_a_later_shell_write(tmp_path: Path):
@@ -181,14 +181,14 @@ PY
 mv scratch.txt forge_driver.py
 """
 
-    assert gate._bash_may_modify_protected(command)
+    assert gate._bash_deny_reason(command)
 
 
 def test_python_c_supports_path_open_mode_variants(tmp_path: Path):
     gate, workspace = _gate(tmp_path)
     driver = workspace / "forge_driver.py"
 
-    assert gate._bash_may_modify_protected(
+    assert gate._bash_deny_reason(
         f"python -c \"from pathlib import Path; Path({str(driver)!r}).open(mode='a+').write('x')\""
     )
 
@@ -227,7 +227,7 @@ def test_python_rename_and_replace_apis_protect_both_paths(tmp_path: Path):
         (f"python -c \"from pathlib import Path; Path('scratch.py').replace({str(driver)!r})\""),
     ]
 
-    assert all(gate._bash_may_modify_protected(command) for command in commands)
+    assert all(gate._bash_deny_reason(command) for command in commands)
 
 
 def test_stop_detects_protected_snapshot_changes(tmp_path: Path):

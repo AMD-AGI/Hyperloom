@@ -1046,7 +1046,7 @@ class TestForgeGemmRuntimeConfigMerge:
 
 
 class TestBf16DenseFallbackIsInternalToForge:
-    """Change 3: the fp8->bf16 dense retry moved down into forge's tuner router."""
+    """The coordinator schedules one GEMM call without a second dtype attempt."""
 
     @pytest.mark.asyncio
     async def test_kernel_entry_makes_exactly_one_gemm_call(self, tmp_path, monkeypatch):

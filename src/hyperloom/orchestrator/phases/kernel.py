@@ -635,8 +635,7 @@ class KernelPhase(PhaseHandler):
         try:
             from ..kernel.request_handlers import run_gemm_tuning_handler
 
-            # The fp8 -> bf16 dense retry now lives inside the tuner router: an fp8 run whose tuning comes back empty
-            # runs the bf16 dense pass in the same call (router selects it as a fallback).
+            # Forge selects each tuner from model configuration, observed serving demand, or an explicit request.
             result = await run_gemm_tuning_handler(
                 {
                     "task_id": "kernel_entry_gemm_tuning",

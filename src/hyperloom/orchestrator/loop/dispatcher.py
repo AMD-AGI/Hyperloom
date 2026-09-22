@@ -1791,9 +1791,7 @@ class DispatcherCollaborator:
             return False
         last = getattr(ss, "last_gemm_tuning", {}) or {}
         status = str(last.get("status") or "").strip().lower()
-        # The fp8 -> bf16 dense retry now runs inside a single gemm call (the
-        # tuner router selects the bf16 pass as a fallback), so a completed run's
-        # status is terminal -- there is no pending second attempt to re-trigger.
+        # A completed GEMM run is terminal; dtype selection belongs to its tuner plan.
         return status not in {
             "ok",
             "succeeded",

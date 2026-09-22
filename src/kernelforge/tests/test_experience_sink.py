@@ -10,8 +10,8 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.knowledge import experience_sink as sink
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_GBRAIN,
     KnowledgeConfig,
+    KnowledgeStoreMode,
 )
 from kernelforge.rewrite_by_flydsl.agent_kb import KernelRecipeKB
 from kernelforge.knowledge.loop_identity import (
@@ -94,14 +94,9 @@ def _records(config, workspace) -> KernelRecipeKB:
 
 # --- gates ----------------------------------------------------------------- #
 def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
-    # Remote mode selected against GBrain, which holds no rewrite records, so there is no backend to write to.
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
+    knowledge = KnowledgeConfig(
+        mode=KnowledgeStoreMode.REMOTE,
         local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid",
-        gbrain_token="secret",
-        remote_backend=REMOTE_BACKEND_GBRAIN,
     )
     config = Config.from_env(
         workspace=str(workspace),

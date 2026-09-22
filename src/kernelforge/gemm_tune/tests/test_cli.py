@@ -120,6 +120,84 @@ def test_cli_resolves_auto_once_and_records_effective_gpu(tmp_path, monkeypatch)
     assert '"gpu_type": "auto"' not in json.dumps([plan, report]).lower()
 
 
+def test_observed_bf16_demand_runs_after_an_fp8_candidate(tmp_path, monkeypatch):
+    """A candidate for a different dtype cannot satisfy observed BF16 work."""
+    _stub_preflight(monkeypatch)
+    model = _model_dir(tmp_path)
+    (model / "config.json").write_text(
+        json.dumps({"hidden_size": 256, "intermediate_size": 1024, "torch_dtype": "bfloat16"}),
+        encoding="utf-8",
+    )
+    demand = tmp_path / "demand.json"
+    demand.write_text(
+        json.dumps(
+            {
+                "demands": [
+                    {
+                        "table": "bf16_tuned_gemm.csv",
+                        "tuner": "sglang_dense_bf16",
+                        "env_var": "AITER_CONFIG_GEMM_BF16",
+                        "miss_count": 1000,
+                        "distinct_keys": 1,
+                        "keys": [{"M": 1, "N": 256, "K": 256, "requests": 1000}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    executed: list[str] = []
+
+    class _Tuner:
+        def __init__(self, name):
+            self.name = name
+
+        def execute(self):
+            executed.append(self.name)
+            if self.name == "a8w8_blockscale":
+                artifact = output / "fp8.csv"
+                artifact.write_text("M,N,K\n1,256,256\n", encoding="utf-8")
+                return TuneResult(
+                    tuner_name=self.name,
+                    status="ok",
+                    candidate=True,
+                    artifact_path=str(artifact),
+                    env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+                    env_value=str(artifact),
+                )
+            return TuneResult(tuner_name=self.name, status="no_improvement")
+
+    monkeypatch.setattr(cli_mod, "_create_tuner", lambda name, ctx: _Tuner(name))
+    result = CliRunner().invoke(
+        gemm_tune,
+        [
+            "run",
+            "--model-path",
+            str(model),
+            "--framework",
+            "sglang",
+            "--precision",
+            "fp8",
+            "--quant-type",
+            "blockscale",
+            "--gpu-type",
+            "mi300x",
+            "--demand",
+            str(demand),
+            "--skip-gpu-check",
+            "--output-dir",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert executed == ["a8w8_blockscale", "sglang_dense_bf16"]
+    report = json.loads((output / "result.json").read_text())
+    assert [t["tuner"] for t in report["tuners_run"]] == executed
+    assert not report.get("tuners_skipped")
+
+
 def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monkeypatch):
     from kernelforge.gemm_tune import model_analyzer, router
 

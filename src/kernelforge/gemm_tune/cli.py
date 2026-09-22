@@ -377,7 +377,6 @@ def run(
     from .utils import check_gpu_status, emit_result_json
     from .tuners.base import TuneContext
     from .report import build_report, write_report
-    from .candidates import is_candidate
 
     output_path = Path(output_dir)
     _setup_logging(output_path, verbose)
@@ -622,12 +621,6 @@ def run(
             log.info("SKIP %s: %s", spec.name, spec.skip_reason)
             continue
 
-        # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
-        if spec.fallback and any(is_candidate(r) for r in results):
-            skipped.append((spec.name, "fallback not needed: an earlier tuner produced a candidate"))
-            log.info("SKIP %s: an earlier tuner already produced a candidate", spec.name)
-            continue
-
         # Check global timeout
         remaining = global_deadline - time.time()
         if remaining <= 0:
@@ -846,8 +839,6 @@ def plan(
     for spec in tuner_specs:
         if not spec.should_run:
             click.echo(f"  [SKIP] {spec.name}: {spec.skip_reason}")
-        elif spec.fallback:
-            click.echo(f"  [FALLBACK] {spec.name}: runs only if no earlier tuner produces a candidate")
         else:
             click.echo(f"  [RUN]  {spec.name}")
 

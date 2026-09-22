@@ -93,11 +93,11 @@ def test_extra_protected_globs_merged_and_deduped(tmp_path):
 # ── path-classification helpers ────────────────────────────────────────────────
 
 
-def test_is_protected_dir_path_detects_test_dir(tmp_path):
+def test_is_protected_detects_test_dir(tmp_path):
     gate, workspace = _gate(tmp_path)
     p = str(workspace / "tests" / "ref.py")
-    assert gate._is_protected_dir_path(p) is True
-    assert gate._is_protected_dir_path(str(workspace / "aiter" / "kernel.cu")) is False
+    assert gate._is_protected(p) is True
+    assert gate._is_protected(str(workspace / "aiter" / "kernel.cu")) is False
 
 
 def test_protected_changes_reports_added_and_deleted(tmp_path):

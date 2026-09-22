@@ -125,8 +125,8 @@ class TestQuantizedModelsStillTuneBf16Dense:
         assert "a4w4_blockscale" in names
         assert "sglang_dense_bf16" not in names
 
-    def test_dense_fp8_with_only_lm_head_excluded_gets_a_bf16_fallback(self):
-        """No non-lm_head exclusion means the config gives no positive signal for a bf16 dense pass, so it is not selected to run unconditionally."""
+    def test_dense_fp8_with_only_lm_head_excluded_has_no_bf16_pass(self):
+        """Without a substantial BF16 exclusion, only runtime demand can add a BF16 pass."""
         profile = _mxfp4_moe_profile(
             is_moe=False,
             num_experts=0,
@@ -145,11 +145,7 @@ class TestQuantizedModelsStillTuneBf16Dense:
         )
         by_name = {s.name: s for s in specs if s.should_run}
         assert "a8w8_blockscale" in by_name
-        # Selected, but conditional: it runs only if fp8 tuning is barren.
-        assert "sglang_dense_bf16" in by_name
-        assert by_name["sglang_dense_bf16"].fallback is True
-        # The fp8 dense tuner is a normal, unconditional run.
-        assert by_name["a8w8_blockscale"].fallback is False
+        assert "sglang_dense_bf16" not in by_name
 
     def test_dense_fp8_with_attention_excluded_keeps_the_bf16_pass(self):
         profile = _mxfp4_moe_profile(
@@ -170,9 +166,6 @@ class TestQuantizedModelsStillTuneBf16Dense:
         )
         by_name = {s.name: s for s in specs if s.should_run}
         assert "sglang_dense_bf16" in by_name
-        # A non-lm_head exclusion is positive evidence bf16 dense is dispatched, so the pass runs unconditionally --
-        # not merely as an fp8-barren fallback.
-        assert by_name["sglang_dense_bf16"].fallback is False
 
     def test_fp32_weights_are_not_handed_to_the_bf16_tuner(self):
         profile = _mxfp4_moe_profile(model_dtype="float32")

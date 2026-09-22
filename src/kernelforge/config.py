@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import cache
 from pathlib import Path
 
@@ -172,10 +172,6 @@ class Config:
     # the canonical workspace, which is the one place the probe refuses to run.
     specialist_probe_scratch_root: str = ""
 
-    # Experience storage. gbrain_url/gbrain_token remain compatibility fields for
-    # the broader remote knowledge index and are populated only in remote mode.
-    gbrain_url: str = field(default="")
-    gbrain_token: str = field(default="")
     knowledge_config: KnowledgeConfig | None = field(default=None)
 
     # Experimental / off by default: inject framework/mori/ into the forge-loop
@@ -249,12 +245,7 @@ class Config:
         if self.local_knowledge_dir is None:
             self.local_knowledge_dir = resource_path("local_knowledge", self.project_root)
         if self.knowledge_config is None:
-            self.knowledge_config = KnowledgeConfig.from_env(
-                gbrain_base_url=self.gbrain_url or None,
-                gbrain_token=self.gbrain_token or None,
-            )
-        self.gbrain_url = self.knowledge_config.gbrain_base_url
-        self.gbrain_token = self.knowledge_config.gbrain_token
+            self.knowledge_config = KnowledgeConfig.from_env()
         # Only fall back to the env var when the caller didn't pass an
         # explicit value at all -- an explicit True/False (from either
         # direct construction or `from_env(include_mori_kb=...)`) always
@@ -299,6 +290,11 @@ class Config:
     @classmethod
     def from_env(cls, **overrides) -> Config:
         """Load config from environment variables with optional overrides."""
+        unknown = (
+            set(overrides) - {item.name for item in fields(cls)} - {"knowledge_store_mode", "knowledge_local_root"}
+        )
+        if unknown:
+            raise TypeError(f"Unsupported Forge configuration: {', '.join(sorted(unknown))}")
         if os.getenv("KERNEL_AGENTS_MAX_TURNS") is not None:
             _warn_removed_max_turns_env()
         knowledge_config = overrides.get("knowledge_config")
@@ -306,8 +302,6 @@ class Config:
             knowledge_config = KnowledgeConfig.from_env(
                 mode=overrides.get("knowledge_store_mode"),
                 local_root=overrides.get("knowledge_local_root"),
-                gbrain_base_url=overrides.get("gbrain_url"),
-                gbrain_token=overrides.get("gbrain_token"),
             )
         agent_backend = overrides.get("agent_backend", os.getenv("FORGE_AGENT_BACKEND", "auto"))
         return cls(
@@ -364,8 +358,6 @@ class Config:
                     os.getenv("FORGE_SPECIALIST_PROBE_SCRATCH_ROOT", ""),
                 )
             ),
-            gbrain_url=knowledge_config.gbrain_base_url,
-            gbrain_token=knowledge_config.gbrain_token,
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),

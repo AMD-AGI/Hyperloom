@@ -27,8 +27,6 @@ class TunerSpec:
     estimated_minutes: float = 10.0  # Estimated runtime for budget allocation
     # Token counts this tuner is responsible for, when the log says it serves only part of the range.
     token_hint: list[int] | None = None
-    # A fallback tuner runs only when no earlier non-fallback tuner produced a deployable candidate.
-    fallback: bool = False
 
     @property
     def should_run(self) -> bool:
@@ -499,17 +497,6 @@ def _select_sglang_tuners(
                 estimated_minutes=10,
             )
         )
-    elif precision == "fp8" and not any(t.name == "sglang_dense_bf16" for t in tuners):
-        # fp8 -> bf16 dense retry, pushed down from Hyperloom's old second subprocess.
-        tuners.append(
-            TunerSpec(
-                "sglang_dense_bf16",
-                priority=30,
-                estimated_minutes=10,
-                fallback=True,
-            )
-        )
-
     return tuners
 
 

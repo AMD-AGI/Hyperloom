@@ -21,7 +21,6 @@ import click
 from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
 )
 from kernelforge.knowledge.experience_integration import (
@@ -2412,7 +2411,6 @@ def forge_rewrite(
     try:
         rewrite_knowledge_config = KnowledgeConfig.from_env(
             mode="local" if not rewrite_kb_enabled else None,
-            remote_backend=REMOTE_BACKEND_KB_STORE,
         )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc

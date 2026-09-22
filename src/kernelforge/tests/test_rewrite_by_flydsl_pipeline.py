@@ -127,11 +127,10 @@ def test_optimize_does_not_forward_shapes_to_forge_loop(tmp_path, monkeypatch):
 
     def fake_popen(command, **_kwargs):
         captured["command"] = command
-        return _FakeProc(
-            [
-                '__FORGE_RESULT__{"best_ms": 0.7}__FORGE_RESULT__\n',
-            ]
+        Path(command[command.index("--result-json") + 1]).write_text(
+            json.dumps({"experiment_id": "EXP-SHAPES", "best_ms": 0.7})
         )
+        return _FakeProc(["Experiment: EXP-SHAPES\n"])
 
     monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
     result = optimize.run_optimize(
@@ -139,7 +138,7 @@ def test_optimize_does_not_forward_shapes_to_forge_loop(tmp_path, monkeypatch):
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
         experiments_dir=str(tmp_path),
-        result_json=str(tmp_path / "missing.json"),
+        result_json=str(tmp_path / "result.json"),
     )
 
     assert result["best_ms"] == 0.7
@@ -246,25 +245,51 @@ def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch)
     assert out["speedup"] == pytest.approx(2.5)
 
 
-def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
+def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch, capsys):
     s = _spec(tmp_path)
     rj = tmp_path / "res.json"
     rj.write_text('{"experiment_id": "EXP1", "best_ms": 0.5}')
-    monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP1\n", "working...\n"]))
+    lines = [
+        "Experiment: EXP1\n",
+        "working...\n",
+        '__FORGE_RESULT__{"experiment_id": "EXP1", "best_ms": 0.5}__FORGE_RESULT__\n',
+    ]
+    monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(lines))
     # agent_model set -> the --model flag is forwarded to the nested forge-loop.
     cfg = Config.from_env(workspace=str(tmp_path), agent_model="my-model")
     out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
     assert out["best_ms"] == 0.5 and out["experiment_id"] == "EXP1"
+    stdout = capsys.readouterr().out
+    assert "working..." in stdout
+    assert "__FORGE_RESULT__" not in stdout
 
 
-def test_optimize_falls_back_to_stdout_sentinel(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    ("result_contents", "announcement"),
+    [
+        pytest.param(None, "Experiment: EXP2\n", id="missing"),
+        pytest.param("{", "Experiment: EXP2\n", id="malformed"),
+        pytest.param("[]", "Experiment: EXP2\n", id="non-object"),
+        pytest.param('{"best_ms": 0.1}', "Experiment: EXP2\n", id="unidentified"),
+        pytest.param('{"experiment_id": "OLD", "best_ms": 0.1}', "Experiment: EXP2\n", id="stale"),
+        pytest.param('{"experiment_id": "EXP2", "best_ms": 0.1}', "", id="unannounced"),
+    ],
+)
+def test_optimize_rejects_stdout_success_without_a_trusted_result_file(
+    tmp_path, monkeypatch, capsys, result_contents, announcement
+):
     s = _spec(tmp_path)
-    rj = tmp_path / "res.json"  # never written -> forces sentinel fallback
-    lines = ["Experiment: EXP2\n", '__FORGE_RESULT__{"best_ms": 0.7}__FORGE_RESULT__\n']
+    rj = tmp_path / "res.json"
+    if result_contents is not None:
+        rj.write_text(result_contents)
+    lines = [
+        announcement,
+        '__FORGE_RESULT__{"experiment_id": "EXP2", "success": true, "best_ms": 0.7}__FORGE_RESULT__\n',
+    ]
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(lines))
     cfg = Config.from_env(workspace=str(tmp_path))
     out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
-    assert out["best_ms"] == 0.7
+    assert out == {}
     assert "__FORGE_RESULT__" not in capsys.readouterr().out
 
 
@@ -501,8 +526,7 @@ def test_optimize_marks_a_cleanly_finished_ledger_complete(tmp_path, monkeypatch
 
 
 def test_optimize_no_trusted_result_returns_empty(tmp_path, monkeypatch):
-    # Default result_json path (result_json=None) is never written and stdout has neither a trusted experiment_id
-    # match nor a sentinel -> {}.
+    # The default result_json path is never written.
     s = _spec(tmp_path)
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP9\n", "no result here\n"]))
     cfg = Config.from_env(workspace=str(tmp_path))

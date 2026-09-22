@@ -25,8 +25,6 @@ from kernelforge.tracker import ExperimentTracker
 
 log = logging.getLogger(__name__)
 
-_RESULT_RE = re.compile(r"__FORGE_RESULT__(.*?)__FORGE_RESULT__", re.DOTALL)
-
 # forge-loop announces its experiment id on stdout at loop start ("Experiment: <id>", see loop.runner), so it is
 # present in the captured output even when the loop is later hard-killed.
 _EXPERIMENT_RE = re.compile(r"^\s*Experiment:\s*(\S+)\s*$", re.MULTILINE)
@@ -294,7 +292,7 @@ def run_optimize(
     log.info("optimize: launching forge-loop over %s", spec.flydsl_kernel_name)
     print(f"  [forge-rewrite] optimize: {' '.join(cmd)}", flush=True)
 
-    # Stream forge-loop output through stdout for the caller while collecting it to parse the sentinel-wrapped result.
+    # Stream forge-loop output while collecting the experiment id that identifies its result file.
     collected: list[str] = []
     kernel_path = Path(spec.flydsl_kernel)
     fallback_content = kernel_path.read_bytes() if kernel_path.is_file() else None
@@ -397,25 +395,8 @@ def run_optimize(
         return failed
     stdout_text = "".join(collected)
 
-    # Trust --result-json only if it belongs to THIS run, keyed on experiment_id. forge-loop writes the file on every
-    # new best (not only at the end) and stamps its experiment_id into it, and announces that same id on stdout.
     expected_id = _announced_experiment_id(stdout_text)
-    try:
-        parsed = json.loads(Path(result_json).read_text())
-    except (OSError, ValueError):
-        parsed = None
-    result: dict = {}
-    if parsed is not None and expected_id and parsed.get("experiment_id") == expected_id:
-        result = parsed
-
-    # Otherwise fall back to the stdout sentinel — inherently this run's output (captured live), and only emitted on a
-    # clean exit.
-    m = _RESULT_RE.search(stdout_text) if not result else None
-    if m is not None:
-        try:
-            result = json.loads(m.group(1))
-        except ValueError:
-            log.warning("optimize: could not parse forge-loop sentinel JSON")
+    result = _result_for_this_run(result_json, stdout_text) or {}
     if not result:
         log.warning(
             "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",

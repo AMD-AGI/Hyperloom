@@ -19,9 +19,8 @@ from kernelforge.knowledge.experience_sink import (
     write_run_experience,
 )
 from kernelforge.knowledge.experience_store import (
-    REMOTE_BACKEND_GBRAIN,
-    REMOTE_BACKEND_KB_STORE,
     KnowledgeConfig,
+    KnowledgeStoreMode,
 )
 from kernelforge.rewrite_by_flydsl import identity as rewrite_identity
 from kernelforge.rewrite_by_flydsl import record_store
@@ -94,13 +93,9 @@ def _read_args(config, workspace, **overrides):
 
 # --- the paths that yield no candidate ------------------------------------- #
 def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env(
-        {},
-        mode="remote",
+    knowledge = KnowledgeConfig(
+        mode=KnowledgeStoreMode.REMOTE,
         local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid",
-        gbrain_token="secret",
-        remote_backend=REMOTE_BACKEND_GBRAIN,
     )
     config = Config.from_env(
         workspace=str(workspace),
@@ -189,7 +184,6 @@ def test_remote_read_falls_back_across_known_framework_version_and_gpu(
         local_root=tmp_path / "knowledge",
         kb_store_url="http://in-memory",
         kb_store_token="token",
-        remote_backend=REMOTE_BACKEND_KB_STORE,
     )
     config = Config.from_env(
         workspace=str(workspace),

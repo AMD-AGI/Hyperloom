@@ -222,27 +222,7 @@ fusion that already succeeded this session.
 
 ---
 
-## Rewrite nomination lane
-
-> **Not a complete feature yet.** The switch below enables the nomination
-> *contract* — Hyperloom projects its hot-kernel list into a manifest, forge picks
-> from it and hands back patches — but not the capability the contract exists for.
-> The shipped nominator is a placeholder that ranks already-resolved candidates by
-> `gpu_pct` and does not read the trace, so it adds no selection beyond the
-> standard selector. Trace-driven source resolution, per-target base commits and
-> multi-target execution are forge-side work; until they land, one target runs per
-> call regardless of what the lane budget funds. Enable it to exercise the
-> plumbing, not to gain kernel coverage.
-
-| Variable                       | Default                       | Description                                                                                                                                                                                       |
-|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_FORGE_NOMINATION_AUTO` | Unset (selector path)      | Truthy (`1` / `true` / `yes` / `on`) routes the KERNEL rewrite lane through `forge-loop --auto`, so forge reranks and picks among the candidate rows Hyperloom already resolved instead of the Hyperloom selector picking from them. Unset leaves that selection on the selector path and dispatches no self-nomination; it does *not* leave the KERNEL phase as a whole unchanged — see the list below. Takes effect on the `forge` backend only: with `KERNEL_OPT_BACKEND_ORDER` unset, GEAK owns the whole KERNEL phase and hands straight to SWEEP without reaching nomination. An explicitly named kernel is never auto-routed. Each round logs a warning restating the limits above. |
-
-### Changes that land regardless of this variable
-
-The switch above gates kernel *selection* on the rewrite lane and nothing else.
-These behaviours change with it unset, and are not controlled by any other
-variable either.
+## Kernel lane scheduling
 
 Globally, on every backend including the default `geak`:
 
@@ -265,10 +245,9 @@ On the `forge` KERNEL path only (`KERNEL_OPT_BACKEND_ORDER=forge`; the default
 - **GEMM reports carry a per-tuner `candidates[]` list**, so one tuner's table
   can be kept while another is reverted, instead of `recommended_env` landing
   all-or-nothing.
-- **The fp8 → bf16 dense GEMM retry runs inside the same gemm call.** The
-  follow-up subprocess Hyperloom used to launch is gone; the bf16 dense pass is
-  selected up front as a fallback tuner and executes only when no earlier tuner
-  produced a candidate, so a winning fp8 run pays nothing for it.
+- **BF16 GEMM tuning follows model configuration, observed serving demand, or
+  an explicit tuner request.** Each selected tuner runs independently of
+  whether another dtype produced a candidate.
 - **The gemm lane caps how many routed tuners run** (`--max-tuners`), priced on
   the router's own per-tuner estimates.
 - **Kernel subprocess output is recorded as activity** for diagnostics. Activity

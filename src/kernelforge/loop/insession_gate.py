@@ -19,7 +19,6 @@ import sys
 from typing import Any
 
 from kernelforge.llm.workspace_policy import (
-    PROTECTED_DIRS,
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
@@ -42,9 +41,6 @@ from kernelforge.mcp_server.tools.bench import (
 
 # Files the agent must NOT modify: the test harness / driver that MEASURES the kernel.
 _DEFAULT_PROTECTED_GLOBS = list(PROTECTED_GLOBS)
-
-# Directories that belong to the benchmark harness rather than the kernel implementation.
-_DEFAULT_PROTECTED_DIRS = set(PROTECTED_DIRS)
 
 # Tools that modify files on disk (subject to the protected-file deny + counted as edits when they target the kernel).
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -419,8 +415,6 @@ class InSessionGate:
         if kernel_file:
             targets.append(kernel_file)
         self.target_abs = {os.path.normpath(os.path.abspath(f)) for f in targets if f}
-        # Kept for logging/back-compat (the anchor file).
-        self.kernel_abs = os.path.normpath(os.path.abspath(kernel_file)) if kernel_file else ""
 
         # Per-session mutable state.
         self.edit_count = 0
@@ -564,19 +558,6 @@ class InSessionGate:
             exact_paths=self.protected_abs,
             extra_globs=self.protected_globs,
         )
-
-    def _is_protected_dir_path(self, fp: str) -> bool:
-        """Back-compatible directory-only protected-path probe."""
-
-        if not fp:
-            return False
-        path = Path(fp)
-        if self.workspace_root and path.is_absolute():
-            try:
-                path = path.resolve().relative_to(self.workspace_root)
-            except ValueError:
-                path = path.resolve()
-        return any(part.lower() in _DEFAULT_PROTECTED_DIRS for part in path.parts[:-1])
 
     def _iter_snapshot_paths(self) -> list[Path]:
         root = self.workspace_root
@@ -919,10 +900,6 @@ class InSessionGate:
                 return f"inline write may modify protected file '{mentioned}'"
         return ""
 
-    def _bash_may_modify_protected(self, command: str) -> bool:
-        """Back-compat boolean wrapper around :meth:`_bash_deny_reason`."""
-        return bool(self._bash_deny_reason(command))
-
     def _bash_bypass_reason(self, command: str) -> str:
         """WHY a Bash command reaches the driver around its wrapper, or \"\"."""
         driver_base = os.path.basename(self.driver_script)
@@ -1089,7 +1066,7 @@ class InSessionGate:
             # the loop's AITER_REBUILD, so (re)assert it here (aiter HIP; no-op otherwise).
             force_jit_rebuild_for_changes(
                 self.workspace_root or Path.cwd(),
-                [self.kernel_abs, *self.target_abs],
+                sorted(self.target_abs),
             )
 
             # 2a) Correctness — canonical driver, same call the pipeline uses.
