@@ -17,6 +17,7 @@ from kernelforge.roofline_ceiling.device_profile import (
 )
 from kernelforge.roofline_ceiling.evidence import resolve_hardware
 from kernelforge.roofline_ceiling.specs import (
+    CANONICAL_INSTRUCTION_PATHS,
     PEAK_SOURCE_DATASHEET,
     PEAK_SOURCE_REFERENCE,
     arch_spec,
@@ -87,9 +88,27 @@ def test_the_shipped_profile_records_where_every_figure_came_from():
     reference = load_reference(_MI355X)
 
     assert "rocprof-compute" in reference.source_by_figure["mxfp4_scaled_mfma"]
-    assert "graph_replay" in reference.source_by_figure["dispatch_floor_s"]
+    assert "graph-replay" in reference.source_by_figure["dispatch_floor_s"]
     assert reference.measurement["rocm_version"]
     assert reference.measurement["measured_at"]
+    # Every figure, not a representative sample: a roof with no recorded origin
+    # is one nobody can re-derive once the person who measured it has moved on.
+    assert set(reference.peak_flops) <= set(reference.source_by_figure)
+    assert all(f"bandwidth.{tier}" in reference.source_by_figure for tier in reference.bandwidth)
+
+
+def test_the_shipped_profile_answers_every_path_the_analyst_may_name():
+    """A path the analyst is told it may use, with no roof behind it, is a gap."""
+    reference = load_reference(_MI355X)
+
+    assert set(CANONICAL_INSTRUCTION_PATHS) == set(reference.peak_flops)
+
+
+def test_the_integer_paths_are_carried_because_routing_and_packing_run_on_them():
+    reference = load_reference(_MI355X)
+
+    for path in ("int8_valu", "int32_valu", "int64_valu"):
+        assert reference.peak_flops[path] > 0
 
 
 def test_the_shipped_profile_carries_a_bf16_roof_the_chip_can_reach():

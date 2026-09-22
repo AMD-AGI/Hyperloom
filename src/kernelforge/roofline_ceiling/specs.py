@@ -146,11 +146,25 @@ def equal_rate_paths(arch: str) -> tuple[tuple[str, str], ...]:
     return EQUAL_RATE_PATHS.get(str(arch or "").strip().lower(), ())
 
 #: Every instruction path the analyst may name, whether or not this module
-#: carries a datasheet peak for it. The vector and SFU paths are here because
-#: the guide is explicit that scalar and transcendental work must not be priced
-#: at the MFMA rate; a measured device profile carries them, the datasheet table
-#: does not, and a run that falls back to the datasheet reports the resulting
-#: gap rather than borrowing a neighbouring rate.
+#: carries a datasheet peak for it. A measured device profile carries all of
+#: them; the datasheet table carries only the matrix paths, and a run that falls
+#: back to the datasheet reports the resulting gap rather than borrowing a
+#: neighbouring rate.
+#:
+#: The vector paths are here because the guide is explicit that scalar work must
+#: not be priced at the MFMA rate, and the integer ones because they are where
+#: MoE routing, expert sorting, index arithmetic and quantization pack/unpack
+#: actually run -- pricing those against a float roof is the same error as
+#: pricing softmax against the matrix cores, one level down.
+#:
+#: There is deliberately no transcendental path. rocprofiler-compute's roofline
+#: measures none, and no card in the knowledge base states one, so an entry here
+#: could only be filled by a guess. The role document tells the analyst to price
+#: SFU work against the vector roof instead and to say that it did: the vector
+#: roof is an upper bound on what the transcendental unit can retire, so the
+#: substitution makes the ceiling loose in the safe direction -- attainment
+#: reads lower than it should, and a campaign runs on rather than stopping
+#: early.
 #:
 #: A path outside this set is never silently mapped onto a neighbour. Guessing
 #: is precisely how an A16W4 kernel that unpacks to BF16 ends up measured against
@@ -169,8 +183,12 @@ CANONICAL_INSTRUCTION_PATHS = (
     "fp64_matrix",
     "fp16_valu",
     "bf16_valu",
+    "fp8_valu",
     "fp32_valu",
     "fp64_valu",
+    "int8_valu",
+    "int32_valu",
+    "int64_valu",
 )
 
 KNOWN_INSTRUCTION_PATHS = frozenset(CANONICAL_INSTRUCTION_PATHS)

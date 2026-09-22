@@ -80,11 +80,10 @@ def build_request(
 ) -> str:
     """Build the analyst's request payload.
 
-    Every measured figure is stated here rather than left for the analyst to
-    look up. A peak it reads off a knowledge-base card is the vendor datasheet,
-    roughly twice what this box sustains, and a ceiling divided by that while
-    the report says ``roof_only_empirical`` is a report that lies about its own
-    inputs.
+    Every figure is stated here rather than left for the analyst to look up. A
+    peak it reads off a knowledge-base card is the vendor datasheet, roughly
+    twice what the chip sustains, and a ceiling divided by that while the report
+    says ``reference_profile`` is a report that lies about its own inputs.
     """
     hardware = evidence.hardware
     payload: dict[str, Any] = {
