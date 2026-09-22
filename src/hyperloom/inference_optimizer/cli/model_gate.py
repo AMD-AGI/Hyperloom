@@ -1507,6 +1507,37 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
         )
 
 
+def _persist_gate_stop_report(session_dir: Path, *, stop_reason: str, reason: str, warning_label: str) -> None:
+    """Persist the gate stop reason to state.json and the final session report files."""
+    try:
+        from hyperloom.orchestrator.state.shared_state import SharedState
+        from hyperloom.orchestrator.actions.executors.report import (
+            _build_summary_dict,
+            _format_md,
+        )
+        from ..session.session_paths import reports_dir
+
+        state = SharedState.load_or_init(session_dir)
+        # Validated writer keeps the vocab-closed invariant Inv-8.3.
+        state.set_stop_reason(stop_reason)
+        state.closing_phase = True
+        state.save(session_dir)
+        summary = _build_summary_dict(state, {}, [], external_baseline=None)
+        summary["stop_detail"] = reason
+        rdir = reports_dir(session_dir)
+        rdir.mkdir(parents=True, exist_ok=True)
+        (rdir / "final.json").write_text(
+            json.dumps(summary, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
+        print(
+            f"WARNING: failed to persist {warning_label} stop report: {exc!r}",
+            file=sys.stderr,
+        )
+
+
 def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bool:
     """Fail fast when ``max_position_embeddings < ISL+OSL+headroom`` (no --context-length stretch by policy)."""
     isl = int(getattr(args, "isl", 0) or 0)
@@ -1589,33 +1620,12 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
         f"admission stricter, not looser)."
     )
     # Persist the stop reason for CI and session diagnostics.
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3.
-        state.set_stop_reason("model_context_window_too_small")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist context-window stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="model_context_window_too_small",
+        reason=reason,
+        warning_label="context-window",
+    )
     _record_model_gate_check(
         args,
         session_dir,
@@ -1692,32 +1702,12 @@ def _preflight_model_config_compat(
         f"before the heavy server bring-up. Upgrade the framework/transformers "
         f"to a version that supports this model, or skip it on this hardware."
     )
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        state.set_stop_reason("model_config_incompatible")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist model-config stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="model_config_incompatible",
+        reason=reason,
+        warning_label="model-config",
+    )
     model_dir = resolve_local_model_dir(model) or Path(model)
     config_path = model_dir / "config.json"
     _record_model_gate_check(
@@ -1884,33 +1874,12 @@ def _preflight_unsupported_model_arch(
         f"text-generation checkpoint instead."
     )
     # Persist the stop reason for CI and session diagnostics.
-    try:
-        from hyperloom.orchestrator.state.shared_state import SharedState
-        from hyperloom.orchestrator.actions.executors.report import (
-            _build_summary_dict,
-            _format_md,
-        )
-        from ..session.session_paths import reports_dir
-
-        state = SharedState.load_or_init(session_dir)
-        # Validated writer keeps the vocab-closed invariant Inv-8.3.
-        state.set_stop_reason("unsupported_model_arch")
-        state.closing_phase = True
-        state.save(session_dir)
-        summary = _build_summary_dict(state, {}, [], external_baseline=None)
-        summary["stop_detail"] = reason
-        rdir = reports_dir(session_dir)
-        rdir.mkdir(parents=True, exist_ok=True)
-        (rdir / "final.json").write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        (rdir / "final.md").write_text(_format_md(summary), encoding="utf-8")
-    except Exception as exc:  # noqa: BLE001 — don't mask the reason on a writer bug
-        print(
-            f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
-            file=sys.stderr,
-        )
+    _persist_gate_stop_report(
+        session_dir,
+        stop_reason="unsupported_model_arch",
+        reason=reason,
+        warning_label="unsupported-model",
+    )
     _record_model_gate_check(
         args,
         session_dir,
