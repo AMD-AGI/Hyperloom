@@ -29,9 +29,8 @@ _HARDWARE = {
 
 def _report(cases=(("decode-t1", 12.8),)):
     payload = {
-        "cases": [{"case_id": case_id, "t_ideal_ms": ideal, "bound": "memory"} for case_id, ideal in cases],
+        "cases": [{"case_id": case_id, "t_ideal_ms": ideal} for case_id, ideal in cases],
         "hardware": _HARDWARE,
-        "confidence": "high",
         "analysis_md": "# Performance ceiling analysis\n\n"
         + "\n".join(f"Case `{case_id}`: 8e10 B / 6.24 TB/s = {ideal} ms." for case_id, ideal in cases),
     }

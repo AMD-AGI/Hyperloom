@@ -455,6 +455,16 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
 | `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
 
-The result dict (`ideal_ms` per case, `bound`, `arch`, `peak_source`,
-`confidence`) is printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__`
-sentinels.
+Two files are published. `performance_ceiling.json` is the answer and nothing
+else: `cases`, mapping each scored case id to its ideal latency in
+milliseconds, and `mean_ideal_ms`, the equal-weight mean across them — equal
+weight because that is how the campaign scores the suite.
+
+`performance_ceiling_analysis.md` beside it carries the derivation, the roofs
+it was taken against, whether those roofs were measured or recalled, and
+anything the validator objected to. Nothing recomputes the latencies, so that
+document is the whole of what a reader has when deciding whether to believe
+them.
+
+The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
+printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.

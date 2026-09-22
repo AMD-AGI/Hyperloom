@@ -42,10 +42,8 @@ are counted once, for the experts this case actually activates.
 def _report(peak_source: str = PEAK_SOURCE_MEASURED, case_ids=("c0",)):
     payload = {
         "hardware": {**_HARDWARE, "peak_source": peak_source},
-        "cases": [{"case_id": case_id, "t_ideal_ms": 12.8, "bound": "memory"} for case_id in case_ids],
-        "confidence": "medium",
+        "cases": [{"case_id": case_id, "t_ideal_ms": 12.8} for case_id in case_ids],
         "analysis_md": _ANALYSIS + "\n" + "\n".join(f"Case `{case_id}` covered." for case_id in case_ids),
-        "caveats": ["trace captured on two of three shapes"],
     }
     return build_report(
         payload,
@@ -60,7 +58,7 @@ def test_publish_writes_both_the_contract_and_the_document(tmp_path):
 
     assert path == tmp_path / REPORT_FILENAME
     assert (tmp_path / DOCUMENT_FILENAME).is_file()
-    assert json.loads(path.read_text())["cases"][0]["case_id"] == "c0"
+    assert json.loads(path.read_text())["cases"] == {"c0": 12.8}
 
 
 def test_a_published_report_is_readable_by_a_consumer(tmp_path):
@@ -69,7 +67,9 @@ def test_a_published_report_is_readable_by_a_consumer(tmp_path):
 
     restored = read_report(path)
     assert restored.ideal_ms() == original.ideal_ms()
-    assert restored.analysis_md == original.analysis_md
+    assert restored.mean_ideal_ms() == original.mean_ideal_ms()
+    # The derivation lives in the document beside it, not in the file.
+    assert restored.analysis_md == ""
 
 
 def test_the_document_leads_with_the_answer_and_carries_the_derivation_verbatim():
@@ -82,14 +82,12 @@ def test_the_document_leads_with_the_answer_and_carries_the_derivation_verbatim(
     assert "Expert weights" in rendered
 
 
-def test_the_document_states_every_figure_the_estimate_was_taken_against():
-    """A reader recomputing the numbers needs the roofs, not just the answer."""
+def test_the_document_states_the_mean_and_where_the_roofs_came_from():
+    """The published file has the numbers; this is where a reader weighs them."""
     rendered = render_document(_report())
 
-    assert "Bandwidth (hbm)" in rendered
-    assert "Bandwidth (mall)" in rendered
-    assert "Peak (bf16_mfma)" in rendered
-    assert "Dispatch floor" in rendered
+    assert "mean (equal weight)" in rendered
+    assert "measured_on_this_box" in rendered
 
 
 def test_the_document_says_when_its_peaks_were_only_recalled():
@@ -102,8 +100,7 @@ def test_validator_findings_reach_the_document_rather_than_only_the_json():
     report = build_report(
         {
             "hardware": _HARDWARE,
-            "cases": [{"case_id": "c0", "t_ideal_ms": 99.0, "bound": "memory"}],
-            "confidence": "low",
+            "cases": [{"case_id": "c0", "t_ideal_ms": 99.0}],
             "analysis_md": "case `c0` is estimated at 99 ms",
         },
         canonical_id="roofline-ceiling:op:gfx950",
@@ -178,20 +175,12 @@ def test_a_ceiling_below_the_measured_latency_is_reported_not_scored():
     assert "Campaign attainment" not in rendered
 
 
-def test_a_datasheet_ceiling_warns_that_attainment_reads_too_low():
-    rendered = render_for_prompt(_report(PEAK_SOURCE_DATASHEET), {"c0": 20.0})
-
-    assert "absolute lower bound that no implementation reaches" in rendered
-
-
 def test_an_empty_report_renders_nothing_to_inject():
     report = _report()
     empty = type(report)(
-        schema_version=report.schema_version,
         canonical_id=report.canonical_id,
-        hardware=report.hardware,
+        peak_source=report.peak_source,
         cases=(),
-        confidence=report.confidence,
     )
 
     assert render_for_prompt(empty) == ""

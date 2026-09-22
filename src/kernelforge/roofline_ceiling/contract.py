@@ -46,18 +46,6 @@ from kernelforge.roofline_ceiling.specs import (
     equal_rate_paths,
 )
 
-#: Bumped from 1 when the stage-level work model was dropped. A cached v1 report
-#: describes a differently-derived number and is refused rather than read.
-SCHEMA_VERSION = 2
-
-BOUND_COMPUTE = "compute"
-BOUND_MEMORY = "memory"
-BOUND_LATENCY = "latency"
-BOUND_MIXED = "mixed"
-BOUNDS = (BOUND_COMPUTE, BOUND_MEMORY, BOUND_LATENCY, BOUND_MIXED)
-
-CONFIDENCE_LEVELS = ("high", "medium", "low")
-
 #: Memory levels a ceiling may be taken against. Handed to the analyst with
 #: whatever figures were measured for them, because a kernel whose working set
 #: is Infinity-Cache resident rides a higher roof than HBM and one bounded by
@@ -103,32 +91,36 @@ class CaseCeiling:
 
     case_id: str
     t_ideal_ms: float
-    bound: str
-    profiler_observed_ms: float | None = None
+    #: Findings that leave the latency usable but suspect. Surfaced to the
+    #: operator when the report is built and written into the derivation
+    #: document; deliberately absent from the published file, which carries the
+    #: answer and nothing to weigh it against.
     issues: tuple[str, ...] = ()
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize for the published report."""
-        payload = asdict(self)
-        payload["issues"] = list(self.issues)
-        return payload
 
 
 @dataclass(frozen=True)
 class CeilingReport:
-    """Per-shape theoretical achievable latency for one kernel on one box."""
+    """Per-shape theoretical achievable latency for one kernel on one box.
 
-    schema_version: int
+    The published file is the latencies and their mean. Everything else here --
+    the derivation, the findings, where the roofs came from -- exists for the
+    document beside it and for the operator watching the run, and is not
+    serialized. A consumer needs the numbers; a reader deciding whether to
+    believe them needs the document.
+    """
+
     canonical_id: str
-    hardware: Hardware
+    #: ``measured_on_this_box`` or ``datasheet``, for the document. Not
+    #: published: a consumer gets the latencies, and a reader deciding how much
+    #: to trust them reads the derivation instead.
+    peak_source: str
     cases: tuple[CaseCeiling, ...]
-    confidence: str
-    #: The analyst's own derivation, in the structure the methodology prescribes.
-    #: The only audit trail there is, which is why it is required rather than
-    #: optional: a latency with nothing behind it cannot be argued with, only
-    #: believed or discarded.
+    #: The analyst's own derivation. The only audit trail there is: nothing
+    #: recomputes these latencies, so a reader who doubts one has this and
+    #: nothing else.
     analysis_md: str = ""
-    caveats: tuple[str, ...] = ()
+    #: Roofs the analyst established, kept for the document. Never published.
+    hardware: Hardware | None = None
 
     def case(self, case_id: str) -> CaseCeiling | None:
         """Look one case up by id."""
@@ -141,16 +133,23 @@ class CeilingReport:
         """The headline answer: ``case_id -> theoretical achievable latency``."""
         return {entry.case_id: entry.t_ideal_ms for entry in self.cases}
 
+    def mean_ideal_ms(self) -> float | None:
+        """The equal-weight mean across cases, or ``None`` when there are none.
+
+        Equal weight because that is how the campaign scores the suite: a mean
+        that weighted by latency would let one large shape speak for all of
+        them, and then the aggregate here would describe something the
+        objective does not.
+        """
+        if not self.cases:
+            return None
+        return sum(entry.t_ideal_ms for entry in self.cases) / len(self.cases)
+
     def to_dict(self) -> dict[str, Any]:
-        """Serialize the published report."""
+        """Serialize the published report: the latencies and their mean, nothing else."""
         return {
-            "schema_version": self.schema_version,
-            "canonical_id": self.canonical_id,
-            "hardware": self.hardware.to_dict(),
-            "confidence": self.confidence,
-            "analysis_md": self.analysis_md,
-            "caveats": list(self.caveats),
-            "cases": [entry.to_dict() for entry in self.cases],
+            "mean_ideal_ms": self.mean_ideal_ms(),
+            "cases": self.ideal_ms(),
         }
 
 
@@ -204,7 +203,7 @@ def response_schema() -> dict[str, Any]:
     """The JSON shape the analyst must return, also used to ask for a repair."""
     return {
         "type": "object",
-        "required": ["hardware", "cases", "confidence", "analysis_md"],
+        "required": ["hardware", "cases", "analysis_md"],
         "properties": {
             "hardware": hardware_schema(),
             "cases": {
@@ -212,7 +211,7 @@ def response_schema() -> dict[str, Any]:
                 "description": "One entry per scored case id, no more and no fewer.",
                 "items": {
                     "type": "object",
-                    "required": ["case_id", "t_ideal_ms", "bound"],
+                    "required": ["case_id", "t_ideal_ms"],
                     "properties": {
                         "case_id": {"type": "string"},
                         "t_ideal_ms": {
@@ -220,29 +219,22 @@ def response_schema() -> dict[str, Any]:
                             "description": (
                                 "Theoretical achievable latency for this shape, in milliseconds. "
                                 "Your own composition of the terms you judged relevant, against "
-                                "the hardware figures supplied in this request."
+                                "the roofs you established in 'hardware'."
                             ),
-                        },
-                        "bound": {
-                            "type": "string",
-                            "enum": list(BOUNDS),
-                            "description": "What limits this shape at its ceiling.",
                         },
                     },
                 },
             },
-            "confidence": {"type": "string", "enum": list(CONFIDENCE_LEVELS)},
             "analysis_md": {
                 "type": "string",
                 "description": (
                     "The full derivation as Markdown, in the structure the role document "
                     "prescribes. This is the only record of how each latency was reached, so "
-                    "it must carry the formulas, the hardware figures used, the per-case "
-                    "arithmetic and the assumptions -- enough for a reader to recompute every "
-                    "number without rerunning you."
+                    "it must carry the formulas, the roofs used, the per-case arithmetic, what "
+                    "bounds each shape and every assumption -- enough for a reader to recompute "
+                    "every number without rerunning you."
                 ),
             },
-            "caveats": {"type": "array", "items": {"type": "string"}},
         },
     }
 
@@ -426,15 +418,10 @@ def build_report(
         if t_ideal_ms is None or t_ideal_ms <= 0:
             raise CeilingContractError(f"case {case_id!r} needs a finite positive 't_ideal_ms'")
 
-        bound = str(raw_case.get("bound") or "").strip().lower()
-        if bound not in BOUNDS:
-            raise CeilingContractError(f"case {case_id!r} needs a 'bound' from: {', '.join(BOUNDS)}")
-
         issues: list[str] = []
-        # The one check that survives dropping the work model, and the one the
-        # methodology leans on hardest: a ceiling above what the box was seen
-        # doing is not a ceiling. Report it rather than clamping -- the estimate
-        # is wrong somewhere, and clamping hides which part.
+        # The check the methodology leans on hardest: a ceiling above what the
+        # box was seen doing is not a ceiling. Reported, never clamped -- the
+        # estimate is wrong somewhere and clamping hides which part.
         seen = observed.get(case_id)
         if seen is not None and t_ideal_ms > float(seen):
             issues.append(
@@ -447,13 +434,7 @@ def build_report(
         if case_id not in analysis_md:
             issues.append(f"case {case_id!r} is never mentioned in the derivation, so its latency is unaudited")
 
-        by_id[case_id] = CaseCeiling(
-            case_id=case_id,
-            t_ideal_ms=t_ideal_ms,
-            bound=bound,
-            profiler_observed_ms=(float(seen) if seen is not None else None),
-            issues=tuple(issues),
-        )
+        by_id[case_id] = CaseCeiling(case_id=case_id, t_ideal_ms=t_ideal_ms, issues=tuple(issues))
 
     missing = [case_id for case_id in expected if case_id not in by_id]
     if missing:
@@ -462,95 +443,39 @@ def build_report(
     if extra:
         raise CeilingContractError("ceiling for case(s) the driver never scored: " + ", ".join(extra))
 
-    confidence = str(payload.get("confidence") or "").strip().lower()
-    if confidence not in CONFIDENCE_LEVELS:
-        raise CeilingContractError(f"'confidence' must be one of {', '.join(CONFIDENCE_LEVELS)}")
-
-    caveats = [str(entry).strip() for entry in (payload.get("caveats") or ()) if str(entry).strip()]
-    if hardware.peak_source == PEAK_SOURCE_DATASHEET:
-        caveats.append(
-            "Peaks are vendor datasheet figures, measured on no card: these latencies are an absolute "
-            "lower bound no implementation reaches. The gap to a real card is not a fixed discount -- "
-            "on gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix -- so cases of "
-            "different dtypes are not comparable and no correction makes them so."
-        )
-    missing_paths = sorted(set(CANONICAL_INSTRUCTION_PATHS) - set(hardware.peak_flops))
-    if missing_paths:
-        caveats.append(
-            "No roof was established for: "
-            + ", ".join(missing_paths)
-            + ". A case whose arithmetic runs on one of those was priced against a substitute."
-        )
-    if hardware.dispatch_floor_s <= 0:
-        caveats.append(
-            "Dispatch floor was not measured, so any launch-latency term in these estimates is the "
-            "analyst's assumption rather than this box's."
-        )
-
     return CeilingReport(
-        schema_version=SCHEMA_VERSION,
         canonical_id=canonical_id,
-        hardware=hardware,
+        peak_source=hardware.peak_source,
         cases=tuple(by_id[case_id] for case_id in expected),
-        confidence=confidence,
         analysis_md=analysis_md,
-        caveats=tuple(dict.fromkeys(caveats)),
+        hardware=hardware,
     )
 
 
 def load_report(payload: Mapping[str, Any]) -> CeilingReport:
-    """Rebuild a report from its published JSON, for a consumer reading the cache."""
-    version = payload.get("schema_version")
-    if version != SCHEMA_VERSION:
-        raise CeilingContractError(f"unsupported ceiling schema {version!r}; this build reads {SCHEMA_VERSION}")
+    """Rebuild a report from its published file.
 
-    raw_hardware = payload.get("hardware")
-    if not isinstance(raw_hardware, Mapping):
-        raise CeilingContractError("published report has no 'hardware' record")
-    hardware = Hardware(
-        arch=str(raw_hardware.get("arch") or ""),
-        peak_flops={str(key): float(value) for key, value in (raw_hardware.get("peak_flops") or {}).items()},
-        bandwidth={str(key): float(value) for key, value in (raw_hardware.get("bandwidth") or {}).items()},
-        peak_source=str(raw_hardware.get("peak_source") or ""),
-        dispatch_floor_s=float(raw_hardware.get("dispatch_floor_s") or 0.0),
-        provenance=dict(raw_hardware.get("provenance") or {}),
-    )
+    The file carries the latencies and their mean. Everything that would let a
+    reader weigh them -- the derivation, the roofs, where those roofs came from
+    -- is in the document published beside it, so a report loaded from disk can
+    answer what the ceiling is and not how much to trust it.
+    """
+    raw_cases = payload.get("cases")
+    if not isinstance(raw_cases, Mapping):
+        raise CeilingContractError("published report has no 'cases' mapping")
 
     cases: list[CaseCeiling] = []
-    for raw_case in payload.get("cases") or ():
-        if not isinstance(raw_case, Mapping):
-            raise CeilingContractError("published report has a malformed case entry")
-        observed = raw_case.get("profiler_observed_ms")
-        cases.append(
-            CaseCeiling(
-                case_id=str(raw_case.get("case_id") or ""),
-                t_ideal_ms=float(raw_case.get("t_ideal_ms") or 0.0),
-                bound=str(raw_case.get("bound") or BOUND_MIXED),
-                profiler_observed_ms=(float(observed) if observed is not None else None),
-                issues=tuple(str(entry) for entry in (raw_case.get("issues") or ())),
-            )
-        )
+    for case_id, raw in raw_cases.items():
+        latency = _finite(raw)
+        if latency is None or latency <= 0:
+            raise CeilingContractError(f"published report has no usable latency for case {case_id!r}")
+        cases.append(CaseCeiling(case_id=str(case_id), t_ideal_ms=latency))
 
-    return CeilingReport(
-        schema_version=SCHEMA_VERSION,
-        canonical_id=str(payload.get("canonical_id") or ""),
-        hardware=hardware,
-        cases=tuple(cases),
-        confidence=str(payload.get("confidence") or ""),
-        analysis_md=str(payload.get("analysis_md") or ""),
-        caveats=tuple(str(entry) for entry in (payload.get("caveats") or ())),
-    )
+    return CeilingReport(canonical_id="", peak_source="", cases=tuple(cases))
 
 
 __all__ = [
     "BANDWIDTH_TIERS",
-    "BOUNDS",
-    "BOUND_COMPUTE",
-    "BOUND_LATENCY",
-    "BOUND_MEMORY",
-    "BOUND_MIXED",
-    "CONFIDENCE_LEVELS",
-    "SCHEMA_VERSION",
     "CaseCeiling",
     "CeilingContractError",
     "CeilingReport",
