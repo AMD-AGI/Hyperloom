@@ -8,16 +8,23 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.coerce import to_float
 from hyperloom.common.perf_metric import agentx_active
+from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session import session_paths
 
 log = logging.getLogger("hyperloom.research_hints")
 ComparisonReason = Literal["target_unavailable", "concurrency_mismatch", "measurement_unavailable"]
+
+#: A hint older than this no longer describes the session's current
+#: environment (GPU occupancy, neighbour tenancy, install state can all
+#: change mid-session) and is dropped rather than kept advisory forever.
+HINT_STALE_AFTER = timedelta(hours=6)
 
 
 def _coerce_hint(raw: Any) -> dict[str, Any] | None:
@@ -41,7 +48,22 @@ def _coerce_hint(raw: Any) -> dict[str, Any] | None:
         "source": source,
         "domain_tags": domain_tags,
         "status": str(raw.get("status") or "proposed").strip() or "proposed",
+        "observed_at": str(raw.get("observed_at") or "").strip() or now_iso(z_suffix=True),
     }
+
+
+def _is_stale(hint: dict[str, Any]) -> bool:
+    """True when a hint's measurement is older than :data:`HINT_STALE_AFTER`."""
+    observed_at = str(hint.get("observed_at") or "").strip()
+    if not observed_at:
+        return False
+    try:
+        observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - observed > HINT_STALE_AFTER
 
 
 def _hint_key(hint: dict[str, Any]) -> str:
@@ -65,7 +87,7 @@ def load_hints(session_dir: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for item in items:
         coerced = _coerce_hint(item)
-        if coerced is not None:
+        if coerced is not None and not _is_stale(coerced):
             out.append(coerced)
     return out
 
