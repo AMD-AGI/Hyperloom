@@ -491,6 +491,95 @@ def wait_for_phase(
         time.sleep(poll_interval_seconds)
 
 
+#: Gauges that name "requests the engine is decoding right now", per framework. An
+#: agentic recipe drives its own replay, so AIPerf's progress API — which
+#: :func:`wait_for_phase` reads — belongs to a client this process never started.
+#: The server's own metrics are the one steady-state signal both frameworks publish.
+_RUNNING_GAUGES: tuple[str, ...] = (
+    "sglang:num_running_reqs",
+    "vllm:num_requests_running",
+)
+
+
+def load_text(url: str, *, timeout_seconds: float) -> str:
+    """Load a text body from an HTTP endpoint."""
+    request = urllib.request.Request(url, headers={"Accept": "text/plain"})
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def running_requests(metrics_url: str, *, timeout_seconds: float) -> float | None:
+    """Return the engine's in-flight request count, or ``None`` when unpublished.
+
+    Sums the gauge across labelled series: both frameworks emit one sample per
+    model (and sglang per DP rank), so reading only the first line undercounts a
+    server that is genuinely busy.
+    """
+    body = load_text(metrics_url, timeout_seconds=timeout_seconds)
+    total: float | None = None
+    for line in body.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name = line.split("{", 1)[0].split(" ", 1)[0]
+        if name not in _RUNNING_GAUGES:
+            continue
+        try:
+            value = float(line.rsplit(" ", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        total = value if total is None else total + value
+    return total
+
+
+def wait_for_steady_state(
+    *,
+    metrics_url: str,
+    min_running: float,
+    stable_samples: int,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+) -> int:
+    """Wait until the server reports a sustained in-flight load; return the start ns.
+
+    "Sustained" means ``min_running`` or more in-flight requests on
+    ``stable_samples`` consecutive polls. A single sample is not enough: the
+    AgentX warmup also puts requests in flight, and opening the window there
+    captures warmup rather than the graded steady state.
+    """
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    streak = 0
+    last_error = ""
+    last_seen: float | None = None
+
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            detail = f"last running={last_seen}" if last_seen is not None else "gauge never appeared"
+            suffix = f"; last metrics error: {last_error}" if last_error else ""
+            raise TimeoutError(f"timed out waiting for steady state ({detail}){suffix}")
+
+        try:
+            running = running_requests(metrics_url, timeout_seconds=max(1.0, poll_interval_seconds))
+            last_error = ""
+            last_seen = running
+            if running is not None and running >= min_running:
+                streak += 1
+                if streak >= stable_samples:
+                    return time.time_ns()
+            else:
+                streak = 0
+        except (
+            http.client.HTTPException,
+            OSError,
+            TimeoutError,
+            ValueError,
+            urllib.error.URLError,
+        ) as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            streak = 0
+
+        time.sleep(poll_interval_seconds)
+
+
 def wait_for_capture_stop(
     *,
     api_url: str,
@@ -607,6 +696,16 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--timeout-seconds", required=True, type=float)
     wait_parser.add_argument("--poll-interval-seconds", default=1.0, type=float)
 
+    steady_parser = subparsers.add_parser(
+        "wait-steady",
+        help="wait until the server's own metrics report a sustained in-flight load",
+    )
+    steady_parser.add_argument("--metrics-url", required=True)
+    steady_parser.add_argument("--min-running", default=1.0, type=float)
+    steady_parser.add_argument("--stable-samples", default=5, type=int)
+    steady_parser.add_argument("--timeout-seconds", required=True, type=float)
+    steady_parser.add_argument("--poll-interval-seconds", default=5.0, type=float)
+
     capture_parser = subparsers.add_parser(
         "wait-capture-stop",
         help="wait until capture coverage or a safety bound is reached",
@@ -652,6 +751,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if args.command == "pick-port":
         print(pick_loopback_port())
+        return 0
+    if args.command == "wait-steady":
+        if args.stable_samples < 1:
+            print("aiperf phase gate failed: stable samples must be positive", file=sys.stderr)
+            return 1
+        try:
+            print(
+                wait_for_steady_state(
+                    metrics_url=args.metrics_url,
+                    min_running=args.min_running,
+                    stable_samples=args.stable_samples,
+                    timeout_seconds=args.timeout_seconds,
+                    poll_interval_seconds=args.poll_interval_seconds,
+                )
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            print(f"aiperf phase gate failed: {exc}", file=sys.stderr)
+            return 1
         return 0
     if args.command == "wait-capture-stop":
         if args.max_window_seconds < 0:

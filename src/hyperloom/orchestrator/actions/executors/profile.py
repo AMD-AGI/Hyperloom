@@ -1158,6 +1158,26 @@ class ProfileExecutor(BaselineExecutor):
             capture_envs = dict(params.get("extra_envs") or {})
             capture_envs["AGENTX_CAPTURE_ID"] = capture_id
             capture_envs["AGENTX_CAPTURE_STATUS_PATH"] = str(capture_status_path)
+            # Name the profiler's output directory. Nothing else does it on this path:
+            # the multi-node and scriptable launchers each set it for their own layout,
+            # and the AgentX recipes never mention it, so a single-node AgentX server
+            # armed the profiler with nowhere to write and ``_trace_dirs`` in
+            # aiperf_client.sh found no directory to wait on. Both names are set the way
+            # ``bypass_scriptable`` does: a framework reads only its own, and resolving
+            # which one applies here would duplicate the recipe's own choice.
+            #
+            # ``<workspace>/torch_trace`` rather than somewhere under ``capture_dir``:
+            # it is the first entry ``_candidate_trace_dirs`` probes and the fallback
+            # ``_trace_dirs`` already looks in, so discovery needs no change. Rounds
+            # share the directory, which the AgentX mtime gate below already accounts
+            # for -- it keeps only files newer than this task's start.
+            trace_dir = profile_output_dir / "torch_trace"
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            for env_name in ("SGLANG_TORCH_PROFILER_DIR", "VLLM_TORCH_PROFILER_DIR"):
+                # An operator-pinned directory wins: they may be collecting traces
+                # somewhere this session does not own.
+                if not str(capture_envs.get(env_name) or os.environ.get(env_name) or "").strip():
+                    capture_envs[env_name] = str(trace_dir)
             params["extra_envs"] = capture_envs
 
         # Mtime gate for the multi-node shared-trace-dir layout: captured before super().__call__ so this round's
