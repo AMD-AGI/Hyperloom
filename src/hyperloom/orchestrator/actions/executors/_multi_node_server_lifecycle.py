@@ -372,14 +372,11 @@ async def restart_server_for_round(
             os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
 
         # Multi-node TraceLens SGLang patch fan-out (fail-soft).
-        try:
-            from ._server_patcher import _tracelens_patch_enabled, resolve_sglang_shape_mode
-        except Exception:  # noqa: BLE001
-            _tracelens_patch_enabled_fn = lambda: True  # noqa: E731 - safe default
-            _sglang_shape_mode_val = "patched"
-        else:
-            _tracelens_patch_enabled_fn = _tracelens_patch_enabled
-            _sglang_shape_mode_val = resolve_sglang_shape_mode()
+        from ._server_patcher import resolve_sglang_shape_mode
+        from ._workload_envs import _tracelens_patch_enabled
+
+        _tracelens_patch_enabled_fn = _tracelens_patch_enabled
+        _sglang_shape_mode_val = resolve_sglang_shape_mode()
         if _sglang_shape_mode_val == "sitecustomize":
             # sitecustomize mode: shapes come from the no-patch tool; skip the patch fan-out.
             log.info(

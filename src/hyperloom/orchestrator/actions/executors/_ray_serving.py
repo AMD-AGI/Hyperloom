@@ -415,18 +415,15 @@ class ServingLease:
         import subprocess as _sp  # noqa: PLC0415
 
         import ray  # noqa: PLC0415
+        from ray.exceptions import RayActorError as _actor_err, RayTaskError as _task_err  # noqa: PLC0415
 
-        # Resolve Ray's exception classes defensively.
-        _ray_exc = getattr(ray, "exceptions", None)
-        _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
-        _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
         try:
             rc, out, err = self._await_or_cancel(
                 ref,
                 acquire_ref=acquire_ref,
                 cancel_scope=cancel_scope,
             )
-        except _actor_err as exc:  # type: ignore[misc]
+        except _actor_err as exc:
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
             # benchmark failure instead of cascading. Dropping it also makes ``stop()``/``close()`` no-ops, so nothing
@@ -444,7 +441,7 @@ class ServingLease:
             except Exception:  # noqa: BLE001 - failure recovery must not raise
                 pass
             return 1, "", f"ray_actor_error: {exc}"[:2000]
-        except _task_err as exc:  # type: ignore[misc]
+        except _task_err as exc:
             # Worker crash / unexpected error: surface as a benchmark failure so the caller's existing rc!=0 handling
             # runs, not a session crash.
             log.warning("ServingLease.run_session_kill: ray worker error: %r", exc)
