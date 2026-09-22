@@ -10,14 +10,17 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import time
+from pathlib import Path
 
 from hyperloom.common.env import is_truthy
 
 from ._grid_base import (
     GridVariant,
 )
+from ._grid_server_args import compose_server_args
 
 log = logging.getLogger(__name__)
 
@@ -329,11 +332,112 @@ def _detect_model_class(model_path: str) -> tuple[bool, bool]:
     return is_mla, is_moe
 
 
+_UNSAFE_UNIFIED_ATTN_STACK = {
+    "sglang": "0.5.20.dev20260920+gc610c40399",
+    "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+    "rocm": "10.0.0",
+}
+_UNSAFE_UNIFIED_ATTN_REASON = (
+    "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack"
+)
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+_DIST_VERSION_SHA_RE = re.compile(r"\+g([0-9a-f]{7,})")
+
+
+def _fingerprint_component_matches(actual: str, expected: str) -> bool:
+    """Match one stack-fingerprint component against a pinned commit, accepting the git-describe dist version a
+    package reports when no explicit commit env var was exported.
+    """
+    if actual == expected:
+        return True
+    if not _FULL_SHA_RE.fullmatch(expected):
+        return False
+    found = _DIST_VERSION_SHA_RE.search(actual)
+    return found is not None and expected.startswith(found.group(1))
+
+
+def _matches_unsafe_unified_attn_stack(
+    *,
+    framework: str,
+    model_path: str,
+    gpu_type: str,
+    stack_fingerprint: dict | None,
+) -> bool:
+    if framework.strip().lower() != "sglang" or gpu_type.strip().lower() not in {"mi355x", "gfx950"}:
+        return False
+    stack = stack_fingerprint if isinstance(stack_fingerprint, dict) else {}
+    if any(
+        not _fingerprint_component_matches(str(stack.get(key) or ""), value)
+        for key, value in _UNSAFE_UNIFIED_ATTN_STACK.items()
+    ):
+        return False
+    model_dir = Path(model_path)
+    if "14b" not in model_dir.name.lower() or "fp8" not in model_dir.name.lower():
+        return False
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(config, dict):
+        return False
+    quant = config.get("quantization_config") or {}
+    if not isinstance(quant, dict):
+        return False
+    return (
+        config.get("architectures") == ["Qwen3ForCausalLM"]
+        and str(config.get("model_type") or "").lower() == "qwen3"
+        and str(config.get("torch_dtype") or "").lower() in {"bf16", "bfloat16"}
+        and config.get("head_dim") == 128
+        and config.get("num_attention_heads") == 40
+        and config.get("num_key_value_heads") == 8
+        and str(quant.get("quant_method") or "").lower() == "fp8"
+    )
+
+
+def _last_server_arg(args: str, flags: tuple[str, ...], default: str) -> str:
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return ""
+    value = default
+    for idx, token in enumerate(tokens):
+        for flag in flags:
+            if token == flag and idx + 1 < len(tokens):
+                value = tokens[idx + 1]
+            elif token.startswith(f"{flag}="):
+                value = token.split("=", 1)[1]
+    return value
+
+
+def _unsafe_unified_attn_reason(variant: GridVariant, *, base_server_args: str) -> str | None:
+    envs = getattr(variant, "extra_envs", None) or {}
+    if not is_truthy(envs.get("SGLANG_USE_AITER_UNIFIED_ATTN"), default=False):
+        return None
+    effective_args = compose_server_args(
+        base_extra_args=base_server_args,
+        variant_extra_args=variant.extra_server_args,
+        remove_args=variant.remove_args,
+        args_mode=variant.args_mode,
+    )
+    page_size = _last_server_arg(effective_args, ("--page-size", "--page_size"), "1")
+    kv_dtype = _last_server_arg(
+        effective_args,
+        ("--kv-cache-dtype", "--kv_cache_dtype"),
+        "auto",
+    ).lower()
+    if page_size == "1" and kv_dtype in {"auto", "bf16", "bfloat16"}:
+        return _UNSAFE_UNIFIED_ATTN_REASON
+    return None
+
+
 def apply_compatibility_filter(
     grid: list["GridVariant"],
     *,
     framework: str,
     model_path: str,
+    gpu_type: str = "",
+    stack_fingerprint: dict | None = None,
+    base_server_args: str = "",
 ) -> tuple[list["GridVariant"], list[dict]]:
     """Skip variants known to be incompatible with current model/framework."""
     if model_path:
@@ -347,12 +451,29 @@ def apply_compatibility_filter(
     help_available = bool(help_text)
 
     is_xdit = fw == "xdit"
+    unsafe_unified_attn_stack = _matches_unsafe_unified_attn_stack(
+        framework=fw,
+        model_path=model_path,
+        gpu_type=gpu_type,
+        stack_fingerprint=stack_fingerprint,
+    )
 
     kept: list[GridVariant] = []
     dropped: list[dict] = []
     for v in grid:
         args = v.extra_server_args or ""
         skip_reason: str | None = None
+        if unsafe_unified_attn_stack:
+            skip_reason = _unsafe_unified_attn_reason(v, base_server_args=base_server_args)
+        if skip_reason:
+            dropped.append(
+                {
+                    "name": v.name,
+                    "source": "compatibility_filter",
+                    "reason": skip_reason,
+                }
+            )
+            continue
         # xDiT do-not-set blacklist (env-keyed; precision lock + known crashes).
         if is_xdit:
             skip_reason = xdit_blacklist_reason(getattr(v, "extra_envs", None))
