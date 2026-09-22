@@ -1345,7 +1345,7 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
-def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float = 0.0) -> int:
+def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
     Reads the same classifier the breakdown grades outcomes against. A second

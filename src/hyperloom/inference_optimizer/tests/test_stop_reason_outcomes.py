@@ -29,26 +29,26 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 )
 def test_the_outcome_vocabulary_is_stable(stop_reason, expected):
     """The categories a reader already relies on keep their answers."""
-    assert sr.outcome_status(stop_reason, baseline_tput=1.0) == expected
+    assert sr.outcome_status(stop_reason, 1.0) == expected
 
 
 def test_a_success_shaped_reason_needs_a_baseline_measurement_to_read_completed():
     """time_exhausted with no measurement ever produced is not a completed run."""
-    assert sr.outcome_status("target_reached", baseline_tput=0.0) == "failed"
-    assert sr.outcome_status("time_exhausted", baseline_tput=0.0) == "failed"
+    assert sr.outcome_status("target_reached", 0.0) == "failed"
+    assert sr.outcome_status("time_exhausted", 0.0) == "failed"
 
 
 def test_a_host_fault_is_infrastructure_not_a_verdict_about_the_model():
     """An environment terminal ends the run without judging what it was optimizing."""
     assert ENV_FAULT in sr.INFRASTRUCTURE_STOP_REASONS
-    assert sr.outcome_status(ENV_FAULT) == "aborted"
-    assert sr.outcome_status(ENV_FAULT) != "failed"
+    assert sr.outcome_status(ENV_FAULT, 1.0) == "aborted"
+    assert sr.outcome_status(ENV_FAULT, 1.0) != "failed"
 
 
 def test_a_refused_argv_is_the_harness_faulting_not_the_model():
     """An argument the installed parser never had is a harness fault, so it reads like one."""
     assert ARGV_INVALID in sr.INFRASTRUCTURE_STOP_REASONS
-    assert sr.outcome_status(ARGV_INVALID) == "aborted"
+    assert sr.outcome_status(ARGV_INVALID, 1.0) == "aborted"
 
 
 @pytest.mark.parametrize("reason", sorted(sr.INFRASTRUCTURE_STOP_REASONS))
@@ -60,14 +60,14 @@ def test_an_infrastructure_terminal_survives_being_written_to_the_state(reason):
 
     assert written == reason
     assert state.stop_reason == reason
-    assert sr.outcome_status(state.stop_reason) == "aborted"
+    assert sr.outcome_status(state.stop_reason, 1.0) == "aborted"
 
 
 def test_the_new_category_is_consulted_by_the_function_that_derives_the_outcome():
     """A category no derivation reads is a category that changes nothing."""
     for reason in sr.INFRASTRUCTURE_STOP_REASONS:
-        assert sr.outcome_status(reason) == "aborted"
-        assert _outcome_status(reason) == "aborted"
+        assert sr.outcome_status(reason, 1.0) == "aborted"
+        assert _outcome_status(reason, 1.0) == "aborted"
 
 
 def test_the_projection_derives_the_outcome_from_the_shared_mapping():
@@ -81,7 +81,7 @@ def test_the_projection_derives_the_outcome_from_the_shared_mapping():
         "server_argv_invalid",
     )
     for reason in reasons:
-        assert _outcome_status(reason) == sr.outcome_status(reason)
+        assert _outcome_status(reason, 1.0) == sr.outcome_status(reason, 1.0)
 
 
 def test_every_classified_terminal_is_one_the_state_machine_can_actually_write():
