@@ -747,6 +747,50 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
     assert "best_throughput" not in audit["result"]
 
 
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            return SimpleNamespace(
+                status="skipped",
+                reason="no_new_keep_or_pure_warm_replay",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="",
+                primary_value=0.0,
+            )
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        lambda: _Remote(),
+    )
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "skipped"
+
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert "primary_metric" not in audit["result"]
+    assert "primary_value" not in audit["result"]
+    assert "best_throughput" not in audit["result"]
+
+
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
     """benchmark_mode is stamped so the mode survives a restart; the gate should trust it rather than the shell that happens to be running."""
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -77,20 +76,13 @@ def write_final_remote_recipe(
         return RemoteWriteResult("skipped", "invalid_recipe_scope", canonical_id, session_id)
     try:
         profile = KBSelectionProfile.from_state(state, scope=scope)
-    except RemoteRecipeValidationError:
-        from hyperloom.common.perf_metric import agentx_active
-
-        if not agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
-            current_best = getattr(state, "current_best", {}) or {}
-            try:
-                throughput = float(current_best.get("tput") or 0.0)
-            except (AttributeError, TypeError, ValueError):
-                throughput = 0.0
-            reason = (
-                "nonfinite_optimized_throughput" if not math.isfinite(throughput) else "missing_optimized_throughput"
-            )
-            return RemoteWriteResult("skipped", reason, canonical_id, session_id)
-        return RemoteWriteResult("skipped", "invalid_recipe_selection_profile", canonical_id, session_id)
+    except RemoteRecipeValidationError as exc:
+        return RemoteWriteResult(
+            "skipped",
+            exc.reason or "invalid_recipe_selection_profile",
+            canonical_id,
+            session_id,
+        )
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
         bundle = build_remote_knowledge(

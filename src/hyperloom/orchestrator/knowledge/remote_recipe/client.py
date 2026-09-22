@@ -453,15 +453,16 @@ class RemoteRecipeClient:
         *,
         scope: RecipeScope,
         files_dir: Path,
-        primary_metric: str = "optimized_throughput",
-        primary_value: float | None = None,
+        primary_metric: str,
+        primary_value: float,
         objective_schema: str = "",
-        optimized_throughput: float | None = None,
     ) -> RemoteWriteResult:
         """Write files, replace knowledge, then promote on the mode's primary metric."""
-        score = primary_value if primary_value is not None else optimized_throughput
-        if score is None or not math.isfinite(score):
-            raise RemoteRecipeValidationError(f"{primary_metric} must be finite, got {score!r}")
+        if not primary_metric:
+            raise RemoteRecipeValidationError("primary_metric is required")
+        if not math.isfinite(primary_value):
+            raise RemoteRecipeValidationError(f"{primary_metric} must be finite, got {primary_value!r}")
+        score = primary_value
 
         def outcome(status: str, reason: str = "") -> RemoteWriteResult:
             return RemoteWriteResult(

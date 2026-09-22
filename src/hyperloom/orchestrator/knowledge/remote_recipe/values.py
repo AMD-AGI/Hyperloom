@@ -1260,8 +1260,6 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_material_available": (replayable and has_replay_material(document)),
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
-    if interactivity_gain is not None:
-        row["interactivity_gain_pct"] = interactivity_gain
     for key, value in _mapping(knowledge.get("workload_shape")).items():
         if key in SHAPE_KEYS:
             resolved = _positive_int(value)

@@ -115,6 +115,7 @@ _REMOTE_RESULT_TYPES: dict[str, str] = {
     "nonfinite_optimized_throughput": _close_out.RESULT_INVALID_THROUGHPUT,
     "missing_optimized_throughput": _close_out.RESULT_MISSING_THROUGHPUT,
     "invalid_recipe_scope": _close_out.RESULT_INVALID_SCOPE,
+    "invalid_recipe_selection_profile": _close_out.RESULT_INVALID_SELECTION_PROFILE,
     "empty_replay_material": _close_out.RESULT_EMPTY_REPLAY_MATERIAL,
     "not_better_than_champion": _close_out.RESULT_NOT_BETTER,
     "champion_not_promoted": _close_out.RESULT_CHAMPION_NOT_PROMOTED,
@@ -2655,14 +2656,8 @@ class WritebackCollaborator:
                     status=remote_result.status,
                     canonical_id=remote_cid,
                     session_id=remote_result.session_id,
-                    primary_metric=str(getattr(remote_result, "primary_metric", "") or "optimized_throughput"),
-                    primary_value=float(
-                        getattr(
-                            remote_result,
-                            "primary_value",
-                            remote_result.optimized_throughput,
-                        )
-                    ),
+                    primary_metric=remote_result.primary_metric,
+                    primary_value=remote_result.primary_value,
                     reason=remote_result.reason,
                 )
                 return {

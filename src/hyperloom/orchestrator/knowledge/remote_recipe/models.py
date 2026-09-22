@@ -55,6 +55,10 @@ _BUILDER_REF_PREFIXES: tuple[str, ...] = (
 class RemoteRecipeValidationError(ValueError):
     """A locally-built remote recipe violates the KB Store contract."""
 
+    def __init__(self, message: str, *, reason: str = "") -> None:
+        super().__init__(message)
+        self.reason = reason
+
 
 def _scope_int(value: Any) -> int | None:
     """Normalize an integer scope value echoed through a URL query."""
@@ -164,39 +168,73 @@ class KBSelectionProfile:
         *,
         scope: RecipeScope | None = None,
     ) -> "KBSelectionProfile":
-        from hyperloom.common.gain_math import gain_pct
-        from hyperloom.common.perf_metric import agentx_active
+        from hyperloom.common.perf_metric import agentx_active, output_tput_of
+        from hyperloom.orchestrator.state.shared_state import resolve_graded_comparison
 
         scope = scope or RecipeScope.from_state(state)
         current = getattr(state, "current_best", {}) or {}
         if not isinstance(current, dict):
-            raise RemoteRecipeValidationError("current_best must be a mapping")
-        if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
-            baseline = getattr(state, "baseline_perf", {}) or {}
-            baseline_i = float(baseline.get("e2e_norm_intvty_p90") or 0.0)
-            candidate_i = float(current.get("e2e_norm_intvty_p90") or 0.0)
-            total = float(current.get("total_throughput") or 0.0)
-            gain = gain_pct(candidate_i, baseline_i)
-            if gain is None or not math.isfinite(gain) or total <= 0:
+            raise RemoteRecipeValidationError(
+                "current_best must be a mapping",
+                reason="invalid_recipe_selection_profile",
+            )
+
+        def validated_gain() -> float:
+            try:
+                value = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+            except (TypeError, ValueError) as exc:
                 raise RemoteRecipeValidationError(
-                    "AgentX write needs baseline-relative interactivity gain and positive total_throughput"
+                    "cumulative_gain_validated must be numeric",
+                    reason="invalid_recipe_selection_profile",
+                ) from exc
+            if not math.isfinite(value):
+                raise RemoteRecipeValidationError(
+                    "cumulative_gain_validated must be finite",
+                    reason="invalid_recipe_selection_profile",
                 )
+            return value
+
+        if agentx_active(benchmark_mode=getattr(state, "benchmark_mode", "")):
+            graded = resolve_graded_comparison(state, current, against_baseline=True)
+            if (
+                not graded.comparable
+                or not graded.graded_on_intvty
+                or graded.tput_candidate <= 0
+                or graded.tput_reference <= 0
+            ):
+                detail = graded.degrade_reason or "interactivity grading did not apply"
+                raise RemoteRecipeValidationError(
+                    f"AgentX write needs comparable baseline/current interactivity and total-throughput axes ({detail})",
+                    reason="invalid_recipe_selection_profile",
+                )
+            gain = validated_gain()
             return cls(
                 scope=scope,
                 primary_metric="interactivity_gain_pct",
-                primary_value=float(gain),
+                primary_value=gain,
                 objective_schema="agentx_keep",
                 metrics={
-                    "interactivity_gain_pct": float(gain),
-                    "total_throughput": total,
-                    "baseline_interactivity": baseline_i,
-                    "candidate_interactivity": candidate_i,
-                    "baseline_total_throughput": float(baseline.get("total_throughput") or 0.0),
+                    "interactivity_gain_pct": gain,
+                    "total_throughput": graded.tput_candidate,
+                    "baseline_interactivity": graded.reference,
+                    "candidate_interactivity": graded.candidate,
+                    "baseline_total_throughput": graded.tput_reference,
                 },
             )
-        throughput = float(current.get("tput") or 0.0)
+        throughput = output_tput_of(current)
         if not math.isfinite(throughput) or throughput <= 0:
-            raise RemoteRecipeValidationError("InferenceX write needs positive optimized_throughput")
+            raw_throughput = current.get("output_throughput")
+            if raw_throughput is None:
+                raw_throughput = current.get("tput")
+            try:
+                nonfinite = raw_throughput is not None and not math.isfinite(float(raw_throughput))
+            except (TypeError, ValueError):
+                nonfinite = False
+            reason = "nonfinite_optimized_throughput" if nonfinite else "missing_optimized_throughput"
+            raise RemoteRecipeValidationError(
+                "InferenceX write needs positive optimized_throughput",
+                reason=reason,
+            )
         return cls(
             scope=scope,
             primary_metric="optimized_throughput",
@@ -204,7 +242,7 @@ class KBSelectionProfile:
             objective_schema="single_throughput",
             metrics={
                 "optimized_throughput": throughput,
-                "validated_e2e_gain": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
+                "validated_e2e_gain": validated_gain(),
             },
         )
 

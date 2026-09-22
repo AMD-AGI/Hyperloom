@@ -58,7 +58,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     build_publishable_recipe_config,
     has_replay_material,
 )
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _remote_result_type
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 _DOWNLOAD_BYTES = b"verified artifact"
 _DOWNLOAD_SHA256 = hashlib.sha256(_DOWNLOAD_BYTES).hexdigest()
@@ -545,6 +546,8 @@ def test_remote_recipe_projects_workload_shape_for_donor_gating(
         "isl": 1024,
         "osl": 256,
     }
+    assert row["validated_gain_pct"] == pytest.approx(state.cumulative_gain_validated)
+    assert "interactivity_gain_pct" not in row
 
 
 def test_publish_sanitizer_allows_only_safe_replay_envs_and_args() -> None:
@@ -1271,7 +1274,8 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
                 status="written",
                 reason="",
                 session_id=session_id,
-                optimized_throughput=10.0,
+                primary_metric="optimized_throughput",
+                primary_value=10.0,
             )
 
     monkeypatch.setattr(
@@ -1658,7 +1662,8 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         "session-1",
         bundle,
         scope=_SCOPE,
-        optimized_throughput=130.0,
+        primary_metric="optimized_throughput",
+        primary_value=130.0,
         files_dir=tmp_path,
     )
 
@@ -1703,7 +1708,8 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
         "session-1",
         bundle,
         scope=_SCOPE,
-        optimized_throughput=200.0,
+        primary_metric="optimized_throughput",
+        primary_value=200.0,
         files_dir=tmp_path,
     )
     assert result.status == "skipped"
@@ -1790,6 +1796,7 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
 def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.benchmark_mode = "agentx"
+    state.cumulative_gain_validated = 20.0
     state.baseline_perf = {
         "e2e_norm_intvty_p90": 20.0,
         "total_throughput": 1000.0,
@@ -1825,10 +1832,37 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
         }
     )
     assert warm["validated_gain_pct"] == pytest.approx(20.0)
-    assert warm["interactivity_gain_pct"] == pytest.approx(20.0)
+    assert "interactivity_gain_pct" not in warm
     promote = next(call for call in store.calls if call[0] == "set_champion")
     assert promote[3] == "interactivity_gain_pct"
     assert promote[4] == pytest.approx(20.0)
+
+
+def test_agentx_selection_rejects_incomplete_baseline_axes(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.benchmark_mode = "agentx"
+    state.baseline_perf = {"e2e_norm_intvty_p90": 20.0}
+    state.current_best.update(
+        {
+            "e2e_norm_intvty_p90": 24.0,
+            "total_throughput": 960.0,
+        }
+    )
+
+    with pytest.raises(RemoteRecipeValidationError, match="baseline_axes_missing"):
+        KBSelectionProfile.from_state(state)
+
+    store = _FakeStore(metric="interactivity_gain_pct")
+    result = write_final_remote_recipe(
+        state,
+        "agentx:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert result.status == "skipped"
+    assert result.reason == "invalid_recipe_selection_profile"
+    assert store.calls == []
+    assert _remote_result_type(result.status, result.reason) == _close_out.RESULT_INVALID_SELECTION_PROFILE
 
 
 def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:
