@@ -2604,29 +2604,17 @@ class WritebackCollaborator:
                 "result_type": _close_out.RESULT_CONFIGURATION_FAILED,
                 "error_class": type(exc).__name__,
             }
-        # Every Recipe sink funnels through agentx_kb_blocked; see it for
-        # why an agentic measurement must not enter a cross-session store. Placed
-        # ahead of the mode branch because in REMOTE mode _kb_amend_recipe returns
-        # early, which made the write below the only Recipe writer and the one
-        # door that gate could not see.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_blocked,
-        )
+        from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_kb_blocked(self.shared_state):
-            log.info(
-                "Recipe KB finalize skipped (AgentX): the recipe identity has no mode "
-                "or workload dimension, so an agentic-replay result would overwrite a "
-                "synthetic best_throughput and be tagged isl/osl=%s/%s.",
-                getattr(self.shared_state, "isl", "?"),
-                getattr(self.shared_state, "osl", "?"),
+        if (
+            agentx_active(
+                benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")
             )
-            # Backend stays as configured: "disabled" here would be
-            # indistinguishable in telemetry from a KB that was actually down,
-            # and reason= already carries why nothing was written.
+            and config.mode is not KnowledgeStoreMode.REMOTE
+        ):
             return {
                 "status": "skipped",
-                "reason": "agentx",
+                "reason": "agentx_local_store_unsupported",
                 "backend": str(getattr(config, "mode", "") or "unknown"),
                 "result_type": _close_out.RESULT_AGENTX_BLOCKED,
             }

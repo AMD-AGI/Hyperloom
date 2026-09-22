@@ -452,40 +452,48 @@ class RemoteRecipeClient:
         bundle: KnowledgeBundle,
         *,
         scope: RecipeScope,
-        optimized_throughput: float,
         files_dir: Path,
-        metric: str = "optimized_throughput",
+        primary_metric: str = "optimized_throughput",
+        primary_value: float | None = None,
+        objective_schema: str = "",
+        optimized_throughput: float | None = None,
     ) -> RemoteWriteResult:
-        """Write files, replace knowledge, then promote when the score wins."""
-        if not math.isfinite(optimized_throughput):
-            raise RemoteRecipeValidationError(f"optimized_throughput must be finite, got {optimized_throughput!r}")
+        """Write files, replace knowledge, then promote on the mode's primary metric."""
+        score = primary_value if primary_value is not None else optimized_throughput
+        if score is None or not math.isfinite(score):
+            raise RemoteRecipeValidationError(
+                f"{primary_metric} must be finite, got {score!r}"
+            )
         # Defense in depth at the final shared-store boundary.
         bundle.knowledge = sanitize_shared_knowledge(bundle.knowledge)
         bundle.validate()
         if not has_replay_material({"knowledge": bundle.knowledge}):
             log.error(
-                "Remote Recipe KB rejected a session with no replay material: cid=%s sid=%s optimized_throughput=%s",
+                "Remote Recipe KB rejected a session with no replay material: cid=%s sid=%s %s=%s",
                 canonical_id,
                 session_id,
-                optimized_throughput,
+                primary_metric,
+                score,
             )
             return RemoteWriteResult(
                 "skipped",
                 "empty_replay_material",
                 canonical_id,
                 session_id,
-                optimized_throughput,
+                score,
             )
         scope_payload = scope.as_dict()
         rollup = self.store.get_rollup(canonical_id, scope=scope_payload)
-        _, prior, _ = _champion(rollup, validate_metric=True, expected_metric=metric)
-        if optimized_throughput <= prior:
+        _, prior, _ = _champion(
+            rollup, validate_metric=True, expected_metric=primary_metric
+        )
+        if score <= prior:
             return RemoteWriteResult(
                 "skipped",
                 "not_better_than_champion",
                 canonical_id,
                 session_id,
-                optimized_throughput,
+                score,
             )
         expected = {artifact.path for artifact in bundle.artifacts}
         if expected:
@@ -506,13 +514,14 @@ class RemoteRecipeClient:
             session_id=session_id,
             mode="replace",
             scope=scope_payload,
+            objective_schema=objective_schema,
         )
         try:
             self.store.set_champion(
                 canonical_id,
                 session_id,
-                metric=metric,
-                value=optimized_throughput,
+                metric=primary_metric,
+                value=score,
                 scope=scope_payload,
             )
         except KBStoreError as exc:
@@ -521,14 +530,14 @@ class RemoteRecipeClient:
             _, winner, _ = _champion(
                 self.store.get_rollup(canonical_id, scope=scope_payload),
                 validate_metric=True,
-                expected_metric=metric,
+                expected_metric=primary_metric,
             )
-            if winner < optimized_throughput:
+            if winner < score:
                 self.store.set_champion(
                     canonical_id,
                     session_id,
-                    metric=metric,
-                    value=optimized_throughput,
+                    metric=primary_metric,
+                    value=score,
                     scope=scope_payload,
                 )
             else:
@@ -537,14 +546,14 @@ class RemoteRecipeClient:
                     "champion_not_promoted",
                     canonical_id,
                     session_id,
-                    optimized_throughput,
+                    score,
                 )
         return RemoteWriteResult(
             "written",
             "",
             canonical_id,
             session_id,
-            optimized_throughput,
+            score,
         )
 
 

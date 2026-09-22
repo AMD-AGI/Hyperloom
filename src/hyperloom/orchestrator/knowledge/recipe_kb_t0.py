@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     cid_to_path_components,
@@ -967,11 +968,12 @@ def run_t0_anchor(
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
 
-    # The warm-start read is the fourth Recipe sink; see agentx_kb_blocked.
-    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_kb_blocked
-
-    if agentx_kb_blocked(shared_state):
-        log.info("run_t0_anchor: skipping (AgentX); the recipe identity has no mode dimension")
+    # The local JSON store remains inference-only.
+    if (
+        agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
+        and str(getattr(kb, "mode", "") or "") != "remote"
+    ):
+        log.info("run_t0_anchor: local Recipe KB does not serve agentx identities")
         return
 
     sd = Path(session_dir)
@@ -1044,6 +1046,13 @@ def run_t0_anchor(
         precision=_precision or "",
         model_type=_model_type_val,
         architectures=_architectures_val,
+        scheme=(
+            "agentx"
+            if agentx_active(
+                benchmark_mode=getattr(shared_state, "benchmark_mode", "")
+            )
+            else "inference"
+        ),
     )
 
     # Persist framework + framework_version so CLOSE/KEEP derives the same cid.

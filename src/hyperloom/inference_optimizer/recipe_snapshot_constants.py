@@ -99,12 +99,15 @@ def recipe_canonical_id(
     architectures: "str | list[str]" = "",
     framework_version: str,
     precision: str,
+    scheme: str = "inference",
 ) -> str:
     """Build the recipe ``canonical_id``:
     ``inference:{model}:{hardware}:{framework_name}:{model_type}:{architectures}:{framework_version}:{precision}``.
     """
+    if scheme not in {"inference", "agentx"}:
+        raise ValueError(f"unsupported recipe identity scheme: {scheme!r}")
     return (
-        f"inference:"
+        f"{scheme}:"
         f"{_slug(model, DEFAULT_MODEL_SLUG)}:"
         f"{_slug(hardware, DEFAULT_HARDWARE_SLUG)}:"
         f"{_slug(framework_name, DEFAULT_FRAMEWORK_SLUG)}:"

@@ -1236,7 +1236,12 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
-    validated_gain = _number(knowledge.get("validated_e2e_gain"))
+    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
+    validated_gain = (
+        interactivity_gain
+        if "interactivity_gain_pct" in knowledge
+        else _number(knowledge.get("validated_e2e_gain"))
+    )
     view = _mapping(document.get("view"))
     replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
     row = {
@@ -1260,6 +1265,8 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_material_available": (replayable and has_replay_material(document)),
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
+    if interactivity_gain is not None:
+        row["interactivity_gain_pct"] = interactivity_gain
     for key, value in _mapping(knowledge.get("workload_shape")).items():
         if key in SHAPE_KEYS:
             resolved = _positive_int(value)

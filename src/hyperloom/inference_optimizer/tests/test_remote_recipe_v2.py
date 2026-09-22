@@ -1526,8 +1526,18 @@ class _FakeStore:
         session_id="",
         mode="merge",
         scope=None,
+        objective_schema="",
     ):
-        self.calls.append(("put_knowledge", canonical_id, session_id, mode, scope))
+        self.calls.append(
+            (
+                "put_knowledge",
+                canonical_id,
+                session_id,
+                mode,
+                scope,
+                objective_schema,
+            )
+        )
         self.published_knowledge = json.loads(json.dumps(knowledge))
 
     def set_champion(self, canonical_id, session_id, *, metric, value, scope=None):
@@ -1603,10 +1613,11 @@ def test_write_order_replace_metric_and_409_retry(tmp_path: Path) -> None:
     names = [call[0] for call in store.calls]
     assert names[:4] == ["get_rollup", "put_dir", "put_knowledge", "set_champion"]
     assert names[-2:] == ["get_rollup", "set_champion"]
-    assert store.calls[2][-2] == "replace"
+    assert store.calls[2][3] == "replace"
+    assert store.calls[2][-1] == "single_throughput"
     assert store.calls[3][-3:-1] == ("optimized_throughput", 130.0)
     assert store.calls[0][-1] == _SCOPE.as_dict()
-    assert store.calls[2][-1] == _SCOPE.as_dict()
+    assert store.calls[2][4] == _SCOPE.as_dict()
     assert store.calls[3][-1] == _SCOPE.as_dict()
     assert len([call for call in store.calls if call[0] == "put_knowledge"]) == 1
     assert all(not str(call[1]).startswith("kernel:") for call in store.calls if len(call) > 1)
@@ -1765,6 +1776,104 @@ def test_absent_rollup_is_treated_as_first_write(tmp_path: Path) -> None:
         "put_knowledge",
         "set_champion",
     ]
+
+
+def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.benchmark_mode = "agentx"
+    state.baseline_perf = {
+        "e2e_norm_intvty_p90": 20.0,
+        "total_throughput": 1000.0,
+    }
+    state.current_best.update(
+        {
+            "e2e_norm_intvty_p90": 24.0,
+            "total_throughput": 960.0,
+        }
+    )
+    store = _FakeStore(metric="interactivity_gain_pct")
+    result = write_final_remote_recipe(
+        state,
+        "agentx:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+
+    assert result.status == "written"
+    put = next(call for call in store.calls if call[0] == "put_knowledge")
+    assert put[4] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
+    assert put[5] == "agentx_keep"
+    assert store.published_knowledge["interactivity_gain_pct"] == pytest.approx(20.0)
+    assert "validated_e2e_gain" not in store.published_knowledge
+    assert store.published_knowledge["total_throughput"] == 960.0
+    assert store.published_knowledge["baseline_interactivity"] == 20.0
+    warm = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "agentx:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "knowledge": store.published_knowledge,
+            "view": {"replayable": True},
+        }
+    )
+    assert warm["validated_gain_pct"] == pytest.approx(20.0)
+    assert warm["interactivity_gain_pct"] == pytest.approx(20.0)
+    promote = next(call for call in store.calls if call[0] == "set_champion")
+    assert promote[3] == "interactivity_gain_pct"
+    assert promote[4] == pytest.approx(20.0)
+
+
+def test_agentx_warm_replay_accepts_three_dimension_scope() -> None:
+    store = _FakeStore(metric="interactivity_gain_pct")
+    scope = RecipeScope("forge", 8, 64)
+    store.envelope["canonical_id"] = "agentx:m:h:f:mt:a:v:p"
+    store.envelope["scope"] = {
+        **scope.as_dict(),
+        "scope_schema": "agentx_trace/v1",
+    }
+    store.envelope["knowledge"]["workload_shape"] = {"tp": 8, "conc": 64}
+    store.envelope["knowledge"]["interactivity_gain_pct"] = 20.0
+    store.envelope["knowledge"]["total_throughput"] = 960.0
+
+    selected = RemoteRecipeClient(store).get_view(
+        "agentx:m:h:f:mt:a:v:p",
+        scope,
+    )
+    assert selected is not None
+    assert selected["scope"]["tp"] == 8
+    call = next(call for call in store.calls if call[0] == "get_hyperloom_recipe_view")
+    assert call[-1] == {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
+
+
+def test_vendored_scope_query_serializes_only_supplied_dimensions() -> None:
+    query = kb_store_client.KBStoreClient._scope_query(
+        {"kernel_optimizer": "forge", "tp": 8, "conc": 64}
+    )
+    assert "kernel_optimizer=forge" in query
+    assert "tp=8" in query
+    assert "conc=64" in query
+    assert "isl" not in query
+    assert "osl" not in query
+
+
+def test_recipe_canonical_id_changes_only_the_agentx_scheme() -> None:
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import (
+        recipe_canonical_id,
+    )
+
+    kwargs = {
+        "model": "m",
+        "hardware": "h",
+        "framework_name": "f",
+        "model_type": "mt",
+        "architectures": "a",
+        "framework_version": "v",
+        "precision": "p",
+    }
+    inference = recipe_canonical_id(**kwargs)
+    agentx = recipe_canonical_id(**kwargs, scheme="agentx")
+    assert inference == "inference:m:h:f:mt:a:v:p"
+    assert agentx == "agentx:m:h:f:mt:a:v:p"
+    assert inference.split(":", 1)[1] == agentx.split(":", 1)[1]
 
 
 def test_non_throughput_champion_metric_is_rejected(tmp_path: Path) -> None:
@@ -2354,6 +2463,21 @@ def test_nonfinite_write_throughput_skips_without_remote_calls(tmp_path: Path) -
     assert store.calls == []
 
 
+def test_invalid_inference_scope_keeps_scope_error_reason(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.kernel_optimizer = "unsupported"
+    store = _FakeStore()
+    result = write_final_remote_recipe(
+        state,
+        "inference:m:h:f:mt:a:v:p",
+        "session-1",
+        client=RemoteRecipeClient(store),  # type: ignore[arg-type]
+    )
+    assert result.status == "skipped"
+    assert result.reason == "invalid_recipe_scope"
+    assert store.calls == []
+
+
 def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.current_best["tput"] = float("nan")
@@ -2665,6 +2789,26 @@ def test_remote_adapter_forwards_hardware_in(tmp_path: Path) -> None:
     )
     assert remote.kwargs["hardware_in"] == ["mi300x", "mi325x"]
     assert remote.kwargs["match"] == {"framework_name": "sglang"}
+    assert remote.kwargs["scheme"] == "inference"
+
+
+def test_remote_adapter_searches_agentx_identity_scheme(tmp_path: Path) -> None:
+    class _Remote:
+        def __init__(self) -> None:
+            self.kwargs = {}
+
+        def search_identities(self, **kwargs):
+            self.kwargs = dict(kwargs)
+            return {"items": [], "total": 0, "next_offset": None}
+
+    remote = _Remote()
+    adapter = RemoteWarmRecipeAdapter(  # type: ignore[arg-type]
+        remote,
+        tmp_path / "unused",
+        scope=RecipeScope("forge", 8, 64),
+    )
+    assert adapter.search(label_match={"framework": "sglang"}) == []
+    assert remote.kwargs["scheme"] == "agentx"
 
 
 def test_remote_adapter_stops_on_empty_page_with_next_offset(
@@ -2857,7 +3001,7 @@ def test_vendored_sdk_matches_upstream_git_blob() -> None:
     path = Path(kb_store_client.__file__)
     content = path.read_bytes()
     digest = hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest()
-    assert digest == "3402092b4cac1e85e9ad9baae77b8b0020259158"
+    assert digest == "9dbb293ccab87b33555ef48b7e27ec93e726e86c"
 
 
 def test_vendored_sdk_uses_new_view_and_search_routes() -> None:

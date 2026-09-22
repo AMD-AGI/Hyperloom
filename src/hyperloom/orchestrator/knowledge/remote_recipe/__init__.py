@@ -21,6 +21,7 @@ from .client import (
     _deactivate_destination,
 )
 from .models import (
+    KBSelectionProfile,
     RecipeScope,
     RemoteRecipeValidationError,
     RemoteWriteResult,
@@ -70,24 +71,34 @@ def write_final_remote_recipe(
         return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
     if not has_new_keep(state):
         return RemoteWriteResult("skipped", "no_new_keep_or_pure_warm_replay", canonical_id, session_id)
-    current_best = getattr(state, "current_best", {}) or {}
-    try:
-        throughput = float(current_best.get("tput") or 0.0) if isinstance(current_best, dict) else 0.0
-    except (TypeError, ValueError):
-        throughput = 0.0
-    if not math.isfinite(throughput):
-        return RemoteWriteResult(
-            "skipped",
-            "nonfinite_optimized_throughput",
-            canonical_id,
-            session_id,
-        )
-    if throughput <= 0:
-        return RemoteWriteResult("skipped", "missing_optimized_throughput", canonical_id, session_id)
     try:
         scope = RecipeScope.from_state(state)
     except RemoteRecipeValidationError:
-        return RemoteWriteResult("skipped", "invalid_recipe_scope", canonical_id, session_id)
+        return RemoteWriteResult(
+            "skipped", "invalid_recipe_scope", canonical_id, session_id
+        )
+    try:
+        profile = KBSelectionProfile.from_state(state, scope=scope)
+    except RemoteRecipeValidationError:
+        from hyperloom.common.perf_metric import agentx_active
+
+        if not agentx_active(
+            benchmark_mode=getattr(state, "benchmark_mode", "")
+        ):
+            current_best = getattr(state, "current_best", {}) or {}
+            try:
+                throughput = float(current_best.get("tput") or 0.0)
+            except (AttributeError, TypeError, ValueError):
+                throughput = 0.0
+            reason = (
+                "nonfinite_optimized_throughput"
+                if not math.isfinite(throughput)
+                else "missing_optimized_throughput"
+            )
+            return RemoteWriteResult(
+                "skipped", reason, canonical_id, session_id
+            )
+        return RemoteWriteResult("skipped", "invalid_recipe_selection_profile", canonical_id, session_id)
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
         bundle = build_remote_knowledge(
@@ -95,12 +106,17 @@ def write_final_remote_recipe(
             files_dir,
             sections=KnowledgeSections.from_env(),
         )
+        if profile.primary_metric == "interactivity_gain_pct":
+            bundle.knowledge.pop("validated_e2e_gain", None)
+        bundle.knowledge.update(profile.metrics)
         return resolved.write_if_better(
             canonical_id,
             session_id,
             bundle,
-            scope=scope,
-            optimized_throughput=throughput,
+            scope=profile.scope,
+            primary_metric=profile.primary_metric,
+            primary_value=profile.primary_value,
+            objective_schema=profile.objective_schema,
             files_dir=files_dir,
         )
 
@@ -349,7 +365,7 @@ class RemoteWarmRecipeAdapter:
         while len(self._scanned_candidate_ids) < self.search_candidate_cap and pages_scanned < self.search_page_cap:
             has_more = False
             result = self._remote_kb.search_identities(
-                scheme="inference",
+                scheme=self._scope.identity_scheme,
                 match=translated,
                 hardware_in=hardware_in,
                 offset=offset,
@@ -365,7 +381,7 @@ class RemoteWarmRecipeAdapter:
                 if not isinstance(item, dict):
                     continue
                 canonical_id = str(item.get("canonical_id") or "").strip()
-                if not canonical_id.startswith("inference:"):
+                if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
                     continue
                 cached = self._candidate_rows.get(canonical_id)
                 if cached is not None:

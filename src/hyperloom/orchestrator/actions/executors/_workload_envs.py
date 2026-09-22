@@ -243,17 +243,6 @@ def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     return {**os.environ, "CONC": str(conc)}
 
 
-def agentx_kb_blocked(shared_state: Any = None) -> bool:
-    """Whether an AgentX session must skip its Recipe KB exchange, in either direction."""
-    # The recipe canonical id is a seven-tuple of model / hardware / framework / precision identity: no workload, no
-    # mode. Row workload tags come from ``SharedState.isl``/``osl``, the inert 1024/1024 placeholders under AgentX, so
-    # a write would overwrite a synthetic ``best_throughput`` on a bare numeric comparison and tag the row as a
-    # 1024/1024 synthetic run. Reads are blocked for the mirror-image reason: a recipe validated on that synthetic
-    # shape clears the donor shape gate and would warm-start an AgentX session onto the wrong regime. The store is
-    # machine-global and ``--reset-state`` does not clear it, so the damage outlives its session.
-    return agentx_active(shared_state)
-
-
 # The 1M-context families that replay the unfiltered corpus; everything else
 # gets the 256k-capped variant. Mirrors ``aiperf_client.sh::_default_loader``,
 # which is the side that actually selects the corpus at runtime -- this one only
