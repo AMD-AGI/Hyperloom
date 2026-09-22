@@ -615,11 +615,8 @@ class ConversationCollaborator:
         not either fired -- "evaluated and did not trip" is the reading that
         explains a phase staying open.
 
-        Best-effort: the advisory must render whether or not it is recorded.
-        The recorder is reached defensively because this method's caller gets
-        borrowed onto lightweight stand-ins by tests, which carry none of the
-        phase-handler machinery -- and an advisory that raised because its
-        observability was absent would be a worse bug than a missing row.
+        The recorder is reached through ``getattr`` because tests borrow this
+        method onto lightweight stand-ins that carry no phase-handler machinery.
         """
         getter = getattr(self, "_framework_timeline", None)
         recorder = getter() if callable(getter) else None

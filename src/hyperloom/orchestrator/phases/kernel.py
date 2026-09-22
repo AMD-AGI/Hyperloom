@@ -2242,8 +2242,6 @@ class KernelPhase(PhaseHandler):
         Called where ``geak_result`` is set rather than beside the candidate
         record, because a run that measured a latency but accepted nothing
         never reaches the candidate path and would otherwise report none of it.
-
-        Best-effort: a failed record never breaks the phase.
         """
         if not isinstance(result, dict) or not result:
             return
@@ -2298,7 +2296,7 @@ class KernelPhase(PhaseHandler):
         through, and this journey is the only place they reach the optimizer at
         all, so they are recorded even though nothing else in the file is.
 
-        Best-effort: a missing or partial file never breaks the phase.
+        A missing or unreadable journey file records nothing and returns.
         """
         journey = self._load_geak_journey(result)
         if not journey:
@@ -2306,8 +2304,7 @@ class KernelPhase(PhaseHandler):
 
         record_geak_attempts(
             event=str(
-                result.get("kernel_event_id")
-                or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
+                result.get("kernel_event_id") or kernel_event_id(int(getattr(self.shared_state, "macro_cycle", 0) or 0))
             ),
             journey=journey,
         )

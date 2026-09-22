@@ -1024,8 +1024,7 @@ class IntentRouter:
 
         An analysis dispatched this way opens no roofline event of its own, so
         without this the snapshot counter it advanced has nothing on the
-        timeline to account for it. Best-effort: a failed record never breaks
-        the request.
+        timeline to account for it.
         """
         from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
 
