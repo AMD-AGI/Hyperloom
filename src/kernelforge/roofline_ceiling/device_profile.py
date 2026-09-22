@@ -15,18 +15,23 @@ it was measured. Partition mode is part of the identity rather than metadata on
 it: splitting an MI355X into CPX changes the bandwidth one slice can reach, so
 the same card under SPX is a different machine.
 
-Adding a machine means measuring it once and committing the result. See
-``docs/kernelforge/reference/device-profiles.md`` for the procedure, which is
-worth following exactly -- the figures are easy to transcribe wrongly, and
-:func:`validate_profile` catches only the mistakes that contradict the
-datasheet.
-
-Nothing cross-checks a committed profile against a fresh measurement, because
-there is no longer a fresh measurement. A roof that reads low is the dangerous
+Adding a machine means measuring it once and committing the result. Nothing
+cross-checks a committed profile against a fresh measurement, because there is
+no longer a fresh measurement. A roof that reads low is the dangerous
 direction: the ceiling derived from it is too loose, so the kernel reads as
 closer to done than it is, and a campaign with an attainment target stops with
-the work half finished. Hence the self-check, and hence a profile that fails it
-is refused rather than used.
+the work half finished. Hence :func:`validate_profile`, and hence a profile
+that fails it is refused rather than used.
+
+The self-check catches only what the datasheet contradicts. Two transcription
+errors it cannot see are worth knowing about when authoring an entry. A roof
+left unscaled -- ``roofline.csv`` reports GFLOP/s and GB/s, so every figure
+needs a factor of 1e9 -- produces attainment above one on every case, which
+excludes them all and leaves the target unable to fire; loud, but only once a
+campaign runs. A dispatch floor timed eagerly rather than from a captured graph
+comes out around three times too high, because eager timing also pays the
+framework's per-op host submission that a graph-timed driver never pays, and
+nothing downstream can tell.
 """
 
 from __future__ import annotations
