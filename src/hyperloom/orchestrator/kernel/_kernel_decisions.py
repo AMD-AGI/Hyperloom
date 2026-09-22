@@ -11,6 +11,9 @@ import logging
 import os
 from typing import Any
 
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
+
 from hyperloom.common.env import env_flag
 
 from .patch_landing import (
@@ -704,6 +707,43 @@ def _source_files_in_optimization_stack(state) -> set[str]:
     return sources
 
 
+def _canonical_kernel_recipe_operator(kernel_id: str) -> str:
+    """The ``kernel_name`` dimension out of a ``kernel:<producer>:<kernel_name>:...`` id, or ``\"\"`` when ``kernel_id`` is not that scheme.
+
+    forge-loop / flydsl / fusion land their integrations under this six-dimension recipe id (see
+    ``kernelforge.knowledge.kernel_identity``), not the roofline trace's synthetic ``kNNN`` id. The ``kernel_name``
+    dimension is already ``normalize_operator_name``-clean at write time, so it is returned as-is.
+    """
+    parts = str(kernel_id or "").split(":")
+    if len(parts) != 7 or parts[0] != "kernel" or parts[1] not in KERNEL_RECIPE_PRODUCERS:
+        return ""
+    return parts[2]
+
+
+def _forge_loop_entries_by_operator_in_optimization_stack(state) -> dict[str, dict[str, Any]]:
+    """Map normalized operator name -> its integrating optimization_stack entry (forge-loop/flydsl/fusion).
+
+    These lanes key their ``optimization_stack`` entries by the long-form recipe id
+    (``kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>``), which never equals a roofline
+    trace's synthetic ``kNNN`` kernel_id even though both name the same kernel. Comparing on the operator name — run
+    through the same ``normalize_operator_name`` the recipe id was built with — is the one identity the two sides
+    share.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for e in state.optimization_stack or []:
+        if not isinstance(e, dict) or e.get("action") not in INTEGRATING_STACK_ACTIONS:
+            continue
+        operator = _canonical_kernel_recipe_operator(str(e.get("kernel_id") or ""))
+        if operator:
+            entries[normalize_operator_name(operator)] = e
+    return entries
+
+
+def _forge_loop_operators_in_optimization_stack(state) -> set[str]:
+    """Normalized operator names an integrating kernel-recipe lane has already landed; see the sibling ``_entries`` function."""
+    return set(_forge_loop_entries_by_operator_in_optimization_stack(state))
+
+
 def _record_matches_task(
     record: dict[str, Any],
     *,
@@ -891,6 +931,7 @@ def untried_hot_reusable_kernels(
         for entry in (state.optimization_stack or [])
         if isinstance(entry, dict) and entry.get("action") in INTEGRATING_STACK_ACTIONS
     ]
+    integrated_operators = _forge_loop_operators_in_optimization_stack(state)
     rejected = set(state.rejected_kernel_ids or [])
     _ensure_kernel_task_state(state)
     attempts = state.kernel_opt_task_attempts or {}
@@ -1011,6 +1052,11 @@ def untried_hot_reusable_kernels(
         ):
             continue
         if src and src in integrated_sources:
+            continue
+        # A kernel-recipe lane (forge-loop/flydsl/fusion) landed under its own long-form recipe id, which never
+        # equals this row's synthetic kNNN id or its trace source_file -- see _forge_loop_operators_in_optimization_stack.
+        row_name = str(_identity[1] or "")
+        if row_name and normalize_operator_name(row_name) in integrated_operators:
             continue
         stable_attempt = next(
             (

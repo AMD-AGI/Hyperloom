@@ -169,6 +169,39 @@ def test_integrated_kernel_classifies_correctly(tmp_path: Path) -> None:
     assert "integrated" in out["by_kernel"][0]["summary"].lower()
 
 
+def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tmp_path: Path) -> None:
+    """Reproduces a real session: forge-loop integrated "_fwd_grouped_kernel_stage1" via
+    kernel_rewrite_controller, landing an optimization_stack entry keyed by the long-form recipe id
+    ("kernel:forge-loop:<operator>:<framework>:<framework_version>:<backend>:<gpu>"). It never wrote
+    kernel_opt_task_attempts and never shares a kernel_id/source_file with the roofline trace's k001.
+    Without operator-name reconciliation, this kernel falsely reports as "never attempted" even though it
+    is the exact kernel that landed the session's validated gain."""
+    state = _make_state(
+        top15=[
+            _top15_entry(
+                "k001",
+                name="_fwd_grouped_kernel_stage1",
+                source_file="/sgl-workspace/aiter/op_tests/triton_tests/utils/mla_decode_ref.py",
+            )
+        ],
+    )
+    state.optimization_stack = [
+        {
+            "action": "integrate",
+            "kernel_id": "kernel:forge-loop:fwd_grouped_kernel_stage1:sglang:0.5.17:triton:mi355x",
+            "target_file": "/sgl-workspace/sglang/python/sglang/kernels/ops/attention/decode_attention.py",
+            "ts": "2026-09-21T18:30:06.535892+00:00",
+        }
+    ]
+    out = build_kernel_optimization_summary(state, tmp_path)
+    assert out["totals"]["attempted"] == 1
+    assert out["totals"]["integrated"] == 1
+    assert out["kernel_opt_outcome"] != "skip"
+    row = out["by_kernel"][0]
+    assert row["kernel_id"] == "k001"
+    assert row["category"] == CATEGORY_INTEGRATED
+
+
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:
     state = _make_state(
         top15=[_top15_entry("k001")],

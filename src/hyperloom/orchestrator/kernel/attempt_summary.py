@@ -12,7 +12,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from kernelforge.knowledge.implementation_identity import normalize_operator_name
+
 from hyperloom.common.coerce import to_float
+
+from ._kernel_decisions import _forge_loop_entries_by_operator_in_optimization_stack
 
 
 log = logging.getLogger(__name__)
@@ -260,6 +264,29 @@ def _rejection_bucket(reason: str) -> str:
     if reason.startswith("max_failures_"):
         return "max_failures_without_keep"
     return "other"
+
+
+def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
+    """A ledger-shaped attempt for a kernel-recipe-lane integration that never wrote ``kernel_opt_task_attempts``.
+
+    Only called for a row already known (by operator name) to be integrated, so the fields below describe a KEEP —
+    there is no partial/rejected state on this path, since a lane only ever lands a stack entry once it kept a
+    patch.
+    """
+    return {
+        "attempts": 1,
+        "partial_count": 0,
+        "failure_count": 0,
+        "last_decision": "KEEP",
+        "last_status": "integrated",
+        "last_micro_speedup": 0.0,
+        "last_source_file": str(stack_entry.get("target_file") or stack_entry.get("source_file") or ""),
+        "last_ts": str(stack_entry.get("ts") or ""),
+        "rejected_reason": "",
+        "compile_passed": True,
+        "correctness_passed": stack_entry.get("accuracy") is not None,
+        "integration_status": "integrated",
+    }
 
 
 def _classify_attempted(
@@ -524,6 +551,12 @@ def build_kernel_optimization_summary(
         kid = str(entry.get("kernel_id") or "")
         if kid and entry.get("action") == "integrate":
             integrated_ids.add(kid)
+    # A kernel-recipe lane (forge-loop/flydsl/fusion) lands its optimization_stack entry under its own long-form
+    # recipe id, which never equals a top15 row's synthetic kNNN id and never touches kernel_opt_task_attempts —
+    # so without this, an integrated kernel silently reads as "never attempted" (see
+    # _forge_loop_entries_by_operator_in_optimization_stack's docstring for why the operator name is the shared
+    # identity).
+    forge_loop_entries_by_operator = _forge_loop_entries_by_operator_in_optimization_stack(state)
     last_kernel_opt = dict(getattr(state, "last_kernel_opt", {}) or {})
     keep_pending_kid = ""
     if str(last_kernel_opt.get("decision") or "").upper() == "KEEP":
@@ -553,15 +586,26 @@ def build_kernel_optimization_summary(
             continue
         processed_kids.add(kid)
         attempt = attempts_map.get(kid)
+        forge_loop_entry = (
+            forge_loop_entries_by_operator.get(normalize_operator_name(str(top_entry.get("name") or "")))
+            if attempt is None
+            else None
+        )
+        if attempt is None and forge_loop_entry is not None:
+            attempt = _synthetic_forge_loop_attempt(forge_loop_entry)
         if attempt is None:
             # A hot kernel none of the recorded lanes touched.
             continue
         counts["attempted"] += 1
-        category = _classify_attempted(
-            attempt,
-            integrated_ids=integrated_ids,
-            rejected_ids=rejected_ids,
-            kernel_id=kid,
+        category = (
+            CATEGORY_INTEGRATED
+            if forge_loop_entry is not None
+            else _classify_attempted(
+                attempt,
+                integrated_ids=integrated_ids,
+                rejected_ids=rejected_ids,
+                kernel_id=kid,
+            )
         )
         counts[_category_count_key(category)] += 1
         if category == CATEGORY_ATTEMPTED_REJECTED:
