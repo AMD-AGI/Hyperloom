@@ -19,12 +19,20 @@ observation is to relabel it, it fails the bar and goes.
 
 The bar is one question: **if this is not changed, is the current behaviour wrong?**
 
-Blocking means one of two things, and the repo treats them as equal:
+Blocking means one of three things, and the repo treats them as equal:
 
 | Kind | What counts |
 |---|---|
 | Wrong behaviour | correctness, crash, data or precision error, compatibility break, security, performance regression |
 | Desync | an operator-observable change the PR description never states; PR title or description does not match the diff at the current head |
+| Contract violation | the diff breaks a rule `AGENTS.md` states outright, and the finding names both the bullet it breaks and the module in this repo that already owns the concern |
+
+The third kind is the narrow one. "This could be simpler", "I would have put it elsewhere" and
+"consider extracting a helper" are reviewer taste and are deleted like anything else. What
+survives is the case where the repo has already decided — a detour around a path that exists, or
+a concern implemented outside the module that owns it — and the decision is written down where
+both sides can read it. A finding that cannot name the bullet and the owner is taste wearing a
+citation, and it goes.
 
 If there are no blocking issues, say so explicitly. Do not manufacture small ones to fill space.
 
@@ -76,7 +84,7 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 52 rules across 9
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 53 rules across 9
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V6 and X2 are on every list.
 
@@ -174,16 +182,24 @@ a diff that reads well hides its defects. One line per check into `$WORK/ai_diag
    handle is not stored, an `await`-less blocking call inside `async def`, a subprocess with no
    timeout and no kill path.
 
-## Step 6 — Free-form pass, then the blind-spot line
+## Step 6 — Free-form pass, then the build-it-again and blind-spot lines
 
 Read the diff as someone who knows this system. Does the approach belong at this layer? Any
 correctness risk the rules missed — a phase entered twice, a resume landing on a state shape the
 new code cannot read, a destructive sweep scoped by pattern rather than by what this run owns, a
 number compared against one another measurement system produced?
 
-Then answer this in full, appended to `$WORK/answers.txt` as a `BLIND:` line: **"Is there any
-correctness risk, resource hazard, or behavioural edge case in this diff that none of Steps 1-5
-caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
+Then two questions, both answered in full rather than assented to.
+
+Append a `BUILD:` line to `$WORK/answers.txt`: **"If none of this code existed, what would you
+build — and does every mechanism this diff adds need to exist?"** Name what you would build, then
+say which of the diff's parts it does not contain. A part that survives that comparison only
+because it is already written is the answer this question exists to catch. Anything found here is
+a `Contract violation` candidate and carries the `AGENTS.md` bullet and the owner module with it,
+or it is taste and stops here.
+
+Append a `BLIND:` line: **"Is there any correctness risk, resource hazard, or behavioural edge
+case in this diff that none of Steps 1-5 caught?"** A bare "no" is not an answer — say what you looked for and did not find. Anything found
 after this point goes on the card marked `-- late finding` rather than back into a finished
 artifact, so that the order the review ran in stays legible.
 
