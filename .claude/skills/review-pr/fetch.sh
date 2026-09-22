@@ -30,28 +30,36 @@ mkdir -p "$WORK"
 # recently, and the conflict check in SKILL.md Step 8 then never fires on a conflicting PR.
 for attempt in 1 2 3 4 5; do
   gh pr view "$PR" --repo "$REPO" \
-    --json number,title,author,state,headRefOid,baseRefName,url,mergeable \
-    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .url .mergeable}}' \
+    --json number,title,author,state,headRefOid,baseRefName,baseRefOid,url,mergeable \
+    --template '{{printf "number: %v\ntitle: %v\nauthor: %v\nstate: %v\nhead: %v\nbase_ref: %v\nbase_tip: %v\nurl: %v\nmergeable: %v\n" .number .title .author.login .state .headRefOid .baseRefName .baseRefOid .url .mergeable}}' \
     > "$WORK/meta.txt" || die "gh pr view failed for #$PR"
   grep -q '^mergeable: UNKNOWN$' "$WORK/meta.txt" || break
-  [ "$attempt" = 5 ] && die "GitHub did not settle mergeability for #$PR; rerun rather than review the conflict axis blind"
+  # A merged or closed PR has no mergeability to compute and stays UNKNOWN for good; only an
+  # open one is expected to settle. Re-reviewing a merged PR is a supported case, so it must
+  # not be the thing that aborts the fetch.
+  grep -q '^state: OPEN$' "$WORK/meta.txt" || break
+  [ "$attempt" = 5 ] && die "GitHub did not settle mergeability for open #$PR; rerun rather than review the conflict axis blind"
   sleep 3
 done
 
 sed -n 's/^title: //p' "$WORK/meta.txt" > "$WORK/title.txt"
 HEAD_SHA=$(sed -n 's/^head: //p' "$WORK/meta.txt")
-BASE_REF=$(sed -n 's/^base_ref: //p' "$WORK/meta.txt")
-[ -n "$HEAD_SHA" ] && [ -n "$BASE_REF" ] || die "PR metadata carries no head sha or base ref"
+BASE_TIP=$(sed -n 's/^base_tip: //p' "$WORK/meta.txt")
+[ -n "$HEAD_SHA" ] && [ -n "$BASE_TIP" ] || die "PR metadata carries no head sha or base sha"
 
 gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""' > "$WORK/body.txt"
 
 # The merge base, never the base-branch tip. A diff taken against the tip attributes
 # every commit main gained since the branch point to this PR, which is how a
 # pre-existing behaviour gets reported as a regression (rule V1).
-BASE_SHA=$(gh api "repos/$REPO/compare/$BASE_REF...$HEAD_SHA" --jq '.merge_base_commit.sha')
+#
+# Resolved from the base sha the PR recorded, not from the base branch name: once the PR is
+# merged, the branch contains its commits, so the merge base against the branch is the head
+# itself and the diff comes back empty. Re-reviewing a merged PR is a supported case.
+BASE_SHA=$(gh api "repos/$REPO/compare/$BASE_TIP...$HEAD_SHA" --jq '.merge_base_commit.sha')
 case "$BASE_SHA" in
   [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-  *) die "no merge base for $BASE_REF...$HEAD_SHA" ;;
+  *) die "no merge base for $BASE_TIP...$HEAD_SHA" ;;
 esac
 printf '%s\n' "$BASE_SHA" > "$WORK/base.txt"
 
@@ -60,8 +68,10 @@ printf '%s\n' "$BASE_SHA" > "$WORK/base.txt"
 # date, so a silent stop would hide exactly the commit the rule is about. Say what was dropped
 # and name the head commit, which is the newest by definition.
 gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" \
-  --jq '.commits[].commit.message | split("\n")[0]' > "$WORK/commits.txt"
-TOTAL_COMMITS=$(gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" --jq '.total_commits')
+  --jq '.total_commits, (.commits[].commit.message | split("\n")[0])' > "$WORK/.commits.raw"
+TOTAL_COMMITS=$(head -1 "$WORK/.commits.raw")
+tail -n +2 "$WORK/.commits.raw" > "$WORK/commits.txt"
+rm -f "$WORK/.commits.raw"
 LISTED_COMMITS=$(wc -l < "$WORK/commits.txt" | tr -d ' ')
 if [ "$LISTED_COMMITS" -lt "$TOTAL_COMMITS" ]; then
   printf '# TRUNCATED: %s of %s commits listed, oldest first. Head commit: %s\n' \
