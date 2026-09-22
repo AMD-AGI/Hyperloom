@@ -447,12 +447,38 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # ``profiler=torch`` and a trace dir have to be asserted here too, not left to
-    # Magpie's launcher script alone: that script appends its own flags *after*
+    # Magpie's launcher script alone: that script prepends its own flags *before*
     # EXTRA_VLLM_ARGS at actual launch, but the argv preflight probe only sees
     # EXTRA_VLLM_ARGS, and vLLM's ProfilerConfig validator rejects
     # delay/max_iterations without both present in the checked fragment.
     assert "--profiler-config.profiler torch" in extra, extra
     assert "--profiler-config.torch_profiler_dir" in extra, extra
+
+
+def test_candidate_trace_dirs_covers_the_vllm_output_root(tmp_path):
+    """vLLM writes rank traces into the run output dir, one level above the Magpie workspace."""
+    from hyperloom.orchestrator.actions.executors.profile import _candidate_trace_dirs
+
+    workspace = tmp_path / "task" / "benchmark_vllm_20260922"
+    assert _candidate_trace_dirs(workspace) == [
+        workspace / "torch_trace",
+        workspace,
+        workspace / "capture_traces",
+        workspace.parent / "capture_traces",
+        workspace.parent,
+    ]
+
+
+def test_materialize_profile_pins_magpie_and_vllm_to_one_trace_dir(tmp_path, monkeypatch):
+    """Whichever of the two duplicate flags vLLM keeps, the trace has to land where discovery looks."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    injected = envs["EXTRA_VLLM_ARGS"].split("--profiler-config.torch_profiler_dir ", 1)[1].split()[0]
+    assert envs["VLLM_TORCH_PROFILER_DIR"] == injected
 
 
 def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(

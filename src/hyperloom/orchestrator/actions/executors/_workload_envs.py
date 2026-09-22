@@ -1624,21 +1624,22 @@ def materialize_config_with_envs(
             ]
             # ``profiler`` and ``torch_profiler_dir`` are normally set by
             # Magpie's launcher script, not by this layer -- but that script
-            # appends its own flags *after* EXTRA_VLLM_ARGS in the real
+            # appends its own flags *before* EXTRA_VLLM_ARGS in the real
             # ``vllm serve`` invocation, so the argv preflight probe (which
             # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
             # delay_iterations/max_iterations against a ProfilerConfig that
             # never saw ``profiler=torch`` or a trace dir. vLLM's validator
             # requires both whenever those bounds are present, so the probe
             # fails an argv that will be valid once Magpie's flags are
-            # appended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Asserting placeholders
-            # here keeps the probed fragment self-consistent; the actual
-            # ``torch_profiler_dir`` Magpie computes from ``$WORKSPACE_DIR``
-            # overrides this one at real launch time via vLLM's dotted-flag
-            # last-wins merge, so the value here only has to be a valid
-            # absolute path, not the directory the trace ends up under. An
-            # operator-set flag is left untouched either way.
+            # prepended, and this layer's profiler bounds get treated as
+            # invalid and dropped instead of launched. Asserting the flags
+            # here keeps the probed fragment self-consistent, and because
+            # EXTRA_VLLM_ARGS comes last, this ``torch_profiler_dir`` is the
+            # one vLLM keeps -- it decides where the trace lands. Magpie reads
+            # the same directory from VLLM_TORCH_PROFILER_DIR below, so both
+            # sides agree no matter which flag wins. An operator-set flag is
+            # left untouched either way.
+            envs.setdefault("VLLM_TORCH_PROFILER_DIR", str(output_dir))
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
             if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
