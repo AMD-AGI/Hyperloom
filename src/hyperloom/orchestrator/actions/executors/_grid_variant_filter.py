@@ -337,9 +337,7 @@ _UNSAFE_UNIFIED_ATTN_STACK = {
     "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
     "rocm": "10.0.0",
 }
-_UNSAFE_UNIFIED_ATTN_REASON = (
-    "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack"
-)
+_UNSAFE_UNIFIED_ATTN_REASON = "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack"
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
 _DIST_VERSION_SHA_RE = re.compile(r"\+g([0-9a-f]{7,})")
 

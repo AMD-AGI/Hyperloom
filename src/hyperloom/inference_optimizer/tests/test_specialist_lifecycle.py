@@ -530,8 +530,7 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     force_coord._handle_intent.assert_not_awaited()
     assert state.pruned_families == ["source_patch"]
     failures = [
-        (row["action"], row["task_id"], row["error_class"], row["error_excerpt"])
-        for row in state.last_action_failures
+        (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
     ]
     assert failures == [
         (

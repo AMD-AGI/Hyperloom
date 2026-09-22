@@ -864,9 +864,11 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     # Server is up: sweep remaining CONCs by reuse.
     reuse_failure: BaseException | None = None
     try:
-        reuse_grid = grid[boot_idx:] if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only" else grid[
-            boot_idx + 1 :
-        ]
+        reuse_grid = (
+            grid[boot_idx:]
+            if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
+            else grid[boot_idx + 1 :]
+        )
         for r_idx, variant in enumerate(reuse_grid):
             _reuse_remaining = session_deadline_to_remaining_sec(session_deadline_sec)
             # Check session deadline before each reuse point.

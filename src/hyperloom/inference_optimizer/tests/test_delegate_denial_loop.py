@@ -104,10 +104,7 @@ async def test_delegate_source_patch_without_git_root_prunes_without_retry(sessi
 
         assert await c.tasks.by_state("queued") == []
         assert c.shared_state.pruned_families == ["source_patch"]
-        failures = [
-            (row["action"], row["task_id"], row["error_class"])
-            for row in c.shared_state.last_action_failures
-        ]
+        failures = [(row["action"], row["task_id"], row["error_class"]) for row in c.shared_state.last_action_failures]
         assert failures == [("specialist", "patch-no-root", "no_git_framework_source_root")]
     finally:
         await c.stop()

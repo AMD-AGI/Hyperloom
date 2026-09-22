@@ -372,9 +372,7 @@ def _gemm_tuning_lane_totals(state: Any) -> dict[str, Any]:
         rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
         if rows:
             winners = sum(
-                1
-                for row in rows
-                if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
+                1 for row in rows if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
             )
             attempted += len(rows)
             if result.get("requires_e2e_validation"):
