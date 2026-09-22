@@ -1320,9 +1320,9 @@ def compute_roofline_from_perfmodel(
     bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
     bw_bps = bw_gbps * 1e9
     tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (
-        _resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)
-    ) * max(num_gpus, 1)
+    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)) * max(
+        num_gpus, 1
+    )
     if f_peak_tflops <= 0:
         return None
     f_peak = f_peak_tflops * 1e12
