@@ -21,6 +21,7 @@ from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
     canonical_fingerprint,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import (
+    GridVariant,
     apply_compatibility_filter,
 )
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
@@ -2195,6 +2196,187 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
+
+
+@pytest.mark.asyncio
+async def test_explore_rejects_unsafe_aiter_unified_attn_before_benchmark(
+    sub_agent_runner,
+    tmp_path,
+):
+    sub, tr, _ = sub_agent_runner
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    base = tmp_path / "base_sglang.yaml"
+    _write_baseline_yaml(base)
+    config = yaml.safe_load(base.read_text(encoding="utf-8"))
+    config["benchmark"]["model"] = str(model)
+    config["benchmark"]["precision"] = "fp8"
+    config["benchmark"]["envs"]["EXTRA_SGLANG_ARGS"] = "--page-size 1 --kv-cache-dtype auto"
+    base.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    state = SharedState()
+    state.model_path = str(model)
+    state.model_name = "Qwen3-14B-FP8"
+    state.model_type = "qwen3"
+    state.gpu_type = "mi355x"
+    state.baseline_double_run = False
+    state.stack_fingerprint_meta = {
+        "sglang": "0.5.20.dev20260920+gc610c40399",
+        "aiter": "4ad99832823dde2315b361cbd3b54b1c5c12acd5",
+        "rocm": "10.0.0",
+    }
+    sub.shared_state = state
+
+    output_dir = tmp_path / "explore-unified-attn-filter"
+    benchmarked: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        benchmarked.append(slot.relative_to(output_dir).as_posix())
+        _fake_workspace(slot, tput=800.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "unified",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+                {
+                    "name": "unified_combo",
+                    "extra_args": "--chunked-prefill-size 32768",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {"name": "master", "extra_envs": {"SGLANG_USE_AITER": "1"}},
+                {
+                    "name": "per_token",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_FP8_PER_TOKEN": "1",
+                    },
+                },
+                {
+                    "name": "unified_page16",
+                    "extra_args": "--page-size 16",
+                    "extra_envs": {
+                        "SGLANG_USE_AITER": "1",
+                        "SGLANG_USE_AITER_UNIFIED_ATTN": "1",
+                    },
+                },
+            ],
+        },
+        idempotency_key="ex-unified-attn-filter",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        result = await sub.run_task(task)
+
+    assert benchmarked == [
+        "v00_master/variant_00_master",
+        "v01_per_token/variant_00_per_token",
+        "v02_unified_page16/variant_00_unified_page16",
+    ]
+    assert result.result["skipped_dup"] == [
+        {
+            "name": "unified",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+        {
+            "name": "unified_combo",
+            "reason": "compatibility_filter",
+            "detail": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+        },
+    ]
+    other_stack = dict(state.stack_fingerprint_meta)
+    other_stack["aiter"] = "newer-aiter"
+    other_variant = GridVariant(
+        "other_stack_unified",
+        extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"},
+    )
+    kept, dropped = apply_compatibility_filter(
+        [other_variant],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint=other_stack,
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (["other_stack_unified"], [])
+
+
+def test_unified_attn_filter_matches_aiter_dist_version_short_sha(tmp_path):
+    """The aiter fingerprint degrades to a git-describe dist version when ``AITER_COMMIT`` is unset; the same source
+    tree must still be recognised, otherwise the filter fails open and the unsafe lever reaches the benchmark.
+    """
+    model = tmp_path / "Qwen3-14B-FP8"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["Qwen3ForCausalLM"],
+                "model_type": "qwen3",
+                "torch_dtype": "bfloat16",
+                "head_dim": 128,
+                "num_attention_heads": 40,
+                "num_key_value_heads": 8,
+                "quantization_config": {"quant_method": "fp8"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    kept, dropped = apply_compatibility_filter(
+        [GridVariant("unified", extra_envs={"SGLANG_USE_AITER_UNIFIED_ATTN": "1"})],
+        framework="sglang",
+        model_path=str(model),
+        gpu_type="mi355x",
+        stack_fingerprint={
+            "sglang": "0.5.20.dev20260920+gc610c40399",
+            # The dist version install_baremetal.sh falls back to; embeds the short sha of the pinned commit.
+            "aiter": "0.1.21.dev48+g4ad998328.d20260920",
+            "rocm": "10.0.0",
+        },
+        base_server_args="--page-size 1 --kv-cache-dtype auto",
+    )
+    assert ([variant.name for variant in kept], dropped) == (
+        [],
+        [
+            {
+                "name": "unified",
+                "source": "compatibility_filter",
+                "reason": "SGLANG_USE_AITER_UNIFIED_ATTN=1 is unsafe on the exact ROCm 10 Qwen3-14B-FP8 stack",
+            }
+        ],
+    )
 
 
 def test_atom_default_grid_survives_compatibility_filter_without_help_probe(

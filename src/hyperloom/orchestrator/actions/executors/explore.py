@@ -715,6 +715,14 @@ class ExploreExecutor:
                 runnable,
                 framework=framework,
                 model_path=resolved_model,
+                gpu_type=resolved_gpu or str(getattr(ss, "gpu_type", "") or ""),
+                stack_fingerprint=getattr(ss, "stack_fingerprint_meta", None),
+                base_server_args=compose_server_args(
+                    inherited_args=_effective_inherited_args,
+                    base_extra_args=base_extra_args,
+                    remove_args=base_remove_args,
+                    args_mode=base_args_mode,
+                ),
             )
             # Operator-supplied --skip-variants patterns.
             runnable, _skip_dropped = apply_user_skip_list(
