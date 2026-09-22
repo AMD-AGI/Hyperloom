@@ -470,7 +470,6 @@ class RemoteRecipeClient:
                 reason=reason,
                 canonical_id=canonical_id,
                 session_id=session_id,
-                optimized_throughput=(score if primary_metric == "optimized_throughput" else 0.0),
                 primary_metric=primary_metric,
                 primary_value=score,
             )

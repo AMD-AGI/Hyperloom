@@ -1797,6 +1797,8 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
     state = _state(tmp_path)
     state.benchmark_mode = "agentx"
     state.cumulative_gain_validated = 20.0
+    state.ep = 4
+    state.compute_partition = {"mode": "CPX", "partitions": 8}
     state.baseline_perf = {
         "e2e_norm_intvty_p90": 20.0,
         "total_throughput": 1000.0,
@@ -1823,6 +1825,12 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
     assert "validated_e2e_gain" not in store.published_knowledge
     assert store.published_knowledge["total_throughput"] == 960.0
     assert store.published_knowledge["baseline_interactivity"] == 20.0
+    assert store.published_knowledge["workload_shape"] == {
+        "tp": 8,
+        "conc": 64,
+        "ep": 4,
+        "partitions": 8,
+    }
     warm = knowledge_to_warm_recipe(
         {
             "canonical_id": "agentx:m:h:f:mt:a:v:p",
@@ -1833,6 +1841,10 @@ def test_agentx_writes_baseline_relative_interactivity_gain(tmp_path: Path) -> N
     )
     assert warm["validated_gain_pct"] == pytest.approx(20.0)
     assert "interactivity_gain_pct" not in warm
+    assert "isl" not in warm
+    assert "osl" not in warm
+    assert warm["ep"] == 4
+    assert warm["partitions"] == 8
     promote = next(call for call in store.calls if call[0] == "set_champion")
     assert promote[3] == "interactivity_gain_pct"
     assert promote[4] == pytest.approx(20.0)

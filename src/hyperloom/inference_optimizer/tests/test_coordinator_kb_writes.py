@@ -725,7 +725,6 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
                 reason="",
                 canonical_id=canonical_id,
                 session_id=session_id,
-                optimized_throughput=0.0,
                 primary_metric="interactivity_gain_pct",
                 primary_value=20.0,
             )

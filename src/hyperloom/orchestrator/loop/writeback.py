@@ -107,8 +107,8 @@ import logging as _logging
 log = _logging.getLogger(__name__)
 
 # Stable ``result_type`` codes for the reasons the remote KB Store returns.
-# An exact lookup, not substring matching: ``agentx`` the skip reason and
-# ``agentx`` inside an exception class name are different things.
+# Use an exact lookup so a reason token cannot collide with the same text inside
+# an exception name or explanatory message.
 _REMOTE_RESULT_TYPES: dict[str, str] = {
     "KB_STORE_URL/TOKEN not configured": _close_out.RESULT_KB_DISABLED,
     "no_new_keep_or_pure_warm_replay": _close_out.RESULT_NO_NEW_KEEP,

@@ -127,30 +127,31 @@ def _positive_int(value: Any) -> int | None:
     return resolved if resolved > 0 else None
 
 
-#: Shape dimensions read straight off the session state at face value.
-_STATE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
+#: Every dimension either supported identity scheme may place in its scope.
+_SCOPE_SHAPE_KEYS: Final[tuple[str, ...]] = ("tp", "conc", "isl", "osl")
 
 #: Every key ``workload_shape`` can publish. :func:`knowledge_to_warm_recipe` projects exactly these onto the warm
 #: row, derived from the writer so the projection cannot quietly drop a dimension the writer started publishing.
-SHAPE_KEYS: Final[tuple[str, ...]] = (*_STATE_SHAPE_KEYS, "ep", "partitions")
+SHAPE_KEYS: Final[tuple[str, ...]] = (*_SCOPE_SHAPE_KEYS, "ep", "partitions")
 
 
-def workload_shape(state: Any) -> dict[str, int]:
+def workload_shape(state: Any, *, scope: RecipeScope | None = None) -> dict[str, int]:
     """Return the workload dimensions a row records about the machine it ran on.
 
+    Identity-scoped dimensions come from the same validated ``RecipeScope`` the
+    Store request uses, so AgentX never republishes its inert ISL/OSL defaults.
     ``ep`` and ``partitions`` describe the same thing the ``canonical_id``'s hardware slug now encodes, so this is a
     description of the run rather than the gate on replaying it. Both are omitted at their default value -- ``ep <=
     1`` is dense and one partition is the whole card -- which keeps a row that merely took the CLI's ``--ep`` default
     from claiming a formation it never chose.
     """
+    resolved_scope = scope or RecipeScope.from_state(state)
     extra = _mapping(getattr(state, "baseline_workload_extra", {}))
-    shape: dict[str, int] = {}
-    for key in _STATE_SHAPE_KEYS:
-        value = _positive_int(getattr(state, key, None))
-        if value is None:
-            value = _positive_int(extra.get(key))
-        if value is not None:
-            shape[key] = value
+    shape = {
+        key: value
+        for key, value in resolved_scope.as_dict().items()
+        if key != "kernel_optimizer" and isinstance(value, int)
+    }
     ep = _positive_int(getattr(state, "ep", None))
     if ep is None:
         ep = _positive_int(extra.get("ep"))
@@ -1158,7 +1159,7 @@ def build_remote_knowledge(
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
             **dict(metrics or {}),
-            "workload_shape": workload_shape(state),
+            "workload_shape": workload_shape(state, scope=scope),
             "value": value,
             "what_worked": worked,
             "what_failed": _experience(state, "last_action_failures"),

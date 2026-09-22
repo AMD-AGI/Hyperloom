@@ -376,8 +376,6 @@ class RemoteWriteResult:
     reason: str = ""
     canonical_id: str = ""
     session_id: str = ""
-    # Compatibility field for existing InferenceX audit consumers.
-    optimized_throughput: float = 0.0
     primary_metric: str = ""
     primary_value: float = 0.0
 

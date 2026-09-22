@@ -90,19 +90,30 @@ export KB_STORE_TOKEN=...
 
 Both credentials are required; missing credentials fail at startup. Remote mode
 selects metadata through
-`GET /v1/kb/{canonical_id}/views/hyperloom-recipe` with all five scope query
-parameters: `kernel_optimizer` (`forge` or `geak`), `tp`, `conc`, `isl`, and
-`osl`. For example:
+`GET /v1/kb/{canonical_id}/views/hyperloom-recipe`. The scope depends on the
+canonical identity scheme:
+
+- `inference:` uses `kernel_optimizer` (`forge` or `geak`), `tp`, `conc`,
+  `isl`, and `osl`.
+- `agentx:` uses `kernel_optimizer`, `tp`, and `conc`; fixed-length ISL/OSL
+  placeholders are neither queried nor persisted in `workload_shape`.
+
+For example:
 
 ```text
+# InferenceX
 /v1/kb/{canonical_id}/views/hyperloom-recipe?kernel_optimizer=forge&tp=8&conc=64&isl=1024&osl=256
+
+# AgentX
+/v1/kb/{canonical_id}/views/hyperloom-recipe?kernel_optimizer=forge&tp=8&conc=64
 ```
 
 The same scope is required for scoped session rollup reads and is included in
 Recipe writes and champion updates. Hyperloom derives it from the current
-session state; if the optimizer is unsupported or a numeric dimension is not
-positive, remote warm-start is skipped with `recipe_scope_invalid` instead of
-failing the optimization run.
+session state. If the optimizer is unsupported, `tp`/`conc` are non-positive,
+or an InferenceX `isl`/`osl` is absent or non-positive, warm start is disabled
+with `recipe_scope_invalid` and CLOSE publication records
+`invalid_recipe_scope` instead of failing the optimization run.
 
 Remote mode uses `/v1/kb/search` for bounded seven-tuple fallback. It downloads
 the selected session's exact file manifest and replays one combined Recipe:
