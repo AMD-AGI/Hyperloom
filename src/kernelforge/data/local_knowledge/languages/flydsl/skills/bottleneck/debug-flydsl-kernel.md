@@ -65,7 +65,10 @@ inv_sum  = fx.Float32(1.0) / safe_sum
 ```
 
 ### Locate it from the host
-Do not guess which buffer went bad — print them:
+Do not guess which buffer went bad — print them. Probes like these are for a scratch copy under
+`forge_experiments/`, or for a driver script you delete afterwards; a submitted kernel carries no
+`print`, and a probe left behind reads to the next session as something the operator is supposed to
+emit:
 
 ```python
 torch.cuda.synchronize()
@@ -75,7 +78,8 @@ print(f"temp_out   nan={temporary_output.isnan().sum()}")
 ```
 
 The first buffer in the chain that contains NaN is where to look. A NaN in `max_logits` and a NaN in
-`temp_out` are different bugs.
+`temp_out` are different bugs. When the bug is found, the fix goes into the kernel and the probes do
+not.
 
 ---
 

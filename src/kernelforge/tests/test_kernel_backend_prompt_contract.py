@@ -87,16 +87,26 @@ def forge_loop_prompts(monkeypatch):
 # hipblaslt, since the word now has a defined meaning beside it; and hipblaslt
 # gained the paragraph it had never rendered despite three stop conditions
 # resting on it.
+# Sending the sweep to a copy moved the eight source backends and left assembly
+# byte-identical, which is the expected shape: the two edits are both in the
+# shared prompt_utils.py preamble, and assembly renders neither card. Diffed
+# line by line -- twenty lines in each of the eight, and the changed content is
+# one identical block in all of them (same md5 over the diff bodies). The
+# edit-surface bullet gained the converse it had always implied but never said
+# (reaching someone else's environment constant is in scope, authoring a new
+# read in the deliverable is not), and the sweep bullet moved the knobs into a
+# copy under forge_experiments/ and replaced "KEEP the knobs ... strip at
+# submission" with what the submitted kernel carries instead.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "3535633aa83c8cf725211c1d6ceb8bb50dbd50884f78dba434fdccf8a21e1d21",
+    "aiter": "4998333601ec64f50f489f991ba6a8a3bd8884bf6489ad05b45dca5fb1e0c9d0",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "2b3728b0d546a9e16427f1881d1c316bd0243ef57aeea2253bde566e7a92435f",
-    "flydsl": "f65b1f31f2f4c881ab9a19e96a66140aa0608a06090793f6f4123a583eedfdbb",
-    "fusion": "cf383be0c7c747629dca1490a77de6c77c540b9f5fe74d2a53d5c9e5f5223f52",
-    "gluon": "4b20a6be3cb41188ef76339920c01114c7f78e5a81f3a7c87fbc5c728ac328d2",
-    "hip": "e8867227a644afee37b6fa96c7578376e9141f522236b5ebaa0cc2a9a0b83a8d",
-    "hipblaslt": "0a5a2dc43b8ee3c8598a04b975c50ec7158219cb929b37d72da8071c75d9a11a",
-    "triton": "3acb6da27c977cbd18c3dd138cf5beb1e75a2d5710d7af63998110c5f6cae187",
+    "ck": "ced4d49611f49aaf9cc83dbfd6503a96d134cb635e9c2f293b2aa4eac41e8432",
+    "flydsl": "f0e3277302f47ab8588c366a457008932094f17ad59b3421eed4a719ad21e193",
+    "fusion": "f8dff507ff548abd7887bd5482e58fef11be1ee0907680e112f442e46e3bb3d5",
+    "gluon": "6c14947fa8acc317a280b9fbb4dea22a9e21ad145a669db1242d6e690b35e125",
+    "hip": "5b3732328ff0e5c3f341236677ff409dc5a10851bb874ab4566378fa2f8217ba",
+    "hipblaslt": "0025272647704539649c243fd756d4433f0e0f73c77b4b5341985f69f780c0c6",
+    "triton": "14d0f939891735764ed7d425134b527adbdcd3a6c52f82be8331f465b9ace8e7",
 }
 
 
@@ -232,18 +242,25 @@ class TestEditSurfaceAndSweepContract:
                 f"{backend}: prompt does not warn that a bool-cast swept string is always True"
             )
 
-    def test_no_kernel_backend_tells_the_implementer_to_collapse_the_knobs(self, source_loop_prompts):
-        """A knob deleted mid-campaign is an axis no later session re-opens."""
+    def test_every_kernel_backend_keeps_sweep_plumbing_out_of_what_it_submits(self, source_loop_prompts):
+        """Sweep knobs are scaffolding for the copy; the kernel that ships carries the literal they picked.
+
+        The prompt used to say the opposite -- keep the knobs in the source for the whole search, strip them at
+        submission if anyone asks. Nobody asked, so every campaign delivered its scaffolding: sixty environment reads
+        and three hundred echo lines in one shipped kernel, indistinguishable to a reader from live configuration.
+        Sending the sweep to a copy costs the search nothing and is the only version of the rule that holds without a
+        cleanup step somebody has to remember.
+        """
         for backend, prompt in source_loop_prompts.items():
             lowered = prompt.lower()
-            assert "collapse the knobs back" not in lowered, (
-                f"{backend}: prompt still tells the implementer to delete its own sweep knobs"
+            assert "keep the knobs" not in lowered, (
+                f"{backend}: prompt still tells the implementer to ship its own sweep knobs"
             )
-            assert "dead weight in the delivered kernel" not in lowered, (
-                f"{backend}: prompt still calls a shipped sweep knob dead weight"
+            assert "a copy of the kernel" in lowered, (
+                f"{backend}: prompt does not send the sweep to a copy"
             )
-            assert "keep the knobs" in lowered, (
-                f"{backend}: prompt does not tell the implementer to keep the sweep knobs through the search"
+            assert "winning literal" in lowered, (
+                f"{backend}: prompt does not say the submitted kernel carries the literal, not the read"
             )
 
     def test_sweep_contract_is_not_owned_by_one_kernel_backend(self):
