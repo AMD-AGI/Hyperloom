@@ -450,7 +450,6 @@ def test_materialize_config_with_envs_no_clamp_when_visible_zero(
 
 # BaselineExecutor.__call__ end-to-end (subprocess mocked)
 def _fake_workspace(slot: Path, *, tput: float = 1500.0) -> Path:
-
     import json
 
     ws = slot / "benchmark_sglang_20260513_010101"
