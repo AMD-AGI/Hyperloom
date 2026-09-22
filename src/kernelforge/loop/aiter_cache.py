@@ -52,8 +52,6 @@ class AiterCacheIsolation:
     owner_pid: int
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_text(path, json.dumps(payload, sort_keys=True))
 
 
 def configure_aiter_cache_isolation(
@@ -82,18 +80,21 @@ def configure_aiter_cache_isolation(
     _seed_flydsl_cache(flydsl_cache_dir)
     owner_file = cache_root / _OWNER_FILE
     owner_pid = os.getpid()
-    _atomic_write_json(
+    atomic_write_text(
         owner_file,
-        {
-            "schema_version": 1,
-            "owner_pid": owner_pid,
-            "created_unix": time.time(),
-            "aiter_root_dir": str(aiter_root_dir),
-            "aiter_jit_dir": str(aiter_jit_dir),
-            "flydsl_cache_dir": str(flydsl_cache_dir),
-            "max_cache_bytes": policy.max_bytes,
-            "target_cache_bytes": policy.target_bytes,
-        },
+        json.dumps(
+            {
+                "schema_version": 1,
+                "owner_pid": owner_pid,
+                "created_unix": time.time(),
+                "aiter_root_dir": str(aiter_root_dir),
+                "aiter_jit_dir": str(aiter_jit_dir),
+                "flydsl_cache_dir": str(flydsl_cache_dir),
+                "max_cache_bytes": policy.max_bytes,
+                "target_cache_bytes": policy.target_bytes,
+            },
+            sort_keys=True,
+        ),
     )
 
     # cpp_itfs uses AITER_ROOT_DIR/build while compile_ops uses AITER_JIT_DIR/build.
@@ -290,17 +291,20 @@ def activate_aiter_cache_for_sources(
     owner_pid = os.getpid()
     now = time.time()
     existing_owner = _read_owner(owner_file)
-    _atomic_write_json(
+    atomic_write_text(
         owner_file,
-        {
-            "schema_version": 1,
-            "owner_pid": owner_pid,
-            "created_unix": existing_owner.get("created_unix", now),
-            "last_used_unix": now,
-            "aiter_root_dir": str(aiter_root_dir),
-            "aiter_jit_dir": str(aiter_jit_dir),
-            "flydsl_cache_dir": str(flydsl_cache_dir),
-        },
+        json.dumps(
+            {
+                "schema_version": 1,
+                "owner_pid": owner_pid,
+                "created_unix": existing_owner.get("created_unix", now),
+                "last_used_unix": now,
+                "aiter_root_dir": str(aiter_root_dir),
+                "aiter_jit_dir": str(aiter_jit_dir),
+                "flydsl_cache_dir": str(flydsl_cache_dir),
+            },
+            sort_keys=True,
+        ),
     )
     os.environ["AITER_ROOT_DIR"] = str(aiter_root_dir)
     os.environ["AITER_JIT_DIR"] = str(aiter_jit_dir)

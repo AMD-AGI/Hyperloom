@@ -70,8 +70,6 @@ def _git(workspace: str | Path, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(workspace), *args, check=False)
 
 
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _infer_framework(spec: RewriteSpec, explicit: str) -> str:
@@ -504,7 +502,7 @@ def _snapshot_failure(
     atomic_write_text(root / "partial.patch", partial.stdout or "")
     atomic_write_text(root / "status.txt", status.stdout or "")
     atomic_write_text(root / "error.txt", error + "\n")
-    _atomic_write_json(root / "progress.json", {"events": progress_log})
+    atomic_write_text(root / "progress.json", json.dumps({"events": progress_log}, indent=2, sort_keys=True) + "\n")
     return str(root)
 
 
@@ -667,14 +665,11 @@ def _publish_patch(
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
             "Framework integration validation is intentionally pending in Hyperloom.\n",
         )
-        _atomic_write_json(
-            temporary / "benchmark.json",
-            {
+        atomic_write_text(temporary / "benchmark.json", json.dumps({
                 "source_ms": source_ms,
                 "flydsl_best_ms": flydsl_best_ms,
-            },
-        )
-        _atomic_write_json(temporary / "publication.json", manifest)
+            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(temporary / "publication.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         files_root = temporary / "files"
         files_root.mkdir(parents=True, exist_ok=True)
         for relative in changed_files:
@@ -702,8 +697,8 @@ def _publish_patch(
 
     # The bundle is complete on disk before either pointer becomes readable, so a hard kill can only leave the
     # previous publication or nothing at all.
-    _atomic_write_json(manifest_path, manifest)
-    _atomic_write_json(result_path, manifest)
+    atomic_write_text(manifest_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(result_path, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return (
         str(version / "forge.patch"),
         str(manifest_path),
