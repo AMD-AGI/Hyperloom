@@ -318,6 +318,8 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
                 task = await self._enqueue_internal_analysis_task(
                     reason="cycle_start",
                 )
+                if task is None:
+                    return
                 self.shared_state.auto_roofline_pending_task_id = task.task_id
                 log.info(
                     "cycle %d start: forced reprofile task=%s",

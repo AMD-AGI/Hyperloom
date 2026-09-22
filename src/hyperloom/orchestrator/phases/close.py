@@ -88,6 +88,8 @@ class ClosePhase(PhaseHandler):
             # Roofline disabled for this run; nothing to profile.
             return
         task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
+        if task is None:
+            return
         log.info(
             "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
             task.task_id,

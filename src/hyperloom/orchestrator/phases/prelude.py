@@ -2644,6 +2644,8 @@ class PreludePhase(PhaseHandler):
             rl_task = await self._enqueue_internal_analysis_task(
                 reason="prelude_initial",
             )
+            if rl_task is None:
+                return
             state.auto_roofline_pending_task_id = rl_task.task_id
             log.info(
                 "PRELUDE: baseline landed (tput=%.2f); auto-enqueued initial %s task=%s",
@@ -2667,11 +2669,26 @@ class PreludePhase(PhaseHandler):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> Task:
-        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>."""
+    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> "Task | None":
+        """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key
+        internal-analysis-<reason>. Returns None when the stack cannot produce a GPU trace for it to analyze.
+        """
         from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 
         state = self.shared_state
+        unsupported = str(getattr(state, "gpu_trace_unsupported_reason", "") or "")
+        if unsupported:
+            log.error(
+                "internal-analysis (%s): not enqueued -- %s; relying on static-source evidence for the rest of "
+                "the session",
+                reason,
+                unsupported,
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
+            )
+            return None
         kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
