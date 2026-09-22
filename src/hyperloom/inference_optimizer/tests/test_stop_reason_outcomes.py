@@ -29,7 +29,13 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 )
 def test_the_outcome_vocabulary_is_stable(stop_reason, expected):
     """The categories a reader already relies on keep their answers."""
-    assert sr.outcome_status(stop_reason) == expected
+    assert sr.outcome_status(stop_reason, baseline_tput=1.0) == expected
+
+
+def test_a_success_shaped_reason_needs_a_baseline_measurement_to_read_completed():
+    """time_exhausted with no measurement ever produced is not a completed run."""
+    assert sr.outcome_status("target_reached", baseline_tput=0.0) == "failed"
+    assert sr.outcome_status("time_exhausted", baseline_tput=0.0) == "failed"
 
 
 def test_a_host_fault_is_infrastructure_not_a_verdict_about_the_model():

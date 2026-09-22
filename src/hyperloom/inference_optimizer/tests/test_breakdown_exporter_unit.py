@@ -198,7 +198,7 @@ def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
     assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
     assert stop_reasons.outcome_status("supervisor_coordinator_died") == "aborted"
     assert stop_reasons.outcome_status("supervisor_tick_stalled") == "aborted"
-    assert stop_reasons.outcome_status("robustness_escalated") == "completed"
+    assert stop_reasons.outcome_status("robustness_escalated", baseline_tput=1.0) == "completed"
 
 
 def test_write_minimal_final_json_idempotent(tmp_path):

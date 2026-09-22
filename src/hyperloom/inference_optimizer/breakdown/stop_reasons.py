@@ -49,19 +49,24 @@ MODEL_GATE_STOP_REASONS: frozenset[str] = frozenset(
 )
 
 
-def outcome_status(stop_reason: str) -> str:
+def outcome_status(stop_reason: str, baseline_tput: float = 0.0) -> str:
     """Map a terminal ``stop_reason`` onto the outcome vocabulary.
 
     Args:
         stop_reason: The session's terminal stop reason; empty while it runs.
+        baseline_tput: The session's baseline throughput measurement, if any.
+            A success-shaped stop reason with no baseline measurement means
+            the run never produced anything to grade, so it is downgraded to
+            ``failed`` regardless of how it stopped.
 
     Returns:
-        str: ``completed`` when the run closed normally, ``aborted`` when
-        something other than a verdict ended it -- including a fault in the
-        host -- and ``failed`` otherwise.
+        str: ``completed`` when the run closed normally with at least one
+        baseline measurement, ``aborted`` when something other than a
+        verdict ended it -- including a fault in the host -- and ``failed``
+        otherwise.
     """
     if stop_reason in SUCCESS_STOP_REASONS:
-        return "completed"
+        return "completed" if baseline_tput > 0 else "failed"
     if not stop_reason or stop_reason in ABORTED_STOP_REASONS or stop_reason in INFRASTRUCTURE_STOP_REASONS:
         return "aborted"
     return "failed"
