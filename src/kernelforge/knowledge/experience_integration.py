@@ -1044,7 +1044,7 @@ def kb_warmstart(
             "read_error": "",
         }
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         try:
@@ -1404,7 +1404,7 @@ def write_experience_to_kb(
             snr_db = snr_db_override
 
         kernel_source = ""
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError):
             kernel_source = Path(kernel).read_text(errors="replace")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
