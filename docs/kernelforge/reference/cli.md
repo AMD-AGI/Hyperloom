@@ -415,18 +415,21 @@ published report carries the analyst's own derivation — formulas, figures used
 and assumptions — because nothing recomputes the latencies and that document is
 the only record of how they were reached.
 
-Those hardware figures are a property of the machine, not of the operator, so
-they are established once and read thereafter, in this order:
+Those hardware figures are a property of the machine, not of the operator or of
+the day, so they are looked up rather than measured at run time:
 
 | `peak_source` | Where the figures came from |
 |:--|:--|
-| `roof_only_empirical` | Measured on this box by `rocprof-compute --roof-only`, then cached per machine — including partition mode, since slicing a card changes what one slice reaches. |
-| `reference_profile` | Measured on a reference card of the same architecture, device and partition, shipped with the package. For a host without `rocprof-compute` this is far better than a datasheet, and the report says the figures are not this box's. |
-| `datasheet` | Vendor peaks. An absolute lower bound no implementation reaches — roughly a factor of two below achievable, and the factor varies by instruction path, so cases of different dtypes stop being comparable. |
+| `reference_profile` | A committed device profile, measured on a card of this architecture, device and partition mode, then reviewed. The ordinary source. |
+| `datasheet` | Vendor peaks, for a machine no profile covers. An absolute lower bound no implementation reaches — roughly a factor of two below achievable, so attainment against it reads far too low and an attainment target will never be met. |
 
-Shipped reference profiles live in `kernelforge/data/roofline_ceiling/device_profiles/`
-and record when, with which tool versions, and under which partition and power
-cap they were measured, plus any figure their author did not trust.
+Device profiles live in `kernelforge/data/roofline_ceiling/device_profiles/` and
+record when, with which tool versions, and under which partition and power cap
+they were measured, plus any figure their author did not trust. Adding a machine
+means measuring it once and committing the result: see
+[device profiles](device-profiles.md) for the procedure, which is worth
+following exactly — nothing cross-checks a committed figure, and a roof that
+reads low makes the ceiling too loose, so an attainment target fires early.
 
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.
@@ -440,16 +443,12 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
 | `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
-| `--device <n>` | `0` | GPU ordinal to measure and profile on. |
-| `--roof-only` / `--no-roof-only` | on | Measure this box's roofs with `rocprof-compute --roof-only` the first time, and cache them per machine. Roofs do not depend on the operator, so later campaigns on the same box read the cached profile instead of remeasuring. |
-| `--remeasure-device` | off | Measure this box's roofs again rather than reading the cached profile. Use after a ROCm upgrade, a partition change or a power-cap change. |
-| `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The key includes `peak_source` and the roof figures themselves, so neither a datasheet answer nor one derived from peaks the box no longer reports is served to a caller who asked for a current measured one. |
+| `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The key includes `peak_source` and the roof figures themselves, so an answer derived from roofs that have since been re-committed is retired rather than served. |
 | `--op-name <name>` | workspace name | Operator name used in the cache identity. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
 | `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
-| `--roof-timeout-sec <s>` | `3600` | Wall-clock budget for the `--roof-only` microbenchmarks. |
 
 The result dict (`ideal_ms` per case, `bound`, `arch`, `peak_source`,
 `confidence`) is printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__`

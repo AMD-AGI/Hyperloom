@@ -1,20 +1,26 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Datasheet hardware peaks, used only when an empirical roof is unavailable.
+"""Datasheet hardware peaks, the last resort behind the shipped device profiles.
 
-These are vendor peaks. No implementation reaches them: the packaged knowledge
-base says so in as many words (``hardware/mi350_matrix_core.md``: "Conflating
-peak with achievable -- ~45-55% of peak is the practical ceiling";
-``hardware/mi350_memory.md``: "Quoting HBM peak as achievable -- sustained is
-below 8.0 TB/s"). A ceiling computed from this table is therefore an absolute
-lower bound on latency, not an achievable target, and every consumer has to be
-able to tell the two apart -- which is what :data:`PEAK_SOURCE_DATASHEET` on the
-resolved hardware record is for.
+These are vendor peaks, transcribed here as literals: nothing at run time reads
+the knowledge-base cards cited below, they are recorded only so a figure can be
+traced to where it came from.
 
-The empirical path (``rocprof-compute --roof-only``) is the default and measures
-this box. This table exists so a host without a working profiler still produces
-a number, clearly labelled.
+No implementation reaches them. The packaged knowledge base says so in as many
+words (``hardware/mi350_matrix_core.md``: "Conflating peak with achievable --
+~45-55% of peak is the practical ceiling"; ``hardware/mi350_memory.md``:
+"Quoting HBM peak as achievable -- sustained is below 8.0 TB/s"). A ceiling
+computed from this table is therefore an absolute lower bound on latency rather
+than an achievable target, and attainment measured against it reads far below
+what the kernel deserves -- so a campaign with an attainment target will never
+reach it. That is the intended failure: running too long is recoverable, and
+stopping early on a roof nobody checked is not.
+
+The ordinary source is a shipped device profile in
+:mod:`~kernelforge.roofline_ceiling.device_profile`, measured on a real card of
+the configuration it claims. This table is what answers for a machine no
+profile covers.
 
 Peaks are keyed by *instruction path*, not by dtype, because the two are not the
 same question. An A16W4 kernel that unpacks to BF16 MFMA runs at the BF16 rate
@@ -28,27 +34,17 @@ from dataclasses import dataclass, field
 
 #: ``hardware.peak_source`` value for a peak read off this table.
 PEAK_SOURCE_DATASHEET = "datasheet"
-#: ``hardware.peak_source`` value for a peak measured on this box, either by
-#: ``--roof-only`` during this run or by an earlier run that cached it.
-PEAK_SOURCE_EMPIRICAL = "roof_only_empirical"
-#: ``hardware.peak_source`` value for a peak measured on another card of the
-#: same configuration and shipped with the package. Better than a datasheet,
-#: and distinguished from a local measurement because it is not one.
+#: ``hardware.peak_source`` value for a peak taken from a shipped device
+#: profile: measured on a real card of this configuration, reviewed, and
+#: committed. This is the ordinary source -- nothing measures at run time.
 PEAK_SOURCE_REFERENCE = "reference_profile"
 
 #: What each source means, in one phrase, for every reader that has to say so.
-#:
-#: Centralized because the three sources are not two. Describing anything that
-#: is not a local measurement as "vendor datasheet" tells a reader holding a
-#: reference-card ceiling that its peaks are roughly twice what the chip
-#: sustains, when they were measured on the chip -- and every consumer that
-#: branched on "is it empirical" rather than "which source is it" made exactly
-#: that substitution.
+#: Centralized so no consumer has to re-derive the distinction and get it wrong.
 _PEAK_SOURCE_MEANING = {
-    PEAK_SOURCE_EMPIRICAL: "measured on this box by rocprof-compute --roof-only",
     PEAK_SOURCE_REFERENCE: (
-        "measured on a reference card of this same architecture, device and partition mode, "
-        "not on this box; clocks, power cap and cooling move these figures by a few percent"
+        "measured on a card of this same architecture, device and partition mode, then "
+        "reviewed and committed; clocks, power cap and cooling move these figures by a few percent"
     ),
     PEAK_SOURCE_DATASHEET: (
         "vendor datasheet, measured on no card; an absolute lower bound on latency, "
@@ -69,7 +65,7 @@ class ArchSpec:
     Only HBM is carried. The cache levels have no datasheet figure worth
     quoting -- the knowledge base gives Infinity Cache a latency and no
     bandwidth -- and inventing one would be worse than the analyst knowing it
-    has none. ``--roof-only`` measures them; the datasheet path says it cannot.
+    has none. A measured device profile carries them; this table says it cannot.
     """
 
     arch: str
@@ -129,12 +125,32 @@ _GFX942 = ArchSpec(
 
 _ARCH_SPECS: dict[str, ArchSpec] = {spec.arch: spec for spec in (_GFX950, _GFX942)}
 
+#: Instruction-path pairs an architecture is documented to run at one rate, so
+#: a committed profile reporting them apart has transcribed a profiler artifact.
+#:
+#: Listed explicitly rather than inferred from equal datasheet peaks. The
+#: datasheet groups by theoretical peak, and measured throughput within a group
+#: legitimately differs -- on gfx950 the table rates fp4 and fp6 together at
+#: 10 PF while a real card measures 9.77 and 8.34 PF, which is a property of the
+#: chip and not a mistake. Only a pair the vendor states as a single rate can
+#: carry the inference, and for gfx950 and gfx942 the knowledge base states
+#: exactly one: "FP16/BF16 2.5 PF" and "FP16/BF16 1307 TF" are each one entry.
+EQUAL_RATE_PATHS: dict[str, tuple[tuple[str, str], ...]] = {
+    "gfx950": (("bf16_mfma", "fp16_mfma"),),
+    "gfx942": (("bf16_mfma", "fp16_mfma"),),
+}
+
+
+def equal_rate_paths(arch: str) -> tuple[tuple[str, str], ...]:
+    """Instruction-path pairs ``arch`` is documented to run at a single rate."""
+    return EQUAL_RATE_PATHS.get(str(arch or "").strip().lower(), ())
+
 #: Every instruction path the analyst may name, whether or not this module
 #: carries a datasheet peak for it. The vector and SFU paths are here because
 #: the guide is explicit that scalar and transcendental work must not be priced
-#: at the MFMA rate; ``--roof-only`` measures them, the datasheet table does not,
-#: and a run that falls back to the datasheet reports the resulting gap rather
-#: than borrowing a neighbouring rate.
+#: at the MFMA rate; a measured device profile carries them, the datasheet table
+#: does not, and a run that falls back to the datasheet reports the resulting
+#: gap rather than borrowing a neighbouring rate.
 #:
 #: A path outside this set is never silently mapped onto a neighbour. Guessing
 #: is precisely how an A16W4 kernel that unpacks to BF16 ends up measured against
@@ -172,12 +188,13 @@ def supported_arches() -> tuple[str, ...]:
 
 __all__ = [
     "CANONICAL_INSTRUCTION_PATHS",
+    "EQUAL_RATE_PATHS",
     "KNOWN_INSTRUCTION_PATHS",
     "PEAK_SOURCE_DATASHEET",
-    "PEAK_SOURCE_EMPIRICAL",
     "PEAK_SOURCE_REFERENCE",
     "ArchSpec",
     "arch_spec",
+    "equal_rate_paths",
     "peak_source_meaning",
     "supported_arches",
 ]

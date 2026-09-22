@@ -14,7 +14,7 @@ import pytest
 from kernelforge import cli as cli_module
 from kernelforge.roofline_ceiling.contract import Hardware, build_report
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR, publish
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_REFERENCE
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
@@ -32,7 +32,7 @@ def _report(cases=(("decode-t1", 12.8),)):
             arch="gfx950",
             peak_flops={"bf16_mfma": 1.686e15},
             bandwidth={"hbm": 6.24e12},
-            peak_source=PEAK_SOURCE_EMPIRICAL,
+            peak_source=PEAK_SOURCE_REFERENCE,
             dispatch_floor_s=3.0e-6,
         ),
         expected_case_ids=[case_id for case_id, _ in cases],

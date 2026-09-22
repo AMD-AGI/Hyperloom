@@ -17,7 +17,6 @@ from kernelforge.roofline_ceiling.contract import (
 )
 from kernelforge.roofline_ceiling.specs import (
     PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_EMPIRICAL,
     PEAK_SOURCE_REFERENCE,
 )
 
@@ -39,7 +38,7 @@ def _hardware(**overrides) -> Hardware:
         "arch": "gfx950",
         "peak_flops": {"bf16_mfma": 1.686e15},
         "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12, "l2": 34.5e12},
-        "peak_source": PEAK_SOURCE_EMPIRICAL,
+        "peak_source": PEAK_SOURCE_REFERENCE,
         "dispatch_floor_s": 3.0e-6,
     }
     base.update(overrides)
@@ -186,13 +185,13 @@ def test_datasheet_peaks_add_the_caveat_that_says_so():
     assert any("absolute lower bound" in caveat for caveat in report.caveats)
 
 
-def test_reference_peaks_say_they_came_from_another_card():
-    """Measured, so not the datasheet warning -- but not this box's, so not silence either."""
+def test_profile_peaks_say_they_were_not_taken_on_this_box_today():
+    """Measured, so not the datasheet warning -- but committed, so not silence either."""
     report = _build(_payload(), hardware=_hardware(peak_source=PEAK_SOURCE_REFERENCE))
 
-    assert any("not from this box" in caveat for caveat in report.caveats)
+    assert any("not from this box on this day" in caveat for caveat in report.caveats)
     assert not any("absolute lower bound" in caveat for caveat in report.caveats)
-    assert report.hardware.is_measured and not report.hardware.is_empirical
+    assert report.hardware.is_measured
 
 
 def test_an_unmeasured_dispatch_floor_is_declared_rather_than_absorbed():
@@ -237,7 +236,7 @@ def test_a_published_report_round_trips():
     assert restored.ideal_ms() == original.ideal_ms()
     assert restored.analysis_md == original.analysis_md
     assert restored.hardware.bandwidth == original.hardware.bandwidth
-    assert restored.hardware.peak_source == PEAK_SOURCE_EMPIRICAL
+    assert restored.hardware.peak_source == PEAK_SOURCE_REFERENCE
 
 
 def test_a_report_from_the_stage_model_era_is_refused_rather_than_misread():

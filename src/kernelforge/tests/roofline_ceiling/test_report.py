@@ -20,7 +20,7 @@ from kernelforge.roofline_ceiling.report import (
     render_for_prompt,
     store_in_cache,
 )
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_REFERENCE
 
 _ANALYSIS = """# Performance ceiling analysis
 
@@ -36,7 +36,7 @@ are counted once, for the experts this case actually activates.
 """
 
 
-def _hardware(peak_source: str = PEAK_SOURCE_EMPIRICAL) -> Hardware:
+def _hardware(peak_source: str = PEAK_SOURCE_REFERENCE) -> Hardware:
     return Hardware(
         arch="gfx950",
         peak_flops={"bf16_mfma": 1.686e15},
@@ -46,7 +46,7 @@ def _hardware(peak_source: str = PEAK_SOURCE_EMPIRICAL) -> Hardware:
     )
 
 
-def _report(peak_source: str = PEAK_SOURCE_EMPIRICAL, case_ids=("c0",)):
+def _report(peak_source: str = PEAK_SOURCE_REFERENCE, case_ids=("c0",)):
     payload = {
         "cases": [{"case_id": case_id, "t_ideal_ms": 12.8, "bound": "memory"} for case_id in case_ids],
         "confidence": "medium",
@@ -83,13 +83,13 @@ def test_the_cache_key_separates_a_measured_ceiling_from_a_datasheet_one():
     silent degrade the whole module is built to prevent."""
     common = {"canonical_id": "roofline-ceiling:op:gfx950", "case_ids": ["c0"], "arch": "gfx950"}
 
-    assert cache_key(**common, peak_source=PEAK_SOURCE_EMPIRICAL) != cache_key(
+    assert cache_key(**common, peak_source=PEAK_SOURCE_REFERENCE) != cache_key(
         **common, peak_source=PEAK_SOURCE_DATASHEET
     )
 
 
 def test_the_cache_key_moves_when_the_scored_case_set_does():
-    common = {"canonical_id": "roofline-ceiling:op:gfx950", "arch": "gfx950", "peak_source": PEAK_SOURCE_EMPIRICAL}
+    common = {"canonical_id": "roofline-ceiling:op:gfx950", "arch": "gfx950", "peak_source": PEAK_SOURCE_REFERENCE}
 
     assert cache_key(**common, case_ids=["c0"]) != cache_key(**common, case_ids=["c0", "c1"])
 
