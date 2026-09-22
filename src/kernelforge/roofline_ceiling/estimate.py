@@ -3,7 +3,7 @@
 
 """One ceiling estimate, end to end, for every caller that wants one.
 
-Settle the evidence, run the analyst, publish the report. The CLI wraps this
+Settle the evidence, run the analyst, hand back what it wrote. The CLI wraps this
 and so does the optimization loop, because two orchestrations of the same three
 steps would drift.
 
@@ -27,8 +27,8 @@ from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.evidence import collect_evidence
 from kernelforge.roofline_ceiling.report import (
     EVIDENCE_DIRNAME,
+    REPORT_FILENAME,
     WORKSPACE_SUBDIR,
-    publish,
 )
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
@@ -51,11 +51,6 @@ class CeilingOutcome:
     notes: tuple[str, ...] = field(default=())
 
 
-def canonical_id_for(operator: str, arch: str) -> str:
-    """The cache identity of one operator's ceiling on one architecture."""
-    return f"roofline-ceiling:{operator}:{arch or 'unknown'}"
-
-
 async def estimate_ceiling(
     backend: Any,
     *,
@@ -65,7 +60,6 @@ async def estimate_ceiling(
     driver_script: str = "",
     case_params: Mapping[str, Any] | None = None,
     output_dir: str | Path | None = None,
-    op_name: str = "",
     arch: str = "",
     known_case_ids: Sequence[str] | None = None,
     known_case_ms: Mapping[str, float] | None = None,
@@ -74,7 +68,7 @@ async def estimate_ceiling(
     run_timeout_sec: float = 1800.0,
     project_root: str | Path | None = None,
 ) -> CeilingOutcome:
-    """Estimate, publish and return the per-shape ceiling for one kernel.
+    """Estimate and return the per-shape ceiling for one kernel.
 
     ``known_case_ids`` / ``known_case_ms`` skip the case-discovery run for a
     caller that has already benched the kernel. Raises
@@ -101,13 +95,10 @@ async def estimate_ceiling(
             "produce a ceiling for; see " + str(artifacts / "performance_run.log")
         )
 
-    operator = op_name.strip() or root.name
-    canonical_id = canonical_id_for(operator, evidence.identity.arch)
-
     report = await run_ceiling_analysis(
         backend,
-        canonical_id=canonical_id,
         workdir=str(root),
+        output_dir=destination,
         kernel_files=kernel_files,
         driver_script=driver_script,
         performance_command=performance_command,
@@ -121,7 +112,7 @@ async def estimate_ceiling(
 
     return CeilingOutcome(
         report=report,
-        report_path=publish(report, destination),
+        report_path=destination / REPORT_FILENAME,
         source=SOURCE_ANALYST,
         scored_case_ids=tuple(scored_cases),
         notes=evidence.notes,
@@ -132,6 +123,5 @@ __all__ = [
     "SOURCE_ANALYST",
     "CeilingOutcome",
     "NoScoredCasesError",
-    "canonical_id_for",
     "estimate_ceiling",
 ]

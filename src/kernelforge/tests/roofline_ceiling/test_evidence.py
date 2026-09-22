@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from kernelforge.roofline_ceiling import evidence as evidence_module
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
 from kernelforge.roofline_ceiling.evidence import discover_scored_cases, resolve_identity
@@ -23,18 +21,6 @@ def test_the_machine_is_named_so_the_analyst_measures_the_right_one(monkeypatch)
     identity = resolve_identity("gfx950")
 
     assert identity.slug() == "gfx950-mi355x-spx-nps1"
-
-
-def test_an_arch_with_no_published_peaks_is_refused_rather_than_left_unchecked(monkeypatch):
-    """Published peaks are what a reported roof gets checked against.
-
-    Without them the one guard on the denominator is gone, and an unchecked
-    roof that reads low stops a campaign early with the work half done.
-    """
-    monkeypatch.setattr(evidence_module, "describe_device", lambda _arch="": DeviceIdentity(arch="gfx1100"))
-
-    with pytest.raises(ValueError, match="no published peaks"):
-        resolve_identity("gfx1100")
 
 
 def test_marketing_names_resolve_to_the_arch_a_probe_reports(monkeypatch):

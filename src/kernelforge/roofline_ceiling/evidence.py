@@ -15,10 +15,10 @@ against the vendor's published peaks in
 :func:`~kernelforge.roofline_ceiling.contract.build_hardware`, which rejects a
 roof no card could reach.
 
-``peak_source`` is still a required field on the result. A ceiling against
-roofs measured on the box and one against recalled datasheet figures differ by
-an amount that varies per instruction path, so a consumer that cannot tell
-which it is holding has no number at all.
+Whether the roofs were measured or recalled is recorded by the analyst in the
+derivation it publishes. The gap between the two is not a fixed discount -- it
+varies per instruction path -- so a reader who needs to know reads the
+document rather than a field.
 """
 
 from __future__ import annotations
@@ -32,8 +32,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe_device
-from kernelforge.roofline_ceiling.specs import arch_spec, supported_arches
-from kernelforge.fusion.gpu_arch import canon_arch
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
@@ -157,21 +155,8 @@ def capture_kernel_trace(
 
 
 def resolve_identity(arch: str = "") -> DeviceIdentity:
-    """Name the machine the ceiling is for, so the analyst measures the right one.
-
-    Raises when the architecture is one this build carries no published peaks
-    for: those peaks are what :func:`build_hardware` checks the analyst's
-    measurements against, and an unchecked roof is the one failure mode that
-    stops a campaign early with the work half done.
-    """
-    identity = describe_device(arch)
-    resolved = identity.arch or canon_arch(arch)
-    if arch_spec(resolved) is None:
-        raise ValueError(
-            f"no published peaks for arch {resolved or '<undetected>'}, so a measured roof could not "
-            "be checked against anything; pass --arch with one of: " + ", ".join(sorted(supported_arches()))
-        )
-    return identity
+    """Name the machine the ceiling is for, so the analyst measures the right one."""
+    return describe_device(arch)
 
 
 def discover_scored_cases(

@@ -416,22 +416,17 @@ and assumptions — because nothing recomputes the latencies and that document i
 the only record of how they were reached.
 
 The hardware figures are the analyst's too. It measures them on the box during
-its session, with `rocprof-compute --roof-only` and a graph-timed dispatch
-probe, and reports what it established:
+its session — `rocprof-compute --roof-only` for the peaks and bandwidths, a
+graph-timed probe for the dispatch floor — and records what it established, and
+how, in the derivation. Nothing is cached and no measured figure is written to
+a shipped artifact: the roofs belong to the run that measured them.
 
-| `peak_source` | Where the figures came from |
-|:--|:--|
-| `measured_on_this_box` | Measured during the session. The ordinary source, and the only one worth an attainment target. |
-| `datasheet` | Recalled published peaks, after the profiler could not be reached. The gap to a real card is not a fixed discount — on gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix — so cases of different dtypes stop being comparable and attainment reads far too low to reach a target. |
-
-Nothing is cached and no measured figure is written to a shipped artifact: the
-roofs belong to the run that measured them. What the framework does keep is a
-check. A reported roof above the vendor's published peak cannot be a
-measurement, and two instruction paths the vendor rates as one must not arrive
-apart — the profiler halves bf16 against fp16, and left uncorrected every bf16
-ceiling is twice as loose as it should be. Either is refused outright rather
-than published, because a roof that reads low makes the ceiling too loose and
-an attainment target fire early.
+Recalled peaks are the fallback when no profiler can be reached, and the
+derivation has to say so. The gap to a real card is not a fixed discount — on
+gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix — so cases of
+different dtypes stop being comparable and attainment reads far too low to
+reach a target. That is the safe direction to fail in: a campaign runs longer
+than it needed to rather than stopping with the work half done.
 
 The analyst session therefore runs with a shell and may install what it needs.
 Every file in the workspace is snapshotted before it starts and restored after,
@@ -448,8 +443,7 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
-| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. An architecture with no published peaks is refused, since those peaks are what the analyst's measured roofs get checked against. |
-| `--op-name <name>` | workspace name | Operator name recorded on the report. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
@@ -460,11 +454,23 @@ else: `cases`, mapping each scored case id to its ideal latency in
 milliseconds, and `mean_ideal_ms`, the equal-weight mean across them — equal
 weight because that is how the campaign scores the suite.
 
-`performance_ceiling_analysis.md` beside it carries the derivation, the roofs
-it was taken against, whether those roofs were measured or recalled, and
-anything the validator objected to. Nothing recomputes the latencies, so that
-document is the whole of what a reader has when deciding whether to believe
-them.
+`performance_ceiling_analysis.md` beside it carries the derivation: the roofs
+the analyst measured and how, the per-case arithmetic, what bounds each shape,
+and every assumption. Nothing recomputes the latencies and nothing checks their
+arithmetic, so that document is the whole of what a reader has when deciding
+whether to believe them.
+
+Both files are written by the analyst itself. The framework reads the JSON back
+and checks one thing: whether it can be read as an answer — a non-empty `cases`
+object of finite positive latencies. A file that cannot is handed back once
+with the reason. A file that can is taken as given.
+
+The session therefore runs with a shell and a writable sandbox, because
+reaching a profiler on an arbitrary image means installing packages and that is
+open-ended work code cannot enumerate. Two things bound it: a pre-tool hook
+refuses edits outside the output and evidence directories, and the workspace
+guard snapshots every workspace file before the session and restores it after,
+so the kernel under optimization comes out as it went in.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
