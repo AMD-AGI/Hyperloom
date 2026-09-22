@@ -423,7 +423,9 @@ def _repair(runner, tmp_path, *, done_payload, kept):
     notes = []
     prep = sr._PreparedRun(workspace=tmp_path, worktree=tmp_path, worktree_base=tmp_path)
     ctx = SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={})
-    out = asyncio.run(
+    # The method returns (kept, regrounding); these tests assert on the patch
+    # list, and the grounding is checked by the caller-level tests instead.
+    out, _regrounding = asyncio.run(
         runner._repair_switch_manifest(
             ctx=ctx, prep=prep, done_payload=done_payload, kept=kept, notes=notes
         )

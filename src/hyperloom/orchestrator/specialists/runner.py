@@ -1296,7 +1296,9 @@ class SpecialistRunner:
         done_payload: dict[str, Any],
         kept: list[str],
         notes: list[str],
-    ) -> list[str]:
+        explicit_root: Path | None = None,
+        candidate_roots: tuple[Path, ...] = (),
+    ) -> tuple[list[str], list[dict[str, Any]] | None]:
         """Give the specialist one round to declare switches its patch gates on.
 
         A specialist that puts every rewrite behind an environment switch and
@@ -1321,14 +1323,25 @@ class SpecialistRunner:
                 whatever manifest the repair round declares.
             kept (list[str]): Patches that passed the safety gate.
             notes (list[str]): Audit notes, appended to.
+            explicit_root (Path | None): The grounding root the first vet resolved.
+                Re-vetting without it re-opens a question already answered, and
+                the answer changes: a patch that grounded cleanly against a
+                named root can come back ``missing target`` when the root has to
+                be guessed again. That silently emptied ``patches_written`` on a
+                run whose ``patch_grounding`` still read ``applies``, because the
+                two fields were written from different vets.
+            candidate_roots (tuple[Path, ...]): Roots the first vet considered,
+                reused for the same reason.
 
         Returns:
-            list[str]: ``kept``, re-vetted when the repair round touched the
-                patches, else unchanged.
+            tuple[list[str], list[dict[str, Any]] | None]: The patches, re-vetted
+                when the repair round touched them, and the grounding from that
+                re-vet -- ``None`` when no re-vet ran, so the caller keeps the
+                original. Returning it is what stops the two fields disagreeing.
         """
         workspace = prep.workspace
         if not kept or workspace is None or self.subprocess_dispatcher is None:
-            return kept
+            return kept, None
 
         declared, _ = _switch_manifest.parse_manifest(
             done_payload.get(_switch_manifest.MANIFEST_KEY)
@@ -1337,7 +1350,7 @@ class SpecialistRunner:
             [Path(p) for p in kept], declared
         )
         if not missing:
-            return kept
+            return kept, None
 
         done_path = self._done_path(workspace)
         # The done artifact is the exit signal the reaper polls for. Leaving it
@@ -1383,19 +1396,34 @@ class SpecialistRunner:
 
         # The round was told to edit the manifest, but it holds the worktree and
         # may have touched the patches to do it, so re-vet rather than trust.
+        regrounding: list[dict[str, Any]] | None = None
         if repair is not None and repair.patches:
             merged = list(dict.fromkeys(list(kept) + list(repair.patches)))
-            kept, _, _, _ = _patch_safety.vet_patches(
+            kept, _, regrounding, _ = _patch_safety.vet_patches(
                 merged,
                 base_checkout=prep.worktree_base or prep.worktree,
-                candidate_roots=_sibling_checkouts(
+                candidate_roots=candidate_roots
+                or _sibling_checkouts(
                     tuple(self.subprocess_config.framework_source_roots)
                     if self.subprocess_config
                     else (),
                     prep.worktree_base or prep.worktree,
                 ),
-                explicit_root="",
+                explicit_root=explicit_root,
             )
+            if not kept:
+                # The repair round only edits a manifest; a set that grounded a
+                # moment ago and does not now is a grounding fault, not the
+                # specialist withdrawing its work. Say so where the next reader
+                # looks, because the payload alone reads as "wrote no patches".
+                notes.append("switch_manifest_repair_dropped_all_patches:" + ",".join(merged[:8]))
+                log.warning(
+                    "specialist %s: re-vet after switch-manifest repair dropped every patch "
+                    "(%d before); grounding root=%r",
+                    ctx.task.task_id,
+                    len(merged),
+                    explicit_root,
+                )
 
         declared, _ = _switch_manifest.parse_manifest(
             done_payload.get(_switch_manifest.MANIFEST_KEY)
@@ -1419,7 +1447,7 @@ class SpecialistRunner:
             done_payload["problems"] = problems
         else:
             notes.append("switch_manifest_repaired:" + ",".join(missing[:8]))
-        return kept
+        return kept, regrounding
 
     async def _finalize(
         self,
@@ -1592,13 +1620,20 @@ class SpecialistRunner:
             )
         )
         # One chance to name the switches it gated on before it stops existing.
-        kept = await self._repair_switch_manifest(
+        # The grounding inputs go with it: the repair round may re-vet, and a
+        # re-vet that has to re-derive the root can drop a set the first vet
+        # kept.
+        kept, regrounding = await self._repair_switch_manifest(
             ctx=ctx,
             prep=prep,
             done_payload=done_payload,
             kept=kept,
             notes=notes,
+            explicit_root=explicit_root,
+            candidate_roots=candidate_roots,
         )
+        if regrounding is not None:
+            grounding = regrounding
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
         # proposal_set over these fields, which costs the round every idea the
