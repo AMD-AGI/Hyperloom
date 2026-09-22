@@ -150,7 +150,10 @@ def _infera_fanout_launch(
     print_logs: bool,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
-    script = _mn_cli._read_pod_script("launch_infera_node.py")
+    script = _mn_cli._read_bundled_pod_python_script(
+        "launch_infera_node.py",
+        deps=("_server_flag_denylist.py", "_sglang_shape_gate.py"),
+    )
     forward_env = _collect_forward_env()
     if forward_env:
         info(f"{label}: forwarding {len(forward_env)} tuning env vars to SSH child")
