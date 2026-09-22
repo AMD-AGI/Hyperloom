@@ -1264,3 +1264,153 @@ async def test_recipe_kb_t4_hook_degraded_is_complete_noop() -> None:
     )
 
     await Coordinator._recipe_kb_t4_hook(coordinator)
+
+
+@pytest.fixture
+def roofline_coord(coord):
+    from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
+    from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+    from hyperloom.orchestrator.state.shared_state import SharedState
+    from hyperloom.orchestrator.state.task_registry import TaskRegistry
+
+    coord.db = SqliteConnection(coord.session_dir / "roofline-close.db")
+    coord.tasks = TaskRegistry(coord.db)
+    coord.locks = ResourceLockManager(SqliteLeaseBackend(coord.db))
+    coord.sub = SubAgentRunner(coord.locks, coord.tasks)
+    coord.shared_state = SharedState(enable_roofline=True, optimization_stack=[{"action": "geak_e2e"}])
+    coord._dispatcher_poll_sec = 0.001
+    yield coord
+    coord.db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_roofline_retries_prior_failed_legs_and_reuses_success(roofline_coord):
+    from unittest.mock import AsyncMock
+
+    c = roofline_coord
+    execute = AsyncMock(return_value={"status": "ok"})
+    c.sub.register_executor("roofline", execute)
+    old_ids = []
+    for state in ("failed", "cancelled", "failed"):
+        task = await c._enqueue_internal_analysis_task(reason="close_post_opt")
+        await c.tasks.transition(task.task_id, "running")
+        await c.tasks.transition(task.task_id, state)
+        old_ids.append(task.task_id)
+    c.shared_state.current_best = {"extra_envs": {"VJEPA2_ATTN_IMPL": "aiter_triton"}}
+
+    await c._maybe_run_close_post_opt_roofline()
+    await c._maybe_run_close_post_opt_roofline()
+
+    execute.assert_awaited_once()
+    executed = execute.await_args.args[0].task
+    assert executed.task_id not in old_ids
+    assert executed.params["reason"] == "close_post_opt"
+    assert executed.params["base_extra_envs"]["VJEPA2_ATTN_IMPL"] == "aiter_triton"
+    assert executed.requires_lanes == list(ACTION_CATALOGUE["roofline"].requires_lanes)
+    assert (await c.tasks.get(executed.task_id)).state == "succeeded"
+    assert [(await c.tasks.get(task_id)).state for task_id in old_ids] == ["failed", "cancelled", "failed"]
+    assert not await c.locks.lane_holders()
+    assert not c.dispatcher._executions
+    await c.dispatcher.close_db_after_executions()
+
+
+@pytest.mark.asyncio
+async def test_close_roofline_waits_for_existing_execution(roofline_coord):
+    c = roofline_coord
+    entered, finish = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def execute(ctx):
+        calls.append(ctx.task.task_id)
+        entered.set()
+        await finish.wait()
+        return {"status": "ok"}
+
+    c.sub.register_executor("roofline", execute)
+    task = await c._enqueue_internal_analysis_task(reason="close_post_opt")
+    action = asyncio.create_task(c.run_task_registered(task))
+    await asyncio.wait_for(entered.wait(), 5)
+    close = asyncio.create_task(c._maybe_run_close_post_opt_roofline())
+    try:
+        await asyncio.sleep(0.01)
+        assert not close.done()
+    finally:
+        finish.set()
+        await asyncio.gather(action, close)
+    assert calls == [task.task_id]
+    assert not await c.locks.lane_holders()
+    await c.dispatcher.close_db_after_executions()
+
+
+@pytest.mark.asyncio
+async def test_close_roofline_timeout_does_not_terminalize_live_worker(roofline_coord, monkeypatch):
+    from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
+
+    c = roofline_coord
+    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
+    c.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC = 0.01
+    finish = asyncio.Event()
+
+    async def execute(_ctx):
+        await finish.wait()
+        return {"status": "ok"}
+
+    c.sub.register_executor("roofline", execute)
+    task = await c._enqueue_internal_analysis_task(reason="close_post_opt")
+    try:
+        await c._maybe_run_close_post_opt_roofline()
+        assert (await c.tasks.get(task.task_id)).state == "running"
+        assert await c.locks.lane_holders()
+        assert c.dispatcher._executions
+    finally:
+        finish.set()
+        await asyncio.gather(*c.dispatcher._executions)
+    assert (await c.tasks.get(task.task_id)).state == "succeeded"
+    assert not await c.locks.lane_holders()
+    assert not c.dispatcher._inflight_actions
+    await c.dispatcher.close_db_after_executions()
+
+
+@pytest.mark.asyncio
+async def test_resume_regenerates_close_reports_once_per_leg(roofline_coord, monkeypatch):
+    from hyperloom.inference_optimizer.cli.bootstrap import _begin_resume_leg
+    from hyperloom.orchestrator.actions.executors.report import ReportExecutor
+    from hyperloom.orchestrator.actions.executors.session_breakdown import SessionBreakdownExecutor
+    from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+
+    c = roofline_coord
+    c.sub = SubAgentRunner(c.locks, c.tasks, session_dir=c.session_dir, shared_state=c.shared_state)
+    report = ReportExecutor()
+    monkeypatch.setattr(report, "_maybe_publish_results", lambda *_args: {"status": "disabled"})
+    c.sub.register_executor("report", report)
+    c.sub.register_executor("session_breakdown", SessionBreakdownExecutor())
+    c.shared_state.baseline_tput = 14.4
+    c.shared_state.framework = "custom"
+    c.shared_state.model_type = "pytorch"
+    task_ids = {"report": [], "session_breakdown": []}
+    for leg, latency in enumerate((21.7, 19.74, 19.5)):
+        if leg:
+            _begin_resume_leg(c.shared_state)
+        c.shared_state.current_best = {
+            "action": "geak_e2e" if leg else "explore",
+            "tput": 1000 / latency,
+            "e2el_mean_ms": latency,
+        }
+        c.shared_state.stop_reason = "sweep_done"
+        c.shared_state.save(c.session_dir)
+        for kind, enqueue in (
+            ("report", c._enqueue_internal_report_task),
+            ("session_breakdown", c._enqueue_internal_session_breakdown_task),
+        ):
+            task = await enqueue(reason="close_phase_entry")
+            assert await c._run_close_task(task, step=kind) == "succeeded"
+            task_ids[kind].append(task.task_id)
+            reused = await enqueue(reason="close_phase_entry")
+            assert reused.task_id == task.task_id
+            assert reused.state == "succeeded"
+        saved = json.loads((c.session_dir / "reports/final.json").read_text())
+        assert saved["current_best"]["e2el_mean_ms"] == latency
+        assert f"{latency:.1f} ms" in (c.session_dir / "reports/final.md").read_text()
+        assert (c.session_dir / "session_breakdown.json").is_file()
+    assert all(len(set(ids)) == 3 for ids in task_ids.values())

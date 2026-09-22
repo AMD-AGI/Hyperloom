@@ -235,6 +235,7 @@ class SubAgentRunner:
         prebound_lease: Lease | None = None,
         extra_context: dict | None = None,
         release_resources: Callable[[], Awaitable[bool]] | None = None,
+        on_cleanup_confirmed: Callable[[], None] | None = None,
     ) -> SubAgentResult:
         """Claim the row, execute it, record the outcome.
 
@@ -249,6 +250,7 @@ class SubAgentRunner:
             extra_context: Optional extra values merged into the
                 :class:`RunnerContext`.
             release_resources: Confirm worker cleanup before releasing lanes.
+            on_cleanup_confirmed: Acknowledge resource release, including when dispatch raises.
 
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.
@@ -382,6 +384,8 @@ class SubAgentRunner:
                                 cleanup_error = sys.exc_info()[1]
                 finally:
                     cleanup_confirmed = released and cleanup_error is None
+                    if cleanup_confirmed and on_cleanup_confirmed is not None:
+                        on_cleanup_confirmed()
                     if outcome is not None:
                         evidence.update(outcome=asdict(outcome), cleanup_confirmed=cleanup_confirmed)
                         if not cleanup_confirmed:

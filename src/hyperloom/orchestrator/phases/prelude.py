@@ -2698,20 +2698,34 @@ class PreludePhase(PhaseHandler):
             if bs:
                 params["benchmark_script"] = bs
         lanes, ttl = self._registry_lanes_ttl(kind)
-        task, was_existing = await self.tasks.create_or_return_existing(
+        return await self._enqueue_analysis_attempt(
             kind=kind,
             params=params,
-            idempotency_key=(
-                f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}"
-            ),
-            requires_lanes=lanes,
-            lease_ttl_sec=ttl,
+            key=f"internal-analysis-{reason}{self._cycle_idem_suffix()}{self._analysis_attempt_suffix(kind)}",
+            lanes=lanes,
+            ttl=ttl,
         )
-        if was_existing:
-            log.info(
-                "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
-                kind,
-                task.task_id,
-                task.state,
+
+    async def _enqueue_analysis_attempt(
+        self, *, kind: str, params: dict[str, Any], key: str, lanes: list[str], ttl: int
+    ) -> Task:
+        """Reuse live/successful analysis; retry terminal failures without changing their history."""
+        attempt_key = key
+        while True:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind=kind,
+                params=params,
+                idempotency_key=attempt_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
-        return task
+            if task.state not in {"failed", "cancelled"}:
+                if was_existing:
+                    log.info(
+                        "internal-analysis task already exists (idempotent: kind=%s task_id=%s, state=%s)",
+                        kind,
+                        task.task_id,
+                        task.state,
+                    )
+                return task
+            attempt_key = f"{key}-retry-{task.task_id}"

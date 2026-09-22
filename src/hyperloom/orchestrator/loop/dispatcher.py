@@ -973,19 +973,28 @@ class DispatcherCollaborator:
             return True
 
         async def execute_and_complete() -> SubAgentResult:
-            result = await self.sub.run_task(
-                task,
-                prebound_lease=lease,
-                extra_context=extra_context,
-                release_resources=release_resources,
-            )
+            cleanup_confirmed = False
+
+            def confirm_cleanup() -> None:
+                nonlocal cleanup_confirmed
+                cleanup_confirmed = True
+
             try:
+                result = await self.sub.run_task(
+                    task,
+                    prebound_lease=lease,
+                    extra_context=extra_context,
+                    release_resources=release_resources,
+                    on_cleanup_confirmed=confirm_cleanup,
+                )
+                confirm_cleanup()
                 if on_complete is not None:
                     await on_complete(result)
                 return result
             finally:
-                self._inflight_actions.pop(task.task_id, None)
-                self._executions.discard(asyncio.current_task())
+                if cleanup_confirmed:
+                    self._inflight_actions.pop(task.task_id, None)
+                    self._executions.discard(asyncio.current_task())
 
         with use_cancel_scope(cancel_scope), current_action_scope(task.kind):
             execution = asyncio.create_task(execute_and_complete())

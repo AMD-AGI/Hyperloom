@@ -88,44 +88,7 @@ class ClosePhase(PhaseHandler):
             # Roofline disabled for this run; nothing to profile.
             return
         task = await self._enqueue_internal_analysis_task(reason="close_post_opt")
-        log.info(
-            "CLOSE step 0: running post-opt roofline task=%s (timeout=%.0fs)",
-            task.task_id,
-            self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
-        )
-        # Hard timeout so a slow profile+TraceLens can't stall the close sequence; on timeout no post-opt snapshot
-        # lands and the chart degrades to baseline-only.
-        try:
-            result = await asyncio.wait_for(
-                self.run_task_registered(task),
-                timeout=self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "CLOSE step 0: post-opt roofline timed out after %.0fs; skipping (no post-opt snapshot)",
-                self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC,
-            )
-            try:
-                current = await self.tasks.get(task.task_id)
-                if current.state == "queued":
-                    await self.tasks.transition(
-                        task.task_id,
-                        "cancelled",
-                        {"reason": "close_post_opt_roofline_timeout"},
-                    )
-                elif current.state == "running":
-                    await self.tasks.transition(
-                        task.task_id,
-                        "failed",
-                        {"reason": "close_post_opt_roofline_timeout"},
-                    )
-            except Exception:  # noqa: BLE001
-                log.debug(
-                    "CLOSE step 0: failed to mark timed-out post-opt roofline task",
-                    exc_info=True,
-                )
-            return
-        state = getattr(result, "state", None)
+        state = await self._run_close_task(task, step="0 (post-opt roofline)")
         log.info("CLOSE step 0: post-opt roofline finished (state=%s)", state)
 
     def _record_close_roofline_progress(self) -> None:
@@ -553,7 +516,10 @@ class ClosePhase(PhaseHandler):
         params: dict[str, Any],
         idempotency_key: str,
     ) -> Task:
-        """Enqueue a Coordinator-internal close-step task the sequencer can still run."""
+        """Enqueue a close artifact once per run leg, preserving retries within that leg."""
+        resumed_ts = getattr(self.shared_state, "resumed_ts", "")
+        if resumed_ts:
+            idempotency_key = f"{idempotency_key}-resume-{resumed_ts}"
         task: Task | None = None
         for key in (idempotency_key, f"{idempotency_key}-{_RETRY_KEY_SUFFIX}"):
             task, was_existing = await self.tasks.create_or_return_existing(
@@ -657,6 +623,8 @@ class ClosePhase(PhaseHandler):
 
         registry = getattr(self, "action_registry", None)
         kind = str(getattr(task, "kind", "") or "")
+        if kind == "roofline" and task.params.get("reason") == "close_post_opt":
+            return self.CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC
         meta = registry.get(kind) if registry is not None else None
         typical_sec = expected_action_cost_minutes(meta) * 60.0
         return min(_CLOSE_STEP_WAIT_CEILING_SEC, max(_CLOSE_STEP_WAIT_FLOOR_SEC, typical_sec))
@@ -743,7 +711,7 @@ class ClosePhase(PhaseHandler):
                 bound_sec,
             )
             return _TASK_STATE_RUNNING
-        return result.state
+        return result.state if result is not None else "queued"
 
     async def _record_close_step(
         self,

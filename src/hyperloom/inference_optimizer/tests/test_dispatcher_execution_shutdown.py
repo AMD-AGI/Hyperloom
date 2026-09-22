@@ -765,3 +765,42 @@ def test_shutdown_does_not_cancel_or_await_its_own_inline_caller(tmp_path, monke
         asyncio.run(run())
     finally:
         dispatcher.db.close()
+
+
+@pytest.mark.parametrize("state", ["failed", "cancelled", "succeeded"])
+@pytest.mark.parametrize("release_fails", [False, True])
+def test_rejected_dispatch_shutdown_tracks_actual_cleanup(tmp_path, monkeypatch, state, release_fails):
+    from hyperloom.orchestrator.loop.sub_agent_runner import ExecutionCleanupUnconfirmed
+    from hyperloom.orchestrator.state.task_registry import IllegalTransition
+
+    dispatcher = _dispatcher(tmp_path)
+    execute = AsyncMock(return_value={"status": "ok"})
+    dispatcher.sub.register_executor("shutdown_test", execute)
+
+    async def run():
+        task = await dispatcher.tasks.create(
+            kind="shutdown_test", params={}, idempotency_key="old-terminal", requires_lanes=["research_lane"]
+        )
+        await dispatcher.tasks.transition(task.task_id, "running")
+        await dispatcher.tasks.transition(task.task_id, state)
+        if release_fails:
+            monkeypatch.setattr(dispatcher.locks, "release", AsyncMock(side_effect=OSError("release failed")))
+        expected_error = ExecutionCleanupUnconfirmed if release_fails else IllegalTransition
+        with pytest.raises(expected_error):
+            await dispatcher.run_task_registered(task)
+        execute.assert_not_awaited()
+        assert (await dispatcher.tasks.get(task.task_id)).state == state
+        assert bool(await dispatcher.locks.lane_holders()) is release_fails
+        assert bool(dispatcher._inflight_actions) is release_fails
+        assert bool(dispatcher._executions) is release_fails
+        await _close(dispatcher)
+        if release_fails:
+            assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
+        else:
+            with pytest.raises(sqlite3.ProgrammingError):
+                dispatcher.db.fetchone_sync("SELECT 1")
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
