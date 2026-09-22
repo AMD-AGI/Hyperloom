@@ -1,0 +1,267 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: CI evidence experiments
+
+on:
+  push:
+    branches: [feature/leixin/ci-evidence-experiments-20260921]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-evidence-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  EVIDENCE_BASELINE: b8761298c0413b08937554077ad567a764a4e1dc
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated target and measurement environments
+        run: |
+          python -m venv "$RUNNER_TEMP/target"
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/target/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/target/bin/python" -m pip install -e ".[test,ci]" 'pylint>=3.0,<4'
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'PyYAML==6.0.2' 'ruff==0.16.2'
+      - name: Validate experiment workflow
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/ci-evidence-experiments.yml
+      - name: Validate experiment code and contracts
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" -m ruff check --no-cache \
+            .github/scripts/ci_evidence.py .github/scripts/ci_evidence_gate.py \
+            .github/scripts/tests/test_ci_evidence.py
+          "$RUNNER_TEMP/tools/bin/python" -m ruff format --check \
+            .github/scripts/ci_evidence.py .github/scripts/ci_evidence_gate.py \
+            .github/scripts/tests/test_ci_evidence.py
+          "$RUNNER_TEMP/tools/bin/python" -m unittest discover \
+            -s .github/scripts/tests -p test_ci_evidence.py -v
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+      - name: Record fixed dependencies and environment
+        run: |
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py capture \
+            --output "$RUNNER_TEMP/evidence"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py freeze \
+            --output "$RUNNER_TEMP/evidence"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py verify \
+            --manifest "$RUNNER_TEMP/evidence/manifest.json" --baseline "$EVIDENCE_BASELINE"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap
+          path: |
+            ${{ runner.temp }}/evidence/*.json
+            ${{ runner.temp }}/evidence/constraints.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  shell:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v7
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap
+          path: ${{ runner.temp }}/fixed
+      - name: Recreate and verify the fixed target environment
+        run: |
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" --upgrade pip setuptools
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" -e ".[test,ci]" 'pylint>=3.0,<4'
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py verify \
+            --manifest "$RUNNER_TEMP/fixed/manifest.json" --baseline "$EVIDENCE_BASELINE"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py capture \
+            --output "$RUNNER_TEMP/evidence/shell"
+      - name: Measure unchanged shell contracts three times
+        run: |
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py run \
+            --track shell --output "$RUNNER_TEMP/evidence/shell" \
+            --python "$RUNNER_TEMP/target/bin/python"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-shell
+          path: |
+            ${{ runner.temp }}/evidence/shell/**/*.json
+            ${{ runner.temp }}/evidence/shell/**/*.jsonl
+            ${{ runner.temp }}/evidence/shell/**/*.xml
+            ${{ runner.temp }}/evidence/shell/**/*.log
+            ${{ runner.temp }}/evidence/shell/**/stdout.txt
+            ${{ runner.temp }}/evidence/shell/**/stderr.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  walkthrough:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v7
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap
+          path: ${{ runner.temp }}/fixed
+      - name: Recreate and verify the fixed target environment
+        run: |
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" --upgrade pip setuptools
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" -e ".[test,ci]" 'pylint>=3.0,<4'
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py verify \
+            --manifest "$RUNNER_TEMP/fixed/manifest.json" --baseline "$EVIDENCE_BASELINE"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py capture \
+            --output "$RUNNER_TEMP/evidence/walkthrough"
+      - name: Measure three unchanged runs and one serial profile
+        run: |
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py run \
+            --track walkthrough --output "$RUNNER_TEMP/evidence/walkthrough" \
+            --python "$RUNNER_TEMP/target/bin/python"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-walkthrough
+          path: |
+            ${{ runner.temp }}/evidence/walkthrough/**/*.json
+            ${{ runner.temp }}/evidence/walkthrough/**/*.jsonl
+            ${{ runner.temp }}/evidence/walkthrough/**/*.xml
+            ${{ runner.temp }}/evidence/walkthrough/**/*.log
+            ${{ runner.temp }}/evidence/walkthrough/**/stdout.txt
+            ${{ runner.temp }}/evidence/walkthrough/**/stderr.txt
+            ${{ runner.temp }}/evidence/walkthrough/**/*.pstats
+          if-no-files-found: error
+          retention-days: 7
+
+  gate:
+    needs: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v7
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap
+          path: ${{ runner.temp }}/fixed
+      - name: Recreate and verify the fixed target environment
+        run: |
+          python -m venv "$RUNNER_TEMP/target"
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'PyYAML==6.0.2'
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" --upgrade pip setuptools
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" -e ".[test,ci]" 'pylint>=3.0,<4'
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py verify \
+            --manifest "$RUNNER_TEMP/fixed/manifest.json" --baseline "$EVIDENCE_BASELINE"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py capture \
+            --output "$RUNNER_TEMP/evidence/gate"
+      - name: Replay only the original metadata decision in synthetic repositories
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_evidence_gate.py \
+            --repo "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/evidence/gate"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-gate
+          path: |
+            ${{ runner.temp }}/evidence/gate/**/*.json
+            ${{ runner.temp }}/evidence/gate/**/*.jsonl
+            ${{ runner.temp }}/evidence/gate/**/*.log
+            ${{ runner.temp }}/evidence/gate/**/github-output.txt
+            ${{ runner.temp }}/evidence/gate/decide.sh
+          if-no-files-found: error
+          retention-days: 7
+
+  pylint:
+    needs: [bootstrap, gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: actions/download-artifact@v7
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap
+          path: ${{ runner.temp }}/fixed
+      - name: Recreate and verify the fixed target environment
+        run: |
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" --upgrade pip setuptools
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/fixed/constraints.txt" -e ".[test,ci]" 'pylint>=3.0,<4'
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py verify \
+            --manifest "$RUNNER_TEMP/fixed/manifest.json" --baseline "$EVIDENCE_BASELINE"
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py capture \
+            --output "$RUNNER_TEMP/evidence/pylint"
+      - name: Compare one and two Pylint workers in paired order
+        run: |
+          "$RUNNER_TEMP/target/bin/python" .github/scripts/ci_evidence.py run \
+            --track pylint --output "$RUNNER_TEMP/evidence/pylint" \
+            --python "$RUNNER_TEMP/target/bin/python"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: exp-${{ github.run_id }}-${{ github.run_attempt }}-pylint
+          path: |
+            ${{ runner.temp }}/evidence/pylint/**/*.json
+            ${{ runner.temp }}/evidence/pylint/**/*.jsonl
+            ${{ runner.temp }}/evidence/pylint/**/*.log
+            ${{ runner.temp }}/evidence/pylint/**/stdout.txt
+            ${{ runner.temp }}/evidence/pylint/**/stderr.txt
+          if-no-files-found: error
+          retention-days: 7
