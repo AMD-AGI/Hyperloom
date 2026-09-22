@@ -1203,12 +1203,8 @@ def compute_kernel_progress_fingerprint(
 
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
-    try:
-        if bool(getattr(state, "has_keep_pending_integrate", False)):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    if bool(getattr(state, "has_keep_pending_integrate", False)):
+        return True
 
     if _controller_phase_terminal(state):
         return False

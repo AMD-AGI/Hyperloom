@@ -544,16 +544,13 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return
         # Serialize one candidate at a time: skip while a candidate proposal awaits its (durable) Critic verdict,
         # resolved on a later tick.
-        try:
-            if any(
-                getattr(p, "action_name", "") == "integrate_patch"
-                and not getattr(p, "decided", False)
-                and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
-                for p in self.state.pending_proposals.values()
-            ):
-                return
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        if any(
+            getattr(p, "action_name", "") == "integrate_patch"
+            and not getattr(p, "decided", False)
+            and (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id")
+            for p in self.state.pending_proposals.values()
+        ):
+            return
         # An authoring specialist (or its downstream integrate_patch) for the current candidate may still be running;
         # wait only on a live TASK (queued/running), NOT on a pending Critic proposal.
         if getattr(state, "framework_agent_authoring_enabled", False):
@@ -644,25 +641,22 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return True
         # An authored patch awaiting Critic review (or a candidate awaiting its pre-screen verdict) keeps the phase
         # open, but only while the proposal targets a still-unprocessed candidate.
-        try:
-            for p in self.state.pending_proposals.values():
-                if getattr(p, "decided", False):
-                    continue
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                payload = getattr(p, "payload", None) or {}
-                # Both the candidate pre-screen and the authored patch are ``integrate_patch`` proposals now, so the
-                # candidate marker -- not the action name -- says which candidate is pinned.
-                iparams = payload.get("params") or {}
-                cand_id = str(
-                    payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
-                )
-                if not cand_id and not iparams.get("framework_agent_authoring"):
-                    continue
-                if _cand_pins_pump(cand_id):
-                    return True
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        for p in self.state.pending_proposals.values():
+            if getattr(p, "decided", False):
+                continue
+            if getattr(p, "action_name", "") != "integrate_patch":
+                continue
+            payload = getattr(p, "payload", None) or {}
+            # Both the candidate pre-screen and the authored patch are ``integrate_patch`` proposals now, so the
+            # candidate marker -- not the action name -- says which candidate is pinned.
+            iparams = payload.get("params") or {}
+            cand_id = str(
+                payload.get("framework_agent_candidate_id") or iparams.get("framework_agent_candidate_id") or ""
+            )
+            if not cand_id and not iparams.get("framework_agent_authoring"):
+                continue
+            if _cand_pins_pump(cand_id):
+                return True
         return False
 
     @staticmethod
@@ -1650,18 +1644,15 @@ class FrameworkPhase(CoordinatorCollaborator):
         batch_id = str(candidate.get("batch_id") or "")
         # Dedup: a candidate is already awaiting its pre-screen verdict.
         for p in self.state.pending_proposals.values():
-            try:
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
-                    continue
-                if getattr(p, "decided", False):
-                    continue
-                pl = getattr(p, "payload", {}) or {}
-                if str(pl.get("framework_agent_candidate_id") or "") == cand_id and cand_id:
-                    return
-            except Exception:  # noqa: BLE001 — defensive
+            if getattr(p, "action_name", "") != "integrate_patch":
                 continue
+            if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
+                continue
+            if getattr(p, "decided", False):
+                continue
+            pl = getattr(p, "payload", {}) or {}
+            if str(pl.get("framework_agent_candidate_id") or "") == cand_id and cand_id:
+                return
         # Repeated-review backstop: count how many times this candidate has been sent for review.
         if cand_id:
             counts = getattr(self.shared_state, "framework_agent_review_counts", None)
@@ -2754,14 +2745,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # A synthetic review for this specialist is already in flight.
         for p in self.state.pending_proposals.values():
-            try:
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                pl = getattr(p, "payload", {}) or {}
-                if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                    return
-            except Exception:  # noqa: BLE001 — defensive
+            if getattr(p, "action_name", "") != "integrate_patch":
                 continue
+            pl = getattr(p, "payload", {}) or {}
+            if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals:
@@ -2948,14 +2936,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         # A synthetic review for this specialist is already in flight.
         for p in self.state.pending_proposals.values():
-            try:
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                pl = getattr(p, "payload", {}) or {}
-                if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                    return
-            except Exception:  # noqa: BLE001 — defensive
+            if getattr(p, "action_name", "") != "integrate_patch":
                 continue
+            pl = getattr(p, "payload", {}) or {}
+            if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):

@@ -4656,14 +4656,11 @@ class WritebackCollaborator:
                             "validated": False,
                             "reason": repr(exc),
                         }
-                        try:
-                            geak_result = (
-                                self.shared_state.geak_result
-                                if isinstance(getattr(self.shared_state, "geak_result", None), dict)
-                                else {}
-                            )
-                        except Exception:  # noqa: BLE001
-                            log.debug("geak v4 fallback-exception recording failed", exc_info=True)
+                        geak_result = (
+                            self.shared_state.geak_result
+                            if isinstance(getattr(self.shared_state, "geak_result", None), dict)
+                            else {}
+                        )
                     if not bool(fallback_result.get("validated")):
                         from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
 
