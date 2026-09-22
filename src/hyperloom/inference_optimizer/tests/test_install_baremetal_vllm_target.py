@@ -127,7 +127,8 @@ def _source_stubs(tmp_path: Path, checkout: str) -> str:
     fake_py.write_text(
         '#!/bin/sh\necho "PY:$* CONSTRAINT=${PIP_CONSTRAINT:-}'
         " TARGET=${VLLM_TARGET_DEVICE:-}"
-        ' SCM=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-}" >> "$CALLS"\n'
+        " SCM=${SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM:-}"
+        ' SCMGEN=${SETUPTOOLS_SCM_PRETEND_VERSION:-}" >> "$CALLS"\n'
     )
     fake_py.chmod(0o755)
     (venv / "pyvenv.cfg").write_text("include-system-site-packages = true\n")
@@ -178,8 +179,10 @@ def test_source_build_preserves_constraint_for_develop(tmp_path: Path) -> None:
     assert "setup.py develop --no-deps CONSTRAINT=/tmp/" in calls
     assert "TARGET=rocm" in calls
     # A depth-1 checkout has no tags, so the build must be told its version or
-    # setuptools_scm stamps it 0.1.dev1.
+    # setuptools_scm stamps it 0.1.dev1. setup.py develop leaves the dist name
+    # unknown, so only the generic variable is consulted.
     assert "SCM=0.29.0" in calls
+    assert "SCMGEN=0.29.0" in calls
     assert f"AITER:{tmp_path}/deps/aiter" in calls
 
 

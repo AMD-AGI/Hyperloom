@@ -2249,6 +2249,9 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
     start = script_text.index("install_sglang_framework() {")
     end = script_text.index("\n}\n\n# Verify that the installed vLLM package resolves", start) + 3
     install_sglang_framework = script_text[start:end]
+    # The import probe that decides whether to install lives in this helper, shared with the vLLM route.
+    aiter_start = script_text.index("ensure_aiter_for_python() {")
+    ensure_aiter_for_python = script_text[aiter_start : script_text.index("\n}\n", aiter_start) + 3]
 
     fake_py = tmp_path / "python"
     calls_file = tmp_path / "calls.txt"
@@ -2299,6 +2302,7 @@ def test_baremetal_sglang_installs_aiter_when_find_spec_succeeds_but_import_fail
                 "sglang_pypi_version_for_extra() { printf '7.2.4\\n'; }",
                 "ensure_rocm_devel_headers() { :; }",
                 f'install_compatible_aiter() {{ printf \'install_compatible_aiter %s %s\\n\' "$1" "$2" >> "$CALLS_FILE"; touch {import_flag}; }}',
+                ensure_aiter_for_python,
                 install_sglang_framework,
                 "install_sglang_framework",
             ]

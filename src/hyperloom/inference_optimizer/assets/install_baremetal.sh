@@ -1265,7 +1265,10 @@ install_vllm_from_source() {
     --extra-index-url "$ROCM_SDK_INDEX_URL" \
     -r "$VLLM_ROOT/requirements/rocm.txt" ||
     { rm -f "$constraint_file"; die "failed to install vLLM ROCm source requirements"; }
+  # setup.py develop leaves the dist name unknown, and vcs-versioning only consults the
+  # per-distribution variable when it knows that name, so the generic one is the one that lands.
   (cd "$VLLM_ROOT" && VLLM_TARGET_DEVICE=rocm PYTORCH_ROCM_ARCH="$arch" \
+    SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_PRETEND_VERSION" \
     SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM="$VLLM_PRETEND_VERSION" \
     PIP_CONSTRAINT="$constraint_file" "$py" setup.py develop --no-deps) ||
     { rm -f "$constraint_file"; die "vLLM source build failed"; }
