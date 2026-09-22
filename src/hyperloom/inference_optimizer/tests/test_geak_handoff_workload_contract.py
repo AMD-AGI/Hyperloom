@@ -140,7 +140,7 @@ async def _handoff(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> dict:
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 @pytest.mark.asyncio
-async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
+async def test_native_agentx_skips_geak_before_writing_a_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
@@ -150,38 +150,22 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     monkeypatch.setenv("TP", "8")
     monkeypatch.setenv("CONC", "99")
 
-    handoff = await _handoff(coord, monkeypatch)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        Mock(side_effect=AssertionError("native AgentX must not resolve or launch GEAK")),
+    )
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
-    assert handoff["schema_version"] == 3
-    assert handoff["bench_client"] == "auto"
-    assert handoff["bench_launcher"] == "native"
-    assert not {"bench_client_config", "benchmark_mode", "workload_identity"} & handoff.keys()
-    assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
-    recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
-    assert handoff["workload_spec"] == recipe["benchmark"]["workload_spec"]
-    assert handoff["workload_spec"]["metric_basis"] == "aggregate_total_token_tok_s"
-    assert handoff["e2e_metric"] == "total"
-    assert handoff["framework"] == framework
-    assert handoff["model_path"] == "/models/accepted"
-    assert handoff["gpu_type"] == "mi355x"
-    assert handoff["launch_recipe"] == coord.shared_state.baseline_config_path
-    assert handoff["workload"] == {"isl": 2048, "osl": 1536, "conc": 6}
-    assert handoff["gpu_pin"]["var"] == "ROCR_VISIBLE_DEVICES"
-    assert handoff["gpu_pin"]["ids"] == [6, 7]
-    assert handoff["gpu_ids"] == "0,1"
-    assert handoff["gpu_ids_space"] == "logical"
-    assert handoff["tp"] == 2
-    assert handoff["accepted_flags"] == "--accepted-flag 1"
-    assert "ACCEPTED_SETTING=1" in handoff["accepted_env"]
-    assert handoff["same_config_reference_status"] == "unverified"
-    assert handoff["same_config_reference_verification_status"] == "unverified_workload"
-    assert handoff["orchestrator_best_tput_same_config"] == 0.0
-    assert handoff["raw_baseline_tput"] == 0.0
-    spec = handoff["baseline_env_spec"]
-    assert spec["launch_identity"] == handoff["same_config_reference_identity"]
-    assert spec["config"]["remove_args"] == ["--obsolete-flag"]
-    assert spec["config"]["unset_envs"] == ["OBSOLETE_SETTING"]
-    assert spec["config"]["args_mode"] == "replace"
+    assert not (tmp_path / "geak" / "handoff.json").exists()
+    assert coord.shared_state.geak_result == {
+        "status": "skipped",
+        "error_class": "unsupported_upstream_launcher_hook",
+        "error": (
+            "native AgentX kernel optimization is unavailable until "
+            "InferenceX exposes a fingerprinted optimizer-argv hook"
+        ),
+    }
+    assert coord.shared_state.pending_escalate_hint == "skip_to_sweep"
 
 
 @pytest.mark.parametrize(
@@ -189,7 +173,7 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     [(None, "total"), ("intvty_v1", "total"), ("composite_v1", "output"), ("output", "output")],
 )
 @pytest.mark.asyncio
-async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
+async def test_native_agentx_metric_does_not_make_geak_dispatchable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -217,18 +201,12 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
         await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
-    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
-    assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    expected_basis = "aggregate_total_token_tok_s" if expected_metric == "total" else "aggregate_output_tok_s"
-    assert handoff["workload_spec"]["metric_basis"] == expected_basis
-    assert handoff["same_config_reference_status"] == "unverified"
-    assert handoff["same_config_reference_verification_status"] == "unverified_workload"
-    assert handoff["orchestrator_best_tput_same_config"] == 0.0
-    assert handoff["raw_baseline_tput"] == 0.0
-    assert "canonical AgentX validation remains in Hyperloom" in caplog.text
+    assert not (tmp_path / "geak" / "handoff.json").exists()
+    assert captured_env == {}
+    assert coord.shared_state.geak_result["status"] == "skipped"
+    assert coord.shared_state.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
     assert coord.shared_state.benchmark_mode == "agentx"
     assert coord.shared_state.current_best["tput"] == 140.0
-    assert coord.shared_state.geak_result["error_class"] == "no_result_json"
 
 
 @pytest.mark.parametrize(

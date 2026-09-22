@@ -8,12 +8,15 @@ from __future__ import annotations
 import logging
 import csv
 import json
+import math
 import os
 import time
 import re
 import shutil
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from hyperloom.common.coerce import first_float, first_int, to_float, to_int
 from hyperloom.common.jsonio import read_json
@@ -544,6 +547,7 @@ def _merge_raw_result(
         measurement["raw_result_path"] = str(source_path)
     # AgentX scenario verdict.
     if "submission_valid" in raw and "submission_valid" not in measurement:
+        measurement["scenario"] = "agentx"
         measurement["submission_valid"] = raw.get("submission_valid")
         reasons = raw.get("submission_invalid_reasons") or []
         measurement["submission_invalid_reasons"] = (
@@ -565,6 +569,950 @@ LATENCY_FROM_RAW = "raw_result"
 LATENCY_FROM_RESCUED_RAW = "rescued_raw_result"
 LATENCY_DERIVED = "derived_from_e2el_ttft"
 LATENCY_UNAVAILABLE = "unavailable"
+
+_TRUSTED_NATIVE_AGENTX_GPU_COUNT_SOURCES = frozenset(
+    {
+        "magpie_report_recipe",
+        "magpie_config_snapshot",
+        "materialized_workload_metadata",
+        "inferencex_raw",
+    }
+)
+
+
+def _valid_recipe_fingerprint(value: Any) -> str | None:
+    """Return an InferenceX recipe fingerprint only when strictly valid."""
+    if not isinstance(value, str):
+        return None
+    fingerprint = value
+    if len(fingerprint) != 64 or any(character not in "0123456789abcdef" for character in fingerprint):
+        return None
+    return fingerprint
+
+
+def _native_agentx_explicit_topology_fields(value: Any) -> tuple[dict[str, int], bool]:
+    """Return explicit native topology fields and whether all were valid.
+
+    InferenceX's aggregate currently serializes only ``tp`` and ``ep`` even
+    though the fingerprint-bound Magpie snapshot retains TP x PP x PCP.  Keep
+    partial fields available for consistency checks without ever deriving a
+    GPU count from them.
+    """
+    if not isinstance(value, dict):
+        return {}, False
+
+    def explicit_positive_integer(*keys: str) -> tuple[int | None, bool]:
+        present_values = [value[key] for key in keys if key in value]
+        if not present_values:
+            return None, False
+        parsed_values: list[int] = []
+        for raw in present_values:
+            parsed = to_float(raw)
+            if parsed is None or parsed <= 0 or not parsed.is_integer():
+                return None, True
+            parsed_values.append(int(parsed))
+        if len(set(parsed_values)) != 1:
+            return None, True
+        return parsed_values[0], True
+
+    aliases = {
+        "tp": ("tp",),
+        "pp": ("pp",),
+        "pcp": ("pcp_size", "pcp-size", "pcp"),
+        "ep": ("ep",),
+        "gpu_count": ("gpu_count",),
+    }
+    fields: dict[str, int] = {}
+    for canonical, keys in aliases.items():
+        parsed, present = explicit_positive_integer(*keys)
+        if present and parsed is None:
+            return {}, False
+        if parsed is not None:
+            fields[canonical] = parsed
+    return fields, True
+
+
+def _native_agentx_topology(value: Any) -> tuple[dict[str, int], int] | None:
+    """Extract an explicit AgentX topology without inventing PP/PCP defaults."""
+    fields, fields_valid = _native_agentx_explicit_topology_fields(value)
+    if not fields_valid:
+        return None
+    tp = fields.get("tp")
+    pp = fields.get("pp")
+    pcp = fields.get("pcp")
+    explicit_gpu_count = fields.get("gpu_count")
+    dimensions = (tp, pp, pcp)
+    if all(dimension is not None for dimension in dimensions):
+        assert tp is not None and pp is not None and pcp is not None
+        calculated_gpu_count = tp * pp * pcp
+        if explicit_gpu_count is not None and explicit_gpu_count != calculated_gpu_count:
+            return None
+        topology = {"tp": tp, "pp": pp, "pcp": pcp}
+        if "ep" in fields:
+            topology["ep"] = fields["ep"]
+        return topology, calculated_gpu_count
+    if explicit_gpu_count is not None and explicit_gpu_count > 0 and all(dimension is None for dimension in dimensions):
+        topology = {"gpu_count": explicit_gpu_count}
+        if "ep" in fields:
+            topology["ep"] = fields["ep"]
+        return topology, explicit_gpu_count
+    return None
+
+
+def _set_native_agentx_topology(
+    measurement: dict[str, Any],
+    value: Any,
+    *,
+    source: str,
+) -> bool:
+    """Record a validated native topology and its provenance."""
+    parsed = _native_agentx_topology(value)
+    if parsed is None:
+        return False
+    topology, gpu_count = parsed
+    existing_gpu_count = first_int(measurement.get("agentx_gpu_count"))
+    if existing_gpu_count is not None and existing_gpu_count != gpu_count:
+        return False
+    existing_topology = measurement.get("agentx_gpu_topology")
+    if isinstance(existing_topology, dict):
+        for dimension in ("tp", "pp", "pcp", "ep", "gpu_count"):
+            if (
+                dimension in existing_topology
+                and dimension in topology
+                and existing_topology[dimension] != topology[dimension]
+            ):
+                return False
+        topology = {**existing_topology, **topology}
+    measurement["agentx_gpu_topology"] = topology
+    measurement["agentx_gpu_count"] = gpu_count
+    measurement["agentx_gpu_count_source"] = source
+    return True
+
+
+def _merge_native_agentx_report(
+    measurement: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    """Normalize Magpie's native ``agentx_metrics`` into Hyperloom fields."""
+    metrics = report.get("agentx_metrics")
+    if not isinstance(metrics, dict):
+        return
+
+    raw_throughput = metrics.get("throughput")
+    throughput = raw_throughput if isinstance(raw_throughput, dict) else {}
+    raw_requests = metrics.get("requests")
+    requests = raw_requests if isinstance(raw_requests, dict) else {}
+    raw_latency = metrics.get("latency_seconds")
+    latency = raw_latency if isinstance(raw_latency, dict) else {}
+
+    schema_errors: list[str] = []
+
+    def positive_number(value: Any) -> bool:
+        parsed = to_float(value)
+        return parsed is not None and math.isfinite(parsed) and parsed > 0
+
+    if not isinstance(raw_throughput, dict):
+        schema_errors.append("agentx_metrics.throughput_missing")
+    else:
+        for key in ("output_tokens_per_second", "total_tokens_per_second", "duration_seconds"):
+            if not positive_number(throughput.get(key)):
+                schema_errors.append(f"agentx_metrics.throughput.{key}_invalid")
+    if not isinstance(raw_requests, dict):
+        schema_errors.append("agentx_metrics.requests_missing")
+    else:
+        successful_for_schema = first_int(requests.get("successful"))
+        profiled_for_schema = first_int(requests.get("profiled_total"))
+        errors_for_schema = first_int(requests.get("errors"))
+        error_rate_for_schema = to_float(requests.get("error_rate"))
+        if successful_for_schema is None or successful_for_schema <= 0:
+            schema_errors.append("agentx_metrics.requests.successful_invalid")
+        if profiled_for_schema is None or profiled_for_schema <= 0:
+            schema_errors.append("agentx_metrics.requests.profiled_total_invalid")
+        if errors_for_schema is None or errors_for_schema < 0:
+            schema_errors.append("agentx_metrics.requests.errors_invalid")
+        if (
+            error_rate_for_schema is None
+            or not math.isfinite(error_rate_for_schema)
+            or not 0.0 <= error_rate_for_schema <= 1.0
+        ):
+            schema_errors.append("agentx_metrics.requests.error_rate_invalid")
+    if not isinstance(raw_latency, dict):
+        schema_errors.append("agentx_metrics.latency_seconds_missing")
+    interactivity_for_schema = latency.get("e2e_norm_intvty")
+    if not isinstance(interactivity_for_schema, dict) or not positive_number(interactivity_for_schema.get("p90")):
+        schema_errors.append("agentx_metrics.latency_seconds.e2e_norm_intvty.p90_invalid")
+    recipe_for_schema = metrics.get("recipe")
+    recipe_fingerprint: str | None = None
+    if not isinstance(recipe_for_schema, dict):
+        schema_errors.append("agentx_metrics.recipe_missing")
+    else:
+        recipe_fingerprint = _valid_recipe_fingerprint(recipe_for_schema.get("recipe_fingerprint"))
+        if recipe_fingerprint is None:
+            schema_errors.append("agentx_metrics.recipe.recipe_fingerprint_invalid")
+        recipe_tp = first_int(recipe_for_schema.get("tp"))
+        if recipe_tp is None or recipe_tp <= 0:
+            schema_errors.append("agentx_metrics.recipe.tp_invalid")
+    launch_for_schema = metrics.get("launch")
+    launch_fingerprint: str | None = None
+    if not isinstance(launch_for_schema, dict):
+        schema_errors.append("agentx_metrics.launch_missing")
+    else:
+        launch_fingerprint = _valid_recipe_fingerprint(launch_for_schema.get("recipe_fingerprint"))
+        if launch_fingerprint is None:
+            schema_errors.append("agentx_metrics.launch.recipe_fingerprint_invalid")
+        elif recipe_fingerprint is not None and launch_fingerprint != recipe_fingerprint:
+            schema_errors.append("agentx_metrics.recipe_launch_fingerprint_mismatch")
+    if str(metrics.get("mode") or "").strip().lower() not in {"canonical", "fast"}:
+        schema_errors.append("agentx_metrics.mode_invalid")
+    if str(metrics.get("scenario_type") or "").strip().lower() != "agentic-coding":
+        schema_errors.append("agentx_metrics.scenario_type_invalid")
+    if metrics.get("recipe_fingerprint_valid") is not True:
+        schema_errors.append("agentx_metrics.recipe_fingerprint_valid_invalid")
+    if not isinstance(report.get("benchmark_valid"), bool):
+        schema_errors.append("benchmark_valid_missing")
+    if not isinstance(report.get("publishable"), bool):
+        schema_errors.append("publishable_missing")
+    measurement["native_agentx_schema_errors"] = schema_errors
+    measurement["native_agentx_schema_valid"] = not schema_errors
+
+    native_throughput_fields = {
+        "request_throughput": "request_throughput",
+        "input_throughput": "input_tokens_per_second",
+        "output_throughput": "output_tokens_per_second",
+        "total_token_throughput": "total_tokens_per_second",
+        "duration_seconds": "duration_seconds",
+    }
+    for target, source in native_throughput_fields.items():
+        value = to_float(throughput.get(source))
+        if value is not None:
+            measurement[target] = value
+
+    successful = first_int(requests.get("successful"))
+    if successful is not None:
+        measurement["completed_requests"] = successful
+    # AgentX is duration-bounded.  Magpie's ``profiled_total`` is successful
+    # responses plus error-dropped records, not a requested-session target.
+    # Treating it as ``requested_requests`` makes the generic fixed-request
+    # completeness check reject an otherwise complete canonical replay.
+    measurement["requested_requests"] = None
+    measurement["request_errors"] = first_int(requests.get("errors"))
+    native_error_rate = to_float(requests.get("error_rate"))
+    # Hyperloom's legacy result contract records request error rate as a
+    # percentage. Magpie's native AgentX schema uses a 0..1 ratio.
+    measurement["request_error_rate"] = native_error_rate * 100.0 if native_error_rate is not None else None
+
+    def latency_stat_ms(metric: str, stat_name: str) -> float | None:
+        values = latency.get(metric)
+        if not isinstance(values, dict):
+            return None
+        seconds = to_float(values.get(stat_name))
+        return seconds * 1000.0 if seconds is not None else None
+
+    # Magpie's generic LatencyMetrics serializer emits p99=0 even though the
+    # pinned InferenceX AgentX aggregate supplies p95, not p99. Clear those
+    # placeholders; a missing percentile is not a zero-latency observation.
+    measurement["ttft_p99_ms"] = None
+    measurement["e2el_p99_ms"] = None
+    for target, metric, stat_name in (
+        ("ttft_mean_ms", "ttft", "mean"),
+        ("ttft_p50_ms", "ttft", "p50"),
+        ("ttft_p90_ms", "ttft", "p90"),
+        ("ttft_p95_ms", "ttft", "p95"),
+        ("tpot_mean_ms", "tpot", "mean"),
+        ("tpot_p50_ms", "tpot", "p50"),
+        ("tpot_p90_ms", "tpot", "p90"),
+        ("tpot_p95_ms", "tpot", "p95"),
+        ("e2el_mean_ms", "e2el", "mean"),
+        ("e2el_p95_ms", "e2el", "p95"),
+    ):
+        value = latency_stat_ms(metric, stat_name)
+        if value is not None:
+            measurement[target] = value
+
+    interactivity = latency.get("e2e_norm_intvty")
+    if isinstance(interactivity, dict):
+        # This is a rate (1 / normalized E2E seconds), not a latency. Keep the
+        # native unit; multiplying it by 1000 would corrupt Hyperloom's 2-D
+        # AgentX objective.
+        measurement["e2e_norm_intvty_p90"] = to_float(interactivity.get("p90"))
+        measurement["e2e_norm_intvty_p50"] = to_float(interactivity.get("p50"))
+
+    benchmark_valid = report.get("benchmark_valid")
+    publishable = report.get("publishable")
+    measurement["benchmark_valid"] = benchmark_valid
+    measurement["publishable"] = publishable
+    # Canonical Hyperloom measurements must pass both native validity and the
+    # recipe-fingerprint/canonical-mode gate represented by ``publishable``.
+    measurement["submission_valid"] = (
+        benchmark_valid is True and publishable is True
+        if isinstance(benchmark_valid, bool) and isinstance(publishable, bool)
+        else None
+    )
+    reasons = report.get("errors") or []
+    invalid_reasons = [str(reason) for reason in reasons] if isinstance(reasons, list) else [str(reasons)]
+    if benchmark_valid is not True:
+        invalid_reasons.append("native_agentx_benchmark_invalid")
+    if publishable is not True:
+        mode = str(metrics.get("mode") or "").strip().lower()
+        invalid_reasons.append("native_agentx_fast_mode" if mode == "fast" else "native_agentx_not_publishable")
+    measurement["submission_invalid_reasons"] = list(dict.fromkeys(invalid_reasons))
+    measurement["agentx_mode"] = metrics.get("mode")
+    measurement["agentx_requests"] = requests
+    # Keep the compact payloads until the protocol validator has cross-bound
+    # them to InferenceX's aggregate.  The normalized fields omit the complete
+    # latency/accounting maps and cannot by themselves prove a single run.
+    measurement["agentx_report_throughput"] = throughput
+    measurement["agentx_report_latency_seconds"] = latency
+    recipe = metrics.get("recipe")
+    measurement["agentx_recipe"] = recipe
+    measurement["agentx_launch"] = metrics.get("launch")
+    measurement["agentx_request_accounting"] = metrics.get("request_accounting")
+    if recipe_fingerprint is not None:
+        measurement["agentx_recipe_fingerprint"] = recipe_fingerprint
+    if launch_fingerprint is not None:
+        measurement["agentx_launch_recipe_fingerprint"] = launch_fingerprint
+    if recipe_fingerprint is not None and launch_fingerprint == recipe_fingerprint:
+        # Current Magpie omits PCP from agentx_metrics.recipe. Only accept the
+        # compact report itself when every parallelism dimension is explicit.
+        _set_native_agentx_topology(measurement, recipe, source="magpie_report_recipe")
+    measurement["agentx_report_dataset"] = metrics.get("dataset")
+    measurement["agentx_dataset"] = metrics.get("dataset")
+
+
+def _merge_native_agentx_workspace_topology(measurement: dict[str, Any], workspace: Path) -> None:
+    """Use Magpie's resolved config snapshot as a fingerprint-bound topology."""
+    expected_fingerprint = _valid_recipe_fingerprint(measurement.get("agentx_recipe_fingerprint"))
+    if expected_fingerprint is None:
+        return
+    config_path = workspace / "config.yaml"
+    if not config_path.is_file():
+        return
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        measurement["nonfatal_warnings"].append("native_agentx_config_snapshot_unreadable")
+        return
+    if not isinstance(config, dict):
+        return
+
+    wrapped = config.get("benchmark")
+    if isinstance(wrapped, dict):
+        config = wrapped
+
+    agentx = config.get("agentx")
+    resolved = agentx.get("resolved") if isinstance(agentx, dict) else None
+    if isinstance(resolved, dict):
+        resolved_fingerprint = _valid_recipe_fingerprint(
+            resolved.get("recipe-fingerprint", resolved.get("recipe_fingerprint"))
+        )
+        if resolved_fingerprint != expected_fingerprint:
+            measurement["nonfatal_warnings"].append("native_agentx_config_recipe_fingerprint_mismatch")
+            measurement["native_agentx_topology_conflict"] = True
+            return
+        if not _set_native_agentx_topology(measurement, resolved, source="magpie_config_snapshot"):
+            measurement["nonfatal_warnings"].append("native_agentx_config_topology_invalid")
+            measurement["native_agentx_topology_conflict"] = True
+        return
+
+    # Forward-compatible path for a materializer that persists an explicitly
+    # fingerprint-bound workload topology in Magpie's workspace snapshot.
+    workload_spec = config.get("workload_spec")
+    topology = workload_spec.get("resolved_topology") if isinstance(workload_spec, dict) else None
+    if not isinstance(topology, dict):
+        return
+    topology_fingerprint = _valid_recipe_fingerprint(
+        topology.get("recipe_fingerprint", topology.get("recipe-fingerprint"))
+    )
+    if topology_fingerprint != expected_fingerprint:
+        measurement["nonfatal_warnings"].append("native_agentx_workload_recipe_fingerprint_mismatch")
+        measurement["native_agentx_topology_conflict"] = True
+        return
+    if not _set_native_agentx_topology(measurement, topology, source="materialized_workload_metadata"):
+        measurement["nonfatal_warnings"].append("native_agentx_workload_topology_invalid")
+        measurement["native_agentx_topology_conflict"] = True
+
+
+def _native_distribution(value: Any) -> dict[str, int]:
+    """Map InferenceX's native token distribution onto Hyperloom names."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for source, target in (("mean", "avg"), ("p50", "p50"), ("p75", "p75"), ("p90", "p90"), ("p95", "p95")):
+        parsed = to_float(value.get(source))
+        if parsed is not None and math.isfinite(parsed) and parsed >= 0:
+            out[target] = int(round(parsed))
+    return out
+
+
+def _native_agentx_raw_matches_report(
+    measurement: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    source_path: Path,
+) -> bool:
+    """Validate raw aggregate identity before any of its payload is consumed."""
+    warnings = measurement["nonfatal_warnings"]
+    expected_fingerprint = _valid_recipe_fingerprint(measurement.get("agentx_recipe_fingerprint"))
+    raw_fingerprint = _valid_recipe_fingerprint(raw.get("recipe_fingerprint"))
+    if expected_fingerprint is None or raw_fingerprint is None:
+        warnings.append(f"native_agentx_raw_recipe_fingerprint_missing:{source_path}")
+        return False
+    if raw_fingerprint != expected_fingerprint:
+        warnings.append(f"native_agentx_raw_recipe_fingerprint_mismatch:{source_path}")
+        return False
+
+    raw_fields, raw_fields_valid = _native_agentx_explicit_topology_fields(raw)
+    raw_has_topology_field = any(key in raw for key in ("tp", "pp", "pcp", "pcp_size", "pcp-size", "ep", "gpu_count"))
+    if raw_has_topology_field and not raw_fields_valid:
+        warnings.append(f"native_agentx_raw_topology_invalid:{source_path}")
+        return False
+
+    raw_topology = _native_agentx_topology(raw)
+    if raw_topology is not None:
+        parsed_raw_topology, raw_gpu_count = raw_topology
+        expected_gpu_count = first_int(measurement.get("agentx_gpu_count"))
+        if expected_gpu_count is not None and expected_gpu_count != raw_gpu_count:
+            warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
+            return False
+        expected_topology = measurement.get("agentx_gpu_topology")
+        if isinstance(expected_topology, dict):
+            for dimension in ("tp", "pp", "pcp", "ep"):
+                if (
+                    dimension in expected_topology
+                    and dimension in parsed_raw_topology
+                    and expected_topology[dimension] != parsed_raw_topology[dimension]
+                ):
+                    warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
+                    return False
+        return True
+
+    # Pinned InferenceX aggregates currently expose TP + EP, not PP + PCP.
+    # Such a raw file may enrich corpus/cache telemetry only after Magpie's
+    # fingerprint-bound snapshot established the complete physical topology.
+    # In particular, TP alone must never become the per-GPU divisor.
+    expected_gpu_count = first_int(measurement.get("agentx_gpu_count"))
+    expected_topology = measurement.get("agentx_gpu_topology")
+    expected_dimensions = (
+        {
+            dimension: value
+            for dimension in ("tp", "pp", "pcp")
+            if (value := first_int(expected_topology.get(dimension))) is not None and value > 0
+        }
+        if isinstance(expected_topology, dict)
+        else {}
+    )
+    trusted_topology = (
+        expected_gpu_count is not None
+        and expected_gpu_count > 0
+        and measurement.get("agentx_gpu_count_source") in _TRUSTED_NATIVE_AGENTX_GPU_COUNT_SOURCES
+        and len(expected_dimensions) == 3
+        and expected_gpu_count == expected_dimensions["tp"] * expected_dimensions["pp"] * expected_dimensions["pcp"]
+    )
+    if not trusted_topology:
+        warnings.append(f"native_agentx_raw_topology_invalid:{source_path}")
+        return False
+
+    assert isinstance(expected_topology, dict)
+    for dimension in ("tp", "pp", "pcp"):
+        if dimension in raw_fields and raw_fields[dimension] != expected_dimensions[dimension]:
+            warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
+            return False
+    if "gpu_count" in raw_fields and raw_fields["gpu_count"] != expected_gpu_count:
+        warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
+        return False
+    if "ep" in raw_fields:
+        expected_ep = first_int(expected_topology.get("ep"))
+        if expected_ep is None:
+            recipe = measurement.get("agentx_recipe")
+            if isinstance(recipe, dict):
+                expected_ep = first_int(recipe.get("ep"))
+        if expected_ep is not None and raw_fields["ep"] != expected_ep:
+            warnings.append(f"native_agentx_raw_topology_mismatch:{source_path}")
+            return False
+    return True
+
+
+def _merge_native_agentx_raw(
+    measurement: dict[str, Any],
+    raw: dict[str, Any],
+    *,
+    source_path: Path,
+) -> bool:
+    """Enrich a native Magpie report from InferenceX's aggregate JSON.
+
+    Magpie intentionally exposes a compact AgentX summary. The underlying
+    aggregate retains corpus distributions, cache telemetry, and PCP topology
+    that Hyperloom needs for its prompts and per-GPU comparisons.
+    """
+    if str(raw.get("scenario_type") or "").strip().lower() != "agentic-coding":
+        return False
+    if not _native_agentx_raw_matches_report(measurement, raw, source_path=source_path):
+        return False
+    request_metrics = raw.get("request_metrics")
+    request_metrics = request_metrics if isinstance(request_metrics, dict) else {}
+    tokens = request_metrics.get("tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    measurement["isl_distribution"] = _native_distribution(tokens.get("input"))
+    measurement["osl_distribution"] = _native_distribution(tokens.get("output_actual"))
+
+    dataset = raw.get("dataset")
+    if isinstance(dataset, dict):
+        measurement["agentx_dataset"] = dataset
+        measurement["corpus_loader"] = str(dataset.get("loader") or dataset.get("name") or "")
+    cache = request_metrics.get("cache")
+    cache = cache if isinstance(cache, dict) else {}
+    measurement["theoretical_prefix_cache_hit"] = to_float(cache.get("theoretical_cache_hit_rate"))
+    server_metrics = raw.get("server_metrics")
+    if isinstance(server_metrics, dict):
+        measurement["agentx_server_cache"] = server_metrics.get("cache")
+
+    _set_native_agentx_topology(measurement, raw, source="inferencex_raw")
+    measurement["raw_result_path"] = str(source_path)
+    return True
+
+
+def _validate_native_agentx_protocol(
+    measurement: dict[str, Any],
+    *,
+    workspace: Path | None,
+    raw: dict[str, Any] | None,
+    raw_path: Path | None,
+) -> None:
+    """Cross-bind the native report to its exact AIPerf protocol artifacts.
+
+    Magpie's compact report is deliberately convenient, but its current
+    ``benchmark_valid`` gate only proves positive throughput and an acceptable
+    error ratio.  A one-second or cancelled run can therefore look publishable
+    if that report is considered alone.  Native AgentX is accepted only when
+    the Magpie summary, InferenceX aggregate, materialized recipe snapshot and
+    AIPerf's own scenario export all describe the same complete run.
+    """
+
+    errors: list[str] = []
+
+    def reject(code: str) -> None:
+        if code not in errors:
+            errors.append(code)
+
+    def strict_number(value: Any) -> float | None:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else None
+
+    def strict_non_negative_int(value: Any) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if value >= 0 else None
+
+    def metric_avg(payload: dict[str, Any], key: str) -> float | None:
+        metric = payload.get(key)
+        if not isinstance(metric, dict):
+            return None
+        return strict_number(metric.get("avg"))
+
+    config: dict[str, Any] = {}
+    if workspace is None:
+        reject("workspace_missing")
+    else:
+        config_path = workspace / "config.yaml"
+        try:
+            loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            loaded = None
+            reject("config_snapshot_unreadable")
+        if isinstance(loaded, dict):
+            wrapped = loaded.get("benchmark")
+            config = wrapped if isinstance(wrapped, dict) else loaded
+        else:
+            reject("config_snapshot_invalid")
+
+    raw_agentx = config.get("agentx")
+    agentx = raw_agentx if isinstance(raw_agentx, dict) else {}
+    raw_resolved = agentx.get("resolved")
+    resolved = raw_resolved if isinstance(raw_resolved, dict) else {}
+    if not resolved:
+        reject("config_resolved_recipe_missing")
+    workload = config.get("workload_spec")
+    workload = workload if isinstance(workload, dict) else {}
+
+    expected_fingerprint = _valid_recipe_fingerprint(
+        resolved.get("recipe-fingerprint", resolved.get("recipe_fingerprint"))
+    )
+    if expected_fingerprint is None:
+        reject("config_recipe_fingerprint_invalid")
+    elif expected_fingerprint != _valid_recipe_fingerprint(measurement.get("agentx_recipe_fingerprint")):
+        reject("config_report_recipe_fingerprint_mismatch")
+
+    expected_concurrency = first_int(
+        resolved.get("conc"),
+        workload.get("concurrency"),
+    )
+    expected_duration = first_int(
+        resolved.get("duration"),
+        workload.get("duration_s"),
+    )
+    if expected_concurrency is None or expected_concurrency <= 0:
+        reject("config_concurrency_invalid")
+    if expected_duration is None or expected_duration <= 0:
+        reject("config_duration_invalid")
+    if str(measurement.get("agentx_mode") or "").strip().lower() == "canonical" and expected_duration != 3600:
+        reject("canonical_duration_not_3600")
+
+    report_recipe = measurement.get("agentx_recipe")
+    report_recipe = report_recipe if isinstance(report_recipe, dict) else {}
+    report_launch = measurement.get("agentx_launch")
+    report_launch = report_launch if isinstance(report_launch, dict) else {}
+
+    def require_same(label: str, *values: Any, fold: bool = False) -> None:
+        normalized: list[Any] = []
+        for value in values:
+            if value is None or value == "":
+                reject(f"{label}_missing")
+                return
+            item = str(value).strip().lower() if fold else value
+            normalized.append(item)
+        if len(set(normalized)) != 1:
+            reject(f"{label}_mismatch")
+
+    if raw is None or raw_path is None:
+        reject("inferencex_aggregate_missing")
+        raw = {}
+    else:
+        measurement["native_agentx_aggregate_path"] = str(raw_path)
+
+    require_same(
+        "recipe_fingerprint",
+        expected_fingerprint,
+        report_recipe.get("recipe_fingerprint"),
+        report_launch.get("recipe_fingerprint"),
+        raw.get("recipe_fingerprint"),
+    )
+    require_same("concurrency", expected_concurrency, report_recipe.get("conc"), raw.get("conc"))
+    require_same("model", config.get("model"), resolved.get("model"), report_recipe.get("model"), raw.get("model"))
+    require_same(
+        "framework",
+        config.get("framework"),
+        resolved.get("framework"),
+        report_recipe.get("framework"),
+        raw.get("framework"),
+        fold=True,
+    )
+    require_same(
+        "precision",
+        config.get("precision"),
+        resolved.get("precision"),
+        report_recipe.get("precision"),
+        raw.get("precision"),
+        fold=True,
+    )
+    require_same(
+        "image",
+        config.get("docker_image"),
+        resolved.get("image"),
+        report_recipe.get("image"),
+        report_launch.get("docker_image"),
+        raw.get("image"),
+    )
+    require_same(
+        "model_prefix",
+        resolved.get("model-prefix"),
+        report_recipe.get("infmax_model_prefix"),
+        raw.get("infmax_model_prefix"),
+    )
+    require_same(
+        "launcher",
+        config.get("benchmark_script"),
+        report_launch.get("benchmark_script"),
+    )
+    require_same("recipe_name", agentx.get("recipe"), report_launch.get("recipe"))
+    for label, config_key, report_key, raw_key in (
+        ("tp", "tp", "tp", "tp"),
+        ("pp", "pp", "pp", "pp"),
+        ("ep", "ep", "ep", "ep"),
+        ("pcp", "pcp-size", None, "pcp_size"),
+    ):
+        values = [resolved.get(config_key), raw.get(raw_key)]
+        if report_key is not None:
+            values.append(report_recipe.get(report_key))
+        require_same(label, *values)
+
+    accounting = raw.get("request_accounting")
+    accounting = accounting if isinstance(accounting, dict) else {}
+    records_total = strict_non_negative_int(accounting.get("records_total"))
+    records_profiled = strict_non_negative_int(accounting.get("records_profiled"))
+    records_dropped = strict_non_negative_int(accounting.get("records_dropped_total"))
+    records_warmup = strict_non_negative_int(accounting.get("records_warmup_dropped"))
+    records_errors = strict_non_negative_int(accounting.get("records_error_dropped"))
+    successful = strict_non_negative_int(raw.get("num_requests_successful"))
+    total = strict_non_negative_int(raw.get("num_requests_total"))
+    if None in (
+        records_total,
+        records_profiled,
+        records_dropped,
+        records_warmup,
+        records_errors,
+        successful,
+        total,
+    ):
+        reject("request_accounting_invalid")
+    else:
+        assert records_total is not None
+        assert records_profiled is not None
+        assert records_dropped is not None
+        assert records_warmup is not None
+        assert records_errors is not None
+        assert successful is not None
+        assert total is not None
+        if records_total != records_profiled + records_dropped:
+            reject("request_accounting_sum_mismatch")
+        if successful != records_profiled:
+            reject("request_accounting_success_mismatch")
+        if total != records_total:
+            reject("request_accounting_total_mismatch")
+        if records_profiled <= 0:
+            reject("request_accounting_empty")
+        # InferenceX drops the union of warmup and error rows. A row may be in
+        # both sets, so their sum need not equal records_dropped_total, but the
+        # union is bounded by max(counts) and sum(counts).
+        if not max(records_warmup, records_errors) <= records_dropped <= (records_warmup + records_errors):
+            reject("request_accounting_drop_bounds_mismatch")
+        error_categories = accounting.get("error_categories")
+        if not isinstance(error_categories, dict):
+            reject("request_accounting_error_categories_invalid")
+        else:
+            category_counts = [strict_non_negative_int(value) for value in error_categories.values()]
+            if (
+                any(value is None for value in category_counts)
+                or sum(value for value in category_counts if value is not None) != records_errors
+            ):
+                reject("request_accounting_error_categories_mismatch")
+        metrics_requests = measurement.get("completed_requests")
+        if first_int(metrics_requests) != successful:
+            reject("report_success_count_mismatch")
+
+        report_accounting = measurement.get("agentx_request_accounting")
+        if report_accounting != accounting:
+            reject("report_request_accounting_mismatch")
+        report_requests = measurement.get("agentx_requests")
+        report_requests = report_requests if isinstance(report_requests, dict) else {}
+        if strict_non_negative_int(report_requests.get("total")) != records_total:
+            reject("report_request_total_mismatch")
+        if strict_non_negative_int(report_requests.get("records_total")) != records_total:
+            reject("report_records_total_mismatch")
+        if strict_non_negative_int(report_requests.get("profiled_total")) != (successful + records_errors):
+            reject("report_profiled_total_mismatch")
+        if strict_non_negative_int(report_requests.get("errors")) != records_errors:
+            reject("report_error_count_mismatch")
+        if strict_non_negative_int(report_requests.get("warmup_dropped")) != records_warmup:
+            reject("report_warmup_count_mismatch")
+        error_rate_denominator = successful + records_errors
+        report_error_rate = strict_number(report_requests.get("error_rate"))
+        if error_rate_denominator <= 0:
+            reject("report_error_rate_invalid")
+        elif report_error_rate is None or not math.isclose(
+            report_error_rate,
+            records_errors / error_rate_denominator,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            reject("report_error_rate_mismatch")
+
+    request_metrics = raw.get("request_metrics")
+    request_metrics = request_metrics if isinstance(request_metrics, dict) else {}
+    raw_throughput = request_metrics.get("throughput")
+    raw_throughput = raw_throughput if isinstance(raw_throughput, dict) else {}
+    raw_qps = request_metrics.get("qps")
+    raw_qps = raw_qps if isinstance(raw_qps, dict) else {}
+    report_throughput = measurement.get("agentx_report_throughput")
+    report_throughput = report_throughput if isinstance(report_throughput, dict) else {}
+
+    def nested_metric(payload: dict[str, Any], section: str, key: str) -> float | None:
+        nested = payload.get(section)
+        if not isinstance(nested, dict):
+            return None
+        return strict_number(nested.get(key))
+
+    throughput_pairs = (
+        (
+            "request_throughput",
+            strict_number(report_throughput.get("request_throughput")),
+            strict_number(raw_qps.get("mean")),
+        ),
+        (
+            "input_tokens_per_second",
+            strict_number(report_throughput.get("input_tokens_per_second")),
+            nested_metric(raw_throughput, "input", "tokens_per_second"),
+        ),
+        (
+            "output_tokens_per_second",
+            strict_number(report_throughput.get("output_tokens_per_second")),
+            nested_metric(raw_throughput, "output", "tokens_per_second"),
+        ),
+        (
+            "total_tokens_per_second",
+            strict_number(report_throughput.get("total_tokens_per_second")),
+            nested_metric(raw_throughput, "total", "tokens_per_second"),
+        ),
+        (
+            "duration_seconds",
+            strict_number(report_throughput.get("duration_seconds")),
+            strict_number(raw_throughput.get("duration_seconds")),
+        ),
+    )
+    for label, report_value, raw_value in throughput_pairs:
+        if report_value is None or raw_value is None:
+            reject(f"report_{label}_missing")
+        elif report_value != raw_value:
+            reject(f"report_{label}_mismatch")
+
+    raw_latency = request_metrics.get("latency")
+    report_latency = measurement.get("agentx_report_latency_seconds")
+    if not isinstance(raw_latency, dict) or not isinstance(report_latency, dict):
+        reject("report_latency_missing")
+    elif report_latency != raw_latency:
+        reject("report_latency_mismatch")
+
+    aiperf: dict[str, Any] = {}
+    artifact_path: Path | None = None
+    if workspace is not None:
+        try:
+            artifacts = sorted(workspace.rglob("profile_export_aiperf.json"))
+        except OSError:
+            artifacts = []
+        if len(artifacts) != 1:
+            reject("aiperf_artifact_missing" if not artifacts else "aiperf_artifact_ambiguous")
+        else:
+            artifact_path = artifacts[0]
+            payload = read_json(artifact_path, default=None, require_dict=True)
+            if isinstance(payload, dict):
+                aiperf = payload
+                measurement["native_agentx_aiperf_path"] = str(artifact_path)
+            else:
+                reject("aiperf_artifact_unreadable")
+
+    metadata = aiperf.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    if metadata.get("scenario") != "inferencex-agentx-mvp":
+        reject("aiperf_scenario_mismatch")
+    if metadata.get("submission_valid") is not True:
+        reject("aiperf_submission_invalid")
+        raw_reasons = metadata.get("submission_invalid_reasons")
+        if isinstance(raw_reasons, list):
+            for reason in raw_reasons:
+                reject(f"aiperf:{reason}")
+    if aiperf.get("was_cancelled") is not False:
+        reject("aiperf_cancelled_or_unknown")
+
+    input_config = aiperf.get("input_config")
+    input_config = input_config if isinstance(input_config, dict) else {}
+    if input_config.get("scenario") != "inferencex-agentx-mvp":
+        reject("aiperf_input_scenario_mismatch")
+    expected_model = str(config.get("model") or "").strip()
+    models = input_config.get("models")
+    model_items = models.get("items") if isinstance(models, dict) else None
+    if not isinstance(model_items, list) or len(model_items) != 1 or not isinstance(model_items[0], dict):
+        reject("aiperf_models_invalid")
+    elif str(model_items[0].get("name") or "").strip() != expected_model:
+        reject("aiperf_model_mismatch")
+    tokenizer = input_config.get("tokenizer")
+    if not isinstance(tokenizer, dict) or not str(tokenizer.get("name") or "").strip():
+        reject("aiperf_tokenizer_invalid")
+    elif str(tokenizer.get("name") or "").strip() != expected_model:
+        reject("aiperf_tokenizer_mismatch")
+    phases = input_config.get("phases")
+    profiling_phases = (
+        [
+            phase
+            for phase in phases
+            if isinstance(phase, dict) and str(phase.get("kind") or phase.get("name") or "").lower() == "profiling"
+        ]
+        if isinstance(phases, list)
+        else []
+    )
+    if len(profiling_phases) != 1:
+        reject("aiperf_profiling_phase_invalid")
+        phase: dict[str, Any] = {}
+    else:
+        phase = profiling_phases[0]
+        if first_int(phase.get("concurrency")) != expected_concurrency:
+            reject("aiperf_concurrency_mismatch")
+        phase_duration = strict_number(phase.get("duration"))
+        if expected_duration is None or phase_duration != float(expected_duration):
+            reject("aiperf_configured_duration_mismatch")
+        if str(phase.get("timing_mode") or "").strip().lower() != "agentic_replay":
+            reject("aiperf_timing_mode_mismatch")
+
+    coverage = metadata.get("metric_duration_coverage")
+    coverage_rows = coverage if isinstance(coverage, list) else []
+    if len(coverage_rows) != 1 or not isinstance(coverage_rows[0], dict):
+        reject("aiperf_duration_coverage_missing")
+    else:
+        row = coverage_rows[0]
+        required_ratio = strict_number(row.get("required_ratio"))
+        ttft_ratio = strict_number(row.get("ttft_ratio"))
+        itl_ratio = strict_number(row.get("inter_token_latency_ratio"))
+        coverage_duration = strict_number(row.get("expected_duration_seconds"))
+        if profiling_phases and row.get("phase_name") != profiling_phases[0].get("name"):
+            reject("aiperf_duration_coverage_phase_mismatch")
+        if expected_duration is None or coverage_duration != float(expected_duration):
+            reject("aiperf_duration_coverage_expected_mismatch")
+        if required_ratio is None or required_ratio < 0.95 or required_ratio > 1.0:
+            reject("aiperf_duration_coverage_threshold_invalid")
+        if (
+            required_ratio is None
+            or ttft_ratio is None
+            or itl_ratio is None
+            or max(ttft_ratio, itl_ratio) < required_ratio
+        ):
+            reject("aiperf_duration_coverage_failed")
+
+    observed_duration = metric_avg(aiperf, "benchmark_duration")
+    if observed_duration is None or expected_duration is None or observed_duration < 0.95 * expected_duration:
+        reject("aiperf_benchmark_duration_incomplete")
+    aiperf_successes = metric_avg(aiperf, "request_count")
+    if successful is None or aiperf_successes != float(successful):
+        reject("aiperf_success_count_mismatch")
+
+    aiperf_dataset = metadata.get("dataset")
+    report_dataset = measurement.get("agentx_report_dataset")
+    raw_dataset = raw.get("dataset")
+    if not all(isinstance(value, dict) for value in (aiperf_dataset, report_dataset, raw_dataset)):
+        reject("dataset_provenance_missing")
+    else:
+        assert isinstance(aiperf_dataset, dict)
+        assert isinstance(report_dataset, dict)
+        assert isinstance(raw_dataset, dict)
+        if aiperf_dataset != report_dataset or aiperf_dataset != raw_dataset:
+            reject("dataset_provenance_mismatch")
+        if aiperf_dataset.get("source_type") != "public_dataset":
+            reject("dataset_not_public")
+        if first_int(aiperf_dataset.get("num_dataset_entries")) != 393:
+            reject("dataset_entry_count_mismatch")
+        loader = str(aiperf_dataset.get("loader") or "")
+        if not loader.startswith("semianalysis_cc_traces_weka"):
+            reject("dataset_loader_invalid")
+        configured_corpus = str(workload.get("corpus") or "").strip()
+        if configured_corpus and loader != configured_corpus:
+            reject("dataset_config_mismatch")
+
+    if measurement.get("native_agentx_aggregate_ambiguous") is True:
+        reject("inferencex_aggregate_ambiguous")
+
+    measurement["native_agentx_protocol_errors"] = errors
+    measurement["native_agentx_protocol_valid"] = not errors
+    reasons = measurement.get("submission_invalid_reasons")
+    reasons = (
+        [str(reason) for reason in reasons if not str(reason).startswith("native_agentx_protocol:")]
+        if isinstance(reasons, list)
+        else []
+    )
+    if errors:
+        reasons.extend(f"native_agentx_protocol:{error}" for error in errors)
+    measurement["submission_invalid_reasons"] = list(dict.fromkeys(reasons))
+    measurement["submission_valid"] = bool(
+        measurement.get("benchmark_valid") is True and measurement.get("publishable") is True and not errors
+    )
 
 
 def _latency_snapshot(measurement: dict[str, Any]) -> dict[str, Any]:
@@ -636,6 +1584,7 @@ def extract_benchmark_measurement(
 
     measurement: dict[str, Any] = {
         "reported_success": report.get("success") if report else None,
+        "scenario": report.get("scenario"),
         "framework": report.get("framework"),
         "model": report.get("model"),
         # Scriptable (server-less) workloads tag the report with workload_kind/unit and ship a quality_gate block
@@ -667,8 +1616,16 @@ def extract_benchmark_measurement(
         "raw_result_path": None,
         "nonfatal_warnings": [],
     }
+    if str(report.get("scenario") or "").strip().lower() == "agentx":
+        measurement["native_agentx_report"] = True
+        measurement["native_agentx_schema_valid"] = False
+    _merge_native_agentx_report(measurement, report)
+    if workspace is not None and measurement.get("native_agentx_report") is True:
+        _merge_native_agentx_workspace_topology(measurement, workspace)
 
     origins: dict[str, str] = {}
+    native_aggregate: dict[str, Any] | None = None
+    native_aggregate_path: Path | None = None
     _tag_latency_origins(
         measurement,
         origins,
@@ -679,7 +1636,22 @@ def extract_benchmark_measurement(
     if workspace is not None:
         for raw_path in _candidate_raw_jsons(workspace):
             raw = read_json(raw_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
+            if not raw:
+                continue
+            if measurement.get("native_agentx_report") is True:
+                if str(raw.get("scenario_type") or "").strip().lower() != "agentic-coding":
+                    continue
+                accepted = _merge_native_agentx_raw(measurement, raw, source_path=raw_path)
+                if accepted:
+                    if native_aggregate is not None:
+                        measurement["native_agentx_aggregate_ambiguous"] = True
+                        native_aggregate = None
+                        native_aggregate_path = None
+                        break
+                    native_aggregate = raw
+                    native_aggregate_path = raw_path
+                continue
+            if to_float(raw.get("output_throughput")) is None:
                 continue
             before = _latency_snapshot(measurement)
             _merge_raw_result(measurement, raw, source_path=raw_path)
@@ -696,6 +1668,13 @@ def extract_benchmark_measurement(
     before = _latency_snapshot(measurement)
     _derive_tpot_if_missing(measurement, report)
     _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
+    if measurement.get("native_agentx_report") is True:
+        _validate_native_agentx_protocol(
+            measurement,
+            workspace=workspace,
+            raw=native_aggregate,
+            raw_path=native_aggregate_path,
+        )
     measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # Second-chance salvage from Magpie leak destinations when the in-workspace search found no usable measurement
@@ -706,7 +1685,19 @@ def extract_benchmark_measurement(
             subprocess_started_unix=subprocess_started_unix,
         ):
             raw = read_json(rescue_path, default=None, require_dict=True)
-            if not raw or to_float(raw.get("output_throughput")) is None:
+            if not raw:
+                continue
+            native_report = measurement.get("native_agentx_report") is True
+            native_raw = str(raw.get("scenario_type") or "").strip().lower() == "agentic-coding"
+            if native_report and not native_raw:
+                continue
+            if native_report and not _native_agentx_raw_matches_report(
+                measurement,
+                raw,
+                source_path=rescue_path,
+            ):
+                continue
+            if not native_report and to_float(raw.get("output_throughput")) is None:
                 continue
             # Copy the leak into the workspace BEFORE merging so the NFS clone stays self-contained.
             materialized = _materialize_rescue_into_workspace(
@@ -714,6 +1705,16 @@ def extract_benchmark_measurement(
                 workspace,
             )
             recorded_path = materialized if materialized is not None else rescue_path
+            if native_report:
+                accepted = _merge_native_agentx_raw(measurement, raw, source_path=recorded_path)
+                if accepted:
+                    native_aggregate = raw
+                    native_aggregate_path = recorded_path
+                    warnings.append(f"rescued_from_leaked_path:{rescue_path}")
+                    if materialized is None:
+                        warnings.append(f"rescued_copy_into_workspace_failed: {rescue_path}")
+                    break
+                continue
             before = _latency_snapshot(measurement)
             _merge_raw_result(measurement, raw, source_path=recorded_path)
             _tag_latency_origins(measurement, origins, label=LATENCY_FROM_RESCUED_RAW, before=before)
@@ -725,6 +1726,13 @@ def extract_benchmark_measurement(
         before = _latency_snapshot(measurement)
         _derive_tpot_if_missing(measurement, report)
         _tag_latency_origins(measurement, origins, label=LATENCY_DERIVED, before=before)
+        if measurement.get("native_agentx_report") is True:
+            _validate_native_agentx_protocol(
+                measurement,
+                workspace=workspace,
+                raw=native_aggregate,
+                raw_path=native_aggregate_path,
+            )
         measurement["valid_measurement"] = is_valid_measurement(measurement)
 
     # One label for the pair, keyed on TTFT and falling back to E2EL, because
@@ -790,28 +1798,45 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
         return False
-    # Gated on BOTH the mode and the key's presence, and each half earns its keep.
+    if _is_scriptable_measurement(result):
+        # Scriptable workloads have their own image-quality contract and never
+        # run the AgentX replay. An ambient HYPERLOOM_AGENTX left in the parent
+        # shell must not make their otherwise valid result require an AgentX
+        # submission verdict.
+        from ._accuracy_gate import quality_gate_passed
+
+        qg = result.get("quality_gate")
+        return quality_gate_passed(qg, require=False)
+    # Native reports and merged legacy AgentX raw results serialize their
+    # scenario, so a resumed subprocess need not inherit HYPERLOOM_AGENTX.
+    # A stray similarly named key on a synthetic result remains inert.
     from ._workload_envs import agentx_enabled
 
-    if agentx_enabled() and "submission_valid" in result:
+    agentx_result = str(result.get("scenario") or "").strip().lower() == "agentx" or agentx_enabled()
+    if result.get("native_agentx_report") is True and result.get("native_agentx_schema_valid") is not True:
+        return False
+    if result.get("native_agentx_report") is True:
+        if result.get("native_agentx_protocol_valid") is not True:
+            return False
+        gpu_count = first_int(result.get("agentx_gpu_count"))
+        if (
+            result.get("native_agentx_topology_conflict") is True
+            or gpu_count is None
+            or gpu_count <= 0
+            or result.get("agentx_gpu_count_source") not in _TRUSTED_NATIVE_AGENTX_GPU_COUNT_SOURCES
+        ):
+            return False
+    if agentx_result:
         verdict = result.get("submission_valid")
         if verdict is False:
             return False
-        if verdict is None:
+        if verdict is not True:
             # The verdict is unknown: no --scenario was requested or the aiperf build predates the field. map_aiperf
             # writes the key unconditionally, so None arrives as a present key.
             from hyperloom.common.env import env_bool
 
             if not env_bool("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION"):
                 return False
-    if _is_scriptable_measurement(result):
-        # A scriptable run whose image-quality gate failed is not selectable, regardless of throughput.
-        from ._accuracy_gate import quality_gate_passed
-
-        qg = result.get("quality_gate")
-        if not quality_gate_passed(qg, require=False):
-            return False
-        return True
     completed = to_int(result.get("completed_requests"))
     return completed is not None and completed > 0
 

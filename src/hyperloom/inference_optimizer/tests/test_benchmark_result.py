@@ -174,6 +174,715 @@ def _write_inferencex(path: Path, tput: float = 1761.6, completed: int = 640) ->
     )
 
 
+_NATIVE_MODEL = "deepseek-ai/DeepSeek-V4-Pro-0813"
+_NATIVE_MODEL_PREFIX = "dsv4"
+_NATIVE_IMAGE = "lmsysorg/sglang-rocm:test"
+_NATIVE_RECIPE = "dsv4-fp4-mi355x-sglang-agentic-mtp"
+_NATIVE_LAUNCHER = "single_node/agentic/dsv4_fp4_mi355x_sglang_mtp.sh"
+_NATIVE_DATASET = {
+    "source_type": "public_dataset",
+    "loader": "semianalysis_cc_traces_weka_062126",
+    "hf_dataset_name": "semianalysisai/cc-traces-weka-062126",
+    "hf_split": "train",
+    "num_dataset_entries": 393,
+}
+
+
+def _native_accounting() -> dict:
+    return {
+        "records_total": 392,
+        "records_profiled": 390,
+        "records_dropped_total": 2,
+        "records_warmup_dropped": 0,
+        "records_error_dropped": 2,
+        "error_categories": {"http_error": 2},
+    }
+
+
+def _native_raw(*, pcp: int = 1, ep: int = 1) -> dict:
+    return {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        "model": _NATIVE_MODEL,
+        "infmax_model_prefix": _NATIVE_MODEL_PREFIX,
+        "framework": "sglang",
+        "precision": "fp4",
+        "image": _NATIVE_IMAGE,
+        "conc": 16,
+        "tp": 8,
+        "pp": 1,
+        "pcp_size": pcp,
+        "ep": ep,
+        "num_requests_total": 392,
+        "num_requests_successful": 390,
+        "request_accounting": _native_accounting(),
+        "dataset": dict(_NATIVE_DATASET),
+        "request_metrics": {
+            "qps": {"mean": 0.42},
+            "throughput": {
+                "input": {"tokens_per_second": 114_000.0},
+                "output": {"tokens_per_second": 812.5},
+                "total": {"tokens_per_second": 114_812.5},
+                "duration_seconds": 3600.0,
+            },
+            "latency": {
+                "ttft": {"mean": 0.410, "p50": 0.3, "p90": 0.9, "p95": 1.25},
+                "tpot": {"mean": 0.019, "p50": 0.015, "p90": 0.027, "p95": 0.031},
+                "e2el": {"mean": 3.3, "p95": 9.1},
+                "e2e_norm_intvty": {"p50": 300.0, "p90": 184.75},
+            },
+            "tokens": {},
+            "cache": {},
+        },
+    }
+
+
+def _native_agentx_report(*, benchmark_valid: bool = True, publishable: bool = True) -> dict:
+    return {
+        "success": True,
+        "scenario": "agentx",
+        "benchmark_valid": benchmark_valid,
+        "publishable": publishable,
+        "framework": "sglang",
+        "model": _NATIVE_MODEL,
+        "throughput": {
+            "request_throughput": 0.42,
+            "output_throughput": 812.5,
+            "total_token_throughput": 114_812.5,
+            "completed_requests": 390,
+            "duration_seconds": 3600.0,
+        },
+        "latency": {
+            "ttft": {"mean_ms": 410.0, "p99_ms": 0.0},
+            "tpot": {"mean_ms": 19.0},
+            "e2el": {"mean_ms": 3300.0, "p99_ms": 0.0},
+        },
+        "agentx_metrics": {
+            "mode": "canonical" if publishable else "fast",
+            "scenario_type": "agentic-coding",
+            "recipe_fingerprint_valid": True,
+            "requests": {
+                "total": 392,
+                "records_total": 392,
+                "profiled_total": 392,
+                "successful": 390,
+                "errors": 2,
+                "warmup_dropped": 0,
+                "error_rate": 2 / 392,
+                "threshold": 0.10,
+            },
+            "throughput": {
+                "request_throughput": 0.42,
+                "input_tokens_per_second": 114_000.0,
+                "output_tokens_per_second": 812.5,
+                "total_tokens_per_second": 114_812.5,
+                "duration_seconds": 3600.0,
+            },
+            "latency_seconds": {
+                "ttft": {"mean": 0.410, "p50": 0.3, "p90": 0.9, "p95": 1.25},
+                "tpot": {"mean": 0.019, "p50": 0.015, "p90": 0.027, "p95": 0.031},
+                "e2el": {"mean": 3.3, "p95": 9.1},
+                "e2e_norm_intvty": {"p50": 300.0, "p90": 184.75},
+            },
+            "recipe": {
+                "tp": 8,
+                "pp": 1,
+                "ep": 1,
+                "conc": 16,
+                "image": _NATIVE_IMAGE,
+                "model": _NATIVE_MODEL,
+                "infmax_model_prefix": _NATIVE_MODEL_PREFIX,
+                "framework": "sglang",
+                "precision": "fp4",
+                "kv_offloading": "none",
+                "recipe_fingerprint": "a" * 64,
+            },
+            "launch": {
+                "recipe": _NATIVE_RECIPE,
+                "docker_image": _NATIVE_IMAGE,
+                "benchmark_script": _NATIVE_LAUNCHER,
+                "recipe_fingerprint": "a" * 64,
+            },
+            "dataset": dict(_NATIVE_DATASET),
+            "request_accounting": _native_accounting(),
+        },
+    }
+
+
+def _write_native_config_snapshot(
+    workspace: Path,
+    *,
+    fingerprint: str = "a" * 64,
+    tp: int = 8,
+    pp: int = 1,
+    pcp: int = 1,
+    ep: int = 1,
+    write_raw: bool = True,
+) -> None:
+    (workspace / "config.yaml").write_text(
+        json.dumps(
+            {
+                "framework": "sglang",
+                "model": _NATIVE_MODEL,
+                "precision": "fp4",
+                "docker_image": _NATIVE_IMAGE,
+                "benchmark_script": _NATIVE_LAUNCHER,
+                "agentx": {
+                    "recipe": _NATIVE_RECIPE,
+                    "mode": "canonical",
+                    "resolved": {
+                        "image": _NATIVE_IMAGE,
+                        "model": _NATIVE_MODEL,
+                        "model-prefix": _NATIVE_MODEL_PREFIX,
+                        "framework": "sglang",
+                        "precision": "fp4",
+                        "tp": tp,
+                        "pp": pp,
+                        "pcp-size": pcp,
+                        "ep": ep,
+                        "conc": 16,
+                        "duration": 3600,
+                        "recipe-fingerprint": fingerprint,
+                    },
+                },
+                "workload_spec": {
+                    "corpus": _NATIVE_DATASET["loader"],
+                    "concurrency": 16,
+                    "duration_s": 3600,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifact = workspace / "aiperf_artifacts" / "profile_export_aiperf.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(
+        json.dumps(
+            {
+                "was_cancelled": False,
+                "input_config": {
+                    "scenario": "inferencex-agentx-mvp",
+                    "models": {
+                        "strategy": "round_robin",
+                        "items": [{"name": _NATIVE_MODEL}],
+                    },
+                    "tokenizer": {"name": _NATIVE_MODEL},
+                    "phases": [
+                        {
+                            "name": "profiling",
+                            "kind": "profiling",
+                            "timing_mode": "agentic_replay",
+                            "concurrency": 16,
+                            "duration": 3600,
+                        }
+                    ],
+                },
+                "metadata": {
+                    "scenario": "inferencex-agentx-mvp",
+                    "submission_valid": True,
+                    "submission_invalid_reasons": [],
+                    "dataset": dict(_NATIVE_DATASET),
+                    "metric_duration_coverage": [
+                        {
+                            "phase_name": "profiling",
+                            "expected_duration_seconds": 3600,
+                            "required_ratio": 0.95,
+                            "ttft_ratio": 0.99,
+                            "inter_token_latency_ratio": 0.99,
+                        }
+                    ],
+                },
+                "benchmark_duration": {"unit": "seconds", "avg": 3600.0},
+                "request_count": {"unit": "requests", "avg": 390.0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    if write_raw:
+        (workspace / "inferencex_result.json").write_text(
+            json.dumps(_native_raw(pcp=pcp, ep=ep)),
+            encoding="utf-8",
+        )
+
+
+def test_extracts_native_magpie_agentx_schema_with_resolved_topology(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is True
+    assert measurement["input_throughput"] == pytest.approx(114_000.0)
+    assert measurement["output_throughput"] == pytest.approx(812.5)
+    assert measurement["total_token_throughput"] == pytest.approx(114_812.5)
+    assert measurement["ttft_p99_ms"] is None
+    assert measurement["ttft_p95_ms"] == pytest.approx(1250.0)
+    assert measurement["ttft_p50_ms"] == pytest.approx(300.0)
+    assert measurement["ttft_p90_ms"] == pytest.approx(900.0)
+    assert measurement["tpot_p50_ms"] == pytest.approx(15.0)
+    assert measurement["tpot_p90_ms"] == pytest.approx(27.0)
+    assert measurement["e2el_p99_ms"] is None
+    assert measurement["e2el_p95_ms"] == pytest.approx(9100.0)
+    assert measurement["e2e_norm_intvty_p90"] == pytest.approx(184.75)
+    assert measurement["e2e_norm_intvty_p50"] == pytest.approx(300.0)
+    assert measurement["completed_requests"] == 390
+    assert measurement["requested_requests"] is None
+    assert measurement["native_agentx_protocol_valid"] is True
+    assert measurement["submission_valid"] is True
+    assert measurement["request_error_rate"] == pytest.approx(100 * 2 / 392)
+    assert measurement["agentx_gpu_count"] == 8
+    assert measurement["agentx_gpu_count_source"] == "inferencex_raw"
+
+
+def _native_aiperf_path(workspace: Path) -> Path:
+    return workspace / "aiperf_artifacts" / "profile_export_aiperf.json"
+
+
+@pytest.mark.parametrize(
+    ("median", "tail", "output", "duration", "error_rate", "verdict"),
+    [
+        (309.0, 184.75, 812.5, 3600.0, 100 * 2 / 392, "KEEP"),
+        (308.9, 184.75, 812.5, 3600.0, 100 * 2 / 392, "REVERT"),
+        (330.0, 170.0, 812.5, 3600.0, 100 * 2 / 392, "REVERT"),
+        (330.0, 184.75, 700.0, 3600.0, 100 * 2 / 392, "REVERT"),
+        (330.0, 184.75, 812.5, 3000.0, 100 * 2 / 392, "REVERT"),
+        (330.0, 184.75, 812.5, 3600.0, 1.0, "REVERT"),
+    ],
+)
+def test_native_measurement_uses_median_grading_and_all_guards(
+    tmp_path, monkeypatch, median, tail, output, duration, error_rate, verdict
+):
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.state.shared_state import resolve_graded_comparison
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    anchor = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+    assert anchor["valid_measurement"] is True
+    candidate = {
+        **anchor,
+        "e2e_norm_intvty_p50": median,
+        "e2e_norm_intvty_p90": tail,
+        "output_throughput": output,
+        "duration_seconds": duration,
+        "request_error_rate": error_rate,
+    }
+    comparison = resolve_graded_comparison(SimpleNamespace(benchmark_mode="agentx", current_best=anchor), candidate)
+
+    assert comparison.objective == "e2e_norm_intvty_p50"
+    assert comparison.verdict == verdict
+
+
+def test_native_agentx_rejects_one_second_publishable_summary(tmp_path, monkeypatch):
+    """A compact Magpie success cannot substitute for the canonical window."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    report = _native_agentx_report()
+    report["throughput"]["duration_seconds"] = 1.0
+    report["agentx_metrics"]["throughput"]["duration_seconds"] = 1.0
+    artifact = _native_aiperf_path(tmp_path)
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    payload["benchmark_duration"]["avg"] = 1.0
+    artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert "aiperf_benchmark_duration_incomplete" in measurement["native_agentx_protocol_errors"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        ("cancelled", "aiperf_cancelled_or_unknown"),
+        ("coverage", "aiperf_duration_coverage_failed"),
+        ("accounting", "request_accounting_sum_mismatch"),
+        ("accounting_details", "request_accounting_drop_bounds_mismatch"),
+        ("report_accounting", "report_request_accounting_mismatch"),
+        ("throughput", "report_total_tokens_per_second_mismatch"),
+        ("latency", "report_latency_mismatch"),
+        ("model", "aiperf_model_mismatch"),
+        ("models_missing", "aiperf_models_invalid"),
+        ("tokenizer", "aiperf_tokenizer_mismatch"),
+        ("tokenizer_missing", "aiperf_tokenizer_invalid"),
+        ("dataset", "dataset_provenance_mismatch"),
+    ],
+)
+def test_native_agentx_protocol_tampering_fails_closed(
+    tmp_path,
+    monkeypatch,
+    mutation,
+    expected_error,
+):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    report = _native_agentx_report()
+    if mutation in {
+        "cancelled",
+        "coverage",
+        "model",
+        "models_missing",
+        "tokenizer",
+        "tokenizer_missing",
+    }:
+        artifact = _native_aiperf_path(tmp_path)
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+        if mutation == "cancelled":
+            payload["was_cancelled"] = True
+        elif mutation == "coverage":
+            coverage = payload["metadata"]["metric_duration_coverage"][0]
+            coverage["ttft_ratio"] = 0.1
+            coverage["inter_token_latency_ratio"] = 0.1
+        elif mutation == "model":
+            payload["input_config"]["models"]["items"][0]["name"] = "other/model"
+        elif mutation == "models_missing":
+            payload["input_config"].pop("models")
+        elif mutation == "tokenizer":
+            payload["input_config"]["tokenizer"]["name"] = "other/model"
+        else:
+            payload["input_config"].pop("tokenizer")
+        artifact.write_text(json.dumps(payload), encoding="utf-8")
+    elif mutation == "latency":
+        report["agentx_metrics"]["latency_seconds"]["ttft"]["mean"] = 99.0
+    elif mutation == "report_accounting":
+        report["agentx_metrics"]["request_accounting"]["records_error_dropped"] = 3
+    else:
+        raw_path = tmp_path / "inferencex_result.json"
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        if mutation == "accounting":
+            raw["request_accounting"]["records_total"] = 391
+            raw["num_requests_total"] = 391
+        elif mutation == "accounting_details":
+            raw["request_accounting"]["records_error_dropped"] = 999
+            raw["request_accounting"]["error_categories"] = {"boom": 999}
+        elif mutation == "throughput":
+            raw["request_metrics"]["throughput"]["total"] = {"tokens_per_second": 1.0}
+        else:
+            raw["dataset"]["loader"] = "untrusted_loader"
+        raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert expected_error in measurement["native_agentx_protocol_errors"]
+
+
+def test_native_agentx_requires_one_unambiguous_aiperf_export(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    duplicate = tmp_path / "aiperf_artifacts" / "run_1" / "profile_export_aiperf.json"
+    duplicate.parent.mkdir(parents=True)
+    duplicate.write_bytes(_native_aiperf_path(tmp_path).read_bytes())
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert "aiperf_artifact_ambiguous" in measurement["native_agentx_protocol_errors"]
+
+
+def test_native_agentx_without_explicit_pcp_or_resolved_topology_fails_closed(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    measurement = extract_benchmark_measurement(_native_agentx_report())
+
+    assert measurement["native_agentx_schema_valid"] is True
+    assert "agentx_gpu_count" not in measurement
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_nonpublishable_report_is_rejected(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report(publishable=False)
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["benchmark_valid"] is True
+    assert measurement["publishable"] is False
+    assert measurement["submission_valid"] is False
+    assert "native_agentx_fast_mode" in measurement["submission_invalid_reasons"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_requires_benchmark_valid_and_publishable(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report(benchmark_valid=False, publishable=True)
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["submission_valid"] is False
+    assert "native_agentx_benchmark_invalid" in measurement["submission_invalid_reasons"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_missing_metrics_schema_fails_closed(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report()
+    report.pop("agentx_metrics")
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["native_agentx_report"] is True
+    assert measurement["native_agentx_schema_valid"] is False
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_empty_metrics_schema_fails_closed(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report()
+    report["agentx_metrics"] = {}
+
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["native_agentx_schema_valid"] is False
+    assert measurement["native_agentx_schema_errors"]
+    assert measurement["valid_measurement"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("scenario_type", "synthetic", "agentx_metrics.scenario_type_invalid"),
+        ("recipe_fingerprint_valid", False, "agentx_metrics.recipe_fingerprint_valid_invalid"),
+    ],
+)
+def test_native_agentx_identity_schema_fails_closed(monkeypatch, field, value, error):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report()
+    report["agentx_metrics"][field] = value
+
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["native_agentx_schema_valid"] is False
+    assert error in measurement["native_agentx_schema_errors"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_recipe_and_launch_fingerprints_must_match(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    report = _native_agentx_report()
+    report["agentx_metrics"]["launch"]["recipe_fingerprint"] = "b" * 64
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    assert measurement["native_agentx_schema_valid"] is False
+    assert "agentx_metrics.recipe_launch_fingerprint_mismatch" in measurement["native_agentx_schema_errors"]
+    assert measurement["valid_measurement"] is False
+
+
+@pytest.mark.parametrize("launch", [None, {}, {"recipe_fingerprint": "not-a-sha256"}])
+def test_native_agentx_launch_fingerprint_is_required(monkeypatch, launch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report()
+    if launch is None:
+        report["agentx_metrics"].pop("launch")
+    else:
+        report["agentx_metrics"]["launch"] = launch
+
+    measurement = extract_benchmark_measurement(report)
+
+    assert measurement["native_agentx_schema_valid"] is False
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_config_snapshot_fingerprint_must_match(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path, fingerprint="b" * 64)
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert "native_agentx_config_recipe_fingerprint_mismatch" in measurement["nonfatal_warnings"]
+    assert "config_report_recipe_fingerprint_mismatch" in measurement["native_agentx_protocol_errors"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_agentx_config_snapshot_topology_must_match_report(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    report = _native_agentx_report()
+    report["agentx_metrics"]["recipe"]["pcp_size"] = 1
+    _write_native_config_snapshot(tmp_path, tp=4, pp=2, pcp=1)
+
+    measurement = extract_benchmark_measurement(report, workspace=tmp_path)
+
+    # Both shapes total eight GPUs, so count-only checking would miss this
+    # corrupt recipe association.
+    assert measurement["native_agentx_topology_conflict"] is True
+    assert "native_agentx_config_topology_invalid" in measurement["nonfatal_warnings"]
+    assert measurement["valid_measurement"] is False
+
+
+def test_native_raw_aggregate_restores_topology_corpus_and_cache(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path, pcp=2, write_raw=False)
+    raw = _native_raw(pcp=2)
+    raw["request_metrics"].update(
+        {
+            "tokens": {
+                "input": {"mean": 100_000, "p50": 90_000, "p75": 120_000, "p90": 160_000, "p95": 220_000},
+                "output_actual": {"mean": 800, "p50": 330, "p75": 800, "p90": 1_800, "p95": 3_000},
+            },
+            "cache": {"theoretical_cache_hit_rate": 0.972},
+        }
+    )
+    raw["server_metrics"] = {"cache": {"overall_cache_hit_rate": 0.968}}
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is True
+    assert measurement["native_agentx_protocol_valid"] is True
+    assert measurement["agentx_gpu_count"] == 16
+    assert measurement["agentx_gpu_count_source"] == "inferencex_raw"
+    assert measurement["isl_distribution"]["avg"] == 100_000
+    assert measurement["osl_distribution"]["p95"] == 3_000
+    assert measurement["corpus_loader"] == "semianalysis_cc_traces_weka_062126"
+    assert measurement["theoretical_prefix_cache_hit"] == pytest.approx(0.972)
+    assert measurement["agentx_server_cache"]["overall_cache_hit_rate"] == pytest.approx(0.968)
+
+
+def test_native_raw_partial_pinned_schema_enriches_with_trusted_topology(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path, tp=8, pp=1, pcp=2, ep=8)
+    raw = {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        # This is the schema emitted by the pinned InferenceX aggregator. PP
+        # and PCP exist only in Magpie's fingerprint-bound config snapshot.
+        "tp": 8,
+        "ep": 8,
+        "dataset": {"loader": "semianalysis_cc_traces_weka_062126"},
+        "request_metrics": {
+            "tokens": {"input": {"mean": 100_000}, "output_actual": {"p95": 3_000}},
+            "cache": {"theoretical_cache_hit_rate": 0.972},
+        },
+    }
+    raw_path = tmp_path / "inferencex_result.json"
+    raw_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert measurement["native_agentx_protocol_valid"] is False
+    assert "pcp_missing" in measurement["native_agentx_protocol_errors"]
+    assert measurement["agentx_gpu_count"] == 16
+    assert measurement["agentx_gpu_count_source"] == "magpie_config_snapshot"
+    assert measurement["agentx_gpu_topology"] == {"tp": 8, "pp": 1, "pcp": 2, "ep": 8}
+    assert measurement["isl_distribution"]["avg"] == 100_000
+    assert measurement["osl_distribution"]["p95"] == 3_000
+    assert measurement["corpus_loader"] == "semianalysis_cc_traces_weka_062126"
+    assert measurement["theoretical_prefix_cache_hit"] == pytest.approx(0.972)
+    assert measurement["raw_result_path"] == str(raw_path)
+
+
+@pytest.mark.parametrize(("dimension", "contradicting_value"), [("tp", 4), ("ep", 4)])
+def test_native_raw_partial_topology_contradiction_is_rejected(
+    tmp_path,
+    monkeypatch,
+    dimension,
+    contradicting_value,
+):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path, tp=8, pp=1, pcp=2, ep=8)
+    raw = {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        "tp": 8,
+        "ep": 8,
+        "dataset": {"loader": "must-not-be-consumed"},
+    }
+    raw[dimension] = contradicting_value
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    # A contradictory aggregate may not be used to validate the canonical
+    # protocol even though the compact Magpie report itself remains readable.
+    assert measurement["valid_measurement"] is False
+    assert measurement["agentx_gpu_count"] == 16
+    assert measurement["agentx_gpu_count_source"] == "magpie_config_snapshot"
+    assert "corpus_loader" not in measurement
+    assert measurement["raw_result_path"] is None
+    assert any(
+        warning.startswith("native_agentx_raw_topology_mismatch:") for warning in measurement["nonfatal_warnings"]
+    )
+
+
+@pytest.mark.parametrize("fingerprint", [None, "b" * 64])
+def test_native_raw_aggregate_fingerprint_is_required_before_enrichment(tmp_path, monkeypatch, fingerprint):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path)
+    raw = {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": fingerprint,
+        "tp": 8,
+        "pp": 1,
+        "pcp_size": 1,
+        "dataset": {"loader": "untrusted-loader"},
+        "request_metrics": {
+            "tokens": {"input": {"mean": 999_999}},
+            "cache": {"theoretical_cache_hit_rate": 1.0},
+        },
+    }
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is False
+    assert measurement["agentx_gpu_count_source"] == "magpie_config_snapshot"
+    assert "isl_distribution" not in measurement
+    assert "corpus_loader" not in measurement
+    assert "theoretical_prefix_cache_hit" not in measurement
+    assert measurement["raw_result_path"] is None
+    assert any(
+        warning.startswith("native_agentx_raw_recipe_fingerprint_") for warning in measurement["nonfatal_warnings"]
+    )
+
+
+def test_native_raw_fingerprint_rejection_does_not_block_later_matching_aggregate(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    _write_native_config_snapshot(tmp_path, pcp=2, write_raw=False)
+    rejected = {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "b" * 64,
+        "tp": 8,
+        "pp": 1,
+        "pcp_size": 1,
+        "dataset": {"loader": "wrong"},
+    }
+    accepted = _native_raw(pcp=2)
+    (tmp_path / "a_rejected.json").write_text(json.dumps(rejected), encoding="utf-8")
+    accepted_path = tmp_path / "b_accepted.json"
+    accepted_path.write_text(json.dumps(accepted), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert measurement["valid_measurement"] is True
+    assert measurement["agentx_gpu_count"] == 16
+    assert measurement["corpus_loader"] == _NATIVE_DATASET["loader"]
+    assert measurement["raw_result_path"] == str(accepted_path)
+
+
+def test_native_raw_without_complete_topology_does_not_guess_parallelism(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    raw = {
+        "scenario_type": "agentic-coding",
+        "recipe_fingerprint": "a" * 64,
+        "tp": 8,
+        "pp": 1,
+        # PCP is deliberately absent. A default of one would make aggregate
+        # throughput look like trustworthy per-GPU throughput for PCP>1.
+        "dataset": {"loader": "must-not-be-consumed"},
+    }
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(raw), encoding="utf-8")
+
+    measurement = extract_benchmark_measurement(_native_agentx_report(), workspace=tmp_path)
+
+    assert "agentx_gpu_count" not in measurement
+    assert "corpus_loader" not in measurement
+    assert measurement["raw_result_path"] is None
+    assert any(
+        warning.startswith("native_agentx_raw_topology_invalid:") for warning in measurement["nonfatal_warnings"]
+    )
+    assert measurement["valid_measurement"] is False
+
+
 def test_rescue_from_env_path_adopted_after_subprocess_start(
     tmp_path,
     monkeypatch,

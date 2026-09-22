@@ -357,7 +357,11 @@ def gap_for_state(target: dict[str, Any] | None, state: Any) -> dict[str, Any] |
     tput = best.get("total_throughput" if agentx else "tput")
     tput = to_float(tput) if agentx else tput
     tpot = None if agentx else best.get("tpot_mean_ms")
-    tp = to_float(getattr(state, "tp", None)) if agentx else int(getattr(state, "tp", 0) or 0)
+    tp = (
+        to_float(best.get("agentx_gpu_count")) or to_float(getattr(state, "tp", None))
+        if agentx
+        else int(getattr(state, "tp", 0) or 0)
+    )
     return gap_analysis(
         target,
         our_tput_per_gpu=float(tput) / tp if isinstance(tput, (int, float)) and tput > 0 and tp and tp > 0 else None,

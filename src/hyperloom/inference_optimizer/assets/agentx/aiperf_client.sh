@@ -315,7 +315,7 @@ _default_loader() {
 # apart would silently disagree the moment the derivation grows a second input.
 # AGENTX_CANONICAL_DATASET lets an operator declare the canonical corpus for a
 # model the family whitelist does not cover -- see the deviation check.
-CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "$MODEL")}"
+CANON_DS="${AGENTX_CANONICAL_DATASET:-$(_default_loader "${AGENTX_MODEL_ID:-$MODEL}")}"
 DS="${AGENTX_DATASET:-${WEKA_LOADER_OVERRIDE:-$CANON_DS}}"
 if [ -z "${AGENTX_DATASET:-}${WEKA_LOADER_OVERRIDE:-}" ]; then
   case "$DS" in

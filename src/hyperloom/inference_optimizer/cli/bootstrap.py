@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -58,7 +59,7 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 
 
 # Bump when a change makes previously recorded AgentX measurements incomparable.
-AGENTX_MEASUREMENT_EPOCH = 1
+AGENTX_MEASUREMENT_EPOCH = 2
 
 
 def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
@@ -90,8 +91,15 @@ def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
 
 def agentx_state_is_stale(state: Any) -> str:
     """Return why a resumed session's AgentX state is unusable, or ``\"\"``."""
-    want_mode = "agentx" if _agentx_enabled() else "synthetic"
     had_mode = str(getattr(state, "benchmark_mode", "") or "")
+    raw_mode = os.environ.get("HYPERLOOM_AGENTX")
+    # A bare --resume-from in a fresh shell carries no mode declaration. In
+    # that case the persisted session is authoritative; only an explicitly
+    # supplied HYPERLOOM_AGENTX value is a request to switch modes.
+    if raw_mode is None or not raw_mode.strip():
+        want_mode = had_mode or "synthetic"
+    else:
+        want_mode = "agentx" if _agentx_enabled() else "synthetic"
     if had_mode and had_mode != want_mode:
         return (
             f"session was measured in benchmark_mode={had_mode!r} but this run is "
@@ -220,6 +228,34 @@ def _seed_shared_state(
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
     benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
+    _agentx_runtime_pins: dict[str, str] = {}
+    _benchmark_source_config_path = ""
+    if benchmark_mode == "agentx":
+        from hyperloom.inference_optimizer.agentx.native import (
+            AGENTX_RUNTIME_PIN_NAMES,
+        )
+
+        for _pin_name in AGENTX_RUNTIME_PIN_NAMES:
+            _pin_value = os.environ.get(_pin_name, "").strip()
+            if _pin_value:
+                if _pin_name == "INFERENCEX_PATH":
+                    _pin_value = str(Path(_pin_value).expanduser().resolve())
+                _agentx_runtime_pins[_pin_name] = _pin_value
+        _source_config = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+        if _source_config:
+            _source_path = Path(_source_config).expanduser().resolve()
+            if not _source_path.is_file():
+                raise FileNotFoundError(
+                    f"AgentX source benchmark config disappeared before session seed: {_source_path}"
+                )
+            _source_bytes = _source_path.read_bytes()
+            _expected_source_hash = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG_SHA256", "").strip()
+            _actual_source_hash = hashlib.sha256(_source_bytes).hexdigest()
+            if not _expected_source_hash or _actual_source_hash != _expected_source_hash:
+                raise ValueError(f"AgentX source benchmark config changed after finalization: {_source_path}")
+            _snapshot_path = session_dir / "benchmark.source.yaml"
+            _snapshot_path.write_bytes(_source_bytes)
+            _benchmark_source_config_path = str(_snapshot_path)
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -272,7 +308,7 @@ def _seed_shared_state(
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
-        warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
+        warm_replay_enabled=(benchmark_mode != "agentx" and not bool(getattr(args, "no_warm_replay", False))),
         warm_replay_min_confidence=float(getattr(args, "warm_replay_min_confidence", 0.7)),
         warm_replay_min_reproduce_pct=float(getattr(args, "warm_replay_min_reproduce_pct", 0.8)),
         max_minutes=int((args.max_hours or 0) * 60),
@@ -297,14 +333,21 @@ def _seed_shared_state(
         # SWEEP-phase concurrency sweep: defaults OFF under AgentX because each
         # rung is a 3600s window and the session grades at a fixed CONC.
         # Pass --enable-conc-sweep explicitly to override.
-        conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", not _agentx_enabled())),
+        conc_sweep_enabled=(
+            bool(getattr(args, "enable_conc_sweep", None))
+            if getattr(args, "enable_conc_sweep", None) is not None
+            else benchmark_mode != "agentx"
+        ),
         benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        agentx_runtime_pins=_agentx_runtime_pins,
+        benchmark_source_config_path=_benchmark_source_config_path,
         grading=seed_grading(os.environ.get("FRAMEWORK", "sglang"), benchmark_mode),
         conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
         ),
+        active_inferencex_path=_agentx_runtime_pins.get("INFERENCEX_PATH", ""),
     )
     state.save(session_dir)
     return state

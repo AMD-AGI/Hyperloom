@@ -421,6 +421,92 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
+
+    # A native AgentX launcher owns the complete server command line.  The
+    # pinned InferenceX revision has no optimizer-argv hook, so accepting a
+    # normal Hyperloom variant here would run the unchanged server and then
+    # falsely label its result as the candidate.  The base materializer has the
+    # same guard, but grid/GEAK variants are layered on *after* that point and
+    # therefore need their own fail-closed boundary.
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    native_agentx = native_agentx_enabled(bench.get("agentx"))
+    native_expected_gpu_count: int | None = None
+    native_expected_topology: dict[str, Any] = {}
+    native_outer_image = ""
+    if native_agentx:
+        raw_workload = bench.get("workload_spec")
+        workload = raw_workload if isinstance(raw_workload, dict) else {}
+        raw_topology = workload.get("resolved_topology")
+        topology = raw_topology if isinstance(raw_topology, dict) else {}
+        try:
+            native_expected_gpu_count = int(topology["gpu_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Native AgentX grid variants require fingerprint-bound workload_spec.resolved_topology.gpu_count"
+            ) from exc
+        if native_expected_gpu_count <= 0:
+            raise ValueError("Native AgentX resolved GPU count must be positive")
+        try:
+            native_expected_topology = {
+                "tp": int(topology["tp"]),
+                "pp": int(topology["pp"]),
+                "pcp_size": int(topology["pcp_size"]),
+                "ep": int(topology["ep"]),
+                "conc": int(topology["conc"]),
+                "recipe_fingerprint": str(topology["recipe_fingerprint"]),
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Native AgentX grid variants require a complete, fingerprint-bound resolved topology"
+            ) from exc
+        if (
+            min(
+                int(native_expected_topology["tp"]),
+                int(native_expected_topology["pp"]),
+                int(native_expected_topology["pcp_size"]),
+                int(native_expected_topology["ep"]),
+                int(native_expected_topology["conc"]),
+            )
+            <= 0
+            or not native_expected_topology["recipe_fingerprint"]
+        ):
+            raise ValueError("Native AgentX resolved topology values and recipe fingerprint must be present")
+        native_outer_image = str(workload.get("outer_image") or "").strip()
+
+        unsupported: list[str] = []
+        if str(base_extra_args or "").strip():
+            unsupported.append("base_extra_args")
+        if str(variant.extra_server_args or "").strip():
+            unsupported.append("variant.extra_server_args")
+        if str(base_args_mode or "append").strip().lower() == "replace":
+            unsupported.append("base_args_mode=replace")
+        if str(getattr(variant, "args_mode", "append") or "append").strip().lower() == "replace":
+            unsupported.append("variant.args_mode=replace")
+        if to_str_list(base_remove_args) or to_str_list(getattr(variant, "remove_args", [])):
+            unsupported.append("remove_args")
+        if to_str_list(base_unset_envs) or to_str_list(getattr(variant, "unset_envs", [])):
+            unsupported.append("unset_envs")
+        unsupported_envs = sorted(
+            {
+                str(key)
+                for mapping in (base_extra_envs or {}, getattr(variant, "extra_envs", {}) or {})
+                for key in mapping
+                if str(key) != "CONC"
+            }
+        )
+        if unsupported_envs:
+            unsupported.append("extra_envs=" + ",".join(unsupported_envs))
+        if str(getattr(variant, "overlay_pythonpath", "") or "").strip():
+            unsupported.append("overlay_pythonpath")
+        if getattr(variant, "runtime_override", None):
+            unsupported.append("runtime_override")
+        if unsupported:
+            raise ValueError(
+                "Native AgentX cannot apply Hyperloom grid candidates with "
+                "the pinned InferenceX launcher (no optimizer-argv hook): " + "; ".join(unsupported)
+            )
+
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -530,6 +616,44 @@ def _build_variant_yaml(
             pid_dir=server_lifecycle["pid_dir"],
             port=int(server_lifecycle["port"]),
         )
+
+    if native_agentx:
+        # Concurrency is part of the measurement contract even though the
+        # current upstream recipe fingerprint excludes it.  Never compare a
+        # candidate at a different replay load with the accepted baseline.
+        from hyperloom.inference_optimizer.agentx.native import resolve_native_recipe
+
+        inferencex_path = (
+            os.environ.get("INFERENCEX_PATH", "").strip() or str(bench.get("inferencex_path") or "").strip()
+        )
+        if not inferencex_path:
+            raise ValueError("Native AgentX grid variants require benchmark.inferencex_path")
+        actual_conc = int(envs.get("CONC") or 0)
+        expected_conc = int(native_expected_topology["conc"])
+        if actual_conc != expected_conc:
+            raise ValueError(
+                "Native AgentX concurrency is fixed for the session: "
+                f"accepted CONC={expected_conc}, candidate requested {actual_conc}"
+            )
+        assert native_expected_gpu_count is not None
+        resolved_topology = resolve_native_recipe(
+            bench,
+            inferencex_path=inferencex_path,
+            expected_gpu_count=native_expected_gpu_count,
+            outer_image=native_outer_image or None,
+        )
+        changed = {
+            key: (native_expected_topology[key], resolved_topology.get(key))
+            for key in native_expected_topology
+            if native_expected_topology[key] != resolved_topology.get(key)
+        }
+        if changed:
+            detail = ", ".join(f"{key}={before!r}->{after!r}" for key, (before, after) in sorted(changed.items()))
+            raise ValueError(
+                "Native AgentX concurrency changed the accepted recipe arm; "
+                "topology-changing rounds are unsupported: " + detail
+            )
+        envs = bench.setdefault("envs", {})
 
     # The final write to the argument env; nothing below may touch it.
     seal_server_argv(envs, bench.get("framework"), bench=bench)
@@ -643,6 +767,11 @@ def _run_magpie(
     """Blocking subprocess wrapper. Returns (rc, stdout, stderr)."""
     sync_benchmark_timeout(config_path, timeout_sec)
     server_log_path = _benchmark_server_log(config_path, output_dir)
+    config_data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    config_benchmark = config_data.get("benchmark") if isinstance(config_data, dict) else {}
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    native_agentx = isinstance(config_benchmark, dict) and native_agentx_enabled(config_benchmark.get("agentx"))
     env = scrub_benchmark_process_env(os.environ.copy())
     env["PYTHONUNBUFFERED"] = "1"
     from ._workload_envs import resolve_reference_launch
@@ -668,14 +797,20 @@ def _run_magpie(
         env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
         # resumed session or a re-cloned checkout still emits the eval-start marker.
-        ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
+        if not native_agentx:
+            ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
 
     # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
     # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
     probe_root = Path(inferencex_path) if inferencex_path else None
     # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
-    ensure_eval_unbound_outputs_patched(probe_root)
-    if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
+    if not native_agentx:
+        ensure_eval_unbound_outputs_patched(probe_root)
+    if (
+        not native_agentx
+        and not ensure_eval_probe_patched(probe_root)
+        and not materialized_run_eval_disabled(config_path)
+    ):
         eval_bounds_msg = (
             "eval generation bounds + pathology probe are not installed "
             "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
@@ -753,13 +888,35 @@ def _run_magpie(
 
 
 def _num_gpus_for_config(config_path: Path) -> float:
-    """Read the tensor-parallel size (``TP``) from a materialized benchmark YAML."""
+    """Read the physical serving GPU count from a materialized benchmark YAML."""
     try:
         with Path(config_path).open(encoding="utf-8") as fp:
             cfg = yaml.safe_load(fp) or {}
-        envs = (cfg.get("benchmark") or {}).get("envs") or {}
-        return float(int(envs.get("TP", 1) or 1))
+        benchmark = cfg.get("benchmark") or {}
     except Exception:  # noqa: BLE001 — best-effort; default to 1 GPU
+        return 1.0
+
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    workload = benchmark.get("workload_spec") or {}
+    topology = workload.get("resolved_topology") or {}
+    if native_agentx_enabled(benchmark.get("agentx")):
+        # Invalid native metadata is not a reason to under-lease one GPU.  It
+        # is an integrity failure and must stop before Ray schedules the run.
+        gpu_count = int(topology["gpu_count"])
+        tp = int(topology["tp"])
+        pp = int(topology["pp"])
+        pcp = int(topology["pcp_size"])
+        if min(gpu_count, tp, pp, pcp) <= 0 or gpu_count != tp * pp * pcp:
+            raise ValueError("invalid native AgentX resolved topology")
+        return float(gpu_count)
+    try:
+        envs = benchmark.get("envs") or {}
+        tp = int(envs.get("TP", 1) or 1)
+        pp = int(envs.get("PP_SIZE", 1) or 1)
+        pcp = int(envs.get("PCP_SIZE", 1) or 1)
+        return float(tp * pp * pcp)
+    except (AttributeError, OverflowError, TypeError, ValueError):
         return 1.0
 
 
@@ -1989,6 +2146,7 @@ async def run_grid(
                 output_throughput=measurement.get("output_throughput"),
                 request_throughput=measurement.get("request_throughput"),
                 total_token_throughput=measurement.get("total_token_throughput"),
+                agentx_gpu_count=measurement.get("agentx_gpu_count"),
                 completed_requests=measurement.get("completed_requests"),
                 duration_seconds=measurement.get("duration_seconds"),
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),

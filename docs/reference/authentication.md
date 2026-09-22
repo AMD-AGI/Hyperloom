@@ -240,8 +240,14 @@ side is a second provider rather than part of the same gateway credential.
 
 ## Path environment
 
-These are *not* secrets. You normally do not hand-export
-`INFERENCEX_PATH` or `TRACELENS_ROOT` — `install.sh` and its chained
+These are *not* secrets. For a native AgentX launch, normally omit both
+`benchmark.inferencex_path` and `INFERENCEX_PATH`; preflight reuses or clones the
+tested pin. A source `benchmark.inferencex_path` only nominates a preferred
+writable checkout for that fresh session. Preflight replaces a missing or
+wrong-revision checkout with its pinned clone; a correct but non-writable
+explicit checkout fails. A simultaneously supplied, different ambient
+`INFERENCEX_PATH` conflicts with the source before preflight. You likewise do
+not normally hand-export `TRACELENS_ROOT` — `install.sh` and its chained
 kernel-agent installer clone and pin the open-source checkouts when missing.
 Runtime paths are persisted into `.env` by the installer; the CLI preflight
 loads them and derives `PATH` / `LD_LIBRARY_PATH` from `ROCM_PATH` /
@@ -262,16 +268,32 @@ Open-source dependencies default under `HYPERLOOM_CACHE_DIR`
 (`$REPO_ROOT/.cache`), cloned per revision as `<name>@<sha>`. The cache is
 repo-local and writable, so open-source runs need no privileged `/opt` mount.
 
-Leave these variables unset unless you maintain your own checkouts. An
-explicit path pointing at a missing directory fails preflight.
+Leave these variables unset unless you maintain your own checkouts. Most
+explicit missing dependency paths fail preflight; native AgentX is the
+exception described above because InferenceX preflight repairs it with the
+pinned clone.
 
 | Variable                     | Set by operator? | Default / auto-clone target                                | Description                                                                                                         |
 |------------------------------|------------------|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------|
 | `HYPERLOOM_CACHE_DIR`        | rarely           | `$REPO_ROOT/.cache`                                        | Writable, repo-local root for open-source deps (TraceLens, InferenceX, GEAK), cloned per revision as `<name>@<sha>`. |
-| `INFERENCEX_PATH`            | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>` | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline and target analysis; the inference_optimizer installer (`src/hyperloom/inference_optimizer/assets/install.sh`) clones it when unset. |
+| `INFERENCEX_PATH`            | optional legacy override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/InferenceX@<sha>` | [SemiAnalysisAI/InferenceX](https://github.com/SemiAnalysisAI/InferenceX) for baseline, native AgentX recipe resolution, and target analysis. Omit it to reuse/clone the tested pin. Source `benchmark.inferencex_path` may nominate a checkout; a conflicting ambient value fails before preflight, a missing or wrong-revision candidate is replaced by the pinned clone, and a correct but non-writable explicit checkout fails. |
 | `TRACELENS_ROOT`             | optional override | `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` | [AMD-AGI/TraceLens](https://github.com/AMD-AGI/TraceLens) for profiling and kernel detection; the kernel-agent installer clones and pins it when unset. |
 | `TRACELENS_INTERNAL_ROOT`    | optional         | unset (MAF measured on-device)                             | Optional internal TraceLens extension that backfills MAF without an on-device benchmark. When unset, Hyperloom measures MAF on an idle GPU (microbenchmark) — roofline gap / MI355+ MAF analysis is still produced, just measured locally. Hyperloom never clones it. |
-| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and patch inspection. `install.sh` pip-installs Magpie from `MAGPIE_PACKAGE_SPEC` when it is not importable. |
+| `MAGPIE_PATH`                | optional override | Resolved from installed `Magpie` package                  | Magpie package root for benchmark wrappers and native AgentX resolution. `install.sh` installs `MAGPIE_PACKAGE_SPEC` when Magpie is missing **or** the importable build lacks the pinned native AgentX capability. |
+
+Native AgentX is tested with `MAGPIE_REF=3642ce66ae46ca4dc125340b3d14a3f4640c369b`
+(Magpie 0.3.0 release candidate) and
+`INFERENCEX_REF=3d5581562f643f9bdeb8410cd924e2c70906c966`. Treat changing either
+pin as a coordinated compatibility change, not as an authentication override.
+That strict 40-character SHA, native capability, and audited Magpie execution-tree
+check applies only when native AgentX is selected. Generic Magpie benchmarks keep
+the established importability contract and may use an operator-provided compatible
+tag, branch, alternate SHA, or `MAGPIE_PACKAGE_SPEC`.
+Native `benchmark.docker_image` overrides/pins the effective recipe image and is
+part of its fingerprint; it is not a credential. An existing
+`HYPERLOOM_IMAGE` is checked for exact agreement with that effective value, but
+neither starts a container or cryptographically proves which outer image is
+running.
 
 ---
 

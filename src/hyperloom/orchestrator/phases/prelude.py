@@ -2334,8 +2334,8 @@ class PreludePhase(PhaseHandler):
             )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
+                if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+                    state.active_inferencex_path = promoted_checkout
             warm_args = str(params.get("extra_server_args") or "").strip()
             warm_envs = dict(params.get("extra_envs") or {})
             replayed_patch_refs = [

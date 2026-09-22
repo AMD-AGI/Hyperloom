@@ -25,9 +25,9 @@ def test_shared_state_default_enables_conc_sweep():
     )
 
 
-def test_cli_default_enables_conc_sweep():
+def test_cli_default_defers_conc_sweep_to_benchmark_mode():
     ns = _parse()
-    assert ns.enable_conc_sweep is True
+    assert ns.enable_conc_sweep is None
 
 
 def test_cli_no_enable_conc_sweep_disables():

@@ -100,21 +100,96 @@ async def test_agentx_direct_dispatch_fallback_refuses_geak_replay(coordinator, 
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._geak_sweep.sweep_via_geak", _must_not_launch)
     c.phase_kernel._record_geak_kernel_journey = lambda _result: None
     summary = c._geak_rebench_params(reason="unit")
-    assert summary["fallback"] == "geak_harness"
+    assert summary == {"skipped": True, "reason": "unsupported_upstream_launcher_hook"}
     await c._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert st.current_best == before_best
     assert st.cumulative_gain_validated == 20.0
     assert st.resume_pending_revalidation is True
     assert "revalidation_task_id" not in st.geak_pending
-    assert st.geak_pending["revalidation_error"] == "geak_harness_unsupported_canonical_workload"
+    assert st.geak_result["status"] == "skipped"
+    assert st.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert not await c.tasks.queued()
     assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("overlay_state", ["missing", "config_only"])
+async def test_agentx_predispatch_refusal_is_reused_until_overlay_recovers(
+    coordinator, tmp_path, monkeypatch, overlay_state
+) -> None:
+    c = coordinator
+    st = c.shared_state
+    _arm_kernel_to_sweep(st)
+    st.benchmark_mode = "agentx"
+    st.baseline_tput = 100.0
+    st.baseline_config_path = "/run/canonical-agentx.yaml"
+    st.current_best = {"action": "explore", "tput": 120.0}
+    st.resume_pending_revalidation = True
+    overlay = tmp_path / "candidate" / "overlay"
+    if overlay_state == "config_only":
+        overlay.mkdir(parents=True)
+        (overlay / "sitecustomize.py").write_text("pass\n", encoding="utf-8")
+        (overlay / "_overlay_manifest.json").write_text('{"modules": [], "rebinds": []}', encoding="utf-8")
+    candidate = {
+        "status": "ok",
+        "accepted_config": {},
+        "final_overlay": str(overlay.parent),
+        "final_throughput_tok_s": 130.0,
+    }
+    geak_dir = c.session_dir / "geak"
+    geak_dir.mkdir()
+    result_path = geak_dir / "result.json"
+    result_path.write_text(json.dumps(candidate), encoding="utf-8")
+    original_dispatch = c._geak_rebench_params
+    original_fallback = c._validate_geak_via_geak_harness
+    dispatches = []
+    fallbacks = []
+
+    def dispatch(**kwargs):
+        dispatches.append(kwargs)
+        return original_dispatch(**kwargs)
+
+    async def fallback(**kwargs):
+        fallbacks.append(kwargs)
+        return await original_fallback(**kwargs)
+
+    monkeypatch.setattr(c, "_geak_rebench_params", dispatch)
+    monkeypatch.setattr(c, "_validate_geak_via_geak_harness", fallback)
+    monkeypatch.setattr(c.phase_kernel, "_record_geak_kernel_journey", lambda _result: None)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("runner unavailable")),
+    )
+
+    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    assert dispatches == fallbacks == []
+    assert st.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert not await c.tasks.queued()
+    # Exercise the persisted verdict, not an in-memory object identity.
+    st.geak_result = json.loads(json.dumps(st.geak_result))
+    for _ in range(2):
+        st.macro_cycle += 1
+        await c._run_geak_kernel_phase(from_phase="KERNEL")
+    assert dispatches == fallbacks == []
+    assert st.resume_pending_revalidation is True
+    assert st.current_best["tput"] == 120.0
+    assert not st.optimization_stack
+
+    # The result JSON is unchanged; only the real overlay becomes loadable.
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "sitecustomize.py").write_text("pass\n", encoding="utf-8")
+    (overlay / "_overlay_manifest.json").write_text('{"modules": ["kernel.py"]}', encoding="utf-8")
+    st.macro_cycle += 1
+    await c._run_geak_kernel_phase(from_phase="KERNEL")
+    assert not await c.tasks.queued()
+    assert dispatches == fallbacks == []
+    assert json.loads(result_path.read_text(encoding="utf-8")) == candidate
+
+
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 @pytest.mark.asyncio
-async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordinator, bench_client) -> None:
+async def test_agentx_2b_dispatch_is_blocked_without_an_upstream_hook(coordinator, bench_client) -> None:
     c = coordinator
     st = c.shared_state
     st.benchmark_mode = "agentx"
@@ -126,12 +201,9 @@ async def test_agentx_2b_dispatch_uses_canonical_recipe_not_geak_client(coordina
         "accepted_config": {"flags": "--candidate", "env": ""},
     }
 
-    params = c._geak_rebench_params(reason="unit")
-
-    assert params.get("geak_fallback") is True
-    assert params["config_path"] == st.baseline_config_path
-    assert params["grid"][0]["extra_args"] == "--candidate"
-    assert "bench_client" not in params
+    summary = c._geak_rebench_params(reason="unit")
+    assert summary == {"skipped": True, "reason": "unsupported_upstream_launcher_hook"}
+    assert not await c.tasks.queued()
 
 
 @pytest.mark.parametrize(
@@ -906,7 +978,7 @@ async def test_failed_runner_does_not_replay_the_settled_result(coordinator, tmp
 
     await c._run_geak_kernel_phase(from_phase="KERNEL")
 
-    assert len(calls) == 1
+    assert calls == []
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
 
 
@@ -924,7 +996,7 @@ async def test_runner_timeout_does_not_replay_the_settled_result(coordinator, tm
 
     await c._run_geak_kernel_phase(from_phase="KERNEL")
 
-    assert len(calls) == 1
+    assert calls == []
     _assert_settled_candidate_survived(c, tmp_path, revalidations)
 
 
@@ -954,15 +1026,8 @@ _SETTLED_GEAK_RESULT = {
     ids=["new_config", "same_config_new_evidence"],
 )
 @pytest.mark.asyncio
-async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path, fresh: dict) -> None:
-    """A settled verdict tombstones its own candidate, not the next one.
-
-    The crash window this recovery exists for is exactly the one where the
-    runner wrote a fresh ``result.json`` and the handback never landed, so the
-    persisted verdict describes the previous candidate. A rerun that lands on
-    the same flags is still a different run, so config alone cannot say the
-    verdict already covers what is on disk.
-    """
+async def test_agentx_crash_recovery_refuses_unrepresentable_new_evidence(coordinator, tmp_path, fresh: dict) -> None:
+    """Native AgentX leaves settled verdicts intact when a stale GEAK product appears."""
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
@@ -986,9 +1051,10 @@ async def test_crash_recovery_still_promotes_new_evidence(coordinator, tmp_path,
     finally:
         monkeypatch.undo()
 
-    assert revalidations == ["geak_e2e_win_recovered"]
-    assert c._geak_rebench_params(reason="check")["grid"][0]["extra_args"] == fresh["accepted_config"]["flags"]
-    assert st.geak_result["final_throughput_tok_s"] == pytest.approx(fresh["final_throughput_tok_s"])
+    assert revalidations == []
+    assert st.geak_result["revalidation_status"] == "no_promote"
+    assert st.geak_result["accepted_config"]["flags"] == "--settled"
+    assert not await c.tasks.queued()
 
 
 @pytest.mark.asyncio
@@ -1171,11 +1237,14 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     await coordinator._run_geak_kernel_phase(from_phase="EXPLORE")
     if settled:
         assert coordinator.shared_state.geak_result == previous
+    elif mode == "agentx":
+        assert coordinator.shared_state.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
     else:
         assert coordinator.shared_state.geak_result["error_class"] == "invalid_env_spec"
     event = next(row for row in read_timeline_events(coordinator.session_dir) if row["type"] == "kernel")
     assert event["status"] == "failed"
-    assert event["ext"]["outcome"]["error_class"] == "invalid_env_spec"
+    expected_error = "unsupported_upstream_launcher_hook" if mode == "agentx" else "invalid_env_spec"
+    assert event["ext"]["outcome"]["error_class"] == expected_error
     assert not await coordinator.tasks.queued()
 
 
@@ -1344,8 +1413,8 @@ async def test_crash_recovery_does_not_replay_a_refused_candidate(coordinator, t
 
 
 @pytest.mark.asyncio
-async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordinator, tmp_path) -> None:
-    """A rebench that failed to run is a missing verdict, not a settled one."""
+async def test_agentx_crash_recovery_skips_previously_failed_kernel_revalidation(coordinator, tmp_path) -> None:
+    """A stale revalidation cannot dispatch without the native launcher hook."""
     c = coordinator
     st = c.shared_state
     _arm_kernel_to_sweep(st)
@@ -1378,5 +1447,7 @@ async def test_crash_recovery_retries_a_transiently_failed_revalidation(coordina
     finally:
         monkeypatch.undo()
 
-    assert revalidations == ["geak_e2e_win_recovered"]
-    assert st.geak_pending["status"] == "awaiting_rebench"
+    assert revalidations == []
+    assert st.geak_result["status"] == "skipped"
+    assert st.geak_result["error_class"] == "unsupported_upstream_launcher_hook"
+    assert not await c.tasks.queued()

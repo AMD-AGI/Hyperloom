@@ -1,0 +1,48 @@
+# Native Magpie AgentX example for the pinned InferenceX revision
+# 3d5581562f643f9bdeb8410cd924e2c70906c966. inferencex_path is intentionally
+# omitted: Hyperloom preflight reuses or clones the tested pin. A custom
+# benchmark.inferencex_path only nominates a preferred writable checkout.
+benchmark:
+  framework: sglang
+  model: amd/GLM-5.2-MXFP4
+  precision: fp4
+  runner_type: mi355x
+  run_mode: local
+
+  # This switch automatically selects Hyperloom's AgentX session contract when
+  # the file is passed with --benchmark-config. CONC=8 uniquely selects the
+  # TP4/EP4 DRAM+HiCache arm below. At a concurrency shared by multiple arms,
+  # replace this scalar with an object such as:
+  # agentx:
+  #   enabled: true
+  #   selector:
+  #     tp: 4
+  #     kv_offloading: dram
+  #     kv_offload_backend: hicache
+  agentx: enable
+
+  # InferenceX launcher identity remains explicit. Hyperloom validates it but
+  # never patches the pinned launcher. docker_image pins the effective runtime
+  # image and is included in the resolved recipe fingerprint.
+  benchmark_script: single_node/agentic/glm5.2_fp4_mi355x_sglang_mtp.sh
+  docker_image: lmsysorg/sglang-rocm:v0.5.16-rocm720-mi35x-20260728
+
+  envs:
+    # This is the fixed recipe point to measure. TP/PP/PCP/EP, MODEL_PREFIX,
+    # KV offload, and CPU DRAM settings are resolved from the recipe.
+    CONC: 8
+    # Optional explicit topology assertion. Hyperloom derives the same
+    # zero-based mask when it is omitted.
+    ROCR_VISIBLE_DEVICES: 0,1,2,3
+
+  # Also derived by Hyperloom for native AgentX; kept explicit as an assertion.
+  gpu_selection:
+    auto: false
+
+  profiler:
+    torch_profiler:
+      enabled: false
+    system_profiler:
+      enabled: false
+    tracelens:
+      enabled: false

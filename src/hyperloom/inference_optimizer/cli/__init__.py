@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -127,6 +128,7 @@ from .parser import (
 )
 from .preflight import (
     _check_gfx_arch_resolvable,
+    _load_dotenv_fallback,
     _mark_pending_install_event_failed,
     _persist_install_event,
     _preflight as _preflight,
@@ -910,6 +912,22 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
     """Reject the combinations where AgentX labels work it did not do."""
     if not _agentx_enabled():
         return
+    if not os.environ.get("AGENTX_MODEL_ID", "").strip():
+        model_value = str(getattr(args, "model", "") or "").strip()
+        if model_value.count("/") == 1 and not model_value.startswith(("/", ".", "~")):
+            os.environ["AGENTX_MODEL_ID"] = model_value
+    from hyperloom.inference_optimizer.agentx.native import (
+        AGENTX_REQUIRED_RUNTIME_PIN_NAMES,
+    )
+
+    missing_pins = [name for name in AGENTX_REQUIRED_RUNTIME_PIN_NAMES if not os.environ.get(name, "").strip()]
+    if missing_pins:
+        print(
+            "ERROR: native Magpie AgentX requires these immutable runtime "
+            "pins before session creation: " + ", ".join(missing_pins),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     from hyperloom.inference_optimizer import framework_registry
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
         resolve_backend_name,
@@ -926,16 +944,709 @@ def _preflight_agentx_backend(args: argparse.Namespace) -> None:
         )
         raise SystemExit(2)
 
-    framework = str(getattr(args, "framework", "") or "").strip().lower()
-    if framework and framework_registry.is_scriptable(framework):
+    ray_override = os.environ.get("INFERENCE_OPTIMIZER_RAY_EXEC", "").strip().lower()
+    if ray_override in {"1", "true", "yes", "on"}:
         print(
-            f"ERROR: HYPERLOOM_AGENTX=1 with --framework {framework!r}, which is "
-            "scriptable. The AgentX switch only replaces the benchmark client of a "
-            "serving framework, so no trace would be replayed -- but the session "
-            "would still be labelled AgentX and run on AgentX budgets. Pick one.",
+            "ERROR: native Magpie AgentX v1 cannot run inside Hyperloom's Ray "
+            "serving actor. Leave INFERENCE_OPTIMIZER_RAY_EXEC unset (AgentX "
+            "automatically uses direct local execution) or set it to 0.",
             file=sys.stderr,
         )
         raise SystemExit(2)
+
+    nodes = int(getattr(args, "nodes", 1) or 1)
+    if nodes != 1:
+        print(
+            "ERROR: native Magpie AgentX currently supports only --nodes 1. "
+            "The selected single_node/agentic launcher ignores Hyperloom's "
+            "multi-node client phase and would start the wrong local workload.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    framework = (
+        str(getattr(args, "framework", "") or os.environ.get("FRAMEWORK", "")).strip().lower()
+        or framework_registry.DEFAULT_FRAMEWORK
+    )
+    if framework not in {"sglang", "vllm"}:
+        print(
+            f"ERROR: native Magpie AgentX currently supports only SGLang or vLLM; got --framework {framework!r}. "
+            "Other frameworks do not have a verified optimizer-argv bridge.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    if getattr(args, "enable_conc_sweep", None) is True:
+        print(
+            "ERROR: native Magpie AgentX does not yet support Hyperloom's "
+            "post-optimization concurrency sweep. The pinned InferenceX "
+            "launcher has no optimizer-argv hook, so there is no distinct "
+            "optimized arm to compare. Omit --enable-conc-sweep (the AgentX "
+            "default is off) and run the desired recipe concurrency with "
+            "--conc.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+
+_AGENTX_STABLE_SELECTOR_KEYS = (
+    "tp",
+    "pp",
+    "pcp-size",
+    "ep",
+    "dcp-size",
+    "dp-attn",
+    "spec-decoding",
+    "kv-offloading",
+    "kv-offload-backend",
+)
+
+
+def _canonical_agentx_control_pins(
+    benchmark: Mapping[str, Any],
+    *,
+    resolved_recipe: str = "",
+    resolved_config_file: str = "",
+) -> dict[str, str]:
+    """Canonicalize every recipe-selection/result-validity control for resume."""
+    raw_agentx = benchmark.get("agentx")
+    agentx = dict(raw_agentx) if isinstance(raw_agentx, Mapping) else {}
+    raw_workload = benchmark.get("workload_spec")
+    workload = raw_workload if isinstance(raw_workload, Mapping) else {}
+    raw_workload_recipe = workload.get("recipe")
+    workload_recipe = raw_workload_recipe if isinstance(raw_workload_recipe, Mapping) else {}
+
+    mode = str(agentx.get("mode") or "canonical").strip().lower()
+    if mode not in {"canonical", "fast"}:
+        raise ValueError("benchmark.agentx.mode must be 'canonical' or 'fast'")
+    recipe = str(resolved_recipe or agentx.get("recipe") or workload_recipe.get("name") or "").strip()
+    config_file = str(
+        resolved_config_file or agentx.get("config_file") or workload_recipe.get("config_file") or ""
+    ).strip()
+
+    raw_selector = agentx.get("selector")
+    selector = dict(raw_selector) if isinstance(raw_selector, Mapping) else {}
+    if not selector:
+        raw_resolved = agentx.get("resolved")
+        resolved = raw_resolved if isinstance(raw_resolved, Mapping) else {}
+        selector = {key: resolved[key] for key in _AGENTX_STABLE_SELECTOR_KEYS if key in resolved}
+    threshold_raw = agentx.get("failed_request_threshold", 0.10)
+    try:
+        threshold = float(threshold_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("benchmark.agentx.failed_request_threshold must be between 0 and 1") from exc
+    if not 0.0 <= threshold <= 1.0:
+        raise ValueError("benchmark.agentx.failed_request_threshold must be between 0 and 1")
+
+    pins = {
+        "AGENTX_MODE": mode,
+        "AGENTX_FAILED_REQUEST_THRESHOLD": repr(threshold),
+    }
+    if recipe:
+        pins["AGENTX_RECIPE"] = recipe
+    if config_file:
+        pins["AGENTX_CONFIG_FILE"] = config_file
+    if selector:
+        pins["AGENTX_SELECTOR"] = json.dumps(
+            selector,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return pins
+
+
+def _configure_benchmark_config(args: argparse.Namespace) -> bool:
+    """Select a source Magpie YAML and promote its AgentX switch to session mode.
+
+    Returns True when the selected YAML enables native AgentX. This runs
+    before preflight and SharedState seeding so every mode-sensitive subsystem
+    (Ray dispatch, grading, budgets, and the baseline materializer) observes
+    the same decision.
+    """
+    os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT", None)
+    os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT", None)
+    os.environ.pop("HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT", None)
+    os.environ.pop("HYPERLOOM_AGENTX_GPU_COUNT", None)
+    os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG_SHA256", None)
+    cli_value = str(getattr(args, "benchmark_config", "") or "").strip()
+    if getattr(args, "resume_from", None):
+        if cli_value:
+            raise ValueError(
+                "--benchmark-config cannot be used with --resume-from; the resumed "
+                "session uses its accepted materialized baseline config"
+            )
+        # A resume is entirely state-owned. Do not let a stale shell from a
+        # different launch select a foreign YAML before state.json is loaded.
+        os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG", None)
+        return False
+    inherited = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+    raw_path = cli_value or inherited
+    if not raw_path:
+        return False
+
+    path = Path(raw_path).expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"benchmark config does not exist or is not a file: {path}")
+
+    import yaml
+
+    try:
+        source_bytes = path.read_bytes()
+        parsed = yaml.safe_load(source_bytes.decode("utf-8")) or {}
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"cannot read benchmark config {path}: {exc}") from exc
+    benchmark = parsed.get("benchmark") if isinstance(parsed, Mapping) else None
+    if not isinstance(benchmark, Mapping):
+        raise ValueError(f"benchmark config {path} must contain a benchmark mapping")
+
+    cli_model_supplied = getattr(args, "model", None) is not None
+    runtime_model_path = os.environ.get("MODEL_PATH", "").strip()
+    configured_framework = str(benchmark.get("framework") or "").strip().lower()
+    cli_framework = str(getattr(args, "framework", "") or "").strip().lower()
+    if configured_framework and cli_framework and configured_framework != cli_framework:
+        raise ValueError(
+            f"--framework {cli_framework!r} conflicts with benchmark.framework {configured_framework!r} in {path}"
+        )
+    if configured_framework and not cli_framework:
+        args.framework = configured_framework
+    if getattr(args, "model", None) is None:
+        if runtime_model_path:
+            args.model = Path(runtime_model_path).expanduser()
+        elif benchmark.get("model"):
+            args.model = Path(str(benchmark["model"]))
+    if not getattr(args, "precision", None) and benchmark.get("precision"):
+        args.precision = str(benchmark["precision"])
+
+    configured_runner = str(benchmark.get("runner_type") or "").strip().lower()
+    cli_runner = str(getattr(args, "gpu_type", "") or "").strip().lower()
+    if configured_runner and cli_runner and configured_runner != cli_runner:
+        raise ValueError(
+            f"--gpu-type {cli_runner!r} conflicts with benchmark.runner_type {configured_runner!r} in {path}"
+        )
+    if configured_runner and not cli_runner:
+        args.gpu_type = configured_runner
+
+    os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(path)
+    os.environ["HYPERLOOM_BENCHMARK_CONFIG_SHA256"] = hashlib.sha256(source_bytes).hexdigest()
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    native = native_agentx_enabled(benchmark.get("agentx"))
+    raw_envs = benchmark.get("envs")
+    benchmark_envs = raw_envs if isinstance(raw_envs, Mapping) else {}
+    if native:
+        native_replay_overrides = sorted(
+            str(name)
+            for name in benchmark_envs
+            if str(name).upper().startswith(("AIPERF_", "AGENTIC_"))
+            or str(name).upper()
+            in {
+                "AGENTX_DATASET",
+                "AGENTX_WARMUP_REQUESTS_PER_LANE",
+                "WEKA_LOADER_OVERRIDE",
+            }
+        )
+        if native_replay_overrides:
+            raise ValueError(
+                "native AgentX replay controls belong to benchmark.agentx and "
+                "the resolved InferenceX launcher; remove benchmark.envs "
+                + ", ".join(native_replay_overrides)
+                + f" from {path}"
+            )
+    if native and not cli_model_supplied and not runtime_model_path:
+        local_model_path = str(benchmark_envs.get("MODEL_PATH") or "").strip()
+        if local_model_path:
+            if local_model_path.count("/") == 1 and not local_model_path.startswith(("/", ".", "~")):
+                raise ValueError(
+                    f"benchmark.envs.MODEL_PATH={local_model_path!r} in {path} "
+                    "looks like a Hugging Face id, not a local checkpoint path"
+                )
+            args.model = Path(local_model_path).expanduser()
+
+    def _positive_yaml_int(env_name: str) -> int | None:
+        raw = benchmark_envs.get(env_name)
+        if raw in (None, ""):
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"benchmark.envs.{env_name} in {path} must be a positive integer") from exc
+        if value <= 0:
+            raise ValueError(f"benchmark.envs.{env_name} in {path} must be a positive integer")
+        return value
+
+    # A selected YAML is a real CLI input, not merely a template.  Project its
+    # workload values before _run_optimize exports defaults.  Native AgentX TP
+    # is handled after recipe resolution because source envs.TP is tensor
+    # parallelism, while Hyperloom's --tp accounts for every physical rank
+    # (TP x PP x PCP).
+    projected = (
+        ("conc", "CONC"),
+        ("ep", "EP"),
+        ("isl", "ISL"),
+        ("osl", "OSL"),
+        ("max_model_len", "MAX_MODEL_LEN"),
+    )
+    for attr, env_name in projected:
+        if getattr(args, attr, None) is None:
+            value = _positive_yaml_int(env_name)
+            if value is not None:
+                setattr(args, attr, value)
+    if not native and getattr(args, "tp", None) is None:
+        yaml_tp = _positive_yaml_int("TP")
+        if yaml_tp is not None:
+            args.tp = yaml_tp
+
+    if native:
+        raw_mode = os.environ.get("HYPERLOOM_AGENTX", "").strip().lower()
+        if raw_mode and raw_mode not in {"1", "true", "yes", "on", "enable", "enabled"}:
+            raise ValueError(
+                f"benchmark.agentx is enabled in {path}, but "
+                f"HYPERLOOM_AGENTX={raw_mode!r} explicitly disables the session"
+            )
+        os.environ["HYPERLOOM_AGENTX"] = "1"
+        top_model_id = str(benchmark.get("model") or "").strip()
+        env_model_id = str(benchmark_envs.get("AGENTX_MODEL_ID") or "").strip()
+        if top_model_id and env_model_id and top_model_id != env_model_id:
+            raise ValueError(
+                f"benchmark.model={top_model_id!r} conflicts with "
+                f"benchmark.envs.AGENTX_MODEL_ID={env_model_id!r} in {path}"
+            )
+        top_script = str(benchmark.get("benchmark_script") or "").strip()
+        env_script = str(benchmark_envs.get("AGENTX_SERVER_SCRIPT") or "").strip()
+        if top_script and env_script and top_script != env_script:
+            raise ValueError(
+                f"benchmark.benchmark_script={top_script!r} conflicts with "
+                "benchmark.envs.AGENTX_SERVER_SCRIPT="
+                f"{env_script!r} in {path}"
+            )
+        canonical_model_id = env_model_id or top_model_id
+        selected_model = str(getattr(args, "model", "") or "").strip()
+        selected_is_remote = selected_model.count("/") == 1 and not selected_model.startswith(("/", ".", "~"))
+        if (
+            (cli_model_supplied or runtime_model_path)
+            and selected_is_remote
+            and canonical_model_id
+            and selected_model != canonical_model_id
+        ):
+            source = "--model" if cli_model_supplied else "MODEL_PATH"
+            raise ValueError(
+                f"{source}={selected_model!r} conflicts with canonical AgentX "
+                f"model {canonical_model_id!r} in {path}; only a local path may "
+                "override the recipe's model id"
+            )
+        source_pins = {
+            "AGENTX_MODEL_ID": str(canonical_model_id).strip(),
+            "AGENTX_SERVER_SCRIPT": str(env_script or top_script).strip(),
+            "INFERENCEX_PATH": str(benchmark.get("inferencex_path") or "").strip(),
+        }
+        for name, source_value in source_pins.items():
+            if not source_value:
+                continue
+            if name == "INFERENCEX_PATH":
+                source_path = Path(source_value).expanduser()
+                if not source_path.is_absolute():
+                    source_path = path.parent / source_path
+                source_value = str(source_path.resolve())
+            current = os.environ.get(name, "").strip()
+            comparable_current = current
+            if current and name == "INFERENCEX_PATH":
+                comparable_current = str(Path(current).expanduser().resolve())
+            if comparable_current and comparable_current != source_value:
+                raise ValueError(f"{name}={current!r} conflicts with {source_value!r} in {path}")
+            os.environ[name] = source_value
+
+    return native
+
+
+def _finalize_benchmark_config(args: argparse.Namespace) -> bool:
+    """Resolve native recipe topology after dependency preflight.
+
+    ``_configure_benchmark_config`` runs before preflight so mode and identity
+    are known early, but a clean install may not have a Magpie interpreter or
+    a pinned InferenceX checkout yet.  This second step runs immediately after
+    preflight has installed/validated both and before session state or GPU
+    resource accounting is created.
+    """
+    if getattr(args, "resume_from", None):
+        return False
+    raw_path = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+    if not raw_path:
+        return False
+    path = Path(raw_path).expanduser().resolve()
+
+    import copy
+    import yaml
+
+    try:
+        source_bytes = path.read_bytes()
+        expected_source_hash = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG_SHA256", "").strip()
+        actual_source_hash = hashlib.sha256(source_bytes).hexdigest()
+        if not expected_source_hash or actual_source_hash != expected_source_hash:
+            raise ValueError(f"benchmark config changed after initial validation; refusing the mutable source {path}")
+        parsed = yaml.safe_load(source_bytes.decode("utf-8")) or {}
+    except ValueError:
+        raise
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"cannot read benchmark config {path}: {exc}") from exc
+    benchmark = parsed.get("benchmark") if isinstance(parsed, Mapping) else None
+    if not isinstance(benchmark, Mapping):
+        raise ValueError(f"benchmark config {path} must contain a benchmark mapping")
+
+    from hyperloom.inference_optimizer.agentx.native import (
+        native_agentx_enabled,
+        native_execution_identity,
+        preview_native_recipe,
+    )
+
+    if not native_agentx_enabled(benchmark.get("agentx")):
+        return False
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    if not inferencex_path:
+        raise ValueError("native AgentX preflight did not produce an INFERENCEX_PATH")
+
+    preview_benchmark = copy.deepcopy(dict(benchmark))
+    preview_benchmark["inferencex_path"] = inferencex_path
+    if getattr(args, "precision", None):
+        # Materialization projects the process PRECISION over the source YAML.
+        # Resolve that same arm before scheduling GPUs; otherwise a CLI
+        # precision override could preview one recipe and execute another.
+        preview_benchmark["precision"] = str(args.precision).strip()
+    preview_envs_raw = preview_benchmark.get("envs")
+    preview_envs = preview_envs_raw if isinstance(preview_envs_raw, dict) else {}
+    preview_benchmark["envs"] = preview_envs
+    for name in (
+        "AGENTX_MODEL_ID",
+        "AGENTX_SERVER_SCRIPT",
+        "AGENTX_MODE",
+        "AGENTX_RECIPE",
+        "AGENTX_CONFIG_FILE",
+        "AGENTX_SELECTOR",
+        "AGENTX_FAILED_REQUEST_THRESHOLD",
+    ):
+        value = os.environ.get(name, "").strip()
+        if value:
+            preview_envs[name] = value
+    canonical_model = os.environ.get("AGENTX_MODEL_ID", "").strip()
+    canonical_script = os.environ.get("AGENTX_SERVER_SCRIPT", "").strip()
+    if canonical_model:
+        preview_benchmark["model"] = canonical_model
+    if canonical_script:
+        preview_benchmark["benchmark_script"] = canonical_script
+
+    requested_conc = getattr(args, "conc", None)
+    raw_agentx = preview_benchmark.get("agentx")
+    if requested_conc is None and isinstance(raw_agentx, Mapping):
+        configured_conc = raw_agentx.get("concurrency")
+        if configured_conc not in (None, ""):
+            try:
+                requested_conc = int(configured_conc)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"benchmark.agentx.concurrency in {path} must be a positive integer") from exc
+            if requested_conc <= 0:
+                raise ValueError(f"benchmark.agentx.concurrency in {path} must be a positive integer")
+    if requested_conc is not None:
+        preview_envs["CONC"] = int(requested_conc)
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        _native_agentx_config,
+    )
+
+    preview_benchmark["agentx"] = _native_agentx_config(
+        preview_envs,
+        raw_agentx,
+    )
+
+    try:
+        preview = preview_native_recipe(
+            preview_benchmark,
+            inferencex_path=inferencex_path,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError(f"cannot resolve native AgentX recipe from {path}: {exc}") from exc
+    topology = preview["topology"]
+    selected_recipe = str(preview.get("recipe") or "").strip()
+    selected_config_file = str(preview.get("config_file") or "").strip()
+    if not selected_recipe or not selected_config_file:
+        raise ValueError("resolved AgentX recipe did not provide recipe/config-file identity")
+    recipe_fingerprint = str(topology.get("recipe_fingerprint") or "").strip()
+    if not recipe_fingerprint:
+        raise ValueError("resolved AgentX recipe did not provide a fingerprint")
+    resolved_benchmark = preview.get("benchmark")
+    control_source = resolved_benchmark if isinstance(resolved_benchmark, Mapping) else preview_benchmark
+    execution = native_execution_identity(
+        inferencex_path=inferencex_path,
+        benchmark_script=str(control_source.get("benchmark_script") or ""),
+        config_file=selected_config_file,
+        resolved_benchmark=control_source,
+        expected_ref=os.environ.get("INFERENCEX_REF", ""),
+        magpie_execution=preview.get("magpie_execution"),
+        expected_magpie_ref=os.environ.get("MAGPIE_REF", ""),
+    )
+    os.environ["HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT"] = recipe_fingerprint
+    os.environ["HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT"] = execution["static_execution_fingerprint"]
+    gpu_count = int(topology["gpu_count"])
+    os.environ["HYPERLOOM_AGENTX_GPU_COUNT"] = str(gpu_count)
+    for name, value in _canonical_agentx_control_pins(
+        control_source,
+        resolved_recipe=selected_recipe,
+        resolved_config_file=selected_config_file,
+    ).items():
+        os.environ[name] = value
+    explicit_tp = getattr(args, "tp", None)
+    if explicit_tp is not None and int(explicit_tp) != gpu_count:
+        raise ValueError(
+            f"--tp {explicit_tp} conflicts with the resolved AgentX physical "
+            f"GPU count {gpu_count} (TP x PP x PCP) in {path}"
+        )
+    args.tp = gpu_count
+    args.conc = int(topology["conc"])
+    explicit_ep = getattr(args, "ep", None)
+    resolved_ep = int(topology["ep"])
+    if explicit_ep is not None and int(explicit_ep) != resolved_ep:
+        raise ValueError(f"--ep {explicit_ep} conflicts with resolved AgentX EP {resolved_ep} in {path}")
+    args.ep = resolved_ep
+    declared_image = os.environ.get("HYPERLOOM_IMAGE", "").strip()
+    recipe_image = str(preview["entry"].get("image") or "").strip()
+    if declared_image and declared_image != recipe_image:
+        raise ValueError(
+            f"HYPERLOOM_IMAGE does not match the resolved AgentX recipe: {declared_image!r} != {recipe_image!r}"
+        )
+    if not recipe_image:
+        raise ValueError("resolved AgentX recipe did not declare a runtime image")
+    # The YAML's docker_image (or the recipe default when omitted) is the
+    # session image pin.  Preserve a shell value only when it agrees exactly;
+    # no duplicate export is required for the normal --benchmark-config path.
+    os.environ["HYPERLOOM_IMAGE"] = recipe_image
+    return True
+
+
+def _restore_agentx_env_from_state(state: Any) -> bool:
+    """Re-export and normalize a persisted AgentX session mode."""
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+        return False
+    raw = os.environ.get("HYPERLOOM_AGENTX", "").strip()
+    if raw and raw.lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enable",
+        "enabled",
+    }:
+        raise ValueError(f"HYPERLOOM_AGENTX={raw!r} conflicts with the saved AgentX session mode")
+    if raw == "1":
+        return False
+    os.environ["HYPERLOOM_AGENTX"] = "1"
+    return True
+
+
+def _restore_agentx_runtime_pins_from_state(
+    state: Any,
+    *,
+    operator_pins: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Restore a native AgentX session's identity from its accepted baseline.
+
+    Some resume actions, notably ``profile``, start from a shipped template
+    rather than the saved baseline YAML.  Project the immutable native runtime
+    pins back into the process before those actions build a workload so a new
+    shell cannot silently choose another model, launcher, checkout, or image.
+    """
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+        return {}
+
+    config_path = str(getattr(state, "baseline_config_path", "") or "").strip()
+    raw_seed_pins = getattr(state, "agentx_runtime_pins", {})
+    seed_pins = (
+        {str(name): str(value).strip() for name, value in raw_seed_pins.items()}
+        if isinstance(raw_seed_pins, Mapping)
+        else {}
+    )
+    if seed_pins.get("INFERENCEX_PATH"):
+        seed_pins["INFERENCEX_PATH"] = str(Path(seed_pins["INFERENCEX_PATH"]).expanduser().resolve())
+
+    if config_path:
+        import yaml
+
+        try:
+            parsed = yaml.safe_load(Path(config_path).expanduser().read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(f"cannot read the saved AgentX baseline config {config_path!r}: {exc}") from exc
+
+        benchmark = parsed.get("benchmark") if isinstance(parsed, Mapping) else None
+        if not isinstance(benchmark, Mapping):
+            raise ValueError(f"saved AgentX baseline config {config_path!r} has no benchmark mapping")
+        pin_source = config_path
+    else:
+        seed_agentx: dict[str, Any] = {"enabled": True}
+        if seed_pins.get("AGENTX_MODE"):
+            seed_agentx["mode"] = seed_pins["AGENTX_MODE"]
+        if seed_pins.get("AGENTX_RECIPE"):
+            seed_agentx["recipe"] = seed_pins["AGENTX_RECIPE"]
+        if seed_pins.get("AGENTX_CONFIG_FILE"):
+            seed_agentx["config_file"] = seed_pins["AGENTX_CONFIG_FILE"]
+        if seed_pins.get("AGENTX_SELECTOR"):
+            try:
+                seed_selector = json.loads(seed_pins["AGENTX_SELECTOR"])
+            except json.JSONDecodeError as exc:
+                raise ValueError("seed-time AGENTX_SELECTOR is not valid JSON") from exc
+            if not isinstance(seed_selector, dict):
+                raise ValueError("seed-time AGENTX_SELECTOR must be a JSON object")
+            seed_agentx["selector"] = seed_selector
+        if seed_pins.get("AGENTX_FAILED_REQUEST_THRESHOLD"):
+            seed_agentx["failed_request_threshold"] = seed_pins["AGENTX_FAILED_REQUEST_THRESHOLD"]
+        benchmark = {
+            "agentx": seed_agentx,
+            "model": seed_pins.get("AGENTX_MODEL_ID", ""),
+            "benchmark_script": seed_pins.get("AGENTX_SERVER_SCRIPT", ""),
+            "inferencex_path": seed_pins.get("INFERENCEX_PATH", ""),
+            "envs": dict(seed_pins),
+            "workload_spec": {"outer_image": seed_pins.get("HYPERLOOM_IMAGE", "")},
+        }
+        pin_source = "seed-time AgentX session state"
+
+    from hyperloom.inference_optimizer.agentx.native import (
+        AGENTX_REQUIRED_RUNTIME_PIN_NAMES,
+        AGENTX_RUNTIME_PIN_NAMES,
+        native_agentx_enabled,
+        validate_native_launcher_name,
+    )
+
+    if not native_agentx_enabled(benchmark.get("agentx")):
+        raise ValueError(f"saved AgentX pin source {pin_source!r} does not enable native AgentX")
+
+    raw_envs = benchmark.get("envs")
+    envs = raw_envs if isinstance(raw_envs, Mapping) else {}
+    raw_workload = benchmark.get("workload_spec")
+    workload = raw_workload if isinstance(raw_workload, Mapping) else {}
+    raw_recipe = workload.get("recipe")
+    recipe = raw_recipe if isinstance(raw_recipe, Mapping) else {}
+    raw_execution = workload.get("execution")
+    execution = raw_execution if isinstance(raw_execution, Mapping) else {}
+
+    model_id = str(envs.get("AGENTX_MODEL_ID") or benchmark.get("model") or "").strip()
+    launcher = str(envs.get("AGENTX_SERVER_SCRIPT") or benchmark.get("benchmark_script") or "").strip()
+    inferencex_path = str(benchmark.get("inferencex_path") or "").strip()
+    outer_image = str(workload.get("outer_image") or recipe.get("image") or benchmark.get("docker_image") or "").strip()
+    recipe_fingerprint = str(recipe.get("recipe_fingerprint") or "").strip()
+    raw_topology = workload.get("resolved_topology")
+    topology = raw_topology if isinstance(raw_topology, Mapping) else {}
+    gpu_count = str(topology.get("gpu_count") or "").strip()
+
+    if launcher:
+        validate_native_launcher_name(launcher)
+    if inferencex_path:
+        inferencex_path = str(Path(inferencex_path).expanduser().resolve())
+
+    baseline_pins = {
+        "AGENTX_MODEL_ID": model_id,
+        "AGENTX_SERVER_SCRIPT": launcher,
+        "INFERENCEX_PATH": inferencex_path,
+        "HYPERLOOM_IMAGE": outer_image,
+        "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT": recipe_fingerprint,
+        "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT": str(
+            execution.get("static_execution_fingerprint") or ""
+        ).strip(),
+        "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT": str(
+            execution.get("execution_fingerprint") or ""
+        ).strip(),
+        "HYPERLOOM_AGENTX_GPU_COUNT": gpu_count,
+        "MAGPIE_REF": str(execution.get("magpie_commit") or seed_pins.get("MAGPIE_REF") or "").strip(),
+        "INFERENCEX_REF": str(execution.get("inferencex_commit") or seed_pins.get("INFERENCEX_REF") or "").strip(),
+    }
+    baseline_pins.update(_canonical_agentx_control_pins(benchmark))
+    for name, baseline_value in baseline_pins.items():
+        if seed_pins.get(name) and baseline_value and seed_pins[name] != baseline_value:
+            raise ValueError(
+                f"{name} in {pin_source!r} conflicts with the seed-time AgentX session pin {seed_pins[name]!r}"
+            )
+
+    # Baseline-derived identity/fingerprint values outrank the seed fallback.
+    # Selector controls do not necessarily survive as env keys in Magpie's
+    # materialized YAML, so retain their exact seed-time spelling as well.
+    saved_pins = {
+        name: baseline_pins.get(name, "") or seed_pins.get(name, "")
+        for name in AGENTX_RUNTIME_PIN_NAMES
+        if baseline_pins.get(name, "") or seed_pins.get(name, "")
+    }
+    required_pins = list(AGENTX_REQUIRED_RUNTIME_PIN_NAMES)
+    if config_path:
+        required_pins.extend(
+            (
+                "HYPERLOOM_AGENTX_EXPECTED_RECIPE_FINGERPRINT",
+                "HYPERLOOM_AGENTX_EXPECTED_EXECUTION_FINGERPRINT",
+                "HYPERLOOM_AGENTX_EXPECTED_MATERIALIZED_EXECUTION_FINGERPRINT",
+                "HYPERLOOM_AGENTX_GPU_COUNT",
+                "MAGPIE_REF",
+                "INFERENCEX_REF",
+            )
+        )
+    missing = [name for name in required_pins if not saved_pins.get(name)]
+    if missing:
+        raise ValueError(
+            f"saved native AgentX pin source {pin_source!r} is missing required session pin(s): {', '.join(missing)}"
+        )
+
+    current_pins: dict[str, str] = {}
+    for name in AGENTX_RUNTIME_PIN_NAMES:
+        saved = saved_pins.get(name, "")
+        # On resume, dependency preflight runs before state is loaded and may
+        # auto-detect/clone then overwrite INFERENCEX_PATH.  Only the value that
+        # existed in the operator's shell before preflight is a conflicting
+        # choice; a preflight-generated path must not outrank session state.
+        current = (
+            str(operator_pins.get(name) or "").strip()
+            if operator_pins is not None
+            else os.environ.get(name, "").strip()
+        )
+        comparable_current = current
+        if current and name == "INFERENCEX_PATH":
+            comparable_current = str(Path(current).expanduser().resolve())
+        if comparable_current and (not saved or comparable_current != saved):
+            expected = repr(saved) if saved else "unset"
+            raise ValueError(
+                f"{name}={current!r} conflicts with the saved AgentX session pin {expected} from {pin_source!r}"
+            )
+        current_pins[name] = current
+
+    restored: dict[str, str] = {}
+    for name, saved in saved_pins.items():
+        live = os.environ.get(name, "").strip()
+        if not current_pins[name] or live != saved:
+            os.environ[name] = saved
+            restored[name] = saved
+    for name in AGENTX_RUNTIME_PIN_NAMES:
+        if name not in saved_pins:
+            os.environ.pop(name, None)
+    return restored
+
+
+def _enforce_agentx_resume_workload(
+    args: argparse.Namespace,
+    state: Any,
+) -> None:
+    """Keep a resumed native AgentX session on its original workload point."""
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() != "agentx":
+        return
+    for name in ("tp", "ep", "conc"):
+        saved = int(getattr(state, name, 0) or 0)
+        if saved <= 0:
+            raise ValueError(f"saved AgentX session is missing a positive {name} pin")
+        requested = getattr(args, name, None)
+        if requested is not None and int(requested) != saved:
+            raise ValueError(
+                f"--{name.replace('_', '-')} {requested} conflicts with the saved "
+                f"AgentX workload value {saved}; resume cannot select another recipe point"
+            )
+        setattr(args, name, saved)
+    saved_precision = str(getattr(state, "precision", "") or "").strip()
+    if not saved_precision:
+        raise ValueError("saved AgentX session is missing its precision pin")
+    requested_precision = str(getattr(args, "precision", "") or "").strip()
+    if requested_precision and requested_precision.lower() != saved_precision.lower():
+        raise ValueError(
+            f"--precision {requested_precision!r} conflicts with the saved AgentX precision {saved_precision!r}"
+        )
+    args.precision = saved_precision
 
 
 def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
@@ -1006,9 +1717,11 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
         # Model not on disk yet (uncached HF id).
         print(
             "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
-            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
-            "to the synthetic ISL+OSL derivation and the server will be booted at "
-            "that width. Pre-fetch the weights, or pass --max-model-len.",
+            "not be read (weights not on disk yet), so Hyperloom's compatibility "
+            "profile server falls back to the synthetic ISL+OSL width. The native "
+            "InferenceX AgentX launcher ignores this fallback and uses the model's "
+            "own context. Pre-fetch the weights, or pass --max-model-len, before "
+            "requesting a profiler-compatibility leg.",
             file=sys.stderr,
         )
     return (
@@ -1479,6 +2192,29 @@ def _persist_preflight_failure_artifacts(
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    try:
+        # ``HYPERLOOM_BENCHMARK_CONFIG`` is an allowed trusted .env setting.
+        # Load it before topology/default export so the YAML is a true launch
+        # input rather than a late materialization detail.  _preflight repeats
+        # the idempotent load so its install trace still records the source.
+        _load_dotenv_fallback()
+        _configure_benchmark_config(args)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+    resume_operator_agentx_pins: dict[str, str] | None = None
+    if args.resume_from:
+        from hyperloom.inference_optimizer.agentx.native import (
+            AGENTX_RUNTIME_PIN_NAMES,
+        )
+
+        resume_operator_agentx_pins = {
+            name: os.environ.get(name, "").strip()
+            for name in AGENTX_RUNTIME_PIN_NAMES
+            if not name.startswith("HYPERLOOM_AGENTX_")
+        }
+
     # Surface --nodes (CLI flag wins) before _preflight runs.
     nodes_resolved = max(1, int(args.nodes))
     tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
@@ -1603,6 +2339,30 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
+    if args.resume_from:
+        # A resume is state-owned.  The second idempotent dotenv load inside
+        # preflight may have reintroduced a foreign source YAML after
+        # _configure_benchmark_config deliberately cleared it.
+        os.environ.pop("HYPERLOOM_BENCHMARK_CONFIG", None)
+    else:
+        try:
+            _finalize_benchmark_config(args)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SystemExit(2) from exc
+        # Native AgentX topology is only knowable after preflight has installed
+        # Magpie and validated the pinned InferenceX checkout.  Replace the
+        # provisional defaults exported above before any session state or GPU
+        # resource request is created.
+        tp_resolved = max(1, int(getattr(args, "tp", 1) or 1))
+        ep_resolved = max(1, int(getattr(args, "ep", 1) or 1))
+        _export_workload_envs_for_optimize(
+            args,
+            nodes_resolved=nodes_resolved,
+            tp_resolved=tp_resolved,
+            ep_resolved=ep_resolved,
+        )
+
     _resolve_models_for_run(
         args,
         resolved_urls,
@@ -1611,11 +2371,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     # Before either session branch: these are read by the fresh-launch seeding AND by the resume path, so this is the
     # one place that covers both.
-    _preflight_agentx_backend(args)
-    _apply_agentx_budget_profile(args)
     from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
-    resolve_benchmark_timeouts()
+    # A resume may be launched from a fresh shell, where AgentX mode is only in
+    # state.json. Defer mode-sensitive checks until that state has been loaded
+    # and re-exported; fresh launches can settle them immediately.
+    if not args.resume_from:
+        _preflight_agentx_backend(args)
+        _apply_agentx_budget_profile(args)
+        resolve_benchmark_timeouts()
     # A fresh launch has nothing to restore, so settle the budget before the
     # manifest and the workload env read it. A resume keeps ``None`` until
     # ``_restore_budget_and_objective`` has had its chance at the session's own.
@@ -1690,6 +2454,39 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
+        if _restore_agentx_env_from_state(state):
+            print("  re-exported HYPERLOOM_AGENTX: 1 (persisted session mode)")
+        if (
+            str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+            and not str(getattr(state, "baseline_config_path", "") or "").strip()
+        ):
+            source_config = str(getattr(state, "benchmark_source_config_path", "") or "").strip()
+            if source_config:
+                source_path = Path(source_config).expanduser().resolve()
+                if not source_path.is_file():
+                    print(
+                        "ERROR: cannot resume this AgentX session -- saved "
+                        f"source benchmark config is missing: {source_path}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(2)
+                os.environ["HYPERLOOM_BENCHMARK_CONFIG"] = str(source_path)
+                print(f"  restored AgentX source config: {source_path} (baseline not yet accepted)")
+        try:
+            restored_agentx_pins = _restore_agentx_runtime_pins_from_state(
+                state,
+                operator_pins=resume_operator_agentx_pins,
+            )
+        except ValueError as exc:
+            print(f"ERROR: cannot resume this AgentX session -- {exc}", file=sys.stderr)
+            sys.exit(2)
+        if restored_agentx_pins:
+            print("  restored native AgentX session pins: " + ", ".join(sorted(restored_agentx_pins)))
+        resume_preflight_args = argparse.Namespace(**vars(args))
+        resume_preflight_args.framework = state.framework or getattr(args, "framework", "")
+        _preflight_agentx_backend(resume_preflight_args)
+        _apply_agentx_budget_profile(args)
+        resolve_benchmark_timeouts()
         prior_stop = state.stop_reason
         print(f"Resuming session: {session_dir}")
         print(f"  manifest.session_id    : {manifest.get('session_id')}")
@@ -1734,6 +2531,11 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Resolve workload knobs with the resumed state as the fallback source (explicit --isl/--conc/... on this
         # resume still win), then project the resolved values into env so resume sees the same workload contract (not
         # YAML defaults).
+        try:
+            _enforce_agentx_resume_workload(args, state)
+        except ValueError as exc:
+            print(f"ERROR: cannot resume this AgentX session -- {exc}", file=sys.stderr)
+            sys.exit(2)
         _resolve_workload_knobs(args, state)
         _resume_max_model_len = getattr(args, "max_model_len", None) or getattr(state, "max_model_len", 0) or 0
         for env_name, val in (

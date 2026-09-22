@@ -164,6 +164,7 @@ class VariantResult:
     output_throughput: float | None = None
     request_throughput: float | None = None
     total_token_throughput: float | None = None
+    agentx_gpu_count: int | None = None
     completed_requests: int | None = None
     duration_seconds: float | None = None
     ttft_mean_ms: float | None = None
@@ -211,6 +212,7 @@ class VariantResult:
             "output_throughput": self.output_throughput,
             "request_throughput": self.request_throughput,
             "total_token_throughput": self.total_token_throughput,
+            "agentx_gpu_count": self.agentx_gpu_count,
             "completed_requests": self.completed_requests,
             "duration_seconds": self.duration_seconds,
             "ttft_mean_ms": self.ttft_mean_ms,

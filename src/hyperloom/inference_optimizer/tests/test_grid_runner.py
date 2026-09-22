@@ -1933,9 +1933,12 @@ class TestSessionBudgetAdmission:
         assert [r.status for r in results] == ["succeeded"]
 
     @pytest.mark.asyncio
-    async def test_without_an_estimate_agentx_uses_the_same_benchmark_policy(self, tmp_path, monkeypatch):
-        """Legacy AgentX timeout inputs do not turn the hard cap into admission cost."""
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    async def test_legacy_agentx_timeout_inputs_do_not_change_benchmark_policy(self, tmp_path, monkeypatch):
+        """Retired AgentX timeout hints do not turn the hard cap into admission cost."""
+        # Native AgentX grids are measurement-only/fail-closed.  This test is
+        # about the timeout resolver itself, so leave the native mode off and
+        # prove the legacy hints cannot affect an ordinary grid launch.
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
         monkeypatch.setenv("AGENTX_DURATION", "3600")
         monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
         monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)

@@ -33,6 +33,11 @@ def _clear_env(monkeypatch):
         "PROFILE",
         "MODEL_PATH",
         "INFERENCEX_PATH",
+        "HYPERLOOM_AGENTX",
+        "AGENTX_MODEL_ID",
+        "AGENTX_SERVER_SCRIPT",
+        "AGENTX_MODE",
+        "AGENTX_DATASET",
         "HYPERLOOM_PROFILE_MAX_ITERS",
         "HYPERLOOM_PROFILE_DELAY_ITERS",
         "HYPERLOOM_PROFILE_MAX_STEPS_CAP",
@@ -43,6 +48,32 @@ def _clear_env(monkeypatch):
         "XDIT_QUALITY_REF_WRITE",
     ):
         monkeypatch.delenv(k, raising=False)
+
+
+def _enable_native_agentx(monkeypatch, tmp_path: Path) -> None:
+    from hyperloom.inference_optimizer.agentx import native as native_agentx
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("AGENTX_MODEL_ID", "acme/Test-Model")
+    monkeypatch.setenv(
+        "AGENTX_SERVER_SCRIPT",
+        "single_node/agentic/test_fp4_mi355x_sglang_mtp.sh",
+    )
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+
+    def _resolve(benchmark, *, expected_gpu_count, **_kwargs):
+        topology = {
+            "tp": expected_gpu_count,
+            "pp": 1,
+            "pcp_size": 1,
+            "ep": expected_gpu_count,
+            "gpu_count": expected_gpu_count,
+            "recipe_fingerprint": "a" * 64,
+        }
+        benchmark.setdefault("workload_spec", {})["resolved_topology"] = topology
+        return topology
+
+    monkeypatch.setattr(native_agentx, "resolve_native_recipe", _resolve)
 
 
 def _write(path, **bench_extra):
@@ -530,6 +561,39 @@ def test_profile_sglang_bad_extra_body(monkeypatch, tmp_path):
     assert "start_step" in body and "num_steps" in body
 
 
+@pytest.mark.parametrize("framework", ["sglang", "vllm"])
+def test_agentx_diagnostic_profile_preserves_installed_framework(monkeypatch, tmp_path, framework):
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    _clear_env(monkeypatch)
+    _enable_native_agentx(monkeypatch, tmp_path)
+    _stub_server_arg_injectors(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "1")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_shape_mode", lambda: "patched")
+
+    def reject_source_patch(*args, **kwargs):
+        pytest.fail("diagnostic profiling must preserve the native framework install")
+
+    monkeypatch.setattr(we, "ensure_sglang_patched_for_tracelens", reject_source_patch)
+    monkeypatch.setattr(we, "ensure_vllm_patched_for_tracelens", reject_source_patch)
+    monkeypatch.setattr(we, "ensure_sglang_patched_for_ck_blockscale", reject_source_patch)
+    src = _write(
+        tmp_path / "profile.yaml",
+        framework=framework,
+        envs={"PROFILE": "1", "SGLANG_FP8_BLOCKSCALE_CK_MAX_M": "32"},
+        profiler={"torch_profiler": {"enabled": True}},
+    )
+
+    bench = _materialize(src, tmp_path / "out", allow_agentx_profile_compat=True)
+
+    assert bench["workload_spec"]["harness"] == "hyperloom-profiler-compat"
+    assert bench["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "not_attempted"
+    assert bench["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    if framework == "sglang":
+        assert json.loads(bench["envs"]["PROFILE_EXTRA_BODY"])["detailed_annotations"] is False
+
+
 def _profile_num_steps(bench) -> int:
     """Captured-step count the sglang profile path writes into PROFILE_EXTRA_BODY."""
     import json
@@ -726,12 +790,61 @@ def test_agentx_workload_spec_concurrency_tracks_served_conc(monkeypatch, tmp_pa
     # process env instead, so the two agree by construction.
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    _enable_native_agentx(monkeypatch, tmp_path)
     monkeypatch.setenv("CONC", "8")
     src = _write(tmp_path / "cfg.yaml", envs={"CONC": 64})
     bench = _materialize(src, tmp_path / "out")
     assert bench["envs"]["CONC"] == 8
     assert bench["workload_spec"]["concurrency"] == 8
+
+
+def test_native_agentx_rejects_final_extra_env_concurrency_change(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    _enable_native_agentx(monkeypatch, tmp_path)
+    src = _write(
+        tmp_path / "cfg.yaml",
+        envs={"CONC": 8},
+        agentx={"enabled": True, "mode": "canonical", "concurrency": 8},
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"Native AgentX concurrency is fixed for the session: resolved CONC=8, candidate requested 16",
+    ):
+        _materialize(src, tmp_path / "out", extra_envs={"CONC": "16"})
+
+
+def test_native_agentx_filters_credentials_before_recipe_fingerprint(monkeypatch, tmp_path):
+    """The resolver and persisted YAML must see the same credential-free envs."""
+    from hyperloom.inference_optimizer.agentx import native as native_agentx
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    _enable_native_agentx(monkeypatch, tmp_path)
+    resolved_envs: dict[str, object] = {}
+    resolve = native_agentx.resolve_native_recipe
+
+    def _capture_resolved_envs(benchmark, **kwargs):
+        resolved_envs.update(benchmark.get("envs") or {})
+        return resolve(benchmark, **kwargs)
+
+    monkeypatch.setattr(native_agentx, "resolve_native_recipe", _capture_resolved_envs)
+    src = _write(
+        tmp_path / "cfg.yaml",
+        envs={
+            "CONC": 8,
+            "OPENAI_API_KEY": "must-not-be-fingerprinted",
+            "SAFE_WORKLOAD_KNOB": "preserved",
+        },
+    )
+
+    bench = _materialize(src, tmp_path / "out")
+
+    assert "OPENAI_API_KEY" not in resolved_envs
+    assert "OPENAI_API_KEY" not in bench["envs"]
+    assert resolved_envs["SAFE_WORKLOAD_KNOB"] == "preserved"
+    assert bench["envs"]["SAFE_WORKLOAD_KNOB"] == "preserved"
 
 
 def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch, tmp_path):
@@ -747,7 +860,7 @@ def test_agentx_workload_spec_publishes_the_conc_scaled_warmup_grace(monkeypatch
 
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    _enable_native_agentx(monkeypatch, tmp_path)
     monkeypatch.setenv("CONC", "32")
     # A grace declared as measured at CONC=8; warmup is linear in CONC, so the
     # bound this round runs at is 1800 * 32/8.
@@ -771,7 +884,7 @@ def test_agentx_workload_spec_names_the_axis_the_session_is_graded_on(monkeypatc
     """
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    _enable_native_agentx(monkeypatch, tmp_path)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     src = _write(tmp_path / "cfg.yaml", envs={})
     bench = _materialize(src, tmp_path / "out")

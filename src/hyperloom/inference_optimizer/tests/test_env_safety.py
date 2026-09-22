@@ -146,6 +146,17 @@ def test_variant_env_key_allows_workload_pins_and_blocks_hijacks():
         assert not common_env_safety.is_allowed_variant_env_key(hijack)
     for secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_GATEWAY_KEY"):
         assert not common_env_safety.is_allowed_variant_env_key(secret)
+    for agentx_identity in (
+        "AGENTX_MODEL_ID",
+        "AGENTX_SERVER_SCRIPT",
+        "AGENTX_RECIPE",
+        "AGENTX_SELECTOR",
+        "AGENTX_MODE",
+        "AGENTX_FAILED_REQUEST_THRESHOLD",
+        "AGENTX_DATASET",
+        "WEKA_LOADER_OVERRIDE",
+    ):
+        assert not common_env_safety.is_allowed_variant_env_key(agentx_identity)
     assert not common_env_safety.is_allowed_variant_env_key("bad key")
     assert not common_env_safety.is_allowed_variant_env_key("")
 

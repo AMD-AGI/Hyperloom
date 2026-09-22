@@ -22,8 +22,28 @@ def apply_runtime_benchmark_overrides(
     grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and str(bench.get("benchmark_script") or "") == "aiperf_client.sh":
-        agentx_mode = True
+    if agentx_mode is None:
+        serialized_agentx = bench.get("agentx")
+        native_enabled = False
+        if isinstance(serialized_agentx, bool):
+            native_enabled = serialized_agentx
+        elif isinstance(serialized_agentx, str):
+            native_enabled = serialized_agentx.strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "enable",
+                "enabled",
+            }
+        elif isinstance(serialized_agentx, dict):
+            raw_enabled = serialized_agentx.get("enabled", True)
+            native_enabled = (
+                raw_enabled.strip().lower() in {"1", "true", "yes", "enable", "enabled"}
+                if isinstance(raw_enabled, str)
+                else bool(raw_enabled)
+            )
+        if str(bench.get("benchmark_script") or "") == "aiperf_client.sh" or native_enabled:
+            agentx_mode = True
 
     if model_path:
         bench["model"] = str(model_path)
@@ -34,8 +54,9 @@ def apply_runtime_benchmark_overrides(
 
     if gpu_type:
         bench["runner_type"] = str(gpu_type)
-        # Force-pin the generic ``{framework}_{gpu_type}.sh`` so Magpie's resolver doesn't fall through to InferenceX
-        # native scripts that ignore ``EXTRA_*_ARGS``.
+        # The AgentX switch below restores its explicit native launcher. Other
+        # runs stay pinned to the generic script rather than depending on
+        # Magpie's resolver order.
         framework = str(bench.get("framework") or "").lower()
         if framework:
             bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
@@ -49,6 +70,11 @@ def apply_runtime_benchmark_overrides(
     # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
     # rebuild via this function).
     apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode, grading=grading)
+    native_agentx = False
+    if "agentx" in bench:
+        from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+        native_agentx = native_agentx_enabled(bench.get("agentx"))
 
     envs: dict[str, Any] = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the
@@ -77,7 +103,7 @@ def apply_runtime_benchmark_overrides(
         tp_val = int(envs.get("TP", 1) or 1)
         existing_rocr = str(envs.get("ROCR_VISIBLE_DEVICES", "")).strip()
         existing_count = len([x for x in existing_rocr.split(",") if x.strip()]) if existing_rocr else 0
-        if tp_val > 1 and existing_count < tp_val:
+        if not native_agentx and tp_val > 1 and existing_count < tp_val:
             envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_val))
 
     return envs

@@ -362,6 +362,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     benchmark_mode: str = ""
     # Generation counter for AgentX measurements.
     agentx_epoch: int = 0
+    # Immutable native AgentX identity captured before the first baseline.
+    # This is the resume fallback when a process dies before
+    # ``baseline_config_path`` has been accepted and written back.
+    agentx_runtime_pins: dict[str, str] = field(default_factory=dict)
+    # Session-owned copy of the operator's source YAML.  Used only until an
+    # accepted materialized ``baseline_config_path`` exists, so a pre-baseline
+    # crash can resume with the same AgentX selector/mode/custom envs.
+    benchmark_source_config_path: str = ""
     # The grading configuration this session was seeded with: {"objective": GRADED_INTVTY|GRADED_OUTPUT,
     # "noise_pct": float}. Recorded rather than re-derived because the derivation reads HYPERLOOM_PERF_METRIC /
     # HYPERLOOM_PERF_NOISE_PCT, and a resume is a new process: a shell that lost the variable would flip the axis
@@ -1075,6 +1083,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
+        if str(filtered.get("benchmark_mode") or "").strip().lower() == "agentx":
+            filtered["warm_replay_enabled"] = False
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),

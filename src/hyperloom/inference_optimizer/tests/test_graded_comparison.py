@@ -119,6 +119,23 @@ def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
     assert graded.verdict == VERDICT_KEEP
 
 
+def test_agentx_output_guard_does_not_grade_total_throughput_with_native_topology(monkeypatch):
+    _agentx(monkeypatch)
+    anchor = {**_ANCHOR, "total_throughput": 800.0, "agentx_gpu_count": 8}
+    candidate = _full_measurement(total=600.0, output=200.0, intvty=24.8)
+    candidate["agentx_gpu_count"] = 8
+
+    graded = resolve_graded_comparison(
+        _State(current_best=anchor, baseline_tput=180.0),
+        candidate,
+        keep_threshold_pct=2.0,
+    )
+
+    assert graded.verdict == VERDICT_KEEP
+    assert graded.tput_reference == pytest.approx(800.0)
+    assert graded.tput_candidate == pytest.approx(600.0)
+
+
 def test_agentx_revert_when_both_axes_worse(monkeypatch):
     """Both interactivity AND tput regressed beyond the noise band -> REVERT."""
     _agentx(monkeypatch)

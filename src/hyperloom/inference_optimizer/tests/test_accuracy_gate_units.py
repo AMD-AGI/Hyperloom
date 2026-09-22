@@ -417,6 +417,68 @@ class TestParseAgentXErrorRate:
         (tmp_path / "inferencex_result.json").write_text(json.dumps({"request_error_rate": "n/a"}), encoding="utf-8")
         assert ag.parse_agentx_error_rate(tmp_path) is None
 
+    def test_reads_native_magpie_ratio_from_benchmark_report_as_percent(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(
+            json.dumps({"agentx_metrics": {"requests": {"error_rate": 1 / 11, "threshold": 0.1}}}),
+            encoding="utf-8",
+        )
+        assert ag.parse_agentx_error_rate(tmp_path) == pytest.approx(100 / 11)
+
+    def test_reconstructs_native_raw_accounting_as_percent(self, tmp_path):
+        (tmp_path / "inferencex_result.json").write_text(
+            json.dumps(
+                {
+                    "num_requests_successful": 8,
+                    "request_accounting": {"records_error_dropped": 2},
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert ag.parse_agentx_error_rate(tmp_path) == pytest.approx(20.0)
+
+    def test_native_report_error_rate_reaches_quality_gate(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(
+            json.dumps({"agentx_metrics": {"requests": {"error_rate": 0.2, "threshold": 0.1}}}),
+            encoding="utf-8",
+        )
+        result = ag.parse_eval_results(tmp_path, framework="sglang", benchmark_mode="agentx")
+        assert result["accuracy"] == 0.0
+        assert result["error_rate"] == pytest.approx(20.0)
+        assert result["error_rate_threshold"] == pytest.approx(10.0)
+
+    def test_native_report_uses_its_bound_request_threshold(self, tmp_path):
+        (tmp_path / "benchmark_report.json").write_text(
+            json.dumps({"agentx_metrics": {"requests": {"error_rate": 0.15, "threshold": 0.2}}}),
+            encoding="utf-8",
+        )
+        result = ag.parse_eval_results(tmp_path, framework="sglang", benchmark_mode="agentx")
+        assert result["accuracy"] == 1.0
+        assert result["error_rate"] == pytest.approx(15.0)
+        assert result["error_rate_threshold"] == pytest.approx(20.0)
+
+    @pytest.mark.parametrize("threshold", [None, -0.01, 1.01, float("nan"), float("inf"), True, "0.2"])
+    def test_native_report_invalid_request_threshold_fails_closed(self, tmp_path, threshold):
+        requests = {"error_rate": 0.01}
+        if threshold is not None:
+            requests["threshold"] = threshold
+        (tmp_path / "benchmark_report.json").write_text(
+            json.dumps({"agentx_metrics": {"requests": requests}}),
+            encoding="utf-8",
+        )
+        result = ag.parse_eval_results(tmp_path, framework="sglang", benchmark_mode="agentx")
+        assert result["accuracy"] == 0.0
+        assert result["error_rate"] == pytest.approx(1.0)
+        assert result["error_rate_threshold"] is None
+
+    def test_legacy_result_keeps_the_default_request_threshold(self, tmp_path):
+        (tmp_path / "inferencex_result.json").write_text(
+            json.dumps({"request_error_rate": 9.0}),
+            encoding="utf-8",
+        )
+        result = ag.parse_eval_results(tmp_path, framework="vllm", benchmark_mode="agentx")
+        assert result["accuracy"] == 1.0
+        assert result["error_rate_threshold"] == pytest.approx(10.0)
+
     def test_a_mapped_result_missing_the_metric_reports_none(self, tmp_path):
         """aiperf omits the metric when nothing completed. Coalescing that to
         0.0 would report a perfect error rate for a run that measured nothing,

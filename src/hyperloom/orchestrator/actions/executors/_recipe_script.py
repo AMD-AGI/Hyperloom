@@ -54,8 +54,19 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     if not script:
         return ""
 
-    if script == _AGENTX_CLIENT_SCRIPT:
-        script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+    native_agentx = False
+    if "agentx" in bench:
+        from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+        native_agentx = native_agentx_enabled(bench["agentx"])
+    if script == _AGENTX_CLIENT_SCRIPT or native_agentx:
+        # Native launchers own the full replay lifecycle; only the framework's
+        # generic proxy implements GEAK's server-only phase.
+        script = (
+            ""
+            if native_agentx
+            else str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
+        )
         if not script:
             framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
             if not framework:

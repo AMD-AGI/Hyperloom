@@ -171,12 +171,18 @@ def _distribution(metric: Any) -> dict[str, int]:
 
 def map_corpus_shape(result: Mapping[str, Any]) -> dict[str, Any]:
     """Build a ``SharedState.agentx_corpus_shape`` record from a :func:`map_aiperf` result."""
+    completed = result.get("completed")
+    if completed is None:
+        completed = result.get("completed_requests")
+    duration = result.get("duration")
+    if duration is None:
+        duration = result.get("duration_seconds")
     return {
         "corpus_loader": str(result.get("corpus_loader") or ""),
         "isl": dict(result.get("isl_distribution") or {}),
         "osl": dict(result.get("osl_distribution") or {}),
-        "completed_requests": int(result.get("completed") or 0),
-        "duration_s": float(result.get("duration") or 0.0),
+        "completed_requests": int(completed or 0),
+        "duration_s": float(duration or 0.0),
         "prefix_cache_hit": float(result.get("theoretical_prefix_cache_hit") or 0.0),
         "request_error_rate": float(result.get("request_error_rate") or 0.0),
         "source": "measured",

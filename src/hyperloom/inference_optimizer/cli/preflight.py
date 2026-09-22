@@ -49,6 +49,9 @@ from hyperloom.common.provenance import (
     detect_gfx_arch,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.agentx.native import (
+    _MAGPIE_SOURCE_IDENTITY_CODE,
+)
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -1679,6 +1682,101 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
 # MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
 _INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
+_MAGPIE_REF_DEFAULT = "3642ce66ae46ca4dc125340b3d14a3f4640c369b"
+_MAGPIE_GENERIC_HEALTH_CODE = "import Magpie\n"
+_MAGPIE_NATIVE_AGENTX_HEALTH_CODE = (
+    _MAGPIE_SOURCE_IDENTITY_CODE
+    + """
+import inspect
+import re
+import sys
+from pathlib import Path
+
+import Magpie
+from Magpie.modes.benchmark import AgentXConfig
+from Magpie.modes.benchmark.agentx import _expand_single_node_agentx_entries
+
+assert AgentXConfig.from_value("enable")
+assert "run-eval" in inspect.getsource(_expand_single_node_agentx_entries)
+expected = sys.argv[1].strip().lower()
+package_root = Path(Magpie.__file__).resolve().parent
+commit, _source_url = _resolve_magpie_source_identity(package_root)
+_validate_magpie_execution_tree(package_root, commit)
+if re.fullmatch(r"[0-9a-f]{7,40}", expected):
+    assert commit and (commit.startswith(expected) or expected.startswith(commit))
+"""
+)
+
+
+def _magpie_health_code(*, native_agentx: bool) -> str:
+    """Select the Magpie probe appropriate for the requested benchmark mode.
+
+    Generic Magpie intentionally retains the historical importability contract:
+    operators may install a compatible tag, branch, source drop, or alternate
+    commit through ``MAGPIE_REF``/``MAGPIE_PACKAGE_SPEC``. Native AgentX executes
+    a tightly coupled upstream recipe, so only that mode applies the immutable
+    commit, capability, and audited execution-tree checks.
+    """
+    if native_agentx:
+        return _MAGPIE_NATIVE_AGENTX_HEALTH_CODE
+    return _MAGPIE_GENERIC_HEALTH_CODE
+
+
+def _config_enables_native_agentx(path: str | Path) -> bool:
+    """Read only the public AgentX switch from a benchmark YAML."""
+    import yaml
+
+    try:
+        parsed = yaml.safe_load(Path(path).expanduser().read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError, TypeError, ValueError):
+        return False
+    benchmark = parsed.get("benchmark") if isinstance(parsed, dict) else {}
+    if not isinstance(benchmark, dict):
+        return False
+    from hyperloom.inference_optimizer.agentx.native import native_agentx_enabled
+
+    return native_agentx_enabled(benchmark.get("agentx"))
+
+
+def _native_agentx_preflight_requested(
+    args: argparse.Namespace | None,
+) -> bool:
+    """Detect native AgentX before preflight is allowed to mutate checkouts."""
+    resume_from = str(getattr(args, "resume_from", "") or "").strip()
+    if resume_from:
+        state_path = Path(resume_from).expanduser() / "state.json"
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return False
+        if str(state.get("benchmark_mode") or "").strip().lower() != "agentx":
+            return False
+        pins = state.get("agentx_runtime_pins")
+        if isinstance(pins, dict):
+            for name in ("MAGPIE_REF", "INFERENCEX_REF"):
+                saved = str(pins.get(name) or "").strip()
+                if saved and not os.environ.get(name, "").strip():
+                    os.environ[name] = saved
+        if isinstance(pins, dict) and str(pins.get("AGENTX_SERVER_SCRIPT") or "").strip():
+            return True
+        for key in ("baseline_config_path", "benchmark_source_config_path"):
+            config_path = str(state.get(key) or "").strip()
+            if config_path and _config_enables_native_agentx(config_path):
+                return True
+        return False
+
+    config_path = os.environ.get("HYPERLOOM_BENCHMARK_CONFIG", "").strip()
+    if config_path and _config_enables_native_agentx(config_path):
+        return True
+    raw_mode = os.environ.get("HYPERLOOM_AGENTX", "").strip().lower()
+    return bool(os.environ.get("AGENTX_SERVER_SCRIPT", "").strip()) and raw_mode in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "enable",
+        "enabled",
+    }
 
 
 def _inferencex_head_sha(path: Path | str) -> str:
@@ -1698,19 +1796,53 @@ def _inferencex_head_sha(path: Path | str) -> str:
 def _inferencex_ref_matches(path: Path | str, ref: str) -> bool:
     """Whether the checkout at ``path`` is at ``ref``."""
     if not re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or ""):
+        # Legacy/profile-compatible checkouts may intentionally follow a branch
+        # or tag, which cannot be compared to HEAD without a network lookup.
         return True
     head = _inferencex_head_sha(path)
     if not head:
+        # Preserve support for a tarball/source drop without git metadata.  The
+        # native AgentX path applies a stricter check below.
         return True
     return head.startswith(ref.lower()) or ref.lower().startswith(head)
 
 
-def _inferencex_checkout_ok(path: Path | str, *, ref: str | None = None) -> bool:
+def _inferencex_checkout_ok(
+    path: Path | str,
+    *,
+    ref: str | None = None,
+    require_agentx_submodule: bool = False,
+) -> bool:
     """True when ``path`` is a usable InferenceX checkout at the expected ref."""
     if not (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file():
         return False
     if ref is None:
         ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    if require_agentx_submodule:
+        # Native AgentX executes upstream recipe code verbatim, so unlike the
+        # legacy compatibility path it must fail closed on an unverifiable pin.
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", ref or ""):
+            return False
+        head = _inferencex_head_sha(path)
+        if not head or head.lower() != ref.lower():
+            return False
+        root = Path(path)
+        aiperf = root / "utils" / "aiperf"
+        if not (aiperf / "pyproject.toml").is_file():
+            return False
+        gitlink = subprocess.run(
+            ["git", "-C", str(root), "ls-tree", "HEAD", "utils/aiperf"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        fields = (gitlink.stdout or "").strip().split()
+        if gitlink.returncode != 0 or len(fields) < 3 or fields[0] != "160000":
+            return False
+        submodule_head = _inferencex_head_sha(aiperf)
+        if not submodule_head or submodule_head.lower() != fields[2].lower():
+            return False
     if not ref:
         return True
     return _inferencex_ref_matches(path, ref)
@@ -1720,6 +1852,11 @@ def _inferencex_dest_name(ref: str) -> str:
     """Per-revision checkout dir name, matching install.sh's ``InferenceX@<sha>``."""
     slug = ref if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or "") else re.sub(r"[^A-Za-z0-9._-]", "-", ref or "head")
     return f"InferenceX@{slug}"
+
+
+def _native_inferencex_dest_name(ref: str) -> str:
+    """Keep native AgentX away from generic compatibility-patched checkouts."""
+    return f"{_inferencex_dest_name(ref)}-agentx"
 
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
@@ -1798,7 +1935,11 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
     return ok
 
 
-def _clone_inferencex(dest: Path) -> str | None:
+def _clone_inferencex(
+    dest: Path,
+    *,
+    initialize_agentx_submodule: bool = False,
+) -> str | None:
     """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF."""
     repo = os.environ.get("INFERENCEX_REPO") or _INFERENCEX_REPO_DEFAULT
     ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
@@ -1823,9 +1964,51 @@ def _clone_inferencex(dest: Path) -> str | None:
                 check=True,
                 timeout=600,
             )
+        if initialize_agentx_submodule:
+            subprocess.run(
+                ["git", "-C", dest_str, "submodule", "sync", "--", "utils/aiperf"],
+                check=True,
+                timeout=60,
+            )
+            try:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        dest_str,
+                        "submodule",
+                        "update",
+                        "--init",
+                        "--depth",
+                        "1",
+                        "--",
+                        "utils/aiperf",
+                    ],
+                    check=True,
+                    timeout=600,
+                )
+            except subprocess.CalledProcessError:
+                subprocess.run(
+                    [
+                        "git",
+                        "-C",
+                        dest_str,
+                        "submodule",
+                        "update",
+                        "--init",
+                        "--",
+                        "utils/aiperf",
+                    ],
+                    check=True,
+                    timeout=600,
+                )
         # ref="" : the tree was just checked out at `ref` by construction, so re-deriving the pin here would only
         # re-read what we wrote.
-        if not _inferencex_checkout_ok(dest, ref=""):
+        if not _inferencex_checkout_ok(
+            dest,
+            ref=ref,
+            require_agentx_submodule=initialize_agentx_submodule,
+        ):
             raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
         log.info("InferenceX cloned into %s at %s", dest_str, _inferencex_head_sha(dest) or ref)
         return dest_str
@@ -2104,6 +2287,7 @@ def _preflight(
 
     benchmark_backend = _resolve_active_backend_name()
     _magpie_backend_active = benchmark_backend == "magpie"
+    _native_agentx_preflight_active = _native_agentx_preflight_requested(args)
     # Interpreter used for benchmark-runtime installs (Ray).
     benchmark_python = _resolve_benchmark_interpreter()
 
@@ -2255,24 +2439,69 @@ def _preflight(
     magpie_python = benchmark_python
     magpie_installed = False
     magpie_spec: str | None = None
+    magpie_ref = os.environ.get("MAGPIE_REF") or _MAGPIE_REF_DEFAULT
+    os.environ["MAGPIE_REF"] = magpie_ref
+    if _native_agentx_preflight_active and not re.fullmatch(r"[0-9a-fA-F]{40}", magpie_ref):
+        print(
+            "Preflight: ERROR — native AgentX requires MAGPIE_REF to be one "
+            f"immutable 40-character commit SHA; got {magpie_ref!r}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    magpie_health_code = _magpie_health_code(native_agentx=_native_agentx_preflight_active)
     try:
         if not _magpie_backend_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
             check = None
         else:
-            check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+            check = subprocess.run(
+                [
+                    magpie_python,
+                    "-c",
+                    magpie_health_code,
+                    magpie_ref,
+                ],
+                capture_output=True,
+            )
         if _magpie_backend_active and check is not None and check.returncode != 0:
             magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-            magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
             magpie_spec = os.environ.get(
                 "MAGPIE_PACKAGE_SPEC",
                 f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
             )
-            print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
+            unavailable = (
+                "native AgentX capability unavailable" if _native_agentx_preflight_active else "not importable"
+            )
+            print(f"Preflight: Magpie {unavailable}; installing {magpie_spec} ...")
             subprocess.run(
                 [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
                 check=True,
             )
+            health = subprocess.run(
+                [magpie_python, "-c", magpie_health_code, magpie_ref],
+                capture_output=True,
+            )
+            if health.returncode != 0:
+                # A VCS package at the right commit can still contain local
+                # compatibility patches; pip otherwise keeps that installation.
+                subprocess.run(
+                    [
+                        magpie_python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--quiet",
+                        "--force-reinstall",
+                        "--no-deps",
+                        *pip_extra,
+                        magpie_spec,
+                    ],
+                    check=True,
+                )
+                subprocess.run(
+                    [magpie_python, "-c", magpie_health_code, magpie_ref],
+                    check=True,
+                )
             magpie_installed = True
             print("Preflight: Magpie installed OK")
         if _magpie_backend_active and not os.environ.get("MAGPIE_PATH", "").strip():
@@ -2315,6 +2544,17 @@ def _preflight(
     )
 
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
+    _want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+    # Make the implicit default explicit for the native execution-identity
+    # check and for child processes recorded in session provenance.
+    os.environ["INFERENCEX_REF"] = _want_ref
+    if _native_agentx_preflight_active and not re.fullmatch(r"[0-9a-fA-F]{40}", _want_ref):
+        print(
+            "Preflight: ERROR — native AgentX requires INFERENCEX_REF to be "
+            f"one immutable 40-character commit SHA; got {_want_ref!r}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
     inferencex_cloned = False
     if not inferencex_path:
@@ -2328,13 +2568,22 @@ def _preflight(
         # InferenceX detection order: Magpie submodule (canonical post-install.sh) → installer's per-revision cache
         # checkout (InferenceX@<sha>, resolved via resolve_dep_dir so a process that did not inherit INFERENCEX_PATH
         # still finds it; falls back to the bare dir).
-        _want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-        for candidate in (
-            magpie_root / "InferenceX",
-            _resolve_dep_dir(_inferencex_dest_name(_want_ref)),
-            _resolve_dep_dir("InferenceX"),
-        ):
-            if _inferencex_checkout_ok(candidate):
+        candidates = (
+            (_resolve_dep_dir(_native_inferencex_dest_name(_want_ref)),)
+            if _native_agentx_preflight_active
+            else (
+                magpie_root / "InferenceX",
+                _resolve_dep_dir(_inferencex_dest_name(_want_ref)),
+                _resolve_dep_dir("InferenceX"),
+            )
+        )
+        for candidate in candidates:
+            candidate_ok = (
+                _inferencex_checkout_ok(candidate, require_agentx_submodule=True)
+                if _native_agentx_preflight_active
+                else _inferencex_checkout_ok(candidate)
+            )
+            if candidate_ok:
                 if os.access(candidate, os.W_OK):
                     inferencex_path = str(candidate)
                     break
@@ -2352,16 +2601,32 @@ def _preflight(
                 )
     # When no writable checkout at the pin was found, clone one ourselves. baseline cannot run without InferenceX, so
     # a clone failure is a hard error.
-    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+    inferencex_ok = bool(inferencex_path) and (
+        _inferencex_checkout_ok(inferencex_path, require_agentx_submodule=True)
+        if _native_agentx_preflight_active
+        else _inferencex_checkout_ok(inferencex_path)
+    )
+    if not inferencex_ok:
         from ..session.paths import deps_cache_root as _open_source_default
 
-        _ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+        _ref = _want_ref
         # Per-revision dir, matching install.sh: a shared name is what allowed a pre-bump clone to be reused forever.
-        dest = _open_source_default() / _inferencex_dest_name(_ref)
+        dest_name = (
+            _native_inferencex_dest_name(_ref) if _native_agentx_preflight_active else _inferencex_dest_name(_ref)
+        )
+        dest = _open_source_default() / dest_name
         print(f"Preflight: no InferenceX checkout at {_ref[:12]}; cloning into {dest} ...")
-        inferencex_path = _clone_inferencex(dest)
+        inferencex_path = _clone_inferencex(
+            dest,
+            initialize_agentx_submodule=_native_agentx_preflight_active,
+        )
         inferencex_cloned = bool(inferencex_path)
-        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        inferencex_ok = bool(inferencex_path) and (
+            _inferencex_checkout_ok(inferencex_path, require_agentx_submodule=True)
+            if _native_agentx_preflight_active
+            else _inferencex_checkout_ok(inferencex_path)
+        )
+        if not inferencex_ok:
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
                 "failed. baseline cannot run without it. Set INFERENCEX_PATH "
@@ -2432,7 +2697,7 @@ def _preflight(
     # InferenceX itself (above), entirely outside install.sh -- and install.sh is the ONLY place that used to apply
     # the Magpie script patches.
     try:
-        if _magpie_backend_active:
+        if _magpie_backend_active and not _native_agentx_preflight_active:
             # Trust patch first, mirroring install.sh: the eval-concurrency strip removes the very `run_eval ...
             # --concurrent-requests` line the legacy MI300X trust patcher matches on, so the reverse order would leave
             # a tree permanently unpatchable by that path.
@@ -2444,7 +2709,7 @@ def _preflight(
         else:
             trust_ok = True
             concurrency_ok = True
-        anchors_ok = _report_inferencex_patch_anchors(inferencex_path)
+        anchors_ok = True if _native_agentx_preflight_active else _report_inferencex_patch_anchors(inferencex_path)
     except BaseException as exc:
         _fail_install_step(
             install_event,
@@ -2458,8 +2723,20 @@ def _preflight(
         install_event,
         step_id="patch_magpie_eval_concurrency",
         category="patch",
-        status=("skipped" if not _magpie_backend_active else "applied" if patch_ok else "warned"),
-        skip_reason=None if _magpie_backend_active else "benchmark_backend_not_magpie",
+        status=(
+            "skipped"
+            if not _magpie_backend_active or _native_agentx_preflight_active
+            else "applied"
+            if patch_ok
+            else "warned"
+        ),
+        skip_reason=(
+            "benchmark_backend_not_magpie"
+            if not _magpie_backend_active
+            else "native_agentx_uses_pinned_upstream_launcher"
+            if _native_agentx_preflight_active
+            else None
+        ),
         detail={
             "client_trust_compatible": trust_ok,
             "eval_concurrency_compatible": concurrency_ok,

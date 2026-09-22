@@ -266,6 +266,22 @@ def test_map_corpus_shape_carries_the_loader_and_the_percentiles():
     assert shape["request_error_rate"] == pytest.approx(0.007)
 
 
+def test_map_corpus_shape_accepts_native_magpie_accounting_keys():
+    """Native Magpie normalization uses explicit request/duration field names."""
+    from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
+
+    shape = map_corpus_shape(
+        {
+            "completed_requests": 376,
+            "duration_seconds": 1200.5,
+            "isl_distribution": {"p50": 94821},
+        }
+    )
+
+    assert shape["completed_requests"] == 376
+    assert shape["duration_s"] == pytest.approx(1200.5)
+
+
 def test_an_export_with_no_sequence_metrics_yields_empty_distributions():
     """A synthetic result carries none of this; the record must not invent it."""
     from hyperloom.inference_optimizer.agentx.mapping import map_corpus_shape
