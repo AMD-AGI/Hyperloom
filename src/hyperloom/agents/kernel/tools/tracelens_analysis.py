@@ -195,10 +195,6 @@ def _default_top_k() -> int:
 # Statuses that mean "we have an editable device source to optimize".
 _ROUTABLE_STATUS = "resolved"
 
-# TraceLens may annotate a candidate op name with the steady-state phase it was
-# observed in, e.g. ``aiter::fmoe_g1u1 (prefill)``. The mapping is keyed by the
-# bare op name, so strip a trailing phase tag before the (exact) dict lookup.
-_PHASE_SUFFIX_RE = re.compile(r"\s*\((?:prefill|decode|prefilldecode|mixed)\)\s*$")
 
 # Editable source extensions: native device code plus repo-resident Triton .py.
 _NATIVE_SOURCE_EXTS = (".cu", ".cuh", ".hip", ".h")
@@ -547,176 +543,6 @@ def _build_trace_split_warning(
             "NUM_PROMPTS to reach the requested start_step/num_steps window."
         ),
     }
-
-
-def _build_pretrim_no_steady_state_warning(
-    *,
-    trace_input: Path,
-    steps: int,
-    leading_outliers: int,
-    max_dropped_steps: int,
-    outlier_factor: float,
-) -> dict[str, Any]:
-    """Build the ``pretrim_no_steady_state`` trace-health warning.
-
-    Emitted when so many leading steps exceed their phase median that the
-    capture cannot be said to have reached steady state. One such step is the
-    profiler-start transient and gets trimmed; a run of them is a workload still
-    warming up, which trimming cannot fix and which every percentage derived
-    from the window has to be read against.
-
-    Args:
-        trace_input (Path): The capture the pretrimmer inspected.
-        steps (int): Total step annotations in the capture.
-        leading_outliers (int): Leading steps found over the outlier threshold.
-        max_dropped_steps (int): The ceiling that was exceeded.
-        outlier_factor (float): Multiple of the phase median used as threshold.
-
-    Returns:
-        dict[str, Any]: A structured warning entry with code
-            ``pretrim_no_steady_state`` and the supporting counts/message.
-    """
-    return {
-        "code": "pretrim_no_steady_state",
-        "severity": "warning",
-        "trace_input": str(trace_input),
-        "steps": steps,
-        "leading_outliers": leading_outliers,
-        "max_dropped_steps": max_dropped_steps,
-        "outlier_factor": outlier_factor,
-        "message": (
-            f"{leading_outliers} of {steps} leading steps run more than "
-            f"{outlier_factor:g}x their phase median, past the "
-            f"{max_dropped_steps} a profiler-start transient accounts for, so "
-            "the capture never reached steady state and the head of the window "
-            "was left in place. Compute%/Comm% and every kernel's gpu_pct below "
-            "are computed over a window that includes the warm-up. Re-profile "
-            "with more warm-up steps before acting on them."
-        ),
-    }
-
-
-def _check_selected_chunk_has_gpu_events(
-    *,
-    split_dir: Path,
-    selected_chunk: Path,
-    mode: str,
-    available_modes: "dict[str, tuple[str, list[Path]]]",
-) -> "dict[str, Any] | None":
-    """Verify the ``--steady-state-mode``-selected chunk actually contains GPU events.
-
-    Reads the splitter's ``execution_details.csv`` and returns ``None`` when the
-    chunk carries real GPU work, else a ``steady_state_chunk_empty`` warning the
-    caller appends and raises on.
-
-    Args:
-        split_dir: Directory holding the splitter's ``execution_details.csv``.
-        selected_chunk: The chunk file selected by the steady-state mode.
-        mode: The requested ``--steady-state-mode``.
-        available_modes: Mapping of mode to its ``(label, chunks)`` for
-            surfacing non-empty alternatives.
-
-    Returns:
-        ``None`` when the chunk has real GPU work, else a
-        ``steady_state_chunk_empty`` warning dict.
-    """
-    details_path = split_dir / "execution_details.csv"
-    if not details_path.is_file():
-        # No CSV: let the chunk through (idle gate still applies).
-        return None
-    try:
-        with details_path.open("r", encoding="utf-8") as fh:
-            rows = list(csv.DictReader(fh))
-    except (OSError, csv.Error):
-        return None
-
-    selected_resolved = str(selected_chunk.resolve())
-    selected_row: dict[str, str] | None = None
-    for row in rows:
-        out_path = row.get("output_path", "")
-        if not out_path:
-            continue
-        try:
-            if str(Path(out_path).resolve()) == selected_resolved:
-                selected_row = row
-                break
-        except (OSError, ValueError):
-            continue
-    if selected_row is None:
-        return None
-
-    def _f(name: str) -> float:
-        """Read a numeric field from the selected splitter CSV row.
-
-        Args:
-            name (str): Column name to read from ``selected_row``.
-
-        Returns:
-            float: The parsed value, or ``0.0`` when missing/unparseable.
-        """
-        try:
-            return float(selected_row.get(name) or "0") or 0.0
-        except (TypeError, ValueError):
-            return 0.0
-
-    num_gpu_events = int(_f("num_gpu_events"))
-    gpu_busy_duration = _f("gpu_busy_duration")
-    if num_gpu_events > 0 and gpu_busy_duration > 0.0:
-        return None  # chunk carries real GPU work -- proceed.
-
-    # Empty: surface which other modes' chunks DO have gpu events for re-issue.
-    non_empty_modes: list[str] = []
-    for other_mode, (label, chunks) in available_modes.items():
-        if other_mode == mode or not chunks:
-            continue
-        other_resolved = str(chunks[0].resolve())
-        for row in rows:
-            try:
-                if str(Path(row.get("output_path", "")).resolve()) != other_resolved:
-                    continue
-            except (OSError, ValueError):
-                continue
-            try:
-                other_events = int(float(row.get("num_gpu_events") or "0"))
-                other_busy = float(row.get("gpu_busy_duration") or "0")
-            except (TypeError, ValueError):
-                other_events, other_busy = 0, 0.0
-            if other_events > 0 and other_busy > 0.0:
-                non_empty_modes.append(other_mode)
-            break
-
-    return {
-        "code": "steady_state_chunk_empty",
-        "severity": "blocking",
-        "requested_mode": mode,
-        "selected_chunk": str(selected_chunk),
-        "num_gpu_events": num_gpu_events,
-        "gpu_busy_duration": gpu_busy_duration,
-        "non_empty_modes": non_empty_modes,
-        "remediation": (
-            "Re-issue roofline with env "
-            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one of "
-            f"{non_empty_modes or ['(none of the splitter outputs has GPU events; re-profile required)']}. "
-            "Most common cause: short / batched workload (e.g. "
-            "NUM_PROMPTS<=CONC*OSL/2) where prefill is burst-shaped so "
-            "the mixed window degenerates to PD=0; switching to "
-            "'prefilldecode' picks up the real GEMM/attention region."
-        ),
-        "message": (
-            f"TraceLens splitter selected chunk ({mode}) has "
-            f"num_gpu_events={num_gpu_events}, "
-            f"gpu_busy_duration={gpu_busy_duration:.1f}us -- structurally "
-            "empty. Refusing to feed it into TraceLens analysis (would "
-            "produce a misleading high-idle Executive Summary). The "
-            "coordinator should re-issue roofline with a different "
-            "--steady-state-mode per the 'remediation' field."
-        ),
-    }
-
-
-# Chunk-quality gate: a structurally-non-empty chunk can still be garbage.
-# Emits ``steady_state_chunk_low_quality`` when an alternate mode is materially
-# better; returns None otherwise (avoids a retry-loop).
 _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05  # 5%
 # Alternate must beat the requested mode by this margin to avoid thrashing.
 _CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10  # 10 ppt
@@ -1036,395 +862,14 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
-#: How many times the median step *of its own phase* a leading step must exceed
-#: before it counts as a profiler-start transient rather than real work. Observed
-#: transients run two-to-three orders of magnitude over the median (479x on the
-#: reference capture) while healthy decode steps hold inside 2% of it, so
-#: anything in this range separates them with a wide margin either way.
-_PRETRIM_OUTLIER_FACTOR = 10.0
 
-#: Fewest step annotations a trace must carry before the median is worth
-#: trusting. Below this a single slow step skews the median enough that the
-#: comparison stops meaning anything, so the trim is skipped rather than guessed.
-_PRETRIM_MIN_STEPS = 8
 
-#: Fewest steps of the *same phase* before that phase's median is used as a
-#: baseline. Prefill and decode differ by one to two orders of magnitude, so a
-#: phase has to recur often enough for its own median to mean something; a
-#: leading step whose phase is rarer than this is left alone rather than measured
-#: against a population it does not belong to.
-_PRETRIM_MIN_PHASE_STEPS = 3
 
-#: Ceiling on how many leading steps may be dropped. A transient is one step in
-#: every capture examined; needing more than a handful means the run never
-#: reached steady state, which the splitter and the health gates should see
-#: rather than have quietly trimmed away.
-_PRETRIM_MAX_DROPPED_STEPS = 4
 
 
 #: Categories that live on the device timeline. Everything else in a torch
 #: trace -- ``cpu_op``, ``python_function``, ``user_annotation``,
 #: ``cuda_runtime`` -- is host-side.
-_GPU_TIMELINE_CATS = frozenset({"kernel", "gpu_memcpy", "gpu_memset", "gpu_user_annotation"})
-
-
-def _step_annotation_spans(events: list[Any]) -> list[tuple[float, float, str]]:
-    """``(ts, dur, name)`` for every GPU-side step annotation, ordered by start.
-
-    Args:
-        events (list[Any]): ``traceEvents`` from a torch-profiler trace.
-
-    Returns:
-        list[tuple[float, float, str]]: One entry per ``step[...]`` annotation on
-            the GPU timeline. Empty when the trace carries no step annotations.
-    """
-    spans: list[tuple[float, float, str]] = []
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        if ev.get("cat") != "gpu_user_annotation":
-            continue
-        name = ev.get("name")
-        if not isinstance(name, str) or not name.startswith("step["):
-            continue
-        ts = ev.get("ts")
-        dur = ev.get("dur")
-        if isinstance(ts, (int, float)) and isinstance(dur, (int, float)):
-            spans.append((float(ts), float(dur), name))
-    spans.sort()
-    return spans
-
-
-def _host_step_starts(events: list[Any]) -> list[float]:
-    """Host-timeline start of every ``step[...]`` annotation, ordered by start.
-
-    The host runs ahead of the device -- a step's launches are issued while the
-    previous step is still executing -- so a step's host span begins before its
-    device span, and the two have to be paired to cut them at the right places.
-
-    Returned positionally rather than keyed by annotation name, because the
-    names are the framework's and are not unique: a build that omits the
-    cumulative-sequence-length fields repeats ``step[DECODE bs=36]`` for every
-    step at that batch size, and keying on it silently pairs the surviving step
-    with the *first* step of the capture.
-
-    Positional pairing needs the two timelines to hold one annotation per step,
-    and that is a property of the capture rather than something this can assume.
-    Across 32 measured per-rank captures only 5 held it; the other 27 carried
-    128 host ``step[...]`` annotations against a single device one, with the
-    step's own *children* (``scheduler.run_batch``, ``copy_result_to_cpu``)
-    projected onto the device 127 times each. Whatever produces that, the
-    missing entries are not a tail: the Nth host start is then some earlier
-    step's, and both the count check and the ordering check downstream would
-    pass while the host cut lands too early. The caller therefore requires the
-    counts to match exactly and refuses the trim otherwise.
-
-    Args:
-        events (list[Any]): ``traceEvents`` from a torch-profiler trace.
-
-    Returns:
-        list[float]: Host-timeline start timestamps, ascending.
-    """
-    starts: list[float] = []
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        if ev.get("cat") != "user_annotation":
-            continue
-        name = ev.get("name")
-        ts = ev.get("ts")
-        if not isinstance(name, str) or not name.startswith("step["):
-            continue
-        if not isinstance(ts, (int, float)):
-            continue
-        starts.append(float(ts))
-    starts.sort()
-    return starts
-
-
-def _step_phase(name: str) -> str:
-    """The phase token of a ``step[...]`` annotation name.
-
-    ``step[DECODE bs=64 g_sk=580480]`` gives ``DECODE`` and
-    ``step[EXTEND bs=1 toks=16384]`` gives ``EXTEND``.
-
-    Args:
-        name (str): A ``step[...]`` annotation name.
-
-    Returns:
-        str: The leading token inside the brackets, or ``""`` when the name
-            carries none.
-    """
-    return name[len("step[") :].split(" ", 1)[0].rstrip("]")
-
-
-def _phase_step_medians(
-    spans: list[tuple[float, float, str]],
-    min_phase_steps: int = _PRETRIM_MIN_PHASE_STEPS,
-) -> dict[str, float]:
-    """Median step duration per phase, for phases that recur often enough.
-
-    A single median over the whole trace is not a usable baseline for a mixed
-    capture: decode dominates the population at tens of milliseconds while a
-    prefill step runs for the better part of a second, so every prefill step
-    reads as an outlier against it and the leading ones -- exactly the window
-    ``--steady-state-mode=prefilldecode`` exists to analyse -- would be trimmed
-    as start-up noise. Grouping by phase keeps each step measured against work
-    of its own kind.
-
-    Args:
-        spans (list[tuple[float, float, str]]): ``(ts, dur, name)`` per step.
-        min_phase_steps (int): Samples a phase needs before its median is used.
-
-    Returns:
-        dict[str, float]: Phase to median step duration in microseconds. Phases
-            below the sample floor, and phases whose median is not positive, are
-            omitted -- callers treat a missing phase as "no baseline".
-    """
-    by_phase: dict[str, list[float]] = {}
-    for _, dur, name in spans:
-        by_phase.setdefault(_step_phase(name), []).append(dur)
-    medians: dict[str, float] = {}
-    for phase, durs in by_phase.items():
-        if len(durs) < min_phase_steps:
-            continue
-        durs.sort()
-        median = durs[len(durs) // 2]
-        if median > 0:
-            medians[phase] = median
-    return medians
-
-
-def pretrim_startup_transient(
-    src: Path,
-    dst: Path,
-    *,
-    outlier_factor: float = _PRETRIM_OUTLIER_FACTOR,
-    min_steps: int = _PRETRIM_MIN_STEPS,
-    min_phase_steps: int = _PRETRIM_MIN_PHASE_STEPS,
-    max_dropped_steps: int = _PRETRIM_MAX_DROPPED_STEPS,
-) -> tuple[bool, dict[str, Any]]:
-    """Drop the profiler-start transient from the head of a torch trace.
-
-    ``torch.profiler.start()`` is a local, unfenced call whose cost varies by
-    seconds across ranks, and SGLang does not barrier after it. The ranks whose
-    profiler comes up first therefore reach the first collective of the step and
-    spin there until the slowest peer arrives. A spin-waiting collective is
-    charged as GPU-busy time, so that wait lands in the trace as one enormous
-    kernel at the head of the window: on the reference capture a single
-    ``cross_device_reduce_2stage`` held 15747 ms of a 16805 ms window, leaving
-    Compute% at 5.75% and tripping the low-compute gate that suppresses the
-    entire hot-kernel candidate list.
-
-    The collective is self-healing -- releasing it re-synchronises every rank --
-    so the contamination is confined to the first step and everything after it is
-    already steady (32.94 ms +/- 0.3 across the following 127 steps on the same
-    capture). Cutting the leading outlier steps therefore recovers an honest
-    window without touching instrumentation, and keeps ``shape_discovery`` and
-    the ``with_stack`` frames its shapes ride on fully intact.
-
-    Detection is on step duration, not on any kernel name, so the same guard
-    catches other head-of-window transients (first-replay JIT, KV-pool growth)
-    without knowing what they are. Durations are compared against the median of
-    the step's *own phase*: a mixed capture's prefill steps run one to two orders
-    of magnitude longer than its decode steps, and against a whole-trace median
-    the leading prefill steps -- the window
-    ``--steady-state-mode=prefilldecode`` exists to analyse -- would all read as
-    start-up noise. Only a *leading* run of outliers is cut: a slow step in the
-    middle is real behaviour the splitter and the health gates should still see.
-
-    The cut is applied per timeline rather than as one timestamp, because the
-    host runs a step ahead of the device and the two spans interleave across the
-    boundary. See the comment at the cut for what each single-point alternative
-    loses. The two timelines are paired by position, never by annotation name;
-    ``_host_step_starts`` has the reasoning.
-
-    Step count is unaffected downstream: the splitter is invoked with
-    ``--num-steps`` and caps its window there, so it still hands TraceLens
-    exactly that many steps -- only which ones changes. The caller refuses the
-    trim outright when fewer than ``--num-steps`` would remain.
-
-    Args:
-        src (Path): Raw per-rank trace, JSON or ``.gz``.
-        dst (Path): Where the trimmed trace is written. Untouched when no trim
-            is performed.
-        outlier_factor (float): Multiple of the phase median above which a
-            leading step is treated as a transient.
-        min_steps (int): Fewest step annotations required before trimming.
-        min_phase_steps (int): Samples a phase needs before its median is
-            trusted as a baseline.
-        max_dropped_steps (int): Refuse to trim when more than this many leading
-            steps look like transients.
-
-    Returns:
-        tuple[bool, dict[str, Any]]: ``(trimmed, report)``. ``report`` always
-            carries a ``reason``; when ``trimmed`` is True it also carries the
-            step counts and durations for the run log and the pretrim artifact.
-    """
-    factor = outlier_factor
-    try:
-        payload = open_json(src)
-    except Exception as exc:  # noqa: BLE001 - unreadable trace is the splitter's problem, not ours
-        return False, {"reason": "unreadable_trace", "error": str(exc)[:200]}
-    if not isinstance(payload, dict):
-        return False, {"reason": "unexpected_payload"}
-    events = payload.get("traceEvents")
-    if not isinstance(events, list):
-        return False, {"reason": "no_trace_events"}
-
-    spans = _step_annotation_spans(events)
-    if len(spans) < min_steps:
-        return False, {"reason": "too_few_steps", "steps": len(spans), "min_steps": min_steps}
-
-    medians = _phase_step_medians(spans, min_phase_steps)
-    if not medians:
-        # No phase recurs often enough to be a baseline; there is nothing to
-        # call a step abnormal against.
-        return False, {
-            "reason": "no_phase_baseline",
-            "steps": len(spans),
-            "min_phase_steps": min_phase_steps,
-        }
-    phase_medians_ms = {phase: round(med / 1000.0, 3) for phase, med in sorted(medians.items())}
-
-    dropped = 0
-    ratios: list[float] = []
-    while dropped < len(spans):
-        _, dur, name = spans[dropped]
-        # A step whose phase has no baseline stops the run rather than being
-        # dropped on a comparison that does not hold.
-        median_us = medians.get(_step_phase(name))
-        if median_us is None or dur <= factor * median_us:
-            break
-        ratios.append(dur / median_us)
-        dropped += 1
-    if dropped == 0:
-        first_median_us = medians.get(_step_phase(spans[0][2]))
-        return False, {
-            "reason": "no_leading_outlier",
-            "steps": len(spans),
-            "phase_medians_ms": phase_medians_ms,
-            "first_step_phase": _step_phase(spans[0][2]),
-            "first_step_ratio": (round(spans[0][1] / first_median_us, 2) if first_median_us else None),
-        }
-    if dropped > max_dropped_steps:
-        # Not a start-up blip. Leave it visible so the health gates can act.
-        return False, {
-            "reason": "too_many_leading_outliers",
-            "steps": len(spans),
-            "leading_outliers": dropped,
-            "max_dropped_steps": max_dropped_steps,
-            "outlier_factor": factor,
-            "phase_medians_ms": phase_medians_ms,
-        }
-
-    remaining = len(spans) - dropped
-    # One cut per timeline, not one for the trace. The host runs a step ahead of
-    # the device, so the first kept step's launches are issued *while the dropped
-    # step is still executing on the GPU* -- on the reference capture the kept
-    # step's host span starts 839 ms inside the dropped step's 15.78 s device
-    # span. A single timestamp therefore cannot both drop the transient whole and
-    # keep the first surviving step whole: cutting on the device boundary strips
-    # that step's host ops, taking the `kernel_shape_profiler` frames its shape
-    # attribution rides on with them, and cutting on the host boundary leaves the
-    # dropped step's post-barrier kernels behind as orphans.
-    gpu_cut = spans[dropped][0]
-    host_starts = _host_step_starts(events)
-    if len(host_starts) != len(spans):
-        # Exact equality, not "enough host entries": a capture that carries more
-        # host annotations than device ones is missing them from the middle, not
-        # the tail (see `_host_step_starts`), so the Nth host start belongs to
-        # some earlier step and the host cut silently lands too early. Pairing by
-        # name is not an alternative either. Refuse rather than approximate --
-        # the caller keeps the untrimmed trace, which is the state this whole
-        # step was added to improve on but never worse than it.
-        return False, {
-            "reason": "timeline_step_count_mismatch",
-            "steps": len(spans),
-            "host_steps": len(host_starts),
-        }
-    cpu_cut = host_starts[dropped]
-    if cpu_cut > gpu_cut:
-        # The host issues a step's launches before the device runs it, so a host
-        # start later than the paired device start means the two lists are not
-        # aligned and the cut points cannot be trusted.
-        return False, {
-            "reason": "timeline_pairing_unreliable",
-            "steps": len(spans),
-            "host_steps": len(host_starts),
-            "gpu_cut_ts": gpu_cut,
-            "cpu_cut_ts": cpu_cut,
-        }
-
-    def _survives(ev: Any) -> bool:
-        if not isinstance(ev, dict):
-            return True
-        # ph:"M" is metadata (process_name / process_labels / thread_name /
-        # sort indices), not timeline work. torch stamps it with the
-        # profiler-open ts, which is always before either cut, so a plain ts
-        # filter would strip every one of them and leave the chunk with
-        # unnamed processes and threads for TraceLens to attribute against.
-        if ev.get("ph") == "M":
-            return True
-        ts = ev.get("ts")
-        if not isinstance(ts, (int, float)):
-            return True
-        # Trace-level spans and markers (cat:"Trace", the ph:"i" iteration-start
-        # instant) are deliberately *not* given the ph:"M" treatment: unlike
-        # metadata their ts/dur describe the untrimmed window, so carrying them
-        # over unchanged would have the artifact state a start and a duration
-        # the events no longer support. They fall through the ts filter below.
-        ph = ev.get("ph")
-        if ph == "s":  # flow start: sits on the host timeline
-            return ts >= cpu_cut
-        if ph == "f":  # flow finish: sits on the device timeline
-            return ts >= gpu_cut
-        return ts >= (gpu_cut if ev.get("cat") in _GPU_TIMELINE_CATS else cpu_cut)
-
-    kept = [ev for ev in events if _survives(ev)]
-
-    dropped_phase = _step_phase(spans[0][2])
-    report = {
-        "reason": "trimmed",
-        "dropped_steps": dropped,
-        "dropped_ms": round(sum(dur for _, dur, _ in spans[:dropped]) / 1000.0, 3),
-        "dropped_phase": dropped_phase,
-        "median_step_ms": phase_medians_ms[dropped_phase],
-        "phase_medians_ms": phase_medians_ms,
-        # The worst of the dropped steps, not the first: with more than one
-        # dropped the first is not necessarily the transient.
-        "outlier_ratio": round(max(ratios), 2),
-        "outlier_factor": factor,
-        "remaining_steps": remaining,
-        "host_steps": len(host_starts),
-        "events_before": len(events),
-        "events_after": len(kept),
-        "gpu_cut_ts": gpu_cut,
-        "cpu_cut_ts": cpu_cut,
-        "source": str(src),
-        "output": str(dst),
-    }
-
-    payload["traceEvents"] = kept
-    try:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        opener = gzip.open if dst.suffix == ".gz" else open
-        with opener(dst, "wt", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-    except Exception as exc:  # noqa: BLE001 - fall back to the raw trace rather than fail the run
-        # Drop the partial write. The caller keeps the untrimmed trace, and a
-        # truncated file left in the split directory is only something for a
-        # later step to mistake for a usable one. ``reason`` goes last so the
-        # failure is what the caller reads, not the "trimmed" this report was
-        # built with.
-        with contextlib.suppress(OSError):
-            dst.unlink(missing_ok=True)
-        return False, {**report, "reason": "write_failed", "error": str(exc)[:200]}
-    return True, report
-
-
-#: Directory name the splitter writes its per-phase output into. Everything
-#: below it is derived from a raw capture, never a capture itself.
 _SPLIT_DIR_NAME = "trace_split"
 
 #: How many discovered files the CPU-only preflight will open before giving up.
@@ -3859,7 +3304,7 @@ def _resolve_via_active_finder(
         )
     except Exception:  # noqa: BLE001 - a finder failure must fall through, not raise.
         return None
-    op = _PHASE_SUFFIX_RE.sub("", op_name)
+    op = op_name
     if res.source_file and res.patchable:
         return OpResolution(
             op_name=op,
@@ -6775,6 +6220,131 @@ def _default_workspace_path() -> str:
     return workspace_root()
 
 
+
+def _build_split_cmd(
+    args,
+    split_input_path: "Path",
+    split_dir: "Path",
+    split_num_steps: int,
+    log_path: "Path",
+) -> "list[str]":
+    """Assemble the TraceLens splitter CLI argv."""
+    split_cmd = [
+        sys.executable,
+        "-m",
+        "TraceLens.TraceUtils.split_inference_trace_annotation",
+        str(split_input_path),
+        "-o",
+        str(split_dir),
+        "--find-steady-state",
+        "--num-steps",
+        str(split_num_steps),
+    ]
+    conc = args.split_conc or os.environ.get("CONC", "").strip()
+    if str(conc).strip():
+        split_cmd += ["--CONC", str(conc).strip()]
+    osl = args.split_osl or os.environ.get("OSL", "").strip()
+    if str(osl).strip():
+        split_cmd += ["--OSL", str(osl).strip()]
+    r_raw = args.split_r or os.environ.get("RANDOM_RANGE_RATIO", "")
+    r_str = str(r_raw).strip()
+    if r_str:
+        try:
+            float(r_str)
+        except ValueError:
+            append_log(log_path, f"split_trace: ignoring non-numeric --R={r_str!r}")
+        else:
+            split_cmd += ["--R", r_str]
+    if args.split_llm_inference:
+        split_cmd += ["--llm-inference"]
+    if args.split_max_num_seq is not None:
+        split_cmd += ["--max-num-seq", str(args.split_max_num_seq)]
+    return split_cmd
+
+
+def _collect_split_chunks(
+    split_dir: "Path",
+    steady_state_mode: str,
+    analysis_trace_path: "Path",
+) -> "tuple[Path, dict, dict]":
+    """Collect splitter output chunks and select the requested mode.
+
+    Returns ``(selected_chunk, split_meta, mode_to_chunks)``.
+    """
+    def _collect(prefix: str) -> "list[Path]":
+        out: list[Path] = []
+        for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
+            out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))
+        return out
+
+    mixed_chunks = _collect("mixed")
+    decode_chunks = _collect("decode_only")
+    prefill_chunks = _collect("prefilldecode")
+
+    split_meta = {
+        "chunks_by_mode": {
+            "mixed": len(mixed_chunks),
+            "decode_only": len(decode_chunks),
+            "prefilldecode": len(prefill_chunks),
+        },
+        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks),
+    }
+
+    if not (mixed_chunks or decode_chunks or prefill_chunks):
+        raise RuntimeError(
+            "trace_split_no_steady_state: TraceLens splitter "
+            "produced no steady-state chunks; refusing to run "
+            "TraceLens analysis on the raw trace"
+        )
+
+    mode_to_chunks = {
+        "mixed": ("mixed_steady_state", mixed_chunks),
+        "decode_only": ("decode_only_steady_state", decode_chunks),
+        "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
+    }
+    chunk_label, selected_chunks = mode_to_chunks[steady_state_mode]
+    if not selected_chunks:
+        raise RuntimeError(
+            f"steady_state_chunk_missing: requested "
+            f"--steady-state-mode={steady_state_mode} but "
+            f"splitter produced no matching chunk under {split_dir}"
+        )
+
+    selected_chunk = selected_chunks[0]
+    split_meta["selected_mode"] = steady_state_mode
+    split_meta["chunk_label"] = chunk_label
+    split_meta["selected_chunk"] = str(selected_chunk)
+    split_meta["selected_chunk_count"] = len(selected_chunks)
+    split_meta["available_modes"] = [m for m, (_, ch) in mode_to_chunks.items() if ch]
+    return selected_chunk, split_meta, mode_to_chunks
+
+
+def _validate_selected_chunk(
+    split_dir: "Path",
+    selected_chunk: "Path",
+    mode: str,
+    mode_to_chunks: "dict[str, tuple[str, list[Path]]]",
+) -> "list[dict]":
+    """Run the low-quality busy-ratio gate on the selected chunk.
+
+    Returns a list of health warning dicts (empty when the chunk passes).
+    """
+    low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
+        split_dir=split_dir,
+        selected_chunk=selected_chunk,
+        mode=mode,
+        available_modes=mode_to_chunks,
+    )
+    if low_quality_warning is not None:
+        raise RuntimeError(
+            f"steady_state_chunk_low_quality: requested "
+            f"--steady-state-mode={mode} chunk "
+            f"busy_ratio={low_quality_warning['busy_ratio'] * 100:.3f}%; "
+            f"better alternates: {low_quality_warning['non_empty_modes']}"
+        )
+    return []
+
+
 def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
@@ -6962,6 +6532,25 @@ def main() -> int:
             "benchmark-contract PD ratio instead of an empirical default. "
             "Defaults to $RANDOM_RANGE_RATIO when set; leave empty to let "
             "the splitter fall back to its built-in heuristic."
+        ),
+    )
+    parser.add_argument(
+        "--split-llm-inference",
+        action="store_true",
+        help=(
+            "Pass --llm-inference to the TraceLens splitter. Enables "
+            "shape-based phase classification for traces without serving "
+            "annotations. Set automatically for SERVING frameworks."
+        ),
+    )
+    parser.add_argument(
+        "--split-max-num-seq",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of concurrent sequences (decode batch size cap). "
+            "Maps to --max-num-seq on the TraceLens splitter. Iterations with "
+            "batch size above this value are classified as prefill-bearing."
         ),
     )
     parser.add_argument(
@@ -7398,319 +6987,54 @@ def main() -> int:
                 )
                 split_dir = tracelens_dir / "trace_split"
                 split_dir.mkdir(parents=True, exist_ok=True)
-                # Cut the profiler-start transient before the splitter sees the
-                # trace. --find-steady-state selects on load composition, not on
-                # timing, so it will happily hand back a window whose first step
-                # is a multi-second rank-arrival barrier -- and every downstream
-                # percentage is then computed against that inflated denominator.
-                # Trimming here keeps the splitter and TraceLens untouched.
-                trimmed_trace = split_dir / (analysis_trace_path.name.replace(".trace.json", ".pretrimmed.trace.json"))
                 split_num_steps = max(8, int(args.split_num_steps or 32))
-                did_trim, pretrim_report = pretrim_startup_transient(
-                    analysis_trace_path,
-                    trimmed_trace,
-                )
-                pretrim_summary = dict(pretrim_report)
-                pretrim_summary["applied"] = False
-                # Only the splitter's input moves to the trimmed copy.
-                # analysis_trace_path stays on the real capture: capture-folder
-                # discovery resolves the graph-capture sidecar from the trace
-                # file's own directory, and the split warnings name it as the
-                # capture the operator profiled. Both would point into
-                # trace_split/ if this were reassigned.
                 split_input_path = analysis_trace_path
-                if did_trim and pretrim_report["remaining_steps"] < split_num_steps:
-                    # Trimming would leave the splitter fewer steps than it
-                    # was asked for. A silently short window reads as a clean
-                    # measurement; the untrimmed one at least shows the damage.
-                    append_log(
-                        log_path,
-                        f"pretrim: only {pretrim_report['remaining_steps']} step(s) would "
-                        f"remain < --split-num-steps {split_num_steps}; keeping untrimmed trace",
-                    )
-                    pretrim_summary["reason"] = "insufficient_remaining_steps"
-                    pretrim_summary["min_remaining_steps"] = split_num_steps
-                    # The rejected copy is nearly the size of the capture; it is
-                    # not the input to anything now, so do not leave it behind.
-                    with contextlib.suppress(OSError):
-                        trimmed_trace.unlink(missing_ok=True)
-                elif did_trim:
-                    append_log(
-                        log_path,
-                        f"pretrim: dropped {pretrim_report['dropped_steps']} leading "
-                        f"{pretrim_report['dropped_phase']} step(s), "
-                        f"{pretrim_report['dropped_ms']:.1f} ms, "
-                        f"{pretrim_report['outlier_ratio']:.0f}x phase median "
-                        f"{pretrim_report['median_step_ms']:.1f} ms; "
-                        f"{pretrim_report['remaining_steps']} step(s) remain",
-                    )
-                    pretrim_summary["applied"] = True
-                    split_input_path = trimmed_trace
-                    artifacts["tracelens_pretrimmed_trace"] = str(trimmed_trace)
-                elif pretrim_report.get("reason") != "no_leading_outlier":
-                    append_log(log_path, f"pretrim: not applied ({pretrim_report.get('reason')})")
-                if pretrim_report.get("reason") == "too_many_leading_outliers":
-                    # A run of leading outliers is not a transient to trim but a
-                    # workload that never settled. Route it to the health
-                    # warnings so it reaches the report, not just the run log.
-                    trace_health_warnings.append(
-                        _build_pretrim_no_steady_state_warning(
-                            trace_input=analysis_trace_path,
-                            steps=int(pretrim_report["steps"]),
-                            leading_outliers=int(pretrim_report["leading_outliers"]),
-                            max_dropped_steps=int(pretrim_report["max_dropped_steps"]),
-                            outlier_factor=float(pretrim_report["outlier_factor"]),
-                        )
-                    )
-                # Persist as an artifact, not just a log line: the status
-                # file is rewritten by every later step, so a diagnostic
-                # parked there is gone by the time anyone reads the report.
-                pretrim_path = tracelens_dir / "pretrim.json"
-                atomic_write_json(pretrim_path, pretrim_summary)
-                artifacts["tracelens_pretrim"] = str(pretrim_path)
-                # --find-steady-state writes the three *_steady_state_* chunks; --R feeds PD-ratio selection.
-                split_cmd = [
-                    sys.executable,
-                    "-m",
-                    "TraceLens.TraceUtils.split_inference_trace_annotation",
-                    str(split_input_path),
-                    "-o",
-                    str(split_dir),
-                    "--find-steady-state",
-                    "--num-steps",
-                    str(split_num_steps),
-                ]
-                conc = args.split_conc or os.environ.get("CONC", "").strip()
-                if str(conc).strip():
-                    split_cmd += ["--CONC", str(conc).strip()]
-                osl = args.split_osl or os.environ.get("OSL", "").strip()
-                if str(osl).strip():
-                    split_cmd += ["--OSL", str(osl).strip()]
-                # Only pass --R when provided so the splitter's default keeps working.
-                r_raw = args.split_r or os.environ.get(
-                    "RANDOM_RANGE_RATIO",
-                    "",
+                split_cmd = _build_split_cmd(
+                    args, split_input_path, split_dir, split_num_steps, log_path,
                 )
-                r_str = str(r_raw).strip()
-                if r_str:
-                    try:
-                        float(r_str)
-                    except ValueError:
-                        append_log(
-                            log_path,
-                            f"split_trace: ignoring non-numeric --R={r_str!r}",
-                        )
-                    else:
-                        split_cmd += ["--R", r_str]
                 split_rc = run_command(
                     split_cmd,
                     cwd=tl_root,
                     log_path=log_path,
                     timeout_s=max(60, int(args.budget_minutes * 60)),
                 )
-
                 if split_rc != 0:
                     raise RuntimeError(
                         f"trace_split_failed: TraceLens splitter exited with code {split_rc}; "
                         f"see {log_path} for subprocess output."
                     )
 
-                # The three chunks are parallel views; the consumer picks ONE via
-                # --steady-state-mode and we hard-fail when it is missing/empty.
-                def _collect(prefix: str) -> list[Path]:
-                    """Collect splitter chunk files for a steady-state prefix.
-
-                    Args:
-                        prefix (str): Chunk prefix (``mixed``, ``decode_only``,
-                            or ``prefilldecode``).
-
-                    Returns:
-                        list[Path]: Sorted chunk files matching the prefix
-                            across known trace extensions.
-                    """
-                    out: list[Path] = []
-                    for ext in ("trace.json.gz", "json.gz", "trace.json", "json"):
-                        out.extend(sorted(split_dir.rglob(f"{prefix}_steady_state_*.{ext}")))
-                    return out
-
-                mixed_chunks = _collect("mixed")
-                decode_chunks = _collect("decode_only")
-                prefill_chunks = _collect("prefilldecode")
-                run_meta["split"].update(
-                    {
-                        "split_input": str(split_input_path),
-                        "split_dir": str(split_dir),
-                        "num_steps": split_num_steps,
-                        "conc": str(conc or ""),
-                        "osl": str(osl or ""),
-                        "r": r_str,
-                        "returncode": split_rc,
-                        "chunks_by_mode": {
-                            "mixed": len(mixed_chunks),
-                            "decode_only": len(decode_chunks),
-                            "prefilldecode": len(prefill_chunks),
-                        },
-                        "chunks_extracted": len(mixed_chunks) + len(decode_chunks) + len(prefill_chunks),
-                    }
+                cli_trace_path, split_meta, _mode_to_chunks = _collect_split_chunks(
+                    split_dir, args.steady_state_mode, analysis_trace_path,
                 )
+                run_meta["split"].update({
+                    "split_input": str(split_input_path),
+                    "split_dir": str(split_dir),
+                    "num_steps": split_num_steps,
+                    "returncode": split_rc,
+                    **split_meta,
+                })
+                run_meta["selection"].update({
+                    "requested_mode": args.steady_state_mode,
+                    "chunk_label": split_meta.get("chunk_label"),
+                    "selected_chunk": str(cli_trace_path),
+                    "selected_chunk_count": split_meta.get("selected_chunk_count"),
+                    "available_modes": split_meta.get("available_modes"),
+                    "fell_back_to_full_trace": False,
+                })
                 _note_step(
                     "split_trace",
                     category="split",
-                    status="ok" if split_rc == 0 and (mixed_chunks or decode_chunks or prefill_chunks) else "failed",
+                    status="ok",
                     returncode=split_rc,
                     num_steps=split_num_steps,
-                    chunks_extracted=run_meta["split"]["chunks_extracted"],
+                    chunks_extracted=split_meta["chunks_extracted"],
                 )
-                # Splitter produced nothing -> trace_split_no_steady_state failure.
-                if split_rc != 0 or not (mixed_chunks or decode_chunks or prefill_chunks):
-                    warning = _build_trace_split_warning(
-                        trace_input=analysis_trace_path,
-                        split_dir=split_dir,
-                        split_rc=split_rc,
-                        mixed_count=len(mixed_chunks),
-                        decode_count=len(decode_chunks),
-                        prefilldecode_count=len(prefill_chunks),
-                    )
-                    trace_health_warnings.append(warning)
-                    append_log(
-                        log_path,
-                        f"WARNING: trace split unavailable "
-                        f"(rc={split_rc}, mixed={len(mixed_chunks)}, "
-                        f"decode_only={len(decode_chunks)}, "
-                        f"prefilldecode={len(prefill_chunks)}); "
-                        "refusing raw-trace fallback and returning "
-                        "trace_split_no_steady_state warning",
-                    )
-                    raise RuntimeError(
-                        "trace_split_no_steady_state: TraceLens splitter "
-                        "produced no steady-state chunks; refusing to run "
-                        "TraceLens analysis on the raw trace"
-                    )
 
-                _mode_to_chunks = {
-                    "mixed": ("mixed_steady_state", mixed_chunks),
-                    "decode_only": ("decode_only_steady_state", decode_chunks),
-                    "prefilldecode": ("prefilldecode_steady_state", prefill_chunks),
-                }
-                chunk_label, selected_chunks = _mode_to_chunks[args.steady_state_mode]
-                if not selected_chunks:
-                    # Requested mode produced no chunk; emit a warning for re-issue.
-                    warning = {
-                        "code": "steady_state_chunk_missing",
-                        "severity": "blocking",
-                        "requested_mode": args.steady_state_mode,
-                        "requested_chunk_label": chunk_label,
-                        "available_modes": [m for m, (_, ch) in _mode_to_chunks.items() if ch],
-                        "remediation": (
-                            "Re-issue roofline with env "
-                            "INFERENCE_OPTIMIZER_STEADY_STATE_MODE set to one "
-                            "of the available_modes (or pass --steady-state-mode "
-                            "directly when invoking tracelens_analysis.py)."
-                        ),
-                        "trace_input": str(analysis_trace_path),
-                        "split_dir": str(split_dir),
-                    }
-                    trace_health_warnings.append(warning)
-                    append_log(
-                        log_path,
-                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
-                        f"requested but no {chunk_label}_*.json[.gz] in "
-                        f"{split_dir} (mixed={len(mixed_chunks)}, "
-                        f"decode_only={len(decode_chunks)}, "
-                        f"prefilldecode={len(prefill_chunks)}); refusing "
-                        "silent fallback per TraceLens parallel-chunk design",
-                    )
-                    raise RuntimeError(
-                        f"steady_state_chunk_missing: requested "
-                        f"--steady-state-mode={args.steady_state_mode} but "
-                        f"splitter produced no matching chunk under "
-                        f"{split_dir}"
-                    )
-
-                # Data-validity gate: the selected chunk must have observable GPU work.
-                cli_trace_path = selected_chunks[0]
-                run_meta["selection"].update(
-                    {
-                        "requested_mode": args.steady_state_mode,
-                        "chunk_label": chunk_label,
-                        "selected_chunk": str(cli_trace_path),
-                        "selected_chunk_count": len(selected_chunks),
-                        "available_modes": [mode for mode, (_, chunks) in _mode_to_chunks.items() if chunks],
-                        # TraceLens refuses the raw trace when no chunk qualifies,
-                        # so reaching here means the window is a real split chunk.
-                        "fell_back_to_full_trace": False,
-                    }
+                warnings = _validate_selected_chunk(
+                    split_dir, cli_trace_path, args.steady_state_mode, _mode_to_chunks,
                 )
-                empty_chunk_warning = _check_selected_chunk_has_gpu_events(
-                    split_dir=split_dir,
-                    selected_chunk=cli_trace_path,
-                    mode=args.steady_state_mode,
-                    available_modes=_mode_to_chunks,
-                )
-                if empty_chunk_warning is not None:
-                    trace_health_warnings.append(empty_chunk_warning)
-                    append_log(
-                        log_path,
-                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
-                        f"selected chunk {cli_trace_path.name} has "
-                        f"num_gpu_events={empty_chunk_warning['num_gpu_events']} "
-                        f"/ gpu_busy_duration={empty_chunk_warning['gpu_busy_duration']}"
-                        f"; refusing to feed an empty chunk to TraceLens "
-                        "analysis (would produce misleading "
-                        "'Compute %=~0, Idle %=~100' Executive Summary)",
-                    )
-                    raise RuntimeError(
-                        f"steady_state_chunk_empty: requested "
-                        f"--steady-state-mode={args.steady_state_mode} but the "
-                        f"selected chunk has zero GPU events; available "
-                        f"non-empty modes: "
-                        f"{empty_chunk_warning['non_empty_modes']}"
-                    )
-
-                # Quality gate: a non-empty but low-busy chunk emits
-                # steady_state_chunk_low_quality for the same retry path.
-                low_quality_warning = _check_selected_chunk_has_gpu_events_quality(
-                    split_dir=split_dir,
-                    selected_chunk=cli_trace_path,
-                    mode=args.steady_state_mode,
-                    available_modes=_mode_to_chunks,
-                )
-                if low_quality_warning is not None:
-                    run_meta["selection"]["busy_ratio"] = low_quality_warning.get("busy_ratio")
-                    run_meta["selection"]["busy_ratio_threshold"] = low_quality_warning.get("threshold")
-                    _note_step(
-                        "select_chunk",
-                        category="select",
-                        status="failed",
-                        requested_mode=args.steady_state_mode,
-                        selected_chunk=cli_trace_path.name,
-                        busy_ratio=low_quality_warning.get("busy_ratio"),
-                    )
-                    trace_health_warnings.append(low_quality_warning)
-                    append_log(
-                        log_path,
-                        f"ERROR: --steady-state-mode={args.steady_state_mode} "
-                        f"selected chunk {cli_trace_path.name} is "
-                        f"non-empty but low-quality: busy_ratio="
-                        f"{low_quality_warning['busy_ratio'] * 100:.3f}% "
-                        f"(threshold "
-                        f"{low_quality_warning['threshold'] * 100:.0f}%); "
-                        f"alternate modes with higher busy_ratio: "
-                        f"{low_quality_warning['non_empty_modes']}. "
-                        "Refusing to analyze (would yield misleading "
-                        "high-idle Executive Summary). "
-                        "The roofline executor will auto-retry trace_analyze "
-                        "with an adjusted steady-state window — this is a "
-                        "self-healing step on the same captured trace, not a hang.",
-                    )
-                    raise RuntimeError(
-                        f"steady_state_chunk_low_quality: requested "
-                        f"--steady-state-mode={args.steady_state_mode} chunk "
-                        f"busy_ratio="
-                        f"{low_quality_warning['busy_ratio'] * 100:.3f}%; "
-                        f"better alternates: "
-                        f"{low_quality_warning['non_empty_modes']}"
-                    )
+                trace_health_warnings.extend(warnings)
 
                 _note_step(
                     "select_chunk",
@@ -7718,15 +7042,14 @@ def main() -> int:
                     status="ok",
                     requested_mode=args.steady_state_mode,
                     selected_chunk=cli_trace_path.name,
-                    selected_chunk_count=len(selected_chunks),
+                    selected_chunk_count=split_meta.get("selected_chunk_count"),
                 )
                 artifacts["tracelens_trace_split_dir"] = str(split_dir)
                 artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
                 append_log(
                     log_path,
-                    f"trace split OK: mixed={len(mixed_chunks)} "
-                    f"decode_only={len(decode_chunks)} "
-                    f"prefilldecode={len(prefill_chunks)}; "
+                    f"trace split OK: "
+                    f"{split_meta['chunks_by_mode']}; "
                     f"--steady-state-mode={args.steady_state_mode} -> "
                     f"using {cli_trace_path.name} for perf report",
                 )
