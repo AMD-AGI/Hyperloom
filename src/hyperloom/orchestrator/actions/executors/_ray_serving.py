@@ -405,6 +405,18 @@ def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
 
 
+#: Actor handles from quarantined leases, held for the life of this process.
+#:
+#: A Ray actor lives as long as a handle to it does: lose the last reference and
+#: Ray collects it, which returns its GPUs to the scheduler just as surely as
+#: ``ray.kill`` would. Every real owner keeps its lease in an action-local
+#: variable, closes it in a ``finally`` and drops it, so refusing to kill the
+#: actor is not by itself enough to keep its devices reserved -- the handle has
+#: to outlive the lease object. Nothing removes entries: that is the point, and
+#: it is bounded by the session, since the process holding them is the session.
+_QUARANTINED_ACTORS: list[Any] = []
+
+
 class ServingLeaseQuarantined(RuntimeError):
     """A lease whose devices are held by an actor that never answered.
 
@@ -660,6 +672,9 @@ class ServingLease:
                     # inside this method while the caller's finally: close() went
                     # on to kill the actor anyway.
                     self._quarantined = _round_label(cmd)
+                    # Outlives this lease object on purpose; see _QUARANTINED_ACTORS.
+                    if self._actor is not None and self._actor not in _QUARANTINED_ACTORS:
+                        _QUARANTINED_ACTORS.append(self._actor)
                     log.warning(
                         "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
                         "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "

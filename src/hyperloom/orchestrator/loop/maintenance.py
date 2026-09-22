@@ -26,10 +26,11 @@ async def run_lease_and_db_reclaim(
     elapsed lease budgets.
 
     ``leases_unverifiable`` rides the same summary because it is the other half
-    of that answer: lanes still held by an ended holder that left nothing any
-    probe can settle. They are retained on purpose, and a number that stays put
-    while the queue does not drain is where an operator starts; the remedy for
-    each one is logged once by the lane sweep.
+    of that answer: lanes still held by a holder that ended without confirming
+    its cleanup. Nothing decides those -- no identity available to this process
+    survives a served process that setsid's away from it -- so they are retained
+    on purpose. A number that stays put while the queue does not drain is where
+    an operator starts; the remedy for each one is logged once by the diagnostic.
 
     Args:
         host: Coordinator exposing ``reconciler`` and ``db``.

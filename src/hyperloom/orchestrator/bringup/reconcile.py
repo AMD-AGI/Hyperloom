@@ -84,10 +84,11 @@ class ReconcileReport:
     Attributes:
         leases_reaped: Lease rows the pass swept.
         leases_unverifiable: Lane rows still held after the sweep by a holder
-            that ended without leaving anything a probe can settle. Not a
-            failure count -- retaining them is the contract -- but the number an
-            operator needs to see climb, and the maintenance summary carries it
-            out of here.
+            that ended without confirming its cleanup. Nothing decides these:
+            no probe here can tell a lane in use from one merely abandoned, so
+            they are retained by contract rather than left over by accident.
+            Not a failure count -- but the number an operator needs to see
+            climb, and the maintenance summary carries it out of here.
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
@@ -285,10 +286,10 @@ class Reconciler:
         work without releasing -- the pid on the lane row is this process.
         2026-09-21: six lanes were held that way for two hours, starving 19
         queued tasks, by holders that had already ended and whose processes had
-        gone with them. Rows of that vintage are not healed here: the code that
-        wrote them recorded no process group, so they take the unverifiable path
-        and keep their lanes. What this pass ends is the RECURRENCE -- the same
-        failure under code that records a group id, which a probe can settle.
+        gone with them. The same thing would happen under this code, and is
+        meant to: nothing here decides that a lane is free. What changed is that
+        it announces itself within a tick, naming the lane and the statement
+        that clears it, instead of taking an hour of py-spy and sqlite to find.
 
         A holder that ended with its cleanup unconfirmed keeps its lane, and
         nothing here takes it back. Seven rounds of review each proposed a

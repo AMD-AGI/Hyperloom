@@ -7,7 +7,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import gc
 import sys
+import weakref
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -867,6 +869,39 @@ def test_a_timed_out_lease_stays_quarantined_through_the_callers_teardown(monkey
     # 3. And nothing re-creates an actor behind its back.
     with pytest.raises(rs.ServingLeaseQuarantined):
         lease.ensure()
+
+
+def test_a_quarantined_actor_outlives_the_lease_that_declared_it(monkeypatch: pytest.MonkeyPatch):
+    """Refusing to kill the actor is not enough; the handle has to survive the lease.
+
+    A Ray actor lives as long as a handle to it does. Every real owner keeps its
+    lease in an action-local variable, closes it in a ``finally`` and drops it —
+    so if the quarantine lived only on that object, the last reference would go
+    with it and Ray would collect the actor, returning its GPUs exactly as
+    ``ray.kill`` would have. The handle is therefore parked at module scope,
+    which for these purposes is session scope.
+    """
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    monkeypatch.setattr(rs, "_QUARANTINED_ACTORS", [])
+
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+    actor_ref = weakref.ref(actor)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+    lease.close()
+
+    # The owner drops its lease, as every real caller does.
+    del lease, actor
+    gc.collect()
+
+    assert actor_ref() is not None, "the quarantined actor was collected; its GPUs went back to the scheduler"
+    assert rs._QUARANTINED_ACTORS and rs._QUARANTINED_ACTORS[0] is actor_ref()
 
 
 def test_round_wait_ceiling_derives_from_the_rounds_own_cap(monkeypatch: pytest.MonkeyPatch):

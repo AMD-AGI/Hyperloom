@@ -552,13 +552,12 @@ async def _wedge_round_with_lane_rows(db, rounds, tasks, *, cleanup_confirmed: b
 async def test_a_round_whose_holder_left_cleanup_unconfirmed_keeps_everything(db):
     """The bound on the rule above: nothing is freed and nothing is advanced.
 
-    This is the shape of the 2026-09-21 rows, minus the one thing that resolves
-    them -- a tree root to probe. The holder ended without confirming its
-    cleanup and named no tree, so its lanes stay taken; and it fails
-    ``_terminal_by_observation`` as well, which asks the stricter question of
-    whether the holder ended cleanly enough to move a round on. A pass that
-    freed the lanes here would be freeing a lane whose work may still be
-    running.
+    This is the shape of the 2026-09-21 rows. Nothing resolves them, by design:
+    no probe decides that a lane is free, because every identity available here
+    is one a served process can leave. The holder also fails
+    ``_terminal_by_observation``, which asks the stricter question of whether it
+    ended cleanly enough to move a round on. A pass that freed these lanes would
+    be freeing a lane whose work may still be running.
     """
     rec, rounds, tasks, _ = _build(db, terminal_holder_cap_sec=0.0)
     await _wedge_round_with_lane_rows(db, rounds, tasks, cleanup_confirmed=False)
