@@ -1065,3 +1065,143 @@ def test_write_capture_status_is_structured_and_atomic(tmp_path):
     assert payload["phase_start_ns"] == 123
     assert payload["decision"]["stop_reason"] == "wall_clock_limit"
     assert not list(tmp_path.glob(".agentx_profile_capture.*"))
+
+
+_SGL_METRICS = """\
+# HELP sglang:num_running_reqs The number of running requests.
+# TYPE sglang:num_running_reqs gauge
+sglang:num_running_reqs{model_name="/m",dp_rank="0"} 3.0
+sglang:num_running_reqs{model_name="/m",dp_rank="1"} 5.0
+sglang:num_queue_reqs{model_name="/m"} 0.0
+"""
+
+_VLLM_METRICS = 'vllm:num_requests_running{model_name="/m"} 4.0\n'
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [
+        (_SGL_METRICS, 8.0),
+        (_VLLM_METRICS, 4.0),
+        ('sglang:num_running_reqs{model_name="/m"} 0.0\n', 0.0),
+        # An idle server and a server that publishes nothing are different states.
+        ("sglang:num_queue_reqs 7.0\n", None),
+        ("", None),
+        # A commented-out sample is documentation, not a reading.
+        ("# sglang:num_running_reqs 9.0\n", None),
+    ],
+    ids=["sglang-dp-summed", "vllm", "idle", "other-gauges-only", "empty", "comment"],
+)
+def test_running_requests_reads_the_raw_scrape(monkeypatch, body, expected):
+    monkeypatch.setattr(phase_gate, "load_text", lambda *_a, **_k: body)
+    assert phase_gate.running_requests("http://x/metrics", timeout_seconds=1) == expected
+
+
+def test_steady_state_needs_a_streak_not_a_single_sample(monkeypatch):
+    """The AgentX warmup also puts requests in flight; one sample cannot tell them apart."""
+    readings = iter([2.0, 0.0, 2.0, 2.0, 2.0])
+    monkeypatch.setattr(phase_gate, "running_requests", lambda *_a, **_k: next(readings))
+
+    start_ns, signal = phase_gate.wait_for_steady_state(
+        metrics_url="http://x/metrics",
+        min_running=1.0,
+        stable_samples=3,
+        timeout_seconds=60,
+        poll_interval_seconds=0,
+    )
+    assert signal == phase_gate.SIGNAL_RUNNING_REQUESTS
+    assert start_ns > 0
+    # The run of three starts only after the zero broke the first streak.
+    assert next(readings, "consumed") == "consumed"
+
+
+def test_steady_state_times_out_on_an_idle_server(monkeypatch):
+    """Zero in flight is a readable gauge saying "not serving"; it must not open a window."""
+    monkeypatch.setattr(phase_gate, "running_requests", lambda *_a, **_k: 0.0)
+
+    with pytest.raises(TimeoutError, match="last running=0.0"):
+        phase_gate.wait_for_steady_state(
+            metrics_url="http://x/metrics",
+            min_running=1.0,
+            stable_samples=3,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0,
+        )
+
+
+def _unreadable_metrics(*_args, **_kwargs):
+    raise OSError(errno.ECONNREFUSED, "connection refused")
+
+
+def test_an_unreadable_metrics_endpoint_falls_back_to_the_health_grace(monkeypatch):
+    """SGLang serves /metrics only under --enable-metrics, and the agentic recipe that
+    writes the serve line is upstream. Without the fallback a healthy server captures
+    nothing at all."""
+    monkeypatch.setattr(phase_gate, "running_requests", _unreadable_metrics)
+    monkeypatch.setattr(phase_gate, "server_healthy", lambda *_a, **_k: True)
+
+    _start_ns, signal = phase_gate.wait_for_steady_state(
+        metrics_url="http://x/metrics",
+        min_running=1.0,
+        stable_samples=3,
+        timeout_seconds=60,
+        poll_interval_seconds=0,
+        health_url="http://x/health",
+        health_grace_seconds=0.0001,
+    )
+    assert signal == phase_gate.SIGNAL_HEALTH_GRACE
+
+
+def test_the_health_grace_does_not_short_circuit_a_readable_gauge(monkeypatch):
+    """A server that published the gauge and then went quiet is idle, not unmeasurable.
+
+    Letting the grace fire for it would open the window on an idle server and report a
+    trace, which is the failure mode the gauge exists to prevent.
+    """
+    monkeypatch.setattr(phase_gate, "running_requests", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(phase_gate, "server_healthy", lambda *_a, **_k: True)
+
+    with pytest.raises(TimeoutError, match="last running=0.0"):
+        phase_gate.wait_for_steady_state(
+            metrics_url="http://x/metrics",
+            min_running=1.0,
+            stable_samples=3,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0,
+            health_url="http://x/health",
+            health_grace_seconds=0.0001,
+        )
+
+
+def test_the_health_grace_is_off_unless_the_caller_asks_for_it(monkeypatch):
+    """Opt-in: a caller that wants the gauge or nothing must get the gauge or nothing."""
+    monkeypatch.setattr(phase_gate, "running_requests", _unreadable_metrics)
+    monkeypatch.setattr(phase_gate, "server_healthy", lambda *_a, **_k: True)
+
+    with pytest.raises(TimeoutError, match="/metrics never readable"):
+        phase_gate.wait_for_steady_state(
+            metrics_url="http://x/metrics",
+            min_running=1.0,
+            stable_samples=3,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0,
+            health_url="http://x/health",
+            health_grace_seconds=0,
+        )
+
+
+def test_the_health_grace_waits_for_the_server_to_answer_at_all(monkeypatch):
+    """A grace measured from process start would fire against a server still booting."""
+    monkeypatch.setattr(phase_gate, "running_requests", _unreadable_metrics)
+    monkeypatch.setattr(phase_gate, "server_healthy", lambda *_a, **_k: False)
+
+    with pytest.raises(TimeoutError, match="/metrics never readable"):
+        phase_gate.wait_for_steady_state(
+            metrics_url="http://x/metrics",
+            min_running=1.0,
+            stable_samples=3,
+            timeout_seconds=0.01,
+            poll_interval_seconds=0,
+            health_url="http://x/health",
+            health_grace_seconds=0.0001,
+        )

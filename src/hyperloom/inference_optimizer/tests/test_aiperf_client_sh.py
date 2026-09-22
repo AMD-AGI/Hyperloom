@@ -140,6 +140,16 @@ if sys.argv[1] == "wait-phase":
         raise SystemExit(1)
     print("123456789")
     raise SystemExit(0)
+if sys.argv[1] == "wait-steady":
+    marker = os.environ.get("AGENTX_STEADY_GATE_ARGS_MARKER")
+    if marker:
+        with open(marker, "w", encoding="utf-8") as handle:
+            json.dump(sys.argv, handle)
+    if os.environ.get("FAKE_STEADY_GATE_FAIL") == "1":
+        print("fake steady-state gate failure", file=sys.stderr)
+        raise SystemExit(1)
+    print("123456789 " + os.environ.get("FAKE_STEADY_SIGNAL", "running_requests"))
+    raise SystemExit(0)
 if sys.argv[1] == "wait-capture-stop":
     if os.environ.get("FAKE_CAPTURE_GATE_FAIL") == "1":
         print("fake capture gate failure", file=sys.stderr)
@@ -216,6 +226,22 @@ raise SystemExit(subprocess.call(["bash", str(Path(__file__).with_name("aiperf-e
 """
 
 _FAKE_FUSER = "#!/usr/bin/env bash\nexit 0\n"
+
+_FAKE_AGENTIC_RECIPE = r"""#!/usr/bin/env bash
+# Emulates an InferenceX agentic recipe: it ignores MAGPIE_RUN_PHASE, owns the whole
+# lifecycle (boot, replay, aggregate, teardown), writes the nested leaderboard result
+# itself, and records no server pid -- so it returns with nothing left to drive.
+set -e
+art="${RESULT_DIR}/aiperf_artifacts"
+mkdir -p "$art"
+echo '{"output_token_throughput":{"avg":1.0},"request_count":{"avg":1}}' > "$art/profile_export_aiperf.json"
+echo '{"scenarios":{"agentic":{"requests":1}}}' > "${RESULT_DIR}/${RESULT_FILENAME}.json"
+# Stands in for the replay. `command` because the trace-clock stubs virtualise the
+# client's own sleeps, and this one has to pass real time: the capture depends on the
+# watcher getting its bracket in while the recipe is still serving.
+command sleep "${FAKE_AGENTIC_REPLAY_S:-1}"
+exit "${FAKE_AGENTIC_RC:-0}"
+"""
 
 
 def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
@@ -855,15 +881,7 @@ def _capture_status_path(res: Path) -> Path:
     return res / "agentx-profile" / "test-capture" / "capture-status.json"
 
 
-def _fast_trace_poll_env(bind, tmp_path):
-    """Advance shell polling time without changing the real phase gate's clock."""
-    env = _client_only_env(bind, tmp_path)
-    clock = tmp_path / "trace-clock.txt"
-    clock.write_text("0\n", encoding="utf-8")
-    env["AGENTX_TEST_TRACE_CLOCK"] = str(clock)
-    with Path(env["BASH_ENV"]).open("a", encoding="utf-8") as handle:
-        handle.write(
-            r"""
+_TRACE_CLOCK_STUBS = r"""
 sleep() {
   if [ "${0##*/}" = aiperf_client.sh ]; then
     local elapsed
@@ -883,8 +901,24 @@ date() {
   esac
 }
 """
-        )
+
+
+def _trace_clock_env(tmp_path, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Advance shell polling time without changing the real phase gate's clock."""
+    env = dict(base_env or {})
+    clock = tmp_path / "trace-clock.txt"
+    clock.write_text("0\n", encoding="utf-8")
+    env["AGENTX_TEST_TRACE_CLOCK"] = str(clock)
+    bash_env = Path(env.get("BASH_ENV") or (tmp_path / "trace-clock-env.sh"))
+    with bash_env.open("a", encoding="utf-8") as handle:
+        handle.write(_TRACE_CLOCK_STUBS)
+    env["BASH_ENV"] = str(bash_env)
     return env
+
+
+def _fast_trace_poll_env(bind, tmp_path):
+    """The clock stubs on top of client-only mode, which stubs ``kill`` too."""
+    return _trace_clock_env(tmp_path, _client_only_env(bind, tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -1827,3 +1861,157 @@ def test_the_first_file_bound_never_exceeds_the_flush_budget(tmp_path):
     out = r.stdout + r.stderr
     assert "first-file bound 15s" in out, out[-1500:]
     assert "no trace file appeared within 15s" in out
+
+
+_AGENTIC_RECIPE = "agentic/replay.sh"
+
+
+def _agentic_sandbox(tmp_path):
+    """A sandbox whose server script is an agentic recipe rather than a builtin."""
+    bench, bind, res = _sandbox(tmp_path, write_pid=False)
+    recipe = bench / _AGENTIC_RECIPE
+    recipe.parent.mkdir(parents=True)
+    _write_exec(recipe, _FAKE_AGENTIC_RECIPE)
+    return bench, bind, res
+
+
+def _run_agentic_profile(bench, bind, res, tmp_path, **extra_env):
+    env = {
+        "AGENTX_SERVER_SCRIPT": _AGENTIC_RECIPE,
+        # A developer box with either of these exported would otherwise send the flush
+        # wait off to poll a directory the test knows nothing about.
+        "SGLANG_TORCH_PROFILER_DIR": "",
+        "VLLM_TORCH_PROFILER_DIR": "",
+    }
+    env.update(extra_env)
+    return _run_profile(bench, bind, res, tmp_path, **env)
+
+
+def _gpu_trace_source(tmp_path) -> Path:
+    source = tmp_path / "trace-source"
+    source.mkdir()
+    with gzip.open(source / "worker-host_12345.1770000000000000000.trace.json.gz", "wt", encoding="utf-8") as handle:
+        json.dump({"traceEvents": [{"cat": "kernel", "ph": "X", "ts": 1, "dur": 2}]}, handle)
+    return source
+
+
+def test_an_agentic_recipe_captures_a_trace(tmp_path):
+    """The defect: an agentic recipe never opened a profile window at all.
+
+    The delegation owns boot, replay and teardown and returns only once the run is
+    over, so the single-node capture driver below it is unreachable by design -- it
+    exits first. Every AgentX capture therefore produced no trace and no status.
+    """
+    bench, bind, res = _agentic_sandbox(tmp_path)
+    (res / "torch_trace").mkdir()
+    events = tmp_path / "profile-events.txt"
+
+    r = _run_agentic_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="1",
+        FRAMEWORK="vllm",
+        PROFILE_EXTRA_BODY="{}",
+        AGENTX_PROFILE_EVENTS=str(events),
+        FAKE_TRACE_SOURCE=str(_gpu_trace_source(tmp_path)),
+        FAKE_TRACE_DEST=str(res / "torch_trace"),
+        **_trace_clock_env(tmp_path),
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert events.read_text().splitlines() == ["start_profile", "stop_profile"]
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "succeeded"
+    assert capture["reason"] == "capture_complete"
+    assert capture["decision"]["stop_reason"] == "agentic_window_elapsed"
+    # Which signal opened the window is part of the record: a health-grace capture may
+    # have landed in the recipe's warmup, and must not read as gauge-confirmed.
+    assert capture["decision"]["start_signal"] == "running_requests"
+    # The recipe's own measurement still reaches Magpie.
+    assert (res / "inferencex_result.json").exists()
+
+
+def test_the_agentic_watcher_is_armed_before_the_delegation(tmp_path):
+    """Armed after it there would be nothing left to watch: the call returns only
+    once the recipe has already torn its server down."""
+    bench, bind, res = _agentic_sandbox(tmp_path)
+    r = _run_agentic_profile(bench, bind, res, tmp_path, **_trace_clock_env(tmp_path))
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert out.index("armed the agentic trace-capture watcher") < out.index("delegating server boot")
+
+
+def test_the_agentic_window_waits_for_the_servers_own_metrics(tmp_path):
+    """AIPerf's progress API cannot gate this one: it belongs to the recipe's client."""
+    bench, bind, res = _agentic_sandbox(tmp_path)
+    marker = tmp_path / "steady-args.json"
+
+    r = _run_agentic_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_STEADY_GATE_ARGS_MARKER=str(marker),
+        AGENTX_CAPTURE_STEADY_SAMPLES="4",
+        AGENTX_CAPTURE_STEADY_POLL_S="7",
+        AGENTX_CAPTURE_STEADY_TIMEOUT_S="123",
+        **_trace_clock_env(tmp_path),
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = json.loads(marker.read_text())
+    assert argv[1] == "wait-steady"
+    # The port the server was booted on, not the AIPerf progress port.
+    assert argv[argv.index("--metrics-url") + 1] == "http://localhost:8199/metrics"
+    assert argv[argv.index("--stable-samples") + 1] == "4"
+    assert argv[argv.index("--poll-interval-seconds") + 1] == "7"
+    assert argv[argv.index("--timeout-seconds") + 1] == "123"
+    # The fallback for a server that publishes no /metrics at all travels with it.
+    assert argv[argv.index("--health-url") + 1] == "http://localhost:8199/health"
+    assert argv[argv.index("--health-grace-seconds") + 1] == "180"
+
+
+def test_an_agentic_recipe_that_never_serves_says_why(tmp_path):
+    """No steady state means no window: starting the profiler anyway would capture
+    an idle server and report it as a trace."""
+    bench, bind, res = _agentic_sandbox(tmp_path)
+    events = tmp_path / "profile-events.txt"
+
+    r = _run_agentic_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_PROFILE_EVENTS=str(events),
+        FAKE_STEADY_GATE_FAIL="1",
+        **_trace_clock_env(tmp_path),
+    )
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not events.exists(), "the profiler was started without a steady-state signal"
+    capture = json.loads(_capture_status_path(res).read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "server_never_reached_steady_state"
+
+
+def test_an_agentic_round_that_is_not_profiling_arms_nothing(tmp_path):
+    """Measurement rounds must not pay for a capture they never took."""
+    bench, bind, res = _agentic_sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_SERVER_SCRIPT=_AGENTIC_RECIPE)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "armed the agentic trace-capture watcher" not in out
+    assert not _capture_status_path(res).exists()
+
+
+def test_a_non_agentic_round_arms_no_watcher(tmp_path):
+    """The single-node driver brackets its own window; a second one would race it."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run_profile(bench, bind, res, tmp_path)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "armed the agentic trace-capture watcher" not in out
+    # It still captured the ordinary way, so this is not a vacuous pass.
+    assert "PROFILE=1: waiting for AIPerf's measured phase" in out

@@ -2307,6 +2307,82 @@ async def test_agentx_profile_executor_rejects_missing_capture_status(tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_agentx_profile_names_the_profiler_output_dir_and_looks_there(tmp_path, monkeypatch, pinned):
+    """Nothing named a torch-profiler output directory on the AgentX path, so the
+    server armed the profiler with nowhere to write.
+
+    The directory has to be chosen before the run, which rules out every convention
+    hanging off the ``benchmark_*`` workspace Magpie creates during it -- so the
+    executor names one and discovery is handed the same value.
+    """
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    operator_dir = tmp_path / "operator-pinned"
+    expected = operator_dir if pinned else output_dir / "torch_trace"
+    if pinned:
+        operator_dir.mkdir()
+        monkeypatch.setenv("SGLANG_TORCH_PROFILER_DIR", str(operator_dir))
+    else:
+        monkeypatch.delenv("SGLANG_TORCH_PROFILER_DIR", raising=False)
+        monkeypatch.delenv("VLLM_TORCH_PROFILER_DIR", raising=False)
+    seen: dict[str, str] = {}
+
+    async def _fake_baseline(_self, _ctx):
+        envs = dict(_ctx.task.params["extra_envs"])
+        seen.update(envs)
+        # The server writes where it was told to, which is not under the workspace.
+        (expected / "177-TP-0-DECODE.trace.json.gz").write_bytes(b"rank-zero")
+        capture_status = Path(envs["AGENTX_CAPTURE_STATUS_PATH"])
+        capture_status.write_text(
+            json.dumps(
+                {
+                    "capture_id": envs["AGENTX_CAPTURE_ID"],
+                    "status": "succeeded",
+                    "reason": "capture_complete",
+                }
+            ),
+            encoding="utf-8",
+        )
+        workspace = output_dir / "benchmark_sglang_profiler_dir"
+        # Present but empty: the conventional location must not win over the one the
+        # profiler was actually pointed at.
+        (workspace / "torch_trace").mkdir(parents=True)
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+            "submission_valid": True,
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key=f"prof-agentx-profiler-dir-{pinned}",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    if pinned:
+        # An operator collecting traces elsewhere keeps their directory.
+        assert seen.get("SGLANG_TORCH_PROFILER_DIR", str(operator_dir)) == str(operator_dir)
+    else:
+        # aiperf_client.sh's _trace_dirs reads exactly these two names.
+        assert seen["SGLANG_TORCH_PROFILER_DIR"] == str(expected)
+        assert seen["VLLM_TORCH_PROFILER_DIR"] == str(expected)
+    assert res.result["trace_dir"] == str(expected)
+    assert res.result["trace_capture_status"] == "succeeded"
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_agentx_profile_preserves_pre_capture_failure_for_recovery(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     db = SqliteConnection(tmp_path / "x.db")

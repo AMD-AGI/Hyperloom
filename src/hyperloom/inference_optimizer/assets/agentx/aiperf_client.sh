@@ -51,6 +51,13 @@
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_PROFILE_WARMUP_S (deprecated and ignored; phase-gated profiling
 #     replaced the fixed warmup delay),
+#   AGENTX_CAPTURE_STEADY_TIMEOUT_S / _SAMPLES / _POLL_S (an agentic recipe's
+#     capture opens its window on the engine's own in-flight gauge instead of
+#     AIPerf's progress API, which belongs to the recipe's client; defaults
+#     1800 / 5 / 5 seconds),
+#   AGENTX_CAPTURE_HEALTH_GRACE_S (fallback for a server that publishes no
+#     /metrics at all -- SGLang needs --enable-metrics; default 180, 0 to
+#     require the gauge. The signal used is recorded in the capture status),
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -99,6 +106,304 @@ ART="${RESULT_DIR}/aiperf_artifacts"
 rm -rf "$ART"
 mkdir -p "$RESULT_DIR" "$ART"
 
+# ── Numeric input validation, and the phase gate every round calls ───────────
+# Hoisted above the server-boot section because the agentic capture path below
+# needs both before it delegates. The call sites that validate the measurement
+# knobs stay where they were, further down.
+_require_uint() {  # _require_uint NAME VALUE
+  case "$2" in
+    "" | *[!0-9]*)
+      log "ERROR: $1 must be a non-negative integer, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+_require_decimal() {  # _require_decimal NAME VALUE -- digits with one optional dot
+  case "$2" in
+    "" | *[!0-9.]* | *.*.*)
+      log "ERROR: $1 must be a decimal number, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
+
+# ── Trace-capture setup, shared by both capture drivers ──────────────────────
+# Defined here, above the server-boot section, because an agentic recipe needs
+# every one of these before it boots: it owns its whole lifecycle and returns
+# only once the run is over, so a capture armed after the delegation below can
+# never fire. The single-node driver further down consumes the same definitions.
+if [ "${PROFILE:-0}" = "1" ]; then
+  # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
+  # /start_profile the way InferenceX's benchmark_serving.py does, so this script
+  # self-brackets a bounded profiling window inside aiperf's measured phase.
+  # The profiler is already ENABLED on the server (builtin server phase adds the
+  # framework's --profiler-config/env when PROFILE=1); /start_profile begins
+  # recording and /stop_profile flushes the trace to torch_profiler_dir for
+  # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
+  PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
+  _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
+  : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
+  : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
+  CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
+  TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
+  TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
+  case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
+  rm -f "$CAPTURE_STATUS_FILE"
+  PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
+  _write_profile_capture_status() {
+    _status="$1"
+    _reason="$2"
+    _phase_start_ns="${3:-0}"
+    _decision="${4:-}"
+    if [ ! -f "$PHASE_GATE" ]; then
+      log "ERROR missing phase gate ${PHASE_GATE}; cannot write trace-capture status"
+      return 0
+    fi
+    if ! python3 "$PHASE_GATE" write-capture-status \
+      --output "$CAPTURE_STATUS_FILE" \
+      --capture-id "$AGENTX_CAPTURE_ID" \
+      --status "$_status" \
+      --reason "$_reason" \
+      --phase-start-ns "$_phase_start_ns" \
+      --requested-window-seconds "$PWIN" \
+      --decision-json "$_decision"; then
+      log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
+    fi
+  }
+  # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
+  # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the
+  # first file appeared 350s after the call returned, all 8 ranks were present
+  # at 391s, and the set was still growing at 546s on its way to 5.1 GB -- the
+  # ranks serialise one after another. ``cleanup`` allows 20s before SIGKILL, so
+  # every previous capture was killed mid-write: 8 files of plausible size that
+  # all fail ``gzip -t``. That is the same corruption seen on a Kimi-K3 capture
+  # and blamed at the time on copying the files too early; it was this.
+  #
+  # Stability only schedules the integrity check: success requires fresh,
+  # fully readable GPU traces for every expected rank, not just a file count.
+  _trace_dirs() {
+    _seen="|"
+    # Configured profiler paths are valid before the server creates them; the
+    # RESULT_DIR fallback is only evidence when that directory already exists.
+    for d in "${SGLANG_TORCH_PROFILER_DIR:-}" "${VLLM_TORCH_PROFILER_DIR:-}"; do
+      [ -n "$d" ] || continue
+      case "$_seen" in *"|${d}|"*) continue ;; esac
+      printf '%s\n' "$d"
+      _seen="${_seen}${d}|"
+    done
+    d="${RESULT_DIR}/torch_trace"
+    if [ -d "$d" ]; then
+      case "$_seen" in *"|${d}|"*) ;; *) printf '%s\n' "$d" ;; esac
+    fi
+  }
+  _trace_command() {
+    local -a _dirs=()
+    local _dir
+    while IFS= read -r _dir; do
+      [ -n "$_dir" ] && _dirs+=(--trace-dir "$_dir")
+    done < <(_trace_dirs)
+    python3 "$PHASE_GATE" "$@" "${_dirs[@]}"
+  }
+  _trace_stat() {  # -> "<current count> <total bytes>"
+    _trace_command trace-stat --snapshot "$TRACE_SNAPSHOT"
+  }
+  _trace_remaining_ns() {
+    printf '%s\n' "$(( TRACE_FLUSH_DEADLINE_NS - $(date +%s%N) ))"
+  }
+  _trace_seconds() {
+    printf '%d.%09d' "$(( $1 / 1000000000 ))" "$(( $1 % 1000000000 ))"
+  }
+  _trace_complete() {
+    local _remaining_ns
+    [ -n "$TRACE_SNAPSHOT" ] || return 1
+    _remaining_ns="$(_trace_remaining_ns)"
+    [ "$_remaining_ns" -gt 0 ] || return 1
+    _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
+      --cache-file "$TRACE_CACHE_FILE" --timeout-seconds "$(_trace_seconds "$_remaining_ns")" || return 1
+    [ "$(_trace_remaining_ns)" -gt 0 ]
+  }
+  _wait_for_trace_flush() {
+    # Nothing was ever pointed at a directory, so there is nothing to flush.
+    # Without this the loop below can never reach its stable-sample condition
+    # (the count stays 0 forever) and burns the whole budget waiting for files
+    # that no profiler was configured to write.
+    if [ -z "$(_trace_dirs)" ]; then
+      log "no profiler output directory is configured; nothing to wait for"
+      return 2
+    fi
+    _want="${TP:-0}"
+    case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
+    _budget="$TRACE_FLUSH_BUDGET"
+    # A separate, much shorter bound for "no file has appeared at all". A
+    # capture that produced zero files is a failed capture (a rejected
+    # /start_profile, a profiler that never armed) -- waiting out the full
+    # flush budget for it buys nothing. The first rank file landed at t+350s on
+    # the GLM-5.3 8-rank measurement, so the default leaves real margin.
+    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
+    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
+    [ "$_first" -gt "$_budget" ] && _first="$_budget"
+    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
+    _prev=""; _stable=0; _cnt=0
+    _first_deadline_ns=$(( TRACE_FLUSH_START_NS + _first * 1000000000 ))
+    while :; do
+      _remaining_ns="$(_trace_remaining_ns)"
+      if [ "$_remaining_ns" -gt 0 ]; then
+        _sleep_ns=10000000000
+        [ "$_sleep_ns" -gt "$_remaining_ns" ] && _sleep_ns="$_remaining_ns"
+        if [ "$_cnt" -eq 0 ]; then
+          _first_remaining_ns=$(( _first_deadline_ns - $(date +%s%N) ))
+          [ "$_first_remaining_ns" -lt 0 ] && _first_remaining_ns=0
+          [ "$_sleep_ns" -gt "$_first_remaining_ns" ] && _sleep_ns="$_first_remaining_ns"
+        fi
+        [ "$_sleep_ns" -gt 0 ] && sleep "$(_trace_seconds "$_sleep_ns")"
+      fi
+      _now=$(_trace_stat) || return 4
+      _cnt="${_now%% *}"; _now_ns=$(date +%s%N)
+      if [ "$_cnt" -eq 0 ] && [ "$_now_ns" -ge "$_first_deadline_ns" ]; then
+        log "WARN no trace file appeared within ${_first}s of the trace completion check; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
+        return 3
+      fi
+      [ "$_now_ns" -ge "$TRACE_FLUSH_DEADLINE_NS" ] && break
+      if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
+        _stable=$((_stable + 1))
+      else
+        _stable=0
+      fi
+      # Three identical samples AND, when TP is known, one file per rank. The
+      # count check matters: ranks appear one at a time, so a set that is merely
+      # "not growing right now" can still be missing half its ranks.
+      if [ "$_stable" -ge 3 ] && [ "$_want" -gt 0 ] && [ "$_cnt" -ge "$_want" ] && _trace_complete; then
+        _el=$(( ( $(date +%s%N) - TRACE_FLUSH_START_NS ) / 1000000000 ))
+        log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
+        return 0
+      fi
+      [ "$(_trace_remaining_ns)" -le 0 ] && break
+      _prev="$_now"
+    done
+    log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
+    return 4
+  }
+  # One place decides what a (stop, flush) pair means, so the single-node and
+  # agentic drivers can never disagree about which outcome counts as a trace.
+  _finish_profile_capture() {  # <stop_ok> <flush_rc> [phase_start_ns] [decision_json]
+    _fin_stop="$1"
+    _fin_flush="$2"
+    if [ "$_fin_stop" -ne 1 ]; then
+      _write_profile_capture_status "failed" "stop_profile_failed" "${3:-0}" "${4:-}"
+      return 0
+    fi
+    if [ "$_fin_flush" -eq 0 ]; then
+      _write_profile_capture_status "succeeded" "capture_complete" "${3:-0}" "${4:-}"
+      return 0
+    fi
+    case "$_fin_flush" in
+      2) _fin_reason="profiler_output_unconfigured" ;;
+      3) _fin_reason="trace_files_missing" ;;
+      4) _fin_reason="trace_flush_timeout" ;;
+      *) _fin_reason="trace_flush_failed" ;;
+    esac
+    _write_profile_capture_status "failed" "$_fin_reason" "${3:-0}" "${4:-}"
+  }
+
+  # ── Agentic capture: the same bracket, driven from a different signal ───────
+  # AIPerf's progress API cannot gate this one. `wait-phase` reads the progress
+  # endpoint of the aiperf THIS script started, and an agentic recipe starts its
+  # own client instead -- so there is no phase to wait for, and the window has
+  # to open on a signal the server itself publishes: the in-flight request gauge
+  # on /metrics (sglang:num_running_reqs, vllm:num_requests_running).
+  #
+  # Steady state rather than a fixed delay because the recipe's boot and warmup
+  # length is not ours to know, and a delay that guesses short captures warmup.
+  # Early rather than late because the per-rank flush keeps writing for minutes
+  # after /stop_profile returns (MEASURED: 391s to land 8 ranks) while the
+  # recipe tears its server down the moment its replay ends -- a window opened
+  # near the end of the replay is a window whose trace is truncated.
+  CAPTURE_STEADY_TIMEOUT="${AGENTX_CAPTURE_STEADY_TIMEOUT_S:-1800}"
+  _require_uint AGENTX_CAPTURE_STEADY_TIMEOUT_S "$CAPTURE_STEADY_TIMEOUT"
+  CAPTURE_STEADY_SAMPLES="${AGENTX_CAPTURE_STEADY_SAMPLES:-5}"
+  _require_uint AGENTX_CAPTURE_STEADY_SAMPLES "$CAPTURE_STEADY_SAMPLES"
+  if [ "$CAPTURE_STEADY_SAMPLES" -lt 1 ]; then
+    log "ERROR: AGENTX_CAPTURE_STEADY_SAMPLES must be at least 1, got '${CAPTURE_STEADY_SAMPLES}'"
+    exit 2
+  fi
+  CAPTURE_STEADY_INTERVAL="${AGENTX_CAPTURE_STEADY_POLL_S:-5}"
+  _require_uint AGENTX_CAPTURE_STEADY_POLL_S "$CAPTURE_STEADY_INTERVAL"
+  # Fallback for a server that serves no /metrics at all: SGLang publishes it only
+  # under --enable-metrics, and the agentic recipes that write the serve line live
+  # upstream. After this long with a healthy /health and still no readable /metrics,
+  # open the window anyway and record that it rested on the weaker signal -- a
+  # possibly-warmup trace is worth more than the no trace this used to produce. Set
+  # to 0 to require the gauge and fail the capture without it.
+  CAPTURE_HEALTH_GRACE="${AGENTX_CAPTURE_HEALTH_GRACE_S:-180}"
+  _require_uint AGENTX_CAPTURE_HEALTH_GRACE_S "$CAPTURE_HEALTH_GRACE"
+  # Referenced by _trace_complete under `set -u` before any snapshot is taken.
+  TRACE_SNAPSHOT=""
+  AGENTX_CAPTURE_WATCHER_PID=""
+
+  _agentx_capture_watcher() {
+    if ! _w_steady="$(
+      python3 "$PHASE_GATE" wait-steady \
+        --metrics-url "http://localhost:${PORT}/metrics" \
+        --health-url "http://localhost:${PORT}/health" \
+        --health-grace-seconds "$CAPTURE_HEALTH_GRACE" \
+        --stable-samples "$CAPTURE_STEADY_SAMPLES" \
+        --poll-interval-seconds "$CAPTURE_STEADY_INTERVAL" \
+        --timeout-seconds "$CAPTURE_STEADY_TIMEOUT"
+    )"; then
+      log "WARN the server never reported in-flight requests within ${CAPTURE_STEADY_TIMEOUT}s; no trace was captured"
+      _write_profile_capture_status "failed" "server_never_reached_steady_state"
+      return 0
+    fi
+    # "<start_ns> <signal>"; the signal reaches the capture status below so a window
+    # opened on the weaker health grace is never read as gauge-confirmed.
+    _w_signal="${_w_steady##* }"
+    log "agentic replay is serving (signal=${_w_signal}); opening a ${PWIN}s profile window"
+    # Same forwarding contract as the single-node driver: SGLang takes its
+    # capture bounds in the /start_profile body, vLLM ignores them.
+    _w_body="${PROFILE_EXTRA_BODY:-}"
+    _w_auto=0
+    if [ -n "$_w_body" ] && [ "$_w_body" != "{}" ]; then
+      _w_start=(-H "Content-Type: application/json" -d "$_w_body")
+      log "start_profile: forwarding capture bounds ${_w_body}"
+      if python3 "$PHASE_GATE" is-auto-bounded --framework "${_ka_target:-${FRAMEWORK:-}}" --body "$_w_body"; then
+        _w_auto=1
+      fi
+    else
+      _w_start=()
+    fi
+    TRACE_SNAPSHOT="$(_trace_command snapshot-traces)" || TRACE_SNAPSHOT=""
+    if ! curl -sf -X POST "${_w_start[@]+"${_w_start[@]}"}" \
+           "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
+      log "WARN start_profile failed (trace may be empty)"
+      _write_profile_capture_status "failed" "start_profile_failed"
+      return 0
+    fi
+    log "start_profile OK"
+    # No phase end to wait for here -- the recipe's client publishes none -- so
+    # the requested window IS the window, and it is already bounded.
+    sleep "$PWIN"
+    _w_stop=0
+    _w_flush=0
+    TRACE_FLUSH_START_NS=$(date +%s%N)
+    TRACE_FLUSH_DEADLINE_NS=$(( TRACE_FLUSH_START_NS + TRACE_FLUSH_BUDGET * 1000000000 ))
+    if [ "$_w_auto" -eq 1 ] && _trace_complete; then
+      _w_stop=1
+      log "profile auto-completed: current GPU traces cover all expected ranks; skipping stop_profile"
+    else
+      if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
+        _w_stop=1
+        log "stop_profile OK"
+      else
+        log "WARN stop_profile failed"
+      fi
+      _wait_for_trace_flush || _w_flush=$?
+    fi
+    _finish_profile_capture "$_w_stop" "$_w_flush" 0 \
+      "{\"stop_reason\":\"agentic_window_elapsed\",\"elapsed_seconds\":${PWIN},\"start_signal\":\"${_w_signal}\"}"
+  }
+fi
+
 if [ "${MAGPIE_RUN_PHASE:-full}" = "client" ]; then
   log "client-only mode: reusing caller-managed server on port ${PORT}"
 else
@@ -145,6 +450,13 @@ else
     # Belt-and-suspenders: free the port even if the pid was unknown/stale, so a
     # server that booted without a recorded pid can never leak the GPUs.
     command -v fuser >/dev/null 2>&1 && fuser -k "${PORT}/tcp" 2>/dev/null || true
+    # A watcher outliving this script would keep polling a server being torn
+    # down. On the normal path the reap below has already collected it, so this
+    # only fires when an error path skipped the reap.
+    if [ -n "${AGENTX_CAPTURE_WATCHER_PID:-}" ] && kill -0 "$AGENTX_CAPTURE_WATCHER_PID" 2>/dev/null; then
+      log "stopping the trace-capture watcher (pid=${AGENTX_CAPTURE_WATCHER_PID})"
+      kill -TERM "$AGENTX_CAPTURE_WATCHER_PID" 2>/dev/null || true
+    fi
   }
   # Install the trap BEFORE booting the server: if the builtin starts the server
   # then returns nonzero, set -e aborts here and the EXIT trap still fires (the
@@ -210,6 +522,18 @@ else
     log "WARN no keep-alive knob for server script ${BUILTIN}; server idle timeout left at its default while the client tolerates ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms"
   fi
 
+  # Arm the capture BEFORE delegating: the call below does not return until the
+  # agentic recipe has booted, replayed and torn down, so this is the last point
+  # at which anything can watch for the server coming up.
+  if [ "${PROFILE:-0}" = "1" ]; then
+    case "$BUILTIN" in
+      */agentic/*)
+        _agentx_capture_watcher &
+        AGENTX_CAPTURE_WATCHER_PID=$!
+        log "armed the agentic trace-capture watcher (pid=${AGENTX_CAPTURE_WATCHER_PID})"
+        ;;
+    esac
+  fi
   log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
   MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
     PORT="$PORT" RESULT_DIR="$RESULT_DIR" \
@@ -255,6 +579,25 @@ PYMERGE
           rm -f "$_AG_FLAT"
         else
           log "WARN no profile_export_aiperf.json under ${RESULT_DIR}; Magpie may read 0.00 req/s"
+        fi
+        # Collect the capture watcher before returning: the status file it
+        # writes is what Hyperloom reads to decide whether a trace exists, and
+        # exiting here would leave that file absent on a run that captured one.
+        #
+        # A plain `wait` is bounded by construction -- every phase the watcher
+        # can be in carries its own deadline (--timeout-seconds on the
+        # steady-state gate, $PWIN on the window, $TRACE_FLUSH_BUDGET on the
+        # flush) -- and reaching this point means the recipe wrote a result, so
+        # it served traffic, so the steady-state gate has already returned. What
+        # is left to wait for is the per-rank flush, which is the whole point.
+        if [ -n "${AGENTX_CAPTURE_WATCHER_PID:-}" ]; then
+          log "waiting for the trace-capture watcher (pid=${AGENTX_CAPTURE_WATCHER_PID}) to finish"
+          wait "$AGENTX_CAPTURE_WATCHER_PID" || log "WARN the trace-capture watcher exited nonzero"
+          AGENTX_CAPTURE_WATCHER_PID=""
+          # It reports on every path it can take; an absent file here would be
+          # read downstream as "capture never ran", so say what happened instead.
+          [ -f "$CAPTURE_STATUS_FILE" ] \
+            || _write_profile_capture_status "failed" "capture_watcher_wrote_no_status"
         fi
         exit 0
         ;;
@@ -356,22 +699,6 @@ WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-$CANON_WARMUP_GRACE}"
 # Fail loud rather than coerce: these values define what was measured, and this
 # file's whole contract is that a deviation can never be mistaken for a
 # leaderboard run. A typo must stop the round, not silently become canonical.
-_require_uint() {  # _require_uint NAME VALUE
-  case "$2" in
-    "" | *[!0-9]*)
-      log "ERROR: $1 must be a non-negative integer, got '$2'"
-      exit 2
-      ;;
-  esac
-}
-_require_decimal() {  # _require_decimal NAME VALUE -- digits with one optional dot
-  case "$2" in
-    "" | *[!0-9.]* | *.*.*)
-      log "ERROR: $1 must be a decimal number, got '$2'"
-      exit 2
-      ;;
-  esac
-}
 _require_uint AGENTX_WARMUP_REQUESTS_PER_LANE "$WARMLANE"
 _require_uint AGENTX_WARMUP_GRACE_PERIOD "$WARMGRACE"
 # DURATION is read above (before these helpers exist) but validated here, since
@@ -552,7 +879,6 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #   --max-context-length omitted (see the replay-context note above).
 AIPERF_PROGRESS_ARGS=()
 AIPERF_PROGRESS_PORT=""
-PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
 
 # Enable AIPerf's progress API on every round, not just trace-capture ones. It
 # is the only authoritative source of phase timing: `phases.<name>.start_ns` is
@@ -608,45 +934,8 @@ run_aiperf() {
 
 AIPERF_RC=0
 if [ "${PROFILE:-0}" = "1" ]; then
-  # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
-  # /start_profile the way InferenceX's benchmark_serving.py does, so this script
-  # self-brackets a bounded profiling window inside aiperf's measured phase.
-  # The profiler is already ENABLED on the server (builtin server phase adds the
-  # framework's --profiler-config/env when PROFILE=1); /start_profile begins
-  # recording and /stop_profile flushes the trace to torch_profiler_dir for
-  # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
-  PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
-  _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
-  : "${AGENTX_CAPTURE_ID:?AGENTX_CAPTURE_ID required for AgentX profiling}"
-  : "${AGENTX_CAPTURE_STATUS_PATH:?AGENTX_CAPTURE_STATUS_PATH required for AgentX profiling}"
   PHASE_WAIT_TIMEOUT="${AGENTX_PHASE_WAIT_TIMEOUT_S:-$(( DATASET_CONFIG_TIMEOUT + WARMGRACE + DURATION ))}"
   _require_uint AGENTX_PHASE_WAIT_TIMEOUT_S "$PHASE_WAIT_TIMEOUT"
-  CAPTURE_STATUS_FILE="$AGENTX_CAPTURE_STATUS_PATH"
-  TRACE_CACHE_FILE="$(dirname "$CAPTURE_STATUS_FILE")/trace-validation-cache.json"
-  TRACE_FLUSH_BUDGET="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
-  case "$TRACE_FLUSH_BUDGET" in "" | *[!0-9]*) TRACE_FLUSH_BUDGET=1800 ;; esac
-  rm -f "$CAPTURE_STATUS_FILE"
-  PHASE_GATE_FAILURE_REASON="profiling_phase_unavailable"
-  _write_profile_capture_status() {
-    _status="$1"
-    _reason="$2"
-    _phase_start_ns="${3:-0}"
-    _decision="${4:-}"
-    if [ ! -f "$PHASE_GATE" ]; then
-      log "ERROR missing phase gate ${PHASE_GATE}; cannot write trace-capture status"
-      return 0
-    fi
-    if ! python3 "$PHASE_GATE" write-capture-status \
-      --output "$CAPTURE_STATUS_FILE" \
-      --capture-id "$AGENTX_CAPTURE_ID" \
-      --status "$_status" \
-      --reason "$_reason" \
-      --phase-start-ns "$_phase_start_ns" \
-      --requested-window-seconds "$PWIN" \
-      --decision-json "$_decision"; then
-      log "ERROR failed to write trace-capture status via ${PHASE_GATE}"
-    fi
-  }
   if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
     log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
   fi
@@ -658,119 +947,6 @@ if [ "${PROFILE:-0}" = "1" ]; then
     PHASE_GATE_FAILURE_REASON="api_port_allocation_failed"
     log "WARN no AIPerf progress API port; the measurement will run without trace capture"
   fi
-  # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
-  # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the
-  # first file appeared 350s after the call returned, all 8 ranks were present
-  # at 391s, and the set was still growing at 546s on its way to 5.1 GB -- the
-  # ranks serialise one after another. ``cleanup`` allows 20s before SIGKILL, so
-  # every previous capture was killed mid-write: 8 files of plausible size that
-  # all fail ``gzip -t``. That is the same corruption seen on a Kimi-K3 capture
-  # and blamed at the time on copying the files too early; it was this.
-  #
-  # Stability only schedules the integrity check: success requires fresh,
-  # fully readable GPU traces for every expected rank, not just a file count.
-  _trace_dirs() {
-    _seen="|"
-    # Configured profiler paths are valid before the server creates them; the
-    # RESULT_DIR fallback is only evidence when that directory already exists.
-    for d in "${SGLANG_TORCH_PROFILER_DIR:-}" "${VLLM_TORCH_PROFILER_DIR:-}"; do
-      [ -n "$d" ] || continue
-      case "$_seen" in *"|${d}|"*) continue ;; esac
-      printf '%s\n' "$d"
-      _seen="${_seen}${d}|"
-    done
-    d="${RESULT_DIR}/torch_trace"
-    if [ -d "$d" ]; then
-      case "$_seen" in *"|${d}|"*) ;; *) printf '%s\n' "$d" ;; esac
-    fi
-  }
-  _trace_command() {
-    local -a _dirs=()
-    local _dir
-    while IFS= read -r _dir; do
-      [ -n "$_dir" ] && _dirs+=(--trace-dir "$_dir")
-    done < <(_trace_dirs)
-    python3 "$PHASE_GATE" "$@" "${_dirs[@]}"
-  }
-  _trace_stat() {  # -> "<current count> <total bytes>"
-    _trace_command trace-stat --snapshot "$TRACE_SNAPSHOT"
-  }
-  _trace_remaining_ns() {
-    printf '%s\n' "$(( TRACE_FLUSH_DEADLINE_NS - $(date +%s%N) ))"
-  }
-  _trace_seconds() {
-    printf '%d.%09d' "$(( $1 / 1000000000 ))" "$(( $1 % 1000000000 ))"
-  }
-  _trace_complete() {
-    local _remaining_ns
-    [ -n "$TRACE_SNAPSHOT" ] || return 1
-    _remaining_ns="$(_trace_remaining_ns)"
-    [ "$_remaining_ns" -gt 0 ] || return 1
-    _trace_command traces-complete --snapshot "$TRACE_SNAPSHOT" --tp "${TP:-0}" \
-      --cache-file "$TRACE_CACHE_FILE" --timeout-seconds "$(_trace_seconds "$_remaining_ns")" || return 1
-    [ "$(_trace_remaining_ns)" -gt 0 ]
-  }
-  _wait_for_trace_flush() {
-    # Nothing was ever pointed at a directory, so there is nothing to flush.
-    # Without this the loop below can never reach its stable-sample condition
-    # (the count stays 0 forever) and burns the whole budget waiting for files
-    # that no profiler was configured to write.
-    if [ -z "$(_trace_dirs)" ]; then
-      log "no profiler output directory is configured; nothing to wait for"
-      return 2
-    fi
-    _want="${TP:-0}"
-    case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
-    _budget="$TRACE_FLUSH_BUDGET"
-    # A separate, much shorter bound for "no file has appeared at all". A
-    # capture that produced zero files is a failed capture (a rejected
-    # /start_profile, a profiler that never armed) -- waiting out the full
-    # flush budget for it buys nothing. The first rank file landed at t+350s on
-    # the GLM-5.3 8-rank measurement, so the default leaves real margin.
-    _first="${AGENTX_TRACE_FIRST_FILE_TIMEOUT_S:-900}"
-    case "$_first" in "" | *[!0-9]*) _first=900 ;; esac
-    [ "$_first" -gt "$_budget" ] && _first="$_budget"
-    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s, first-file bound ${_first}s)"
-    _prev=""; _stable=0; _cnt=0
-    _first_deadline_ns=$(( TRACE_FLUSH_START_NS + _first * 1000000000 ))
-    while :; do
-      _remaining_ns="$(_trace_remaining_ns)"
-      if [ "$_remaining_ns" -gt 0 ]; then
-        _sleep_ns=10000000000
-        [ "$_sleep_ns" -gt "$_remaining_ns" ] && _sleep_ns="$_remaining_ns"
-        if [ "$_cnt" -eq 0 ]; then
-          _first_remaining_ns=$(( _first_deadline_ns - $(date +%s%N) ))
-          [ "$_first_remaining_ns" -lt 0 ] && _first_remaining_ns=0
-          [ "$_sleep_ns" -gt "$_first_remaining_ns" ] && _sleep_ns="$_first_remaining_ns"
-        fi
-        [ "$_sleep_ns" -gt 0 ] && sleep "$(_trace_seconds "$_sleep_ns")"
-      fi
-      _now=$(_trace_stat) || return 4
-      _cnt="${_now%% *}"; _now_ns=$(date +%s%N)
-      if [ "$_cnt" -eq 0 ] && [ "$_now_ns" -ge "$_first_deadline_ns" ]; then
-        log "WARN no trace file appeared within ${_first}s of the trace completion check; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. The benchmark measurement remains available, but trace capture will be marked failed."
-        return 3
-      fi
-      [ "$_now_ns" -ge "$TRACE_FLUSH_DEADLINE_NS" ] && break
-      if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
-        _stable=$((_stable + 1))
-      else
-        _stable=0
-      fi
-      # Three identical samples AND, when TP is known, one file per rank. The
-      # count check matters: ranks appear one at a time, so a set that is merely
-      # "not growing right now" can still be missing half its ranks.
-      if [ "$_stable" -ge 3 ] && [ "$_want" -gt 0 ] && [ "$_cnt" -ge "$_want" ] && _trace_complete; then
-        _el=$(( ( $(date +%s%N) - TRACE_FLUSH_START_NS ) / 1000000000 ))
-        log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
-        return 0
-      fi
-      [ "$(_trace_remaining_ns)" -le 0 ] && break
-      _prev="$_now"
-    done
-    log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. The benchmark measurement remains available, but trace capture will be marked failed."
-    return 4
-  }
   log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
   run_aiperf & APID=$!
   PHASE_START_NS=""
@@ -834,19 +1010,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
         fi
         _wait_for_trace_flush || FLUSH_RC=$?
       fi
-      if [ "$STOP_OK" -eq 1 ] && [ "$FLUSH_RC" -eq 0 ]; then
-        _write_profile_capture_status "succeeded" "capture_complete" "$PHASE_START_NS" "$CAPTURE_RESULT"
-      elif [ "$STOP_OK" -ne 1 ]; then
-        _write_profile_capture_status "failed" "stop_profile_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
-      else
-        case "$FLUSH_RC" in
-          2) FLUSH_REASON="profiler_output_unconfigured" ;;
-          3) FLUSH_REASON="trace_files_missing" ;;
-          4) FLUSH_REASON="trace_flush_timeout" ;;
-          *) FLUSH_REASON="trace_flush_failed" ;;
-        esac
-        _write_profile_capture_status "failed" "$FLUSH_REASON" "$PHASE_START_NS" "$CAPTURE_RESULT"
-      fi
+      _finish_profile_capture "$STOP_OK" "$FLUSH_RC" "$PHASE_START_NS" "$CAPTURE_RESULT"
     else
       log "WARN start_profile failed (trace may be empty)"
       _write_profile_capture_status "failed" "start_profile_failed" "$PHASE_START_NS"

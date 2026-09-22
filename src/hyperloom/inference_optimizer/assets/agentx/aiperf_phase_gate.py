@@ -494,11 +494,27 @@ def wait_for_phase(
 #: Gauges that name "requests the engine is decoding right now", per framework. An
 #: agentic recipe drives its own replay, so AIPerf's progress API — which
 #: :func:`wait_for_phase` reads — belongs to a client this process never started.
-#: The server's own metrics are the one steady-state signal both frameworks publish.
+#: The server's own metrics are the strongest steady-state signal available here.
+#:
+#: The ``<engine>:`` prefix and the ``num_*_reqs`` / ``num_requests_*`` spellings are
+#: the raw scrape names, which is what this module reads. They are NOT aiperf's
+#: exported names for the same series — ``_kv_metrics`` documents that divergence for
+#: ``vllm:num_preemptions_total`` — so these must not be cross-checked against an export.
 _RUNNING_GAUGES: tuple[str, ...] = (
     "sglang:num_running_reqs",
     "vllm:num_requests_running",
 )
+
+#: The window opened on the engine's in-flight gauge: it was serving when we started.
+SIGNAL_RUNNING_REQUESTS = "running_requests"
+#: The window opened a fixed grace after the server first answered ``/health``, because
+#: ``/metrics`` was never readable. SGLang only serves ``/metrics`` under
+#: ``--enable-metrics`` (vLLM exposes it by default), and the agentic recipes that boot
+#: these servers live upstream, so their serve line is not ours to guarantee. Weaker on
+#: purpose: it says the server is up, not that it is busy, so the window may land in the
+#: recipe's own warmup. Recorded in the capture status either way, so a trace is never
+#: read as gauge-confirmed when it was not.
+SIGNAL_HEALTH_GRACE = "health_grace"
 
 
 def load_text(url: str, *, timeout_seconds: float) -> str:
@@ -531,6 +547,21 @@ def running_requests(metrics_url: str, *, timeout_seconds: float) -> float | Non
     return total
 
 
+def server_healthy(health_url: str, *, timeout_seconds: float) -> bool:
+    """Report whether the server answers its readiness endpoint."""
+    try:
+        load_text(health_url, timeout_seconds=timeout_seconds)
+    except (
+        http.client.HTTPException,
+        OSError,
+        TimeoutError,
+        ValueError,
+        urllib.error.URLError,
+    ):
+        return False
+    return True
+
+
 def wait_for_steady_state(
     *,
     metrics_url: str,
@@ -538,33 +569,54 @@ def wait_for_steady_state(
     stable_samples: int,
     timeout_seconds: float,
     poll_interval_seconds: float,
-) -> int:
-    """Wait until the server reports a sustained in-flight load; return the start ns.
+    health_url: str = "",
+    health_grace_seconds: float = 0.0,
+) -> tuple[int, str]:
+    """Wait until the server is serving; return the start ns and which signal said so.
 
-    "Sustained" means ``min_running`` or more in-flight requests on
-    ``stable_samples`` consecutive polls. A single sample is not enough: the
-    AgentX warmup also puts requests in flight, and opening the window there
-    captures warmup rather than the graded steady state.
+    "Serving" means ``min_running`` or more in-flight requests on ``stable_samples``
+    consecutive polls. A single sample is not enough: the AgentX warmup also puts
+    requests in flight, and opening the window there captures warmup rather than the
+    graded steady state.
+
+    When ``/metrics`` is never readable at all — not "the gauge reads zero", which is a
+    genuinely idle server and keeps waiting — the wait falls back to
+    :data:`SIGNAL_HEALTH_GRACE` once ``health_grace_seconds`` have passed since the
+    server first answered ``health_url``. Returning the weaker signal beats raising:
+    the alternative is a capture that never opens a window on a perfectly healthy
+    server whose serve line simply omitted ``--enable-metrics``. Disabled by default;
+    the caller opts in by passing both a health URL and a positive grace.
     """
+    poll_timeout = max(1.0, poll_interval_seconds)
     deadline = time.monotonic() + timeout_seconds if timeout_seconds > 0 else None
+    fallback_armed = bool(health_url) and health_grace_seconds > 0
     streak = 0
     last_error = ""
     last_seen: float | None = None
+    metrics_ever_read = False
+    healthy_since: float | None = None
 
     while True:
-        if deadline is not None and time.monotonic() >= deadline:
-            detail = f"last running={last_seen}" if last_seen is not None else "gauge never appeared"
+        now = time.monotonic()
+        if deadline is not None and now >= deadline:
+            if last_seen is not None:
+                detail = f"last running={last_seen}"
+            elif metrics_ever_read:
+                detail = "gauge never appeared in a readable /metrics"
+            else:
+                detail = "/metrics never readable"
             suffix = f"; last metrics error: {last_error}" if last_error else ""
             raise TimeoutError(f"timed out waiting for steady state ({detail}){suffix}")
 
         try:
-            running = running_requests(metrics_url, timeout_seconds=max(1.0, poll_interval_seconds))
+            running = running_requests(metrics_url, timeout_seconds=poll_timeout)
+            metrics_ever_read = True
             last_error = ""
             last_seen = running
             if running is not None and running >= min_running:
                 streak += 1
                 if streak >= stable_samples:
-                    return time.time_ns()
+                    return time.time_ns(), SIGNAL_RUNNING_REQUESTS
             else:
                 streak = 0
         except (
@@ -576,6 +628,16 @@ def wait_for_steady_state(
         ) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             streak = 0
+
+        # Only while /metrics has never once been readable: a server that published the
+        # gauge and then went quiet is idle, not unmeasurable, and the grace must not
+        # short-circuit the wait for it to get busy.
+        if fallback_armed and not metrics_ever_read:
+            if healthy_since is None:
+                if server_healthy(health_url, timeout_seconds=poll_timeout):
+                    healthy_since = time.monotonic()
+            elif time.monotonic() - healthy_since >= health_grace_seconds:
+                return time.time_ns(), SIGNAL_HEALTH_GRACE
 
         time.sleep(poll_interval_seconds)
 
@@ -705,6 +767,8 @@ def build_parser() -> argparse.ArgumentParser:
     steady_parser.add_argument("--stable-samples", default=5, type=int)
     steady_parser.add_argument("--timeout-seconds", required=True, type=float)
     steady_parser.add_argument("--poll-interval-seconds", default=5.0, type=float)
+    steady_parser.add_argument("--health-url", default="")
+    steady_parser.add_argument("--health-grace-seconds", default=0.0, type=float)
 
     capture_parser = subparsers.add_parser(
         "wait-capture-stop",
@@ -757,18 +821,21 @@ def main(argv: list[str] | None = None) -> int:
             print("aiperf phase gate failed: stable samples must be positive", file=sys.stderr)
             return 1
         try:
-            print(
-                wait_for_steady_state(
-                    metrics_url=args.metrics_url,
-                    min_running=args.min_running,
-                    stable_samples=args.stable_samples,
-                    timeout_seconds=args.timeout_seconds,
-                    poll_interval_seconds=args.poll_interval_seconds,
-                )
+            start_ns, signal = wait_for_steady_state(
+                metrics_url=args.metrics_url,
+                min_running=args.min_running,
+                stable_samples=args.stable_samples,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds,
+                health_url=args.health_url,
+                health_grace_seconds=args.health_grace_seconds,
             )
         except (RuntimeError, TimeoutError) as exc:
             print(f"aiperf phase gate failed: {exc}", file=sys.stderr)
             return 1
+        # "<start_ns> <signal>": the caller records which signal opened the window, so
+        # a health-grace capture is never reported as a gauge-confirmed one.
+        print(f"{start_ns} {signal}")
         return 0
     if args.command == "wait-capture-stop":
         if args.max_window_seconds < 0:

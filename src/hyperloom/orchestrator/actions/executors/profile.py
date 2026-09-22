@@ -774,13 +774,21 @@ def _preferred_main_trace_path(
     return merged[0] if merged else trace_dir
 
 
-def _candidate_trace_dirs(workspace: Path) -> list[Path]:
-    """Trace directories to probe for a Magpie profile workspace."""
-    return [
+def _candidate_trace_dirs(workspace: Path, configured: Path | None = None) -> list[Path]:
+    """Trace directories to probe for a Magpie profile workspace.
+
+    ``configured`` is the directory this run pointed the framework's torch profiler at, and it
+    leads because it is the one location known rather than guessed. The rest are conventions
+    relative to a ``benchmark_*`` workspace Magpie names itself, so they cannot be handed to a
+    profiler that has to be configured before the run starts.
+    """
+    candidates = [] if configured is None else [configured]
+    candidates += [
         workspace / "torch_trace",
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
     ]
+    return list(dict.fromkeys(candidates))
 
 
 def _default_profile_config() -> Path:
@@ -1148,6 +1156,7 @@ class ProfileExecutor(BaselineExecutor):
         capture_id = ""
         capture_status_path: Path | None = None
         trace_manifest_path: Path | None = None
+        configured_trace_dir: Path | None = None
         if agentx_session:
             profile_output_dir = self._resolve_workspace(ctx, "profile")
             capture_id = uuid.uuid4().hex
@@ -1161,23 +1170,41 @@ class ProfileExecutor(BaselineExecutor):
             # Name the profiler's output directory. Nothing else does it on this path:
             # the multi-node and scriptable launchers each set it for their own layout,
             # and the AgentX recipes never mention it, so a single-node AgentX server
-            # armed the profiler with nowhere to write and ``_trace_dirs`` in
-            # aiperf_client.sh found no directory to wait on. Both names are set the way
-            # ``bypass_scriptable`` does: a framework reads only its own, and resolving
-            # which one applies here would duplicate the recipe's own choice.
+            # armed the profiler with nowhere to write, and ``_trace_dirs`` in
+            # aiperf_client.sh -- which reads exactly these two names -- found no
+            # directory to wait on. Both names are set the way ``bypass_scriptable``
+            # does: a framework reads only its own, and resolving which one applies
+            # here would duplicate the recipe's own choice.
             #
-            # ``<workspace>/torch_trace`` rather than somewhere under ``capture_dir``:
-            # it is the first entry ``_candidate_trace_dirs`` probes and the fallback
-            # ``_trace_dirs`` already looks in, so discovery needs no change. Rounds
-            # share the directory, which the AgentX mtime gate below already accounts
+            # It has to be a path known BEFORE the run, which rules out every
+            # convention ``_candidate_trace_dirs`` otherwise probes: those hang off the
+            # ``benchmark_*`` workspace Magpie creates and names during the run. So the
+            # directory is named here and handed to discovery below instead of guessed
+            # there. Rounds share it, which the AgentX mtime gate below already accounts
             # for -- it keeps only files newer than this task's start.
-            trace_dir = profile_output_dir / "torch_trace"
-            trace_dir.mkdir(parents=True, exist_ok=True)
-            for env_name in ("SGLANG_TORCH_PROFILER_DIR", "VLLM_TORCH_PROFILER_DIR"):
-                # An operator-pinned directory wins: they may be collecting traces
-                # somewhere this session does not own.
-                if not str(capture_envs.get(env_name) or os.environ.get(env_name) or "").strip():
-                    capture_envs[env_name] = str(trace_dir)
+            #
+            # An operator-pinned directory wins outright: they may be collecting
+            # traces somewhere this session does not own. Either way discovery is
+            # handed the same value, so the two cannot disagree about where the
+            # trace went -- which is the property that was missing.
+            pinned = next(
+                (
+                    value
+                    for value in (
+                        str(capture_envs.get(name) or os.environ.get(name) or "").strip()
+                        for name in ("SGLANG_TORCH_PROFILER_DIR", "VLLM_TORCH_PROFILER_DIR")
+                    )
+                    if value
+                ),
+                "",
+            )
+            if pinned:
+                configured_trace_dir = Path(pinned)
+            else:
+                configured_trace_dir = profile_output_dir / "torch_trace"
+                configured_trace_dir.mkdir(parents=True, exist_ok=True)
+                capture_envs["SGLANG_TORCH_PROFILER_DIR"] = str(configured_trace_dir)
+                capture_envs["VLLM_TORCH_PROFILER_DIR"] = str(configured_trace_dir)
             params["extra_envs"] = capture_envs
 
         # Mtime gate for the multi-node shared-trace-dir layout: captured before super().__call__ so this round's
@@ -1421,7 +1448,7 @@ class ProfileExecutor(BaselineExecutor):
             selected_trace_files: list[Path] = []
             existing_empty_dirs: list[Path] = []
             capture_only = False
-            candidate_trace_dirs = _candidate_trace_dirs(workspace)
+            candidate_trace_dirs = _candidate_trace_dirs(workspace, configured_trace_dir)
             for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
