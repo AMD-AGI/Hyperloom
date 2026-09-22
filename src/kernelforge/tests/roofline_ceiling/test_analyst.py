@@ -28,16 +28,22 @@ class _Backend:
 
     name = "fake"
 
-    def __init__(self, *payloads):
+    def __init__(self, *payloads, leavings: dict[str, str] | None = None):
         self._payloads = list(payloads)
+        self._leavings = dict(leavings or {})
         self.specs: list = []
 
     async def run(self, spec, usage=None):
         self.specs.append(spec)
+        scratch = Path(self._output_dir(spec))
+        for name, body in self._leavings.items():
+            leaving = scratch / name
+            leaving.parent.mkdir(parents=True, exist_ok=True)
+            leaving.write_text(body, encoding="utf-8")
         if self._payloads:
             payload = self._payloads.pop(0)
             if payload is not None:
-                target = Path(self._output_dir(spec)) / REPORT_FILENAME
+                target = scratch / REPORT_FILENAME
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(payload if isinstance(payload, str) else json.dumps(payload), encoding="utf-8")
         return type("Result", (), {"text": "done", "end_reason": "agent_stopped"})()
@@ -180,15 +186,15 @@ def test_the_session_can_run_the_profiler_it_needs(tmp_path):
     assert (policy.read, policy.search, policy.write, policy.shell) == (True, True, True, True)
 
 
-def test_the_session_may_write_only_where_it_was_told(tmp_path):
+def test_the_session_writes_outside_the_workspace_so_the_guard_keeps_it(tmp_path):
+    """The guard rolls back new files under the workspace, answer included."""
     backend = _Backend(_GOOD)
 
     _analyse(backend, tmp_path)
 
-    assert backend.specs[0].additional_directories == [
-        str(tmp_path / "out"),
-        str(tmp_path / "evidence"),
-    ]
+    scratch = Path(backend.specs[0].additional_directories[0])
+    assert backend.specs[0].additional_directories == [str(scratch)]
+    assert tmp_path not in scratch.parents
 
 
 def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
@@ -219,12 +225,13 @@ def test_the_hook_refuses_an_edit_outside_the_output_directories(tmp_path):
     assert "read-only" in reason
 
 
-def test_the_hook_allows_the_files_the_analyst_is_asked_for(tmp_path):
+def test_the_hook_allows_the_scratch_directory_it_named(tmp_path):
     backend = _Backend(_GOOD)
     _analyse(backend, tmp_path)
 
-    assert _deny_reason(backend.specs[0].hooks, "Write", str(tmp_path / "out" / REPORT_FILENAME)) is None
-    assert _deny_reason(backend.specs[0].hooks, "Write", str(tmp_path / "evidence" / "roofs.csv")) is None
+    scratch = backend.specs[0].additional_directories[0]
+    assert _deny_reason(backend.specs[0].hooks, "Write", f"{scratch}/{REPORT_FILENAME}") is None
+    assert _deny_reason(backend.specs[0].hooks, "Write", f"{scratch}/roofs/roofline.csv") is None
 
 
 def test_the_hook_leaves_tools_that_do_not_write_alone(tmp_path):
@@ -241,6 +248,25 @@ def test_a_file_the_analyst_wrote_becomes_the_report(tmp_path):
     report = _analyse(_Backend(_GOOD), tmp_path)
 
     assert report.ideal_ms() == {"c0": 12.8}
+
+
+def test_both_deliverables_are_moved_into_the_output_directory(tmp_path):
+    backend = _Backend(_GOOD)
+
+    _analyse(backend, tmp_path)
+
+    assert (tmp_path / "out" / REPORT_FILENAME).is_file()
+
+
+def test_what_the_session_left_behind_is_kept_as_the_record(tmp_path):
+    """How the roofs were established has to survive the scratch directory."""
+    backend = _Backend(_GOOD, leavings={"roofs/roofline.csv": "device,HBMBw\n0,6230\n"})
+
+    _analyse(backend, tmp_path)
+
+    kept = tmp_path / "out" / "evidence" / "analyst" / "roofs" / "roofline.csv"
+    assert kept.is_file()
+    assert "HBMBw" in kept.read_text()
 
 
 def test_an_unreadable_file_is_handed_back_once_with_the_reason(tmp_path):

@@ -13,12 +13,23 @@ that can is taken as given. Nothing re-derives a latency, because a framework
 that could would be asserting a work model this design already found too narrow
 for real operators.
 
-Bounding the write is a hook rather than a sandbox flag because the session
-needs a shell -- reaching a profiler on an arbitrary image means installing
-packages, and that is open-ended work code cannot enumerate. The hook denies
-edits outside the output and evidence directories, and the workspace guard
-snapshots and restores everything else, so the kernel under optimization comes
-out of the session as it went in.
+The session needs a shell -- reaching a profiler on an arbitrary image means
+installing packages, and that is open-ended work code cannot enumerate -- so
+the workspace has to be defended rather than trusted. It is defended twice.
+
+The workspace guard is the real line: granting shell makes it active instead of
+skipped, and ``protected_globs=["*"]`` puts every file under it, so the kernel
+comes out of the session exactly as it went in. That strictness has a
+consequence worth stating, because it is not obvious and it cost a run to find:
+the guard counts *new* files in the workspace as violations too, and rolls the
+tree back when it finds any. An analyst writing its answer under the workspace
+would therefore have its answer deleted on the way out.
+
+So the analyst writes into a scratch directory outside the workspace, and this
+module moves the two deliverables into place afterwards. The hook is the second
+line, refusing the editing tools anywhere but that scratch directory, which
+turns a wrong path into a message the analyst can act on rather than a rollback
+it never sees.
 """
 
 from __future__ import annotations
@@ -26,6 +37,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -41,6 +54,7 @@ from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingR
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle
 from kernelforge.roofline_ceiling.report import (
     DOCUMENT_FILENAME,
+    EVIDENCE_DIRNAME,
     REPORT_FILENAME,
     read_report,
 )
@@ -230,6 +244,30 @@ def _repair_prompt(report_path: Path, problem: str) -> str:
     )
 
 
+def _move_into_place(scratch: Path, destination: Path) -> None:
+    """Put what the analyst wrote where the rest of the system looks for it.
+
+    The two deliverables land in ``destination``; everything else the session
+    produced -- profiler output, benchmark scripts, logs -- lands beneath it as
+    the record of how the roofs were established.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in (REPORT_FILENAME, DOCUMENT_FILENAME):
+        source = scratch / name
+        if source.is_file():
+            shutil.copy2(source, destination / name)
+
+    workings = destination / EVIDENCE_DIRNAME / "analyst"
+    if workings.exists():
+        shutil.rmtree(workings, ignore_errors=True)
+    shutil.copytree(
+        scratch,
+        workings,
+        ignore=shutil.ignore_patterns(REPORT_FILENAME, DOCUMENT_FILENAME),
+        dirs_exist_ok=True,
+    )
+
+
 async def run_ceiling_analysis(
     backend: Any,
     *,
@@ -248,45 +286,52 @@ async def run_ceiling_analysis(
 ) -> CeilingReport:
     """Run the analyst until it leaves a readable ceiling file, or give up."""
     destination = Path(output_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    report_path = destination / REPORT_FILENAME
-
     system_prompt = load_role(project_root)
-    attempt_prompt = build_request(
-        kernel_files=kernel_files,
-        driver_script=driver_script,
-        performance_command=performance_command,
-        case_ids=case_ids,
-        case_params=case_params,
-        evidence=evidence,
-        output_dir=str(destination),
-    )
-    writable_dirs = [str(destination), str(evidence.artifacts_dir)]
+    scratch = Path(tempfile.mkdtemp(prefix="forge_ceiling_"))
+    report_path = scratch / REPORT_FILENAME
 
-    last_problem = ""
-    for attempt in range(MAX_REPAIR_ROUNDS + 1):
-        await _ask(
-            backend,
-            _spec(
-                system_prompt=system_prompt,
-                user_prompt=attempt_prompt,
-                workdir=workdir,
-                model=model,
-                timeout_sec=timeout_sec,
-                writable_dirs=writable_dirs,
-                turns=turns,
-            ),
+    try:
+        attempt_prompt = build_request(
+            kernel_files=kernel_files,
+            driver_script=driver_script,
+            performance_command=performance_command,
+            case_ids=case_ids,
+            case_params=case_params,
+            evidence=evidence,
+            output_dir=str(scratch),
         )
-        try:
-            return read_report(report_path)
-        except (OSError, ValueError, CeilingContractError) as exc:
-            last_problem = str(exc) if not isinstance(exc, OSError) else f"it was not written ({exc})"
-            log.warning("ceiling attempt %d left no readable %s: %s", attempt + 1, REPORT_FILENAME, last_problem)
-            if attempt >= MAX_REPAIR_ROUNDS:
-                break
-            attempt_prompt = _repair_prompt(report_path, last_problem)
 
-    raise CeilingAnalysisError(f"no readable {REPORT_FILENAME} after {MAX_REPAIR_ROUNDS + 1} attempts: {last_problem}")
+        last_problem = ""
+        for attempt in range(MAX_REPAIR_ROUNDS + 1):
+            await _ask(
+                backend,
+                _spec(
+                    system_prompt=system_prompt,
+                    user_prompt=attempt_prompt,
+                    workdir=workdir,
+                    model=model,
+                    timeout_sec=timeout_sec,
+                    writable_dirs=[str(scratch)],
+                    turns=turns,
+                ),
+            )
+            try:
+                report = read_report(report_path)
+            except (OSError, ValueError, CeilingContractError) as exc:
+                last_problem = str(exc) if not isinstance(exc, OSError) else f"it was not written ({exc})"
+                log.warning("ceiling attempt %d left no readable %s: %s", attempt + 1, REPORT_FILENAME, last_problem)
+                if attempt >= MAX_REPAIR_ROUNDS:
+                    break
+                attempt_prompt = _repair_prompt(report_path, last_problem)
+                continue
+            _move_into_place(scratch, destination)
+            return report
+
+        raise CeilingAnalysisError(
+            f"no readable {REPORT_FILENAME} after {MAX_REPAIR_ROUNDS + 1} attempts: {last_problem}"
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 __all__ = [
