@@ -95,7 +95,61 @@ after cgroup.kill : members=[] populated=0
 The survivor is invisible to the process group, to the session, to the pidfile
 and to command-line matching. It is still in the cgroup.
 
-## Design
+## Measured: the deployment already gives most of this away
+
+The design below assumed a delegated cgroup subtree. Measuring the pod the
+platform actually creates for a Hyperloom task (Claw -> SaFE -> PyTorchJob)
+changed the picture:
+
+| | Platform pod | Hand-made privileged pod |
+| --- | --- | --- |
+| `CAP_SYS_ADMIN` | **not held** | held |
+| cgroup namespace | **own** (`/proc/self/cgroup` reads `0::/`) | shared with host |
+| create a child cgroup | **read-only cgroupfs** | yes |
+| escape a cgroup by writing `cgroup.procs` | no | **yes, one write** |
+
+So the privileged pod can build the cgroup design and cannot be secured by it;
+the platform pod is already secure and cannot build it. Getting a delegated
+subtree means changing a pod spec owned by another team.
+
+A PID namespace needs none of that. `unshare(CLONE_NEWUSER|CLONE_NEWPID)`
+succeeds on the platform pod **without** `CAP_SYS_ADMIN`, and ROCm still sees
+every GPU from inside it.
+
+### The boundary that does not need delegation
+
+A process may change its session, process group, parent, executable, uid and
+open files without leaving its PID namespace. `setns` cannot move a caller into
+an *ancestor* PID namespace — only its own or a descendant, and then only for
+children created afterwards. When the namespace's init exits, the kernel kills
+every remaining member before the namespace can disappear.
+
+That turns "is anybody still running" from a search into one question with a
+definite answer: has that init exited.
+
+Verified on the platform pod:
+
+```
+unshare(CLONE_NEWUSER|CLONE_NEWPID)  -> ok, child is pid 1 inside
+survivor: setsid twice, root exits, reparented
+  host pid 4114465, pid 3 inside
+  after init exited -> state 'gone'
+rocm-smi inside the namespace -> 48 GPUs, /dev/kfd rw
+```
+
+The survivor is the exact shape that defeated the process group, the pidfile and
+the command line. It cannot leave the namespace, and it does not outlive it.
+
+Each task's supervisor is identified by pid, `starttime` and the namespace
+inode. A pid is reused; a pid at a start time in a given namespace is not, so a
+mismatch after a coordinator restart is proof the old namespace is gone rather
+than a guess. Anything unreadable stays fail-closed, as before.
+
+**Out of contract, for both designs:** a workload that hands an already-open
+device descriptor to a process outside its boundary through external IPC.
+Neither a PID namespace nor a cgroup can retract an exported descriptor.
+
+## Design (cgroup variant, retained for reference)
 
 A node-local containment service, owned by the coordinator deployment rather
 than by specialist or Ray-actor lifetimes.

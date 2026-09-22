@@ -105,10 +105,19 @@ def test_the_probe_leaves_no_cgroup_behind(tmp_path: Path, monkeypatch: pytest.M
     assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == []
 
 
-@pytest.mark.skipif(
-    containment.cgroup_v2_root() is None or os.geteuid() != 0,
-    reason="needs a writable cgroup v2 hierarchy",
-)
+def _can_create_cgroups() -> bool:
+    """Whether this host actually delegates a writable subtree.
+
+    Being root is not the question. The deployment's own pod mounts cgroupfs
+    read-only, which is what makes the cgroup design undeployable there and the
+    PID-namespace one the cheaper answer -- so the check has to be the operation,
+    not the uid.
+    """
+    support = containment.probe_containment_support()
+    return support.delegated_root is not None
+
+
+@pytest.mark.skipif(not _can_create_cgroups(), reason="no delegated writable cgroup v2 subtree")
 def test_a_setsid_descendant_cannot_leave_its_domain():
     """The property the whole design rests on, exercised against the real kernel.
 
