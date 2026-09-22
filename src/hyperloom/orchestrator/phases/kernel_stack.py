@@ -462,24 +462,21 @@ class KernelStackPhase(PhaseHandler):
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
-                try:
-                    accuracy_gate = _grade_integrate_accuracy(
-                        bench_result,
-                        session_dir=self.session_dir,
-                        workspace=workspace,
-                        # The args the bench server ran under, so a serving context too small to host an eval is not
-                        # read as a broken eval.
-                        server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                accuracy_gate = _grade_integrate_accuracy(
+                    bench_result,
+                    session_dir=self.session_dir,
+                    workspace=workspace,
+                    # The args the bench server ran under, so a serving context too small to host an eval is not
+                    # read as a broken eval.
+                    server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                )
+                if accuracy_gate.get("blocked"):
+                    decision = "NEEDS_REVIEW"
+                    log.info(
+                        "stack-validate: accuracy gate blocked KEEP for %s: %s",
+                        stack_id,
+                        accuracy_gate.get("reason"),
                     )
-                    if accuracy_gate.get("blocked"):
-                        decision = "NEEDS_REVIEW"
-                        log.info(
-                            "stack-validate: accuracy gate blocked KEEP for %s: %s",
-                            stack_id,
-                            accuracy_gate.get("reason"),
-                        )
-                except Exception:  # noqa: BLE001
-                    log.debug("stack-validate: accuracy gate failed", exc_info=True)
 
             finalize_results: list[dict[str, Any]] = []
             stack_reverts: list[dict[str, Any]] = []
