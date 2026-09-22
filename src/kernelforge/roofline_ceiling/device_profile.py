@@ -22,7 +22,6 @@ under SPX is a different machine and its roofs are different numbers.
 
 from __future__ import annotations
 
-import logging
 import re
 import shutil
 import subprocess
@@ -30,8 +29,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
-
-log = logging.getLogger("kernelforge.roofline_ceiling")
 
 _MARKETING_RE = re.compile(r"^\s*Marketing Name:\s*(AMD Instinct\s+\S+)", re.MULTILINE)
 _COMPUTE_PARTITION_RE = re.compile(r"Compute Partition:\s*(\S+)")

@@ -364,7 +364,6 @@ def _make_ceiling_estimator(
     workspace_dir: str,
     driver_script: str,
     source_files: Sequence[str],
-    operator_name: str,
     agent_provider: str,
     agent_model: str,
     session_timeout_sec: int,
@@ -395,7 +394,6 @@ def _make_ceiling_estimator(
             performance_command=bench_command(driver_script),
             kernel_files=[str(path) for path in source_files],
             driver_script=driver_script,
-            op_name=operator_name,
             known_case_ids=list(case_ids),
             known_case_ms=dict(case_ms),
             agent_model=agent_model,
@@ -1627,7 +1625,6 @@ def forge_loop(
             workspace_dir=workspace_dir,
             driver_script=iter_config.driver_script,
             source_files=source_files_list,
-            operator_name=operator_name,
             # The runtime the implementer lanes settle on is resolved further down, after this point, and the analyst
             # is a different role anyway: it reads the same provider/model ladder the standalone command reads, so
             # the raw selection is what it needs and an empty one means "take the default".

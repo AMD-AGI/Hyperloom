@@ -3067,11 +3067,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             return False
         return standing.mean >= target
 
-    def _scored_case_ids(self) -> list[str]:
-        """The cases the objective scores, which a ceiling has to answer in full."""
-        anchor = self._best_case_times or self._baseline_case_times
-        return [case_id for case_id in anchor if case_id not in self._unscored_cases]
-
     def _render_ceiling_advisory(self) -> str:
         """Render the roofline standing for the planner, when a ceiling is published.
 

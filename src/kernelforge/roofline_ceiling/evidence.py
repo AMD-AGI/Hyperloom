@@ -231,9 +231,7 @@ def collect_evidence(
 
     if known_case_ids:
         scored = [str(case_id) for case_id in dict.fromkeys(known_case_ids)]
-        observed = {
-            case_id: float(value) for case_id, value in (known_case_ms or {}).items() if case_id in set(scored)
-        }
+        observed = {case_id: float(value) for case_id, value in (known_case_ms or {}).items() if case_id in set(scored)}
         observed_origin = OBSERVED_CAMPAIGN
         notes = ["scored case set and latencies supplied by the caller; no discovery run was made"]
     else:

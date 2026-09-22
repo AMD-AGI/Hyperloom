@@ -15,9 +15,9 @@ import pytest
 
 from kernelforge import cli as cli_module
 from kernelforge.roofline_ceiling.contract import load_report
+from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.loop.runner import IterationConfig, IterationLoop
-
 
 
 def _report(cases=(("decode-t1", 12.8),)):
@@ -160,13 +160,51 @@ def test_no_estimator_is_built_unless_compute_was_asked_for():
             workspace_dir=".",
             driver_script="driver.py",
             source_files=["kernel.py"],
-            operator_name="op",
             agent_provider="",
             agent_model="",
             session_timeout_sec=60,
         )
         is None
     )
+
+
+def test_the_compute_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
+    """The loop's estimator is invoked, not just built.
+
+    Building it proves nothing: the call into ``estimate_ceiling`` is where a
+    keyword the signature does not have turns into a ``TypeError``, and that
+    only happens once a campaign has already paid for a baseline.
+    """
+    seen = {}
+
+    async def _estimate(backend, **kwargs):
+        seen.update(kwargs)
+        return "outcome"
+
+    monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
+    monkeypatch.setattr(
+        "kernelforge.roofline_ceiling.command.resolve_analyst_backend",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    estimator = cli_module._make_ceiling_estimator(
+        selection="compute",
+        workspace_dir=".",
+        driver_script="driver.py",
+        source_files=["kernel.py"],
+        agent_provider="",
+        agent_model="",
+        session_timeout_sec=60,
+    )
+    assert estimator is not None
+
+    result = asyncio.run(estimator(case_ids=["decode-t1"], case_ms={"decode-t1": 14.0}))
+
+    assert result == "outcome"
+    assert seen["known_case_ids"] == ["decode-t1"]
+    # Every keyword the estimator sends has to be one the signature declares.
+    accepted = set(inspect.signature(real_estimate_ceiling).parameters)
+    assert set(seen) <= accepted, sorted(set(seen) - accepted)
 
 
 def test_the_target_ends_the_campaign_once_the_mean_reaches_it(tmp_path):
