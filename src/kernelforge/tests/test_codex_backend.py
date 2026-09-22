@@ -813,12 +813,10 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
         "create_registered_backend",
         fake_factory,
     )
-    kernel = tmp_path / "kernel.py"
-    kernel.write_text("VALUE = 1\n")
-    driver = tmp_path / "forge_driver.py"
+    repo, kernel, driver = _make_repo(tmp_path)
     driver.write_text("print('allclose: True')\n")
     config = Config(
-        workspace=str(tmp_path),
+        workspace=str(repo),
         agent_backend="codex",
         agent_model="gpt-codex-test",
         agent_precheck=False,
