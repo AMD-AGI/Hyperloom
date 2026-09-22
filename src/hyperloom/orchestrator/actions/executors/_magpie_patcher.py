@@ -206,87 +206,63 @@ _PREPARE_METHOD_MARKER = "def _prepare_benchmark_scripts"
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_magpie_benchmarker_patcher.lock")
 
 
-def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
-    """Resolve ``<magpie_dir>/Magpie/modes/benchmark/benchmarker.py``."""
+def _resolve_component_path(
+    explicit_dir: Path | str | None,
+    env_var: str,
+    *rel_parts: str,
+    check: str = "file",
+) -> Path | None:
+    """Resolve a component sub-path via an explicit dir override or an env var.
+
+    Returns the candidate path if it satisfies *check* (``"file"`` or ``"dir"``),
+    else ``None``.
+    """
     root: Path | None = None
-    if magpie_dir:
-        root = Path(magpie_dir)
+    if explicit_dir:
+        root = Path(explicit_dir)
     else:
-        env = (os.environ.get("MAGPIE_PATH") or "").strip()
+        env = (os.environ.get(env_var) or "").strip()
         if env:
             root = Path(env)
     if root is None:
         return None
-    candidate = root / "Magpie" / "modes" / "benchmark" / "benchmarker.py"
-    return candidate if candidate.is_file() else None
+    candidate = root.joinpath(*rel_parts)
+    return candidate if (candidate.is_file() if check == "file" else candidate.is_dir()) else None
+
+
+def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
+    """Resolve ``<magpie_dir>/Magpie/modes/benchmark/benchmarker.py``."""
+    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "modes", "benchmark", "benchmarker.py")
 
 
 def _resolve_sglang_mi300x_script_path(
     magpie_dir: Path | str | None,
 ) -> Path | None:
     """Resolve Magpie's generic SGLang MI300X benchmark script when present."""
-    root: Path | None = None
-    if magpie_dir:
-        root = Path(magpie_dir)
-    else:
-        env = os.environ.get("MAGPIE_PATH", "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi300x.sh"
-    return candidate if candidate.is_file() else None
+    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", "sglang_mi300x.sh")
 
 
 def _resolve_sglang_mi355x_script_path(
     magpie_dir: Path | str | None,
 ) -> Path | None:
     """Resolve Magpie's SGLang MI355X benchmark script when present."""
-    root: Path | None = None
-    if magpie_dir:
-        root = Path(magpie_dir)
-    else:
-        env = os.environ.get("MAGPIE_PATH", "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "Magpie" / "scripts" / "benchmark" / "sglang_mi355x.sh"
-    return candidate if candidate.is_file() else None
+    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", "sglang_mi355x.sh")
 
 
 def _resolve_benchmark_scripts_dir(
     magpie_dir: Path | str | None,
 ) -> Path | None:
     """Resolve Magpie's ``scripts/benchmark`` directory when present."""
-    root: Path | None = None
-    if magpie_dir:
-        root = Path(magpie_dir)
-    else:
-        env = os.environ.get("MAGPIE_PATH", "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "Magpie" / "scripts" / "benchmark"
-    return candidate if candidate.is_dir() else None
+    return _resolve_component_path(
+        magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", check="dir"
+    )
 
 
 def _resolve_inferencex_benchmarks_dir(
     inferencex_dir: Path | str | None,
 ) -> Path | None:
     """Resolve InferenceX's ``benchmarks`` directory when present."""
-    root: Path | None = None
-    if inferencex_dir:
-        root = Path(inferencex_dir)
-    else:
-        env = (os.environ.get("INFERENCEX_PATH") or "").strip()
-        if env:
-            root = Path(env)
-    if root is None:
-        return None
-    candidate = root / "benchmarks"
-    return candidate if candidate.is_dir() else None
+    return _resolve_component_path(inferencex_dir, "INFERENCEX_PATH", "benchmarks", check="dir")
 
 
 def _resolve_inferencex_benchmark_lib(
