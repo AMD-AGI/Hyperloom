@@ -256,9 +256,7 @@ class TestEditSurfaceAndSweepContract:
             assert "keep the knobs" not in lowered, (
                 f"{backend}: prompt still tells the implementer to ship its own sweep knobs"
             )
-            assert "a copy of the kernel" in lowered, (
-                f"{backend}: prompt does not send the sweep to a copy"
-            )
+            assert "a copy of the kernel" in lowered, f"{backend}: prompt does not send the sweep to a copy"
             assert "winning literal" in lowered, (
                 f"{backend}: prompt does not say the submitted kernel carries the literal, not the read"
             )
