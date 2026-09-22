@@ -865,8 +865,9 @@ def _virtual_trace_clock_env(tmp_path, env=None):
     with Path(env["BASH_ENV"]).open("a", encoding="utf-8") as handle:
         handle.write(
             r"""
+if [ "${0##*/}" = aiperf_client.sh ]; then
 sleep() {
-  if [ "${0##*/}" = aiperf_client.sh ] && [ "${FUNCNAME[1]:-}" = _wait_for_trace_flush ]; then
+  if [ "${FUNCNAME[1]:-}" = _wait_for_trace_flush ]; then
     local elapsed
     read -r elapsed < "$AGENTX_TEST_TRACE_CLOCK"
     awk -v elapsed="$elapsed" -v duration="$1" 'BEGIN { printf "%.9f\n", elapsed + duration }' > "$AGENTX_TEST_TRACE_CLOCK"
@@ -874,6 +875,7 @@ sleep() {
     command sleep "$@"
   fi
 }
+fi
 date() {
   local elapsed
   read -r elapsed < "$AGENTX_TEST_TRACE_CLOCK"

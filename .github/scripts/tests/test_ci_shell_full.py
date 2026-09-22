@@ -10,9 +10,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -47,6 +49,8 @@ class TestClockCandidate(unittest.TestCase):
             script = Path(env["BASH_ENV"]).read_text()
             self.assertIn("FUNCNAME", script)
             self.assertIn("_wait_for_trace_flush", script)
+            prefix = script.split("sleep()", 1)[0]
+            self.assertIn('if [ "${0##*/}" = aiperf_client.sh ]; then', prefix)
             self.assertNotIn("kill()", script)
             self.assertNotIn("fuser", script)
 
@@ -77,6 +81,89 @@ class TestClockCandidate(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()), 15)
             self.assertEqual(marker.read_text().splitlines(), ["2", "6", "300"])
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and shutil.which("bash"), "Linux PID/EOF regression runs on hosted runner"
+    )
+    def test_old_wrapper_leaks_pipe_but_scoped_override_preserves_background_pid(self):
+        old_source = subprocess.run(
+            ["git", "-C", str(REPO), "show", f"c24b171c4fffb2c714714b9e1758d91eff4a769b:{TEST_FILE}"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout
+        new_source = (REPO / TEST_FILE).read_text(encoding="utf-8")
+
+        def probe(source):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                env = dict(os.environ, **clock_functions(source)["_virtual_trace_clock_env"](root))
+                pid_file = root / "background.pid"
+                command_type = root / "sleep-type.txt"
+                child = root / "fake_builtin.sh"
+                child.write_text(
+                    'type -t sleep > "$TYPE_FILE"\n'
+                    'sleep 8 &\nprintf "%s\\n" "$!" > "$PID_FILE.tmp"\nmv "$PID_FILE.tmp" "$PID_FILE"\n',
+                    encoding="utf-8",
+                )
+                env.update(PID_FILE=str(pid_file), TYPE_FILE=str(command_type))
+                process = subprocess.Popen(
+                    ["bash", str(child)],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                timed_out = False
+                try:
+                    deadline = time.monotonic() + 2
+                    while not pid_file.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(pid_file.exists(), "Background process did not publish its PID")
+                    pid = int(pid_file.read_text())
+                    while time.monotonic() < deadline:
+                        comm = Path(f"/proc/{pid}/comm").read_text().strip()
+                        children_path = Path(f"/proc/{pid}/task/{pid}/children")
+                        children = children_path.read_text().strip().split()
+                        if comm == "sleep" or children:
+                            break
+                        time.sleep(0.01)
+                    else:
+                        self.fail("Background process never reached native sleep or its wrapper child")
+                    group = os.getpgid(pid)
+                    self.assertEqual(group, process.pid, "Probe child escaped its isolated process group")
+                    self.assertNotEqual(group, pid, "Probe PID unexpectedly leads the process group")
+                    self.assertEqual(process.wait(timeout=2), 0, "Launcher did not exit before EOF measurement")
+                    try:
+                        os.killpg(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        os.kill(pid, signal.SIGTERM)
+                    try:
+                        process.communicate(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        timed_out = True
+                    return {
+                        "type": command_type.read_text().strip(),
+                        "comm": comm,
+                        "children": len(children),
+                        "eof_timeout": timed_out,
+                    }
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.communicate(timeout=2)
+
+        old, new = probe(old_source), probe(new_source)
+        print("Lifecycle regression: " + json.dumps({"old": old, "new": new}, sort_keys=True), flush=True)
+        self.assertEqual(old["type"], "function")
+        self.assertTrue(old["eof_timeout"], "Old PID/EOF failure did not reproduce; stop before full suite")
+        self.assertGreater(old["children"], 0)
+        self.assertEqual(new["type"], "file")
+        self.assertEqual(new["comm"], "sleep")
+        self.assertFalse(new["eof_timeout"])
 
     def test_original_tests_parameters_and_assertions_are_preserved(self):
         baseline = subprocess.run(
