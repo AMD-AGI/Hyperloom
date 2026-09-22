@@ -95,193 +95,118 @@ after cgroup.kill : members=[] populated=0
 The survivor is invisible to the process group, to the session, to the pidfile
 and to command-line matching. It is still in the cgroup.
 
-## Measured: the deployment already gives most of this away
+## Three designs, measured against the real environments
 
-The design below assumed a delegated cgroup subtree. Measuring the pod the
-platform actually creates for a Hyperloom task (Claw -> SaFE -> PyTorchJob)
-changed the picture:
+Hyperloom runs in three shapes, and the mechanism has to hold in all of them.
 
-| | Platform pod | Hand-made privileged pod |
-| --- | --- | --- |
-| `CAP_SYS_ADMIN` | **not held** | held |
-| cgroup namespace | **own** (`/proc/self/cgroup` reads `0::/`) | shared with host |
-| create a child cgroup | **read-only cgroupfs** | yes |
-| escape a cgroup by writing `cgroup.procs` | no | **yes, one write** |
+| | claw mode (production) | local / baremetal | privileged pod (testing only) |
+| --- | --- | --- | --- |
+| how it starts | Claw -> SaFE -> PyTorchJob | `pip install`, run on a GPU host | hand-made |
+| `CAP_SYS_ADMIN` | **no** | sometimes | yes |
+| `/sys/fs/cgroup` | **read-only** | varies | writable |
+| `mount()` | **EPERM** | varies | permitted |
+| Kubernetes | yes | **may not exist** | yes |
 
-So the privileged pod can build the cgroup design and cannot be secured by it;
-the platform pod is already secure and cannot build it. Getting a delegated
-subtree means changing a pod spec owned by another team.
+`local` is not one environment. The install guide tells users to pick
+`baremetal` *even inside someone else's Docker container*, and notes Hyperloom
+may run as non-root — so it spans bare-metal root and containers measured to be
+as locked down as claw mode.
 
-A PID namespace needs none of that. `unshare(CLONE_NEWUSER|CLONE_NEWPID)`
-succeeds on the platform pod **without** `CAP_SYS_ADMIN`, and ROCm still sees
-every GPU from inside it.
+### Per-task cgroup — undeployable
 
-### The boundary that does not need delegation
+Needs a delegated writable subtree. Claw mode and the locked-down half of local
+mount cgroupfs read-only and cannot create one at all. Only the privileged pod
+can — and it is also the one environment where a cgroup cannot secure anything:
+a root process there leaves its cgroup with a single write to `cgroup.procs`,
+measured.
 
-A process may change its session, process group, parent, executable, uid and
-open files without leaving its PID namespace. `setns` cannot move a caller into
-an *ancestor* PID namespace — only its own or a descendant, and then only for
-children created afterwards. When the namespace's init exits, the kernel kills
-every remaining member before the namespace can disappear.
+### PID namespace — undeployable, and failed in a way worth recording
 
-That turns "is anybody still running" from a search into one question with a
-definite answer: has that init exited.
+`unshare(CLONE_NEWUSER|CLONE_NEWPID)` succeeds everywhere, including claw mode
+without `CAP_SYS_ADMIN`, and ROCm sees every GPU from inside. A survivor that
+calls `setsid` twice and outlives its root — the exact shape that defeated the
+process group, the pidfile and the command line — cannot leave the namespace and
+is killed when its init exits. The boundary itself is sound.
 
-Verified on the platform pod:
+It still does not work, because a real server will not start in one:
 
 ```
-unshare(CLONE_NEWUSER|CLONE_NEWPID)  -> ok, child is pid 1 inside
-survivor: setsid twice, root exits, reparented
-  host pid 4114465, pid 3 inside
-  after init exited -> state 'gone'
-rocm-smi inside the namespace -> 48 GPUs, /dev/kfd rw
+detokenizer_manager.py:546
+    parent_process = psutil.Process().parent()
+psutil.NoSuchProcess: process PID not found (pid=173)
 ```
 
-The survivor is the exact shape that defeated the process group, the pidfile and
-the command line. It cannot leave the namespace, and it does not outlive it.
+A PID namespace renumbers pids while `/proc` still shows the host, so the
+server's children cannot find their own parent. Fixing that means mounting a
+fresh procfs, which needs a mount namespace — and `mount()` returns `EPERM` in
+claw mode and in the locked-down half of local. It works only in the privileged
+pod.
 
-Each task's supervisor is identified by pid, `starttime` and the namespace
-inode. A pid is reused; a pid at a start time in a given namespace is not, so a
-mismatch after a coordinator restart is proof the old namespace is gone rather
-than a guess. Anything unreadable stays fail-closed, as before.
+### One Kubernetes pod per specialist — not portable
 
-**Out of contract, for both designs:** a workload that hands an already-open
-device descriptor to a process outside its boundary through external IPC.
-Neither a PID namespace nor a cgroup can retract an exported descriptor.
+Sound where Kubernetes exists, and it puts containment where it belongs: with
+the cluster runtime. But local mode may have no Kubernetes at all.
 
-## Design (cgroup variant, retained for reference)
+### Why they fail for the same reason
 
-A node-local containment service, owned by the coordinator deployment rather
-than by specialist or Ray-actor lifetimes.
+The deployment deliberately removes exactly the privileges needed to construct
+an isolation domain from inside a container. Being unable to build one is the
+security model working, not a misconfiguration to route around.
 
-For each GPU-holding task it mints a never-reused UUID and creates
-`<delegated-root>/hyperloom/<session-uuid>/<task-uuid>`. The lane acquisition and
-a containment record commit together in SQLite, carrying the task UUID, node
-identity, node `boot_id`, cgroup version, cgroup path and id, the assigned GPU
-ids, and a lifecycle state. The service keeps its own durable ledger, so the two
-sides can be reconciled after either one crashes.
+## Conclusion: retention is the mechanism
 
-Release runs through that state machine and nowhere else: the lane is freed only
-after the node owning the domain attests it is empty. Process-group, pidfile,
-task-terminal and command-line identities are removed from release decisions
-entirely.
+There is no portable way to prove a lane is free. Quoting the design review:
 
-A domain is never identified by a reusable path alone. Paths are reused; UUIDs
-and `boot_id` are not.
+> A plain pipe, socketpair, flock, OFD lock, UID scan, PID scan, or any
+> combination of them does not meet the bar and must not trigger release.
 
-## Boundaries
+So the shipped behaviour is not a stopgap, it is the answer: **retain the lane
+unless teardown positively confirms completion**, and make the retention
+visible. That is what PR #1595 does — one operator diagnostic per
+`(lane, holder)`, naming the lane, the holder, why it cannot be verified, and a
+paste-ready statement that clears it.
 
-Ray-placed actors on other nodes are **out of scope** until the same node-local
-boundary exists there. Killing an actor releases Ray's logical GPUs while its
-daemonised subprocesses may survive, so actor lifetime is specifically not proof
-of process-tree death. Until each eligible worker runs the service, those lanes
-stay fail-closed — held, and reported.
+Overlap is structurally impossible in every supported environment. The cost is
+an operator on an ordinary path.
 
-Multi-tenant Ray is also out of scope. Containment proves when *our* work is
-finished; it does not stop an unrelated Ray client from being scheduled onto the
-same physical cards. That needs either exclusive workers or a node-level
-reservation keyed by physical GPU identity, used by every client.
+## The one mechanism that could automate a subset
 
-## When not to build this
+A **sealed execution**: the workload inherits one end of a pipe with
+`FD_CLOEXEC` cleared, a supervisor keeps the other, and the kernel emits EOF only
+once every reference is gone. That survives `setsid`, double-forking,
+reparenting and `exec`, because the open-file reference is copied through
+`fork` and outlives `exec`.
 
-Containment becomes another escapable proxy — and this design should be
-abandoned for one Kubernetes pod per specialist, where the cluster runtime owns
-containment and fencing — if the deployment cannot:
+A bare descriptor is not enough: a workload can `close`, `close_range`, `dup2`
+or re-set `FD_CLOEXEC` and produce EOF while it is still GPU-capable. What makes
+it sound is an **unprivileged seccomp filter** — available in all three shapes,
+inherited by every descendant, and impossible to weaken — that refuses every
+syscall route which could discard or replace the sentinel.
 
-- remove `CAP_SYS_ADMIN` and cgroup-write authority from specialist and server
-  processes, or
-- provide a delegated cgroup v2 subtree on every execution node, or
-- prevent unrelated GPU clients from scheduling onto the same cards without a
-  shared reservation boundary.
+Conditions, none of them optional:
 
-Startup validation treats each of these as unsupported and **disables automatic
-reclamation**, keeping the fail-closed lane. It must never fall back to
-inspection: a silent downgrade to a refuted proxy is worse than a lane an
-operator can see and clear.
+- The filter must cover *every* fd-destruction mechanism of the running kernel.
+  If it does not, the execution **must not** be classified as sealed.
+- `SCM_RIGHTS` can only prolong retention, never release early; allowing
+  `sendmsg` means accepting hidden queued references as conservative retention.
+- Only the sealed subset may be released automatically. Everything else keeps
+  the behaviour above.
 
-## Failure modes
+This is worth building only when the numbers justify it. The comprehensiveness
+of that filter is safety-critical: getting it wrong is more dangerous than not
+having it, because it would release lanes on a guarantee that does not hold.
 
-Every one of them retains the lane. None releases on an inference.
+## Deciding whether to build it
 
-| Situation | Behaviour |
-| --- | --- |
-| Containment preparation or atomic spawn fails | No specialist code ran. Fail the task; release only after the service attests the prepared domain is empty or was never activated. |
-| Node service unreachable | Retain and retry. Visible stranding, never overlap. |
-| `cgroup.kill` fails, or `populated` never reaches 0 | Retain, report the remaining membership, escalate. Never substitute GPU-utilisation or process-name inspection. |
-| Coordinator crashes | The cgroup and the node ledger survive it. The reconciler resumes from SQLite and still requires an attestation. |
-| Node service crashes | Kernel membership survives. It rebuilds active domains from its ledger and cgroupfs; an ambiguous same-boot absence stays fail-closed. |
-| Worker reboots | A changed `boot_id` proves the old processes cannot survive, but release still waits for the restarted service to confirm recovery. |
-| Workload retains `CAP_SYS_ADMIN` or cgroup write | The structural guarantee is broken. Startup validation rejects this rather than degrading. |
-| SQLite and the node ledger disagree | Retain, reconcile by UUID and `boot_id`. Never infer safety from a missing row, path, actor or pid. |
+`leases_unverifiable` already rides the maintenance summary each tick, and the
+diagnostic names every retained lane. What that does not answer is how often an
+ordinary run ends up there. Measure first:
 
-## Costs
+- How many specialists end with cleanup unconfirmed, as a share of all that end?
+- How many lanes does a typical session strand, and for how long?
+- Does a session ever strand enough to starve, as 2026-09-21 did, or is it
+  usually one lane nobody needed?
 
-- A privileged deployment component on every execution node, with a narrowly
-  delegated writable subtree and permission to kill within it.
-- Specialist workloads can no longer be fully privileged. Scripts expecting
-  `CAP_SYS_ADMIN`, writable `cgroupfs`, nested containers or arbitrary namespace
-  and mount operations will break and must move those operations to a controlled
-  service.
-- A small native launcher, because ordinary Python spawning cannot place a child
-  in a cgroup atomically before user code runs.
-- Two durable ledgers and a state machine, with the operational complexity that
-  follows around crashes and boot identity.
-- Forced cleanup kills every process in the domain, so a per-task cgroup must
-  contain only that task's processes. Placing a shared helper there becomes a
-  correctness bug.
-
-## Steps
-
-1. Startup capability detection: cgroup v2, a writable delegated subtree,
-   `clone3(CLONE_INTO_CGROUP)`, and the ability to launch without
-   `CAP_SYS_ADMIN` or cgroup write. Any failure disables automatic reclamation
-   and preserves the current fail-closed behaviour.
-2. Containment and node-ledger schemas, without changing release behaviour yet.
-   UUID identities and `boot_id`; never a bare path.
-3. The node service and the atomic launcher, used first for one local
-   GPU-specialist spawn path, asserting that deliberately daemonised and
-   `setsid`'d descendants appear under the task cgroup.
-4. Containment made mandatory for every local path that can launch GPU work,
-   including Magpie scripts. Dispatch is rejected before specialist code runs if
-   preparation or atomic spawn fails.
-5. `release_resources()` releases GPU lanes only through the state machine, after
-   an empty attestation. Process-group, pidfile, task-terminal and command-line
-   identities are removed from release decisions.
-6. The restart reconciler, tested against crashes at every transition: before and
-   after the SQLite commit, cgroup creation, spawn, terminal write, kill, empty
-   observation and release. A `PREPARING` record with no workload requires a
-   ledger attestation, not a bare missing-path check.
-7. The service on every eligible Ray worker, returning its attested identity at
-   actor startup, with actor subprocess creation routed through the launcher.
-   Lane ownership stays with the coordinator, not inside the actor.
-8. Before multi-tenant Ray: either a node-level reservation keyed by physical GPU
-   identity that all clients consult, or exclusive workers. Until then the
-   guarantee is limited to Hyperloom-controlled submissions.
-9. Optionally a cgroup v1 backend. Its presence must not weaken the v2 contract;
-   partially delegated v1 hosts stay fail-closed.
-
-## Rejected
-
-- **Process groups, sessions, tree traversal, subreapers, pidfds.** A pidfd
-  identifies one process reliably, not a descendant that daemonises before being
-  registered. `setsid` and reparenting defeat the rest.
-- **Pidfiles, command lines, open files, ROCm utilisation, VRAM at zero.**
-  Observations of expected behaviour, with startup gaps, deletion races and
-  false negatives — not ownership boundaries.
-- **Namespaces alone.** A PID namespace improves visibility but does not stop a
-  privileged descendant creating nested namespaces, and emptiness is less direct
-  to establish than a cgroup's.
-- **Ray actor lifetime or `ray.kill` acknowledgement.** Actor death releases
-  Ray's logical GPUs while daemonised subprocesses may remain.
-- **Holding a module-scope actor handle.** Prevents accidental collection; says
-  nothing about descendants and does not survive coordinator failure.
-- **systemd transient scopes.** Viable only where systemd is the node-local
-  service; typically unavailable inside these containers, and the same privilege
-  restrictions still apply.
-- **GPU device locks without containment.** A durable physical reservation can
-  prevent overlap but cannot decide when abandoned work is dead. Complementary
-  for multi-tenant Ray, not a substitute.
-- **One Kubernetes pod or Job per specialist.** A genuinely strong boundary with
-  cluster-owned cleanup, but a larger execution-model change and slow for
-  iterative specialists. The reasonable alternative if the constraints above
-  cannot be met.
+If stranding is rare, the diagnostic is sufficient and the sealed backend is not
+worth its risk. If it is routine, these numbers are also the argument for
+building it.
