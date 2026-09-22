@@ -415,21 +415,27 @@ published report carries the analyst's own derivation — formulas, figures used
 and assumptions — because nothing recomputes the latencies and that document is
 the only record of how they were reached.
 
-Those hardware figures are a property of the machine, not of the operator or of
-the day, so they are looked up rather than measured at run time:
+The hardware figures are the analyst's too. It measures them on the box during
+its session, with `rocprof-compute --roof-only` and a graph-timed dispatch
+probe, and reports what it established:
 
 | `peak_source` | Where the figures came from |
 |:--|:--|
-| `reference_profile` | A committed device profile, measured on a card of this architecture, device and partition mode, then reviewed. The ordinary source. |
-| `datasheet` | Vendor peaks, for a machine no profile covers. An absolute lower bound no implementation reaches — roughly a factor of two below achievable, so attainment against it reads far too low and an attainment target will never be met. |
+| `measured_on_this_box` | Measured during the session. The ordinary source, and the only one worth an attainment target. |
+| `datasheet` | Recalled published peaks, after the profiler could not be reached. The gap to a real card is not a fixed discount — on gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix — so cases of different dtypes stop being comparable and attainment reads far too low to reach a target. |
 
-Device profiles live in `kernelforge/data/roofline_ceiling/device_profiles/` and
-record when, with which tool versions, and under which partition and power cap
-they were measured, plus any figure their author did not trust. Adding a machine
-means measuring it once and committing the result. Nothing cross-checks a
-committed figure against a fresh measurement, and a roof that reads low makes
-the ceiling too loose, so an attainment target fires early — which is why a
-profile whose figures contradict the datasheet is refused rather than used.
+Nothing is cached and no measured figure is written to a shipped artifact: the
+roofs belong to the run that measured them. What the framework does keep is a
+check. A reported roof above the vendor's published peak cannot be a
+measurement, and two instruction paths the vendor rates as one must not arrive
+apart — the profiler halves bf16 against fp16, and left uncorrected every bf16
+ceiling is twice as loose as it should be. Either is refused outright rather
+than published, because a roof that reads low makes the ceiling too loose and
+an attainment target fire early.
+
+The analyst session therefore runs with a shell and may install what it needs.
+Every file in the workspace is snapshotted before it starts and restored after,
+so the kernel under optimization is out of reach.
 
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.
@@ -442,9 +448,8 @@ configuration file, and cases the driver tags `unscored` get no ceiling.
 | `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
 | `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
 | `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
-| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
-| `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The key includes `peak_source` and the roof figures themselves, so an answer derived from roofs that have since been re-committed is retired rather than served. |
-| `--op-name <name>` | workspace name | Operator name used in the cache identity. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. An architecture with no published peaks is refused, since those peaks are what the analyst's measured roofs get checked against. |
+| `--op-name <name>` | workspace name | Operator name recorded on the report. |
 | `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
 | `--agent-model <name>` | provider default | Analyst model. |
 | `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |

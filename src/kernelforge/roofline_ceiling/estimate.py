@@ -3,10 +3,15 @@
 
 """One ceiling estimate, end to end, for every caller that wants one.
 
-Collect the evidence, run the analyst, publish the report. The CLI wraps this
+Settle the evidence, run the analyst, publish the report. The CLI wraps this
 and so does the optimization loop, because two orchestrations of the same three
-steps would drift: one would gain the cache lookup the other lacked, or keep
-labelling peaks a source the other had already stopped trusting.
+steps would drift.
+
+Nothing is cached. The analyst measures the machine's roofs during its session,
+and a cached report would both freeze figures that are meant to be current and
+write them to a file that outlives the run. Re-deriving costs a profiler pass
+and one agent session per campaign, which is the price of the roofs being this
+box's rather than a record of some earlier box's.
 """
 
 from __future__ import annotations
@@ -23,15 +28,11 @@ from kernelforge.roofline_ceiling.evidence import collect_evidence
 from kernelforge.roofline_ceiling.report import (
     EVIDENCE_DIRNAME,
     WORKSPACE_SUBDIR,
-    cache_key,
     publish,
-    read_cached,
-    store_in_cache,
 )
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
-SOURCE_CACHE = "cache"
 SOURCE_ANALYST = "analyst"
 
 
@@ -66,7 +67,6 @@ async def estimate_ceiling(
     output_dir: str | Path | None = None,
     op_name: str = "",
     arch: str = "",
-    use_cache: bool = True,
     known_case_ids: Sequence[str] | None = None,
     known_case_ms: Mapping[str, float] | None = None,
     agent_model: str = "",
@@ -102,26 +102,7 @@ async def estimate_ceiling(
         )
 
     operator = op_name.strip() or root.name
-    canonical_id = canonical_id_for(operator, evidence.hardware.arch)
-    key = cache_key(
-        canonical_id=canonical_id,
-        case_ids=scored_cases,
-        arch=evidence.hardware.arch,
-        peak_source=evidence.hardware.peak_source,
-        peak_flops=evidence.hardware.peak_flops,
-        bandwidth=evidence.hardware.bandwidth,
-    )
-
-    if use_cache:
-        cached = read_cached(key, project_root)
-        if cached is not None:
-            return CeilingOutcome(
-                report=cached,
-                report_path=publish(cached, destination),
-                source=SOURCE_CACHE,
-                scored_case_ids=tuple(scored_cases),
-                notes=evidence.notes,
-            )
+    canonical_id = canonical_id_for(operator, evidence.identity.arch)
 
     report = await run_ceiling_analysis(
         backend,
@@ -138,12 +119,9 @@ async def estimate_ceiling(
         project_root=project_root,
     )
 
-    report_path = publish(report, destination)
-    if use_cache:
-        store_in_cache(report, key, project_root)
     return CeilingOutcome(
         report=report,
-        report_path=report_path,
+        report_path=publish(report, destination),
         source=SOURCE_ANALYST,
         scored_case_ids=tuple(scored_cases),
         notes=evidence.notes,
@@ -152,7 +130,6 @@ async def estimate_ceiling(
 
 __all__ = [
     "SOURCE_ANALYST",
-    "SOURCE_CACHE",
     "CeilingOutcome",
     "NoScoredCasesError",
     "canonical_id_for",

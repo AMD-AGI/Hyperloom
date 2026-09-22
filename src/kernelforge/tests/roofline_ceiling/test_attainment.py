@@ -7,26 +7,30 @@ from __future__ import annotations
 import pytest
 
 from kernelforge.roofline_ceiling.attainment import measure_attainment
-from kernelforge.roofline_ceiling.contract import Hardware, build_report
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_REFERENCE
+from kernelforge.roofline_ceiling.contract import build_report
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_MEASURED
+
+
+_HARDWARE = {
+    "peak_source": PEAK_SOURCE_MEASURED,
+    "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
+    "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12},
+    "dispatch_floor_s": 3.0e-6,
+    "method": "rocprof-compute --roof-only",
+}
 
 
 def _report(cases):
     payload = {
         "cases": [{"case_id": case_id, "t_ideal_ms": ideal, "bound": "memory"} for case_id, ideal in cases],
+        "hardware": _HARDWARE,
         "confidence": "high",
         "analysis_md": "\n".join(f"Case `{case_id}` at {ideal} ms." for case_id, ideal in cases),
     }
     return build_report(
         payload,
         canonical_id="roofline-ceiling:op:gfx950",
-        hardware=Hardware(
-            arch="gfx950",
-            peak_flops={"bf16_mfma": 1.2e15},
-            bandwidth={"hbm": 6.24e12},
-            peak_source=PEAK_SOURCE_REFERENCE,
-            dispatch_floor_s=1.5e-6,
-        ),
+        arch="gfx950",
         expected_case_ids=[case_id for case_id, _ in cases],
     )
 

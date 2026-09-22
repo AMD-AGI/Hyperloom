@@ -16,9 +16,9 @@ from kernelforge.roofline_ceiling.analyst import (
     load_role,
     run_ceiling_analysis,
 )
-from kernelforge.roofline_ceiling.contract import Hardware
+from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
 from kernelforge.roofline_ceiling.evidence import EvidenceBundle
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_REFERENCE
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_MEASURED
 
 
 class _Backend:
@@ -36,18 +36,17 @@ class _Backend:
         return type("Result", (), {"text": text, "end_reason": "agent_stopped"})()
 
 
-def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_REFERENCE) -> EvidenceBundle:
+def _bundle(tmp_path) -> EvidenceBundle:
     artifacts = tmp_path / "evidence"
     artifacts.mkdir(parents=True, exist_ok=True)
     (artifacts / "trace").mkdir(exist_ok=True)
     (artifacts / "trace" / "kernel_stats.csv").write_text("name,count\n", encoding="utf-8")
     return EvidenceBundle(
-        hardware=Hardware(
+        identity=DeviceIdentity(
             arch="gfx950",
-            peak_flops={"bf16_mfma": 1.686e15},
-            bandwidth={"hbm": 6.24e12, "mall": 8.49e12},
-            peak_source=peak_source,
-            dispatch_floor_s=3.0e-6,
+            device_name="AMD Instinct MI355X",
+            compute_partition="SPX",
+            memory_partition="NPS1",
         ),
         artifacts_dir=artifacts,
         observed_ms={"c0": 40.0},
@@ -55,8 +54,17 @@ def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_REFERENCE) -> EvidenceBundl
     )
 
 
+_HARDWARE = {
+    "peak_source": PEAK_SOURCE_MEASURED,
+    "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
+    "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12},
+    "dispatch_floor_s": 3.0e-6,
+    "method": "rocprof-compute --roof-only",
+}
+
 _GOOD = json.dumps(
     {
+        "hardware": _HARDWARE,
         "cases": [{"case_id": "c0", "t_ideal_ms": 12.8, "bound": "memory"}],
         "confidence": "high",
         "analysis_md": "# Performance ceiling analysis\n\nCase `c0`: 8e10 bytes / 6.24 TB/s = 12.8 ms.",
@@ -83,7 +91,7 @@ def test_the_role_document_ships_with_the_package():
     role = load_role()
 
     assert "Performance Ceiling Analyst" in role
-    assert "You do **not** own the hardware figures" in role
+    assert "Step 0 — establish this machine's roofs" in role
 
 
 def test_the_role_document_hands_the_composition_to_the_analyst():
@@ -96,7 +104,8 @@ def test_the_role_document_hands_the_composition_to_the_analyst():
     assert "partial overlap between stages" in role
 
 
-def test_the_request_states_the_measured_figures_rather_than_leaving_them_to_recall(tmp_path):
+def test_the_request_names_the_machine_rather_than_supplying_its_roofs(tmp_path):
+    """The analyst measures the peaks itself; handing it any would pre-empt that."""
     request = json.loads(
         build_request(
             kernel_files=["kernel.py"],
@@ -108,16 +117,17 @@ def test_the_request_states_the_measured_figures_rather_than_leaving_them_to_rec
         )
     )
 
-    hardware = request["hardware"]
-    assert hardware["peak_flops_by_instruction_path"] == {"bf16_mfma": 1.686e15}
-    assert hardware["dispatch_floor_s"] == 3.0e-6
-    assert "units" in hardware
+    machine = request["machine"]
+    assert machine["arch"] == "gfx950"
+    assert machine["device_name"] == "AMD Instinct MI355X"
+    assert machine["compute_partition"] == "SPX"
+    assert "peak_flops" not in machine
     assert request["scored_case_ids"] == ["c0"]
     assert "output_schema" in request
 
 
-def test_the_request_offers_every_memory_level_that_was_measured(tmp_path):
-    """Pinning the analyst to HBM mis-bounds a cache-resident working set."""
+def test_the_request_fixes_the_vocabulary_a_roof_may_be_reported_in(tmp_path):
+    """A path outside the list cannot be checked against a published peak."""
     request = json.loads(
         build_request(
             kernel_files=[],
@@ -129,35 +139,28 @@ def test_the_request_offers_every_memory_level_that_was_measured(tmp_path):
         )
     )
 
-    levels = request["hardware"]["bandwidth_bytes_per_s_by_memory_level"]
-    assert levels == {"hbm": 6.24e12, "mall": 8.49e12}
-    assert "was not measured on this box" in request["hardware"]["note"]
+    machine = request["machine"]
+    assert "bf16_mfma" in machine["canonical_instruction_paths"]
+    assert "int32_valu" in machine["canonical_instruction_paths"]
+    assert set(machine["memory_levels"]) >= {"hbm", "mall", "l2", "l1", "lds"}
+    assert "refused outright" in machine["note"]
 
 
-def test_the_request_says_whether_the_peaks_were_measured_or_read_off_a_datasheet(tmp_path):
-    measured = json.loads(
+def test_the_request_spells_out_what_each_peak_source_would_mean(tmp_path):
+    request = json.loads(
         build_request(
             kernel_files=[],
             driver_script="",
             performance_command=[],
             case_ids=["c0"],
             case_params={},
-            evidence=_bundle(tmp_path, PEAK_SOURCE_REFERENCE),
-        )
-    )
-    datasheet = json.loads(
-        build_request(
-            kernel_files=[],
-            driver_script="",
-            performance_command=[],
-            case_ids=["c0"],
-            case_params={},
-            evidence=_bundle(tmp_path, PEAK_SOURCE_DATASHEET),
+            evidence=_bundle(tmp_path),
         )
     )
 
-    assert "measured on a card" in measured["hardware"]["peak_source_meaning"]
-    assert "not an achievable target" in datasheet["hardware"]["peak_source_meaning"]
+    meanings = request["machine"]["peak_source_meanings"]
+    assert "measured on this box" in meanings[PEAK_SOURCE_MEASURED]
+    assert "not a fixed discount" in meanings[PEAK_SOURCE_DATASHEET]
 
 
 def test_the_request_hands_over_the_evidence_it_collected(tmp_path):
@@ -179,15 +182,25 @@ def test_the_request_hands_over_the_evidence_it_collected(tmp_path):
     assert "back-solved" in request["observed_ms_meaning"]
 
 
-def test_the_analyst_session_can_only_read(tmp_path):
+def test_the_analyst_session_can_run_the_profiler_it_needs(tmp_path):
+    """Measuring the roofs takes a shell, and installing the tool takes more."""
     backend = _Backend(_GOOD)
 
     _analyse(backend, tmp_path)
 
     policy = backend.specs[0].tool_policy
-    assert backend.specs[0].writable is False
+    assert backend.specs[0].writable is True
     assert (policy.read, policy.search) == (True, True)
-    assert (policy.write, policy.shell) == (False, False)
+    assert (policy.write, policy.shell) == (True, True)
+
+
+def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
+    """The shell is for the profiler. Every workspace file is snapshotted and restored."""
+    backend = _Backend(_GOOD)
+
+    _analyse(backend, tmp_path)
+
+    assert backend.specs[0].protected_globs == ["*"]
 
 
 def test_the_analyst_is_granted_the_evidence_directory(tmp_path):

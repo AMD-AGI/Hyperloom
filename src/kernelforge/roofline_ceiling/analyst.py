@@ -32,13 +32,19 @@ from kernelforge.agent_backends.base import (
     watchdog_timeout_sec,
 )
 from kernelforge.roofline_ceiling.contract import (
+    BANDWIDTH_TIERS,
     CeilingContractError,
     CeilingReport,
     build_report,
     response_schema,
 )
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle
-from kernelforge.roofline_ceiling.specs import CANONICAL_INSTRUCTION_PATHS, peak_source_meaning
+from kernelforge.roofline_ceiling.specs import (
+    CANONICAL_INSTRUCTION_PATHS,
+    PEAK_SOURCE_DATASHEET,
+    PEAK_SOURCE_MEASURED,
+    peak_source_meaning,
+)
 from kernelforge.orchestrator.structured_output import (
     build_repair_prompt,
     extract_json_object,
@@ -80,16 +86,17 @@ def build_request(
 ) -> str:
     """Build the analyst's request payload.
 
-    Every figure is stated here rather than left for the analyst to look up. A
-    peak it reads off a knowledge-base card is the vendor datasheet, roughly
-    twice what the chip sustains, and a ceiling divided by that while the report
-    says ``reference_profile`` is a report that lies about its own inputs.
+    The roofs are the analyst's to establish, so this states the machine rather
+    than its peaks. What it does state is the vocabulary -- the instruction
+    paths and memory levels a roof may be reported against -- because a path
+    outside that set cannot be checked against a published peak, and an
+    unchecked roof is the one that stops a campaign early.
     """
-    hardware = evidence.hardware
+    device = evidence.identity
     payload: dict[str, Any] = {
         "task": (
-            "Estimate the theoretical achievable latency of every scored case of this kernel, "
-            "against the measured hardware figures below. Return one JSON object matching "
+            "Measure this machine's roofs, then estimate the theoretical achievable latency of "
+            "every scored case of this kernel against them. Return one JSON object matching "
             "output_schema and nothing else."
         ),
         "kernel_files": list(kernel_files),
@@ -97,21 +104,23 @@ def build_request(
         "performance_command": list(performance_command),
         "scored_case_ids": list(case_ids),
         "case_parameters": dict(case_params),
-        "hardware": {
-            "arch": hardware.arch,
-            "peak_source": hardware.peak_source,
-            "peak_source_meaning": peak_source_meaning(hardware.peak_source),
+        "machine": {
+            "arch": device.arch,
+            "device_name": device.device_name,
+            "compute_partition": device.compute_partition,
+            "memory_partition": device.memory_partition,
             "units": "peak_flops in FLOP/s (OP/s for integer paths); bandwidth in bytes/s; times in seconds",
-            "peak_flops_by_instruction_path": dict(hardware.peak_flops),
-            "bandwidth_bytes_per_s_by_memory_level": dict(hardware.bandwidth),
-            "dispatch_floor_s": hardware.dispatch_floor_s,
             "canonical_instruction_paths": list(CANONICAL_INSTRUCTION_PATHS),
+            "memory_levels": list(BANDWIDTH_TIERS),
             "note": (
-                "Use these and only these. A memory level or instruction path absent from the "
-                "tables above was not measured on this box: say so rather than substituting a "
-                "datasheet figure or a neighbouring rate."
+                "Establish these roofs yourself on this box, per step 0 of your role document, and "
+                "report them in 'hardware'. Name a path only from the list above. A figure above the "
+                "vendor's published peak, or two paths the vendor rates as one arriving apart, is "
+                "refused outright -- those are the two mistakes that make a ceiling too loose."
             ),
-            "provenance": hardware.provenance,
+            "peak_source_meanings": {
+                source: peak_source_meaning(source) for source in (PEAK_SOURCE_MEASURED, PEAK_SOURCE_DATASHEET)
+            },
         },
         "evidence_dir": str(evidence.artifacts_dir),
         "evidence_files": evidence.artifact_paths(),
@@ -142,29 +151,41 @@ def _spec(
     evidence_dir: str,
     turns: int,
 ) -> AgentRunSpec:
-    """One read-only analyst session."""
+    """One analyst session, able to measure the machine it is estimating for.
+
+    The analyst runs the profiler itself. That is not a convenience: the roofs
+    have to come from this box, and getting a profiler onto an arbitrary image
+    is open-ended work -- a missing package, a broken set of Python
+    dependencies, a ROCm layout that moved -- that code cannot enumerate and an
+    agent can work through.
+
+    The permission that buys is narrow by construction. ``protected_globs=["*"]``
+    puts every file in the workspace under the workspace guard, which snapshots
+    them before the session and restores them after, so a shell that wanders
+    into the kernel under optimization cannot leave a mark on it. Measurement
+    output belongs in the evidence directory, which is outside that set.
+    """
     return AgentRunSpec(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         role="ceiling analyst",
         cwd=workdir,
         model=model,
-        writable=False,
+        writable=True,
         timeout_sec=max(1, int(timeout_sec)),
         tool_policy=AgentToolPolicy(
             read=True,
             search=True,
-            write=False,
-            shell=False,
+            write=True,
+            shell=True,
             max_turns=turns,
         ),
-        # The analyst may only read. Evidence collection is the deterministic
-        # side's job precisely so the numbers it reasons over are the numbers the
-        # framework will divide by.
+        # Everything in the workspace is snapshotted and restored: the analyst
+        # may run a profiler over the kernel, never edit it.
         protected_globs=["*"],
         additional_directories=[evidence_dir],
         # The kernel under analysis is routinely a dirty checkout mid-campaign,
-        # and a read-only session has no business demanding a clean tree.
+        # and an estimator has no business demanding a clean tree.
         allow_dirty_baseline=True,
     )
 
@@ -228,7 +249,7 @@ async def run_ceiling_analysis(
             return build_report(
                 payload,
                 canonical_id=canonical_id,
-                hardware=evidence.hardware,
+                arch=evidence.identity.arch,
                 expected_case_ids=case_ids,
                 observed_ms=evidence.observed_ms,
             )

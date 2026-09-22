@@ -32,23 +32,26 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: ``hardware.peak_source`` value for a peak read off this table.
+#: ``hardware.peak_source`` value for a peak the analyst recalled rather than
+#: measured. Always the vendor datasheet in practice, whatever the analyst calls
+#: it, so it carries the datasheet's warning.
 PEAK_SOURCE_DATASHEET = "datasheet"
-#: ``hardware.peak_source`` value for a peak taken from a shipped device
-#: profile: measured on a real card of this configuration, reviewed, and
-#: committed. This is the ordinary source -- nothing measures at run time.
-PEAK_SOURCE_REFERENCE = "reference_profile"
+#: ``hardware.peak_source`` value for a peak the analyst measured on this box
+#: during its session, with ``rocprof-compute --roof-only`` or an equivalent
+#: saturating benchmark. The ordinary source, and the only one worth a target.
+PEAK_SOURCE_MEASURED = "measured_on_this_box"
 
 #: What each source means, in one phrase, for every reader that has to say so.
 #: Centralized so no consumer has to re-derive the distinction and get it wrong.
 _PEAK_SOURCE_MEANING = {
-    PEAK_SOURCE_REFERENCE: (
-        "measured on a card of this same architecture, device and partition mode, then "
-        "reviewed and committed; clocks, power cap and cooling move these figures by a few percent"
+    PEAK_SOURCE_MEASURED: (
+        "measured on this box during the analysis session; the figures the chip actually "
+        "sustained, not the ones it is sold with"
     ),
     PEAK_SOURCE_DATASHEET: (
-        "vendor datasheet, measured on no card; an absolute lower bound on latency, "
-        "not an achievable target"
+        "vendor datasheet, measured on no card. The gap to a real card is not a fixed discount: "
+        "on gfx950 it is 1.2% for FP32 matrix and 50.8% for FP16 matrix, so cases of different "
+        "dtypes stop being comparable and no single correction restores them"
     ),
 }
 
@@ -209,7 +212,7 @@ __all__ = [
     "EQUAL_RATE_PATHS",
     "KNOWN_INSTRUCTION_PATHS",
     "PEAK_SOURCE_DATASHEET",
-    "PEAK_SOURCE_REFERENCE",
+    "PEAK_SOURCE_MEASURED",
     "ArchSpec",
     "arch_spec",
     "equal_rate_paths",

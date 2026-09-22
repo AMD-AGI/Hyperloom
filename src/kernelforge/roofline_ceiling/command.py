@@ -158,8 +158,7 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
 )
 @click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}.")
 @click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted.")
-@click.option("--cache/--no-cache", default=True, help="Reuse and update the cached ceiling for this identity")
-@click.option("--op-name", default="", help="Operator name used in the cache identity. Defaults to the workspace name.")
+@click.option("--op-name", default="", help="Operator name recorded on the report. Defaults to the workspace name.")
 @click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
 @click.option("--agent-model", default="", help="Agent model. Falls back to the provider default.")
 @click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session")
@@ -172,7 +171,6 @@ def roofline_ceiling_command(
     performance_command: str,
     output_dir: str,
     arch: str,
-    cache: bool,
     op_name: str,
     agent_provider: str,
     agent_model: str,
@@ -210,7 +208,6 @@ def roofline_ceiling_command(
                 output_dir=Path(output_dir).expanduser() if output_dir.strip() else None,
                 op_name=op_name,
                 arch=arch,
-                use_cache=cache,
                 agent_model=agent_model,
                 agent_timeout_sec=agent_timeout_sec,
                 run_timeout_sec=float(run_timeout_sec),
@@ -226,8 +223,6 @@ def roofline_ceiling_command(
         f"[ceiling] arch={hardware.arch} peaks={hardware.peak_source} "
         f"dispatch_floor={hardware.dispatch_floor_s * 1e6:.3g}us cases={len(outcome.scored_case_ids)}"
     )
-    if outcome.source == "cache":
-        click.echo("[ceiling] reusing the cached ceiling for this identity")
     for case in outcome.report.cases:
         for issue in case.issues:
             click.echo(f"[ceiling] {case.case_id}: {issue}")

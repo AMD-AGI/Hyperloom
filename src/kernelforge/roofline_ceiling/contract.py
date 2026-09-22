@@ -38,8 +38,12 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from kernelforge.roofline_ceiling.specs import (
+    CANONICAL_INSTRUCTION_PATHS,
+    KNOWN_INSTRUCTION_PATHS,
     PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_REFERENCE,
+    PEAK_SOURCE_MEASURED,
+    arch_spec,
+    equal_rate_paths,
 )
 
 #: Bumped from 1 when the stage-level work model was dropped. A cached v1 report
@@ -81,7 +85,7 @@ class Hardware:
     @property
     def is_measured(self) -> bool:
         """Whether these came from a real card rather than off a datasheet."""
-        return self.peak_source == PEAK_SOURCE_REFERENCE
+        return self.peak_source == PEAK_SOURCE_MEASURED
 
     @property
     def hbm_bw_bytes_per_s(self) -> float:
@@ -150,12 +154,59 @@ class CeilingReport:
         }
 
 
+def hardware_schema() -> dict[str, Any]:
+    """The JSON shape the analyst reports the roofs it established in."""
+    return {
+        "type": "object",
+        "required": ["peak_source", "peak_flops", "bandwidth", "dispatch_floor_s"],
+        "properties": {
+            "peak_source": {
+                "type": "string",
+                "enum": [PEAK_SOURCE_MEASURED, PEAK_SOURCE_DATASHEET],
+                "description": (
+                    f"'{PEAK_SOURCE_MEASURED}' only if you ran a saturating benchmark on this box "
+                    f"this session. '{PEAK_SOURCE_DATASHEET}' if you could not and fell back to "
+                    "published peaks. Never claim the first when you did the second."
+                ),
+            },
+            "peak_flops": {
+                "type": "object",
+                "description": (
+                    "instruction path -> FLOP/s (OP/s for integer paths), for the paths you "
+                    "established. Omit a path you could not measure rather than guessing it."
+                ),
+            },
+            "bandwidth": {
+                "type": "object",
+                "description": "memory level -> bytes/s, from: " + ", ".join(BANDWIDTH_TIERS),
+            },
+            "dispatch_floor_s": {
+                "type": "number",
+                "description": (
+                    "Seconds for one unavoidable kernel dispatch, timed from a captured graph. "
+                    "Zero if you could not measure it; the report then says every latency term is "
+                    "an assumption."
+                ),
+            },
+            "method": {
+                "type": "string",
+                "description": (
+                    "How each figure was obtained, in enough detail to be repeated: the tool and "
+                    "version, the command, the column each roof was read from, and any correction "
+                    "you applied."
+                ),
+            },
+        },
+    }
+
+
 def response_schema() -> dict[str, Any]:
     """The JSON shape the analyst must return, also used to ask for a repair."""
     return {
         "type": "object",
-        "required": ["cases", "confidence", "analysis_md"],
+        "required": ["hardware", "cases", "confidence", "analysis_md"],
         "properties": {
+            "hardware": hardware_schema(),
             "cases": {
                 "type": "array",
                 "description": "One entry per scored case id, no more and no fewer.",
@@ -205,24 +256,145 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+#: How far a reported figure may sit above its published peak and still be read
+#: as rounding. Nothing measured beats the vendor peak, so past this the figure
+#: was read off wrongly -- a column taken by the wrong name, a unit left
+#: unscaled, or a row taken for the wrong device.
+_OVER_DATASHEET_TOLERANCE = 1.02
+
+#: How far two instruction paths the vendor rates identically may drift.
+_EQUAL_RATE_TOLERANCE = 0.05
+
+
+def build_hardware(payload: Mapping[str, Any], *, arch: str) -> Hardware:
+    """Read the roofs the analyst established, refusing figures that cannot be.
+
+    The analyst measures the machine itself now, which means nothing
+    deterministic stands between a mistyped column and the denominator of every
+    ceiling. These checks are what is left, and they are deliberately narrow:
+    they reject only what the vendor's own published peaks contradict, and say
+    nothing about figures the datasheet does not cover.
+
+    A roof that reads low is the dangerous direction -- the ceiling derived from
+    it is too loose, the kernel reads as closer to done than it is, and a
+    campaign with an attainment target stops with the work half finished. So a
+    figure above its published peak is refused outright, and two paths the
+    vendor rates as one must not arrive apart.
+    """
+    if not isinstance(payload, Mapping):
+        raise CeilingContractError("response must carry a 'hardware' object describing the roofs used")
+
+    peak_source = str(payload.get("peak_source") or "").strip()
+    if peak_source not in {PEAK_SOURCE_MEASURED, PEAK_SOURCE_DATASHEET}:
+        raise CeilingContractError(
+            f"hardware.peak_source must be {PEAK_SOURCE_MEASURED!r} or {PEAK_SOURCE_DATASHEET!r}, "
+            f"not {peak_source!r}"
+        )
+
+    peak_flops: dict[str, float] = {}
+    for name, raw in (payload.get("peak_flops") or {}).items():
+        value = _finite(raw)
+        if value is None or value <= 0:
+            raise CeilingContractError(f"hardware.peak_flops[{name!r}] is not a positive number")
+        if str(name) not in KNOWN_INSTRUCTION_PATHS:
+            raise CeilingContractError(
+                f"hardware.peak_flops names {name!r}, which is not an instruction path this build "
+                "knows; use one of: " + ", ".join(CANONICAL_INSTRUCTION_PATHS)
+            )
+        peak_flops[str(name)] = value
+    if not peak_flops:
+        raise CeilingContractError("hardware.peak_flops is empty; no ceiling can be divided by nothing")
+
+    bandwidth: dict[str, float] = {}
+    for name, raw in (payload.get("bandwidth") or {}).items():
+        value = _finite(raw)
+        if value is None or value <= 0:
+            raise CeilingContractError(f"hardware.bandwidth[{name!r}] is not a positive number")
+        if str(name) not in BANDWIDTH_TIERS:
+            raise CeilingContractError(
+                f"hardware.bandwidth names memory level {name!r}; use one of: " + ", ".join(BANDWIDTH_TIERS)
+            )
+        bandwidth[str(name)] = value
+    if bandwidth.get("hbm", 0.0) <= 0:
+        raise CeilingContractError("hardware.bandwidth needs an 'hbm' figure; every report states that roof")
+
+    dispatch_floor_s = _finite(payload.get("dispatch_floor_s")) or 0.0
+    if dispatch_floor_s < 0:
+        raise CeilingContractError("hardware.dispatch_floor_s cannot be negative")
+
+    for problem in _roofs_contradicting_the_datasheet(peak_flops, bandwidth, arch):
+        raise CeilingContractError(problem)
+
+    provenance: dict[str, Any] = {"reported_by": "ceiling analyst"}
+    method = str(payload.get("method") or "").strip()
+    if method:
+        provenance["method"] = method
+    return Hardware(
+        arch=arch,
+        peak_flops=peak_flops,
+        bandwidth=bandwidth,
+        peak_source=peak_source,
+        dispatch_floor_s=dispatch_floor_s,
+        provenance=provenance,
+    )
+
+
+def _roofs_contradicting_the_datasheet(
+    peak_flops: Mapping[str, float],
+    bandwidth: Mapping[str, float],
+    arch: str,
+) -> list[str]:
+    """Reported roofs the vendor's own published peaks rule out."""
+    spec = arch_spec(arch)
+    if spec is None:
+        return []
+
+    problems: list[str] = []
+    for path, value in sorted(peak_flops.items()):
+        published = float(spec.peak_flops.get(path) or 0.0)
+        if published > 0 and value > published * _OVER_DATASHEET_TOLERANCE:
+            problems.append(
+                f"hardware.peak_flops[{path!r}] is {value:.6g}, above the published {arch} peak of "
+                f"{published:.6g}; no measurement beats the vendor peak, so this was read off wrongly"
+            )
+    hbm = float(bandwidth.get("hbm") or 0.0)
+    if spec.hbm_bw_bytes_per_s > 0 and hbm > spec.hbm_bw_bytes_per_s * _OVER_DATASHEET_TOLERANCE:
+        problems.append(
+            f"hardware.bandwidth['hbm'] is {hbm:.6g}, above the published {arch} peak of "
+            f"{spec.hbm_bw_bytes_per_s:.6g}; no measurement beats the vendor peak"
+        )
+    for left, right in equal_rate_paths(arch):
+        a, b = float(peak_flops.get(left) or 0.0), float(peak_flops.get(right) or 0.0)
+        if a <= 0 or b <= 0:
+            continue
+        if abs(a / b - 1.0) > _EQUAL_RATE_TOLERANCE:
+            problems.append(
+                f"hardware.peak_flops has {left} at {a:.6g} and {right} at {b:.6g}, but {arch} runs "
+                "both at one rate; the profiler halves one of them and the correction was not applied"
+            )
+    return problems
+
+
 def build_report(
     payload: Mapping[str, Any],
     *,
     canonical_id: str,
-    hardware: Hardware,
+    arch: str,
     expected_case_ids: Sequence[str],
     observed_ms: Mapping[str, float] | None = None,
 ) -> CeilingReport:
     """Validate one analyst response and publish it as a ceiling report.
 
+    The analyst establishes the roofs as well as the work model, so the
+    ``hardware`` block it returns is validated here rather than supplied here.
+
     Raises :class:`CeilingContractError` for anything that makes the response
-    unusable -- a missing case, a latency that is not a number, an empty
-    derivation. Findings that leave the answer usable but suspect ride along on
-    the case's ``issues``, because a ceiling whose doubts are invisible is worse
-    than one that names them.
+    unusable -- a roof above the vendor's own peak, a missing case, a latency
+    that is not a number, an empty derivation. Findings that leave the answer
+    usable but suspect ride along on the case's ``issues``, because a ceiling
+    whose doubts are invisible is worse than one that names them.
     """
-    if hardware.peak_source not in {PEAK_SOURCE_REFERENCE, PEAK_SOURCE_DATASHEET}:
-        raise CeilingContractError(f"unknown peak_source {hardware.peak_source!r}")
+    hardware = build_hardware(payload.get("hardware") or {}, arch=arch)
 
     raw_cases = payload.get("cases")
     if not isinstance(raw_cases, Sequence) or isinstance(raw_cases, str) or not raw_cases:
@@ -297,14 +469,17 @@ def build_report(
     caveats = [str(entry).strip() for entry in (payload.get("caveats") or ()) if str(entry).strip()]
     if hardware.peak_source == PEAK_SOURCE_DATASHEET:
         caveats.append(
-            "Peaks are vendor datasheet figures, not measured on any card: these latencies are an "
-            "absolute lower bound that no implementation reaches, not an achievable target."
+            "Peaks are vendor datasheet figures, measured on no card: these latencies are an absolute "
+            "lower bound no implementation reaches. The gap to a real card is not a fixed discount -- "
+            "on gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix -- so cases of "
+            "different dtypes are not comparable and no correction makes them so."
         )
-    elif hardware.peak_source == PEAK_SOURCE_REFERENCE:
+    missing_paths = sorted(set(CANONICAL_INSTRUCTION_PATHS) - set(hardware.peak_flops))
+    if missing_paths:
         caveats.append(
-            "Peaks come from a committed profile measured on a card of this configuration, not from "
-            "this box on this day. Clocks, power cap and cooling move them by a few percent, so read "
-            "these latencies as close rather than exact."
+            "No roof was established for: "
+            + ", ".join(missing_paths)
+            + ". A case whose arithmetic runs on one of those was priced against a substitute."
         )
     if hardware.dispatch_floor_s <= 0:
         caveats.append(
@@ -380,7 +555,9 @@ __all__ = [
     "CeilingContractError",
     "CeilingReport",
     "Hardware",
+    "build_hardware",
     "build_report",
+    "hardware_schema",
     "load_report",
     "response_schema",
 ]
