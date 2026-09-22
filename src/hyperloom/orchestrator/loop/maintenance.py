@@ -41,6 +41,17 @@ async def run_lease_and_db_reclaim(
         report = host.reconciler.last_report
         summary["leases_reaped"] = report.leases_reaped
         summary["leases_unverifiable"] = report.leases_unverifiable
+        # Whether retained lanes are an accident or the ordinary outcome. Every
+        # portable way to release them automatically was refuted (see
+        # docs/task-containment.md), and the one candidate left is
+        # safety-critical, so this is the number that decides whether anyone
+        # should build it.
+        try:
+            unconfirmed, ended = await host.reconciler._locks.cleanup_confirmation_rate()
+            if ended:
+                summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
+        except Exception:  # noqa: BLE001 — a statistic may never fail a tick
+            log.debug("%s: cleanup confirmation rate unavailable", reason, exc_info=True)
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
     except Exception:  # noqa: BLE001
         log.exception("%s: reading the reconciler's cleanup report failed", reason)

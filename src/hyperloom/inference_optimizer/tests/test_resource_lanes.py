@@ -552,6 +552,43 @@ def _live_tree(*, own_session: bool = True):
         proc.wait()
 
 
+@pytest.mark.asyncio
+async def test_the_confirmation_rate_counts_what_decides_the_next_design(conn, locks):
+    """How often teardown is unconfirmed, which is the number worth measuring.
+
+    ``leases_unverifiable`` says how many lanes are held now; it cannot say
+    whether that is an accident or the ordinary outcome. Every portable way to
+    release such a lane automatically was refuted, and the one candidate left is
+    safety-critical, so this ratio is what decides whether anyone should build
+    it. A task with no cleanup evidence at all counts as unconfirmed: that is
+    exactly the shape that strands a lane.
+    """
+    _seed_task(conn, "confirmed", "succeeded", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+    _seed_task(conn, "unconfirmed", "failed", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: False})
+    # _seed_task treats an empty dict as "not supplied", so a history carrying no
+    # cleanup account at all is written directly -- that is the real shape here.
+    conn.raw.execute(
+        "INSERT INTO tasks(task_id, kind, state, params, idempotency_key, history, created_at, updated_at) "
+        "VALUES (?,?,?,'{}',?,?,?,?)",
+        (
+            "silent",
+            "specialist",
+            "succeeded",
+            "idem-silent",
+            json.dumps([{"from": "running", "to": "succeeded", "ts": _T0}]),
+            _T0,
+            _T0,
+        ),
+    )
+    conn.raw.commit()
+    _seed_task(conn, "still-running", "running", evidence={resource_lock.CLEANUP_CONFIRMED_KEY: True})
+
+    unconfirmed, ended = await locks.cleanup_confirmation_rate()
+
+    # 'still-running' has not ended, so it is not part of the question.
+    assert (unconfirmed, ended) == (2, 3)
+
+
 def _remedies(caplog) -> list[str]:
     """Every operator-facing warning the lane diagnostic logged."""
     return [r.getMessage() for r in caplog.records if r.name == "hyperloom.orchestrator.bus.resource_lock"]

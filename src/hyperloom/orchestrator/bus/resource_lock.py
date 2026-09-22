@@ -251,6 +251,35 @@ def _last_cleanup_evidence(history_json: str) -> dict:
     return {}
 
 
+def cleanup_confirmation_rate(cur: sqlite3.Cursor) -> tuple[int, int]:
+    """How often an ended task confirmed its teardown, this session.
+
+    ``leases_unverifiable`` says how many lanes are held right now. It cannot
+    say whether that is a rare accident or the ordinary outcome, and that is the
+    number which decides whether an automatic release mechanism is worth its
+    risk at all: every portable one was refuted, and the only candidate left
+    (a sealed descriptor behind a seccomp filter) is safety-critical to get
+    right. Measure before building it.
+
+    Reads what :meth:`SubAgentRunner._write_terminal` already records, so it
+    costs one query and writes nothing.
+
+    Args:
+        cur: Cursor of the caller's transaction.
+
+    Returns:
+        tuple[int, int]: Ended tasks whose cleanup was NOT confirmed, and ended
+        tasks in total. A task whose history carries no cleanup evidence at all
+        counts as unconfirmed: it is exactly the shape that strands a lane.
+    """
+    unconfirmed = total = 0
+    for (history,) in cur.execute("SELECT history FROM tasks WHERE state IN (?,?,?)", tuple(sorted(TERMINAL_STATES))):
+        total += 1
+        if _last_cleanup_evidence(history).get(CLEANUP_CONFIRMED_KEY) is not True:
+            unconfirmed += 1
+    return unconfirmed, total
+
+
 def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
     """Retained rows whose holder ended and which nothing can show unused.
 
@@ -618,6 +647,15 @@ class SqliteLeaseBackend:
             )
         return reaped
 
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """Unconfirmed-cleanup count and total ended tasks, for this session.
+
+        Returns:
+            tuple[int, int]: ``(unconfirmed, total)``.
+        """
+        async with self.db.transaction() as cur:
+            return cleanup_confirmation_rate(cur)
+
     async def diagnose_unverifiable_holders(self) -> list[dict]:
         """Report every retained row nothing can prove free, and how to free it.
 
@@ -721,6 +759,13 @@ class ResourceLockManager:
         fn = getattr(self.backend, "diagnose_unverifiable_holders", None)
         if not callable(fn):
             return []
+        return await fn()
+
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """Unconfirmed-cleanup count and total ended tasks, via the backend."""
+        fn = getattr(self.backend, "cleanup_confirmation_rate", None)
+        if not callable(fn):
+            return 0, 0
         return await fn()
 
     async def bringup_round_holders(self, now_unix: float) -> set[str]:
