@@ -34,6 +34,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
+kernelforge roofline-ceiling --workspace <W> [options]
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -114,6 +115,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--bench-repeat <n>` | `1` | How many times each bench repeats its measurement in-process, reporting the per-case median. Above 1 shrinks run-to-run spread and requires a driver that accepts `--repeat`; the flag is omitted entirely when this is 1. |
 | `--aiter-cache-max-gb <g>` | `4.0` | Per-attempt AITER cache soft limit in GiB. LRU pruning targets 75% of the limit; `0` disables in-run pruning. |
 | `--profiling` / `--no-profiling` | on | Allow Analysis hardware profiling and Implementer self-profiling guidance on long-horizon runs (>2 hours). Shorter runs keep Analysis static-only regardless. `--no-profiling` disables collection for every duration. |
+| `--roofline-ceiling <auto\|compute\|off\|file>` | `auto` | The per-shape theoretical achievable latency this campaign measures its attainment against. `auto` uses `<W>/forge_experiments/roofline_ceiling/performance_ceiling.json` when it exists and is silently skipped when it does not; `compute` estimates one at campaign start, once the baseline has fixed the scored case set and its per-case times; `off` declines one that is present; any other value is a path, and a path that does not resolve is an error rather than a silent skip. Session-scoped, so a corrected ceiling takes effect on the next `--resume` without invalidating the campaign. |
+| `--roofline-target <fraction>` | `0.0` (off) | Stop the campaign once mean per-case attainment reaches this fraction of the estimated ceiling, e.g. `0.86`. Attainment is `ceiling / measured` per case, averaged with equal weight across scored cases — the same aggregate a KEEP is scored by. The gate fires only when every scored case has a figure: a case whose ceiling sits below its measured latency, or that the ceiling never answered, is excluded from the mean, and a mean over a subset is not the objective it claims to report. Requires a ceiling, and refuses a value above `1.0`. A ceiling is an estimate whose arithmetic nothing checks, so this is off by default — and it never enters the KEEP decision, which stays a measurement against the incumbent. |
 
 ### Rounds and lanes
 
@@ -377,3 +380,77 @@ and `plan` then consume as their highest-priority shape source.
 | `<logs...>` | required | One or more serving logs to read. |
 | `--out <file>` | stdout summary only | Write `demand.json` here. |
 | `--verbose` / `-v` | off | Verbose logging. |
+
+## roofline-ceiling
+
+Estimates the **theoretical achievable latency** of one kernel, for each scored
+test shape, on the accelerator it runs on. The answer is an optimistic lower
+bound under hardware limits and legal algorithm constraints; it does not claim
+an implementation reaching it exists.
+
+The command is self-contained: it collects its own evidence, runs its own
+analyst session, and shares no state with a campaign. It runs before
+`forge-loop` or `forge-rewrite-by-flydsl` and publishes
+`performance_ceiling.json` plus `performance_ceiling_analysis.md`, which those
+commands pick up through their `--roofline-ceiling auto` default.
+
+A campaign can also estimate its own, with `forge-loop --roofline-ceiling
+compute`. That path is the cheaper one: the ceiling is derived once the baseline
+has already fixed the scored case set and measured each case over repeated runs,
+so it needs no discovery pass of its own and its sanity reference is the
+campaign's clock rather than a profiled one. Run this command standalone when
+you want the ceiling before committing a campaign's budget to the kernel.
+
+This command reports no attainment ratio. It has no baseline to divide by
+except the pass it timed under a profiler, and that figure is inflated by the
+profiler; a campaign measures its own attainment against its own per-case
+medians instead. See `--roofline-target` under `forge-loop`.
+
+The estimate is an agent's, composition included, because no table covers MoE
+routing, paged attention, fusion legality or occupancy derating for an arbitrary
+operator, and a fixed composition rule makes the analyst distort its model to
+fit the rule. The hardware is not the agent's: it is handed measured peaks,
+bandwidths and a launch cost, and told to use those and nothing it recalls. Each
+published report carries the analyst's own derivation — formulas, figures used
+and assumptions — because nothing recomputes the latencies and that document is
+the only record of how they were reached.
+
+Those hardware figures are a property of the machine, not of the operator, so
+they are established once and read thereafter, in this order:
+
+| `peak_source` | Where the figures came from |
+|:--|:--|
+| `roof_only_empirical` | Measured on this box by `rocprof-compute --roof-only`, then cached per machine — including partition mode, since slicing a card changes what one slice reaches. |
+| `reference_profile` | Measured on a reference card of the same architecture, device and partition, shipped with the package. For a host without `rocprof-compute` this is far better than a datasheet, and the report says the figures are not this box's. |
+| `datasheet` | Vendor peaks. An absolute lower bound no implementation reaches — roughly a factor of two below achievable, and the factor varies by instruction path, so cases of different dtypes stop being comparable. |
+
+Shipped reference profiles live in `kernelforge/data/roofline_ceiling/device_profiles/`
+and record when, with which tool versions, and under which partition and power
+cap they were measured, plus any figure their author did not trust.
+
+The scored case set comes from the driver's own `case_ms:` lines, not from a
+configuration file, and cases the driver tags `unscored` get no ceiling.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Kernel workspace to analyse. |
+| `--kernel <file>` | config.yaml `source_file_path` | Source file the analyst models; repeatable. |
+| `--driver <file>` | `''` | Measurement driver, passed to the analyst as context. |
+| `--config <file>` | `<W>/config.yaml` | Task configuration supplying `performance_command` and `source_file_path`. |
+| `--performance-command <cmd>` | config.yaml `performance_command` | Shell command that runs the timed benchmark. |
+| `--output-dir <dir>` | `<W>/forge_experiments/roofline_ceiling` | Where the report, the document and the evidence are published. |
+| `--arch <gfx>` | detected | Target architecture, e.g. `gfx950`. Detected via `rocminfo` when omitted; a marketing name such as `MI355X` is accepted. |
+| `--device <n>` | `0` | GPU ordinal to measure and profile on. |
+| `--roof-only` / `--no-roof-only` | on | Measure this box's roofs with `rocprof-compute --roof-only` the first time, and cache them per machine. Roofs do not depend on the operator, so later campaigns on the same box read the cached profile instead of remeasuring. |
+| `--remeasure-device` | off | Measure this box's roofs again rather than reading the cached profile. Use after a ROCm upgrade, a partition change or a power-cap change. |
+| `--cache` / `--no-cache` | on | Reuse and update the cached ceiling for this identity. The key includes `peak_source` and the roof figures themselves, so neither a datasheet answer nor one derived from peaks the box no longer reports is served to a caller who asked for a current measured one. |
+| `--op-name <name>` | workspace name | Operator name used in the cache identity. |
+| `--agent-provider <name>` | auto-selected | Agent provider for the analyst session. |
+| `--agent-model <name>` | provider default | Analyst model. |
+| `--agent-timeout-sec <s>` | `3600` | Wall-clock budget for the analyst session. |
+| `--run-timeout-sec <s>` | `1800` | Wall-clock budget for each measurement subprocess. |
+| `--roof-timeout-sec <s>` | `3600` | Wall-clock budget for the `--roof-only` microbenchmarks. |
+
+The result dict (`ideal_ms` per case, `bound`, `arch`, `peak_source`,
+`confidence`) is printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__`
+sentinels.

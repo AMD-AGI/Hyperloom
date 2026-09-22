@@ -20,10 +20,10 @@ import tempfile
 import textwrap
 import time
 import traceback
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
@@ -168,6 +168,10 @@ LOOP_ARTIFACT_ROOT = "forge_experiments"
 # chosen for.
 CONFIG_COVERAGE_MIN_MOVE_RATIO = 0.01
 CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
+
+# Distinguishes "the ceiling report has not been looked for yet" from "it was looked for and is not there", so a
+# missing or corrupt report is read from disk once per campaign rather than once per iteration.
+_CEILING_UNLOADED = object()
 
 
 def _measurement_case_times(
@@ -466,6 +470,15 @@ class IterationConfig:
     # How large a per-case improvement has to be, relative to the case's own time, before a KEEP counts as having been
     # configured for that case.
     config_coverage_min_move_ratio: float = CONFIG_COVERAGE_MIN_MOVE_RATIO
+    # Published ``performance_ceiling.json`` whose per-shape theoretical latencies the campaign measures its
+    # attainment against. Session-scoped rather than part of the campaign configuration, because a ceiling is a
+    # derived estimate that can be recomputed, corrected or withdrawn between sessions without invalidating the
+    # campaign. It decides when to stop, never which candidate is better: see ``_is_roofline_target_met``.
+    ceiling_report_path: str = ""
+    # Mean per-case attainment (``ceiling / measured``, equal-weight across scored cases) at which the campaign has
+    # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
+    # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
+    roofline_target: float = 0.0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -565,8 +578,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         tracker: ExperimentTracker,
         config: Config | None = None,
         resume: bool = False,
+        ceiling_estimator: Callable[..., Awaitable[Any]] | None = None,
     ):
         self.ic = iter_config
+        # Produces a ceiling report for this kernel, given the case set and per-case latencies the baseline
+        # established. Injected rather than built here so the loop needs no view of the agent-backend registry: the
+        # analyst is a different role, in a read-only sandbox, and resolving it is the caller's job.
+        self._ceiling_estimator = ceiling_estimator
         # Declared here so persistence works before the methods that populate them have run.
         self._best_case_times: dict[str, float] = {}
         # Pairs this process selected and could not stage.
@@ -2511,6 +2529,55 @@ class IterationLoop(AnalysisRuntimeMixin):
             return False
         return self.best_wall_ms <= self.ic.target_wall_ms
 
+    async def _establish_ceiling(self) -> None:
+        """Estimate this kernel's per-shape ceiling once, before the first round.
+
+        Runs only when the caller supplied an estimator and no report is already
+        published: the estimate costs a profiler pass and an analyst session, it
+        does not change as the kernel is optimized -- the ceiling is a property
+        of the operator and the box, not of the current implementation -- and a
+        campaign that resumes has one on disk already.
+
+        The case set and per-case latencies come from the baseline measured just
+        above, which is both a better clock than one profiled pass and one
+        driver run the estimator no longer has to pay for.
+
+        A failure here is reported and dropped. Without a ceiling the campaign
+        simply has no attainment target and runs to its time budget, which is
+        what every campaign did before this existed.
+        """
+        if self._ceiling_estimator is None or str(self.ic.ceiling_report_path or "").strip():
+            return
+        scored = self._scored_case_ids()
+        if not scored:
+            return
+        anchor = self._best_case_times or self._baseline_case_times
+        print("Estimating the roofline ceiling for this kernel...")
+        try:
+            outcome = await self._ceiling_estimator(
+                case_ids=scored,
+                case_ms={case_id: anchor[case_id] for case_id in scored},
+            )
+        except Exception as exc:  # noqa: BLE001 - an absent ceiling costs a target, never the campaign
+            log.warning("roofline ceiling unavailable: %s", exc, exc_info=True)
+            print(f"  [roofline] no ceiling for this campaign: {exc}")
+            return
+
+        self.ic.ceiling_report_path = str(outcome.report_path)
+        self._ceiling_report = outcome.report
+        for note in outcome.notes:
+            print(f"  [roofline] {note}")
+        standing = self._roofline_attainment()
+        if standing is not None and standing.usable:
+            print(
+                f"  [roofline] ceiling published ({outcome.source}); attainment "
+                f"{standing.mean * 100:.1f}% of estimate across {len(standing.cases)} case(s)"
+            )
+        else:
+            print(f"  [roofline] ceiling published ({outcome.source}); no attainment figure yet")
+        for case_id, reason in sorted((standing.excluded if standing else {}).items()):
+            print(f"  [roofline] {case_id}: {reason}")
+
     async def _measure_baseline(self) -> float | None:
         """Bench the pristine kernel before any agent edit — the speedup anchor."""
         if self.ic.build_command:
@@ -2928,6 +2995,101 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
                 for case in context.cases
             ),
+        )
+
+    def _ceiling(self) -> Any | None:
+        """The published ceiling report for this kernel, or ``None``.
+
+        Loaded on demand rather than in ``__init__`` so a ceiling published
+        part-way through a campaign is picked up at the next iteration, and a
+        missing or corrupt one costs a log line rather than the run.
+        """
+        path = str(self.ic.ceiling_report_path or "").strip()
+        if not path:
+            return None
+        cached = getattr(self, "_ceiling_report", _CEILING_UNLOADED)
+        if cached is _CEILING_UNLOADED:
+            try:
+                from kernelforge.roofline_ceiling.report import read_report
+
+                cached = read_report(path)
+            except Exception as exc:  # noqa: BLE001 - a missing ceiling is never worth failing a campaign for
+                log.warning("ceiling unavailable from %s: %s", path, exc)
+                cached = None
+            self._ceiling_report = cached
+        return cached
+
+    def _roofline_attainment(self) -> Any | None:
+        """Score the published ceiling against the incumbent's own per-case times.
+
+        The divisor is the incumbent, not the pristine anchor: attainment has to
+        move as the campaign improves the kernel, and the anchor by definition
+        does not move at all.
+        """
+        report = self._ceiling()
+        if report is None:
+            return None
+        from kernelforge.roofline_ceiling.attainment import measure_attainment
+
+        return measure_attainment(
+            report,
+            self._best_case_times or self._baseline_case_times,
+            unscored_cases=self._unscored_cases,
+        )
+
+    def _is_roofline_target_met(self) -> bool:
+        """Whether mean attainment has reached the target the operator asked for.
+
+        Two things have to hold, and the second is not a second opinion -- it is
+        what makes the first a number at all.
+
+        The mean must cover every scored case. A case excluded from the mean is
+        excluded from the objective the mean claims to report, so dropping the
+        three shapes furthest from their ceilings leaves the four easiest
+        averaging comfortably above target. The commonest exclusion is a ceiling
+        that sits below the latency already measured, which is the work model
+        contradicting itself -- exactly the estimate that must not be allowed to
+        end a campaign.
+
+        Nothing here touches KEEP. Whether one candidate beats another stays a
+        measurement against the incumbent; this decides only whether to buy
+        another round.
+        """
+        target = float(self.ic.roofline_target or 0.0)
+        if target <= 0:
+            return False
+        standing = self._roofline_attainment()
+        if standing is None or not standing.usable:
+            return False
+        if not standing.covers(self._scored_case_ids()):
+            for case_id, reason in sorted(standing.excluded.items()):
+                print(f"  [roofline] {case_id} has no attainment figure, so the target cannot be ruled on: {reason}")
+            return False
+        return standing.mean >= target
+
+    def _scored_case_ids(self) -> list[str]:
+        """The cases the objective scores, which a ceiling has to answer in full."""
+        anchor = self._best_case_times or self._baseline_case_times
+        return [case_id for case_id in anchor if case_id not in self._unscored_cases]
+
+    def _render_ceiling_advisory(self) -> str:
+        """Render the roofline standing for the planner, when a ceiling is published.
+
+        Guidance, not a verdict: it names where the remaining headroom is by
+        case. Because the ceiling is fixed for the campaign, pointing the agent
+        at attainment and pointing it at latency ask for the same thing, so this
+        block adds a direction without adding an incentive.
+        """
+        report = self._ceiling()
+        if report is None:
+            return ""
+        from kernelforge.roofline_ceiling.report import render_for_prompt
+
+        return render_for_prompt(
+            report,
+            self._best_case_times or self._baseline_case_times,
+            target=float(self.ic.roofline_target or 0.0),
+            unscored_cases=sorted(self._unscored_cases),
         )
 
     def _render_case_config_coverage(self) -> str:
@@ -4634,6 +4796,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 "anchor was accepted under the widened bound"
             )
 
+        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
+        # latencies from the campaign's own clock.
+        await self._establish_ceiling()
+
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
 
@@ -4666,6 +4832,21 @@ class IterationLoop(AnalysisRuntimeMixin):
             if self._is_gate_met():
                 self.termination_reason = "gate_met"
                 print(f"\nGATE MET at iteration {iteration}: raw wall target reached at {self.best_wall_ms:.6f} ms")
+                break
+            if self._is_roofline_target_met():
+                self.termination_reason = "roofline_target_met"
+                standing = self._roofline_attainment()
+                print(
+                    f"\nROOFLINE TARGET MET at iteration {iteration}: mean attainment "
+                    f"{standing.mean * 100:.1f}% of the estimated ceiling, at or above the "
+                    f"{float(self.ic.roofline_target) * 100:.0f}% target. The ceiling is an estimate: if this "
+                    "looks early, the derivation in performance_ceiling_analysis.md is where it would be wrong."
+                )
+                for entry in sorted(standing.cases, key=lambda c: c.attainment):
+                    print(
+                        f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
+                        f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
+                    )
                 break
             if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
                 self.termination_reason = "orchestration_failed"
@@ -5061,6 +5242,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 if coverage_block:
                     history = f"{coverage_block}\n\n{history}"
                     print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
+                ceiling_block = self._render_ceiling_advisory()
+                if ceiling_block:
+                    history = f"{ceiling_block}\n\n{history}"
+                    print(f"  [agent] injected roofline attainment standing: {len(ceiling_block)} chars")
                 new_file_block = self._render_uncommittable_new_paths()
                 if new_file_block:
                     history = f"{new_file_block}\n\n{history}"
