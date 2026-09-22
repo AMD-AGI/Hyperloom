@@ -279,6 +279,20 @@ class Reconciler:
         report.closed_windows.append(tracked)
         log.info("RECONCILE: closed revalidation window held by terminal task %s", tracked)
 
+    async def cleanup_confirmation_rate(self) -> tuple[int, int]:
+        """How often an ended task confirmed its teardown, this session.
+
+        Exposed here rather than leaving the caller to reach into ``_locks``:
+        the maintenance summary carries this next to ``leases_unverifiable``,
+        and a rename of a private attribute should not be able to silently drop
+        the one ratio that says whether retained lanes are routine.
+
+        Returns:
+            tuple[int, int]: Ended tasks whose cleanup was not confirmed, and
+            ended tasks in total.
+        """
+        return await self._locks.cleanup_confirmation_rate()
+
     async def _reap_leases(self, now_unix: float, report: ReconcileReport) -> None:
         """Release confirmed-dead local owners, then lanes nothing is using.
 

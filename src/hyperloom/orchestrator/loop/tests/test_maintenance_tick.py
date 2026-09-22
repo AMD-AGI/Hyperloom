@@ -37,12 +37,23 @@ class _Reconciler:
     holds. ``raises`` stands in for a report this pass could not produce.
     """
 
-    def __init__(self, reaped=0, raises=False, unverifiable=0):
+    def __init__(self, reaped=0, raises=False, unverifiable=0, rate=(0, 0)):
         self.last_report = (
             None
             if raises
             else SimpleNamespace(leases_reaped=reaped, leases_unverifiable=unverifiable, failed_tasks=["t1"])
         )
+        self._rate = rate
+
+    async def cleanup_confirmation_rate(self):
+        """The ratio that says whether retained lanes are routine.
+
+        Not wrapped in a swallow at the call site on purpose: if this breaks,
+        the maintenance summary must lose the tick rather than quietly ship a
+        summary that looks complete and is missing the one number the retention
+        decision rests on.
+        """
+        return self._rate
 
 
 class _Pool:

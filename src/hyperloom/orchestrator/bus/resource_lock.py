@@ -285,8 +285,8 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
 
     This is the whole operator story for a leaked lane: there is no cleanup
     command, so :func:`_report_unverifiable` logging the remedy IS the
-    interface. Nothing reclaims these rows any more, so everything it
-    so everything it returns is a row that survived reclamation.
+    interface. Nothing reclaims these rows any more, so everything it returns
+    is a lane that will stay held until an operator acts on it.
 
     Unlike that pass it does NOT filter on ``owner_scope``. A row this process
     may not judge is precisely the kind an operator has to be told about, since
