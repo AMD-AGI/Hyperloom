@@ -142,7 +142,7 @@ class _ExploreStateMixin:
         if not cid:
             return {}
         ss = _shared_state_module()
-        now = ss._now_iso()
+        now = ss.now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -202,11 +202,11 @@ class _ExploreStateMixin:
             return None
         attempts = list(gap.get("attempts") or [])
         ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss.now_iso())})
         if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
             attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss._now_iso()
+        gap["last_updated_ts"] = ss.now_iso()
         return gap
 
     def record_intervention(
@@ -224,7 +224,7 @@ class _ExploreStateMixin:
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             "delta_pct": delta_pct,
-            "ts": _shared_state_module()._now_iso(),
+            "ts": _shared_state_module().now_iso(),
         }
         self.intervention_mix.append(entry)
         cap = _shared_state_module()._INTERVENTION_MIX_CAP
@@ -419,7 +419,7 @@ class _ExploreStateMixin:
             "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
+            "ts": str(variant.get("ts") or _shared_state_module().now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
             # Attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
@@ -470,7 +470,7 @@ class _ExploreStateMixin:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
-        now = _shared_state_module()._now_iso()
+        now = _shared_state_module().now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):

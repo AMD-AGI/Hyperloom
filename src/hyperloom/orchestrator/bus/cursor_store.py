@@ -11,7 +11,6 @@ from hyperloom.common.timeutil import now_iso
 
 from .storage.connection import SqliteConnection
 
-_now_iso = now_iso
 
 
 @dataclass
@@ -30,7 +29,7 @@ class CursorState:
             agent=agent,
             last_processed_seq=0,
             last_processed_msg_id="",
-            processed_at=_now_iso(),
+            processed_at=now_iso(),
         )
 
     @classmethod
@@ -78,9 +77,9 @@ class CursorStore:
                     agent=agent,
                     last_processed_seq=current,
                     last_processed_msg_id=row["last_processed_msg_id"] if row else "",
-                    processed_at=row["processed_at"] if row else _now_iso(),
+                    processed_at=row["processed_at"] if row else now_iso(),
                 )
-            now = _now_iso()
+            now = now_iso()
             cur.execute(
                 "INSERT INTO cursors(agent, last_processed_seq, "
                 "                   last_processed_msg_id, processed_at) "

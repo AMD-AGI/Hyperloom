@@ -57,7 +57,6 @@ def redact_secrets(text: str) -> str:
 
 
 # microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
 
 
 def _coerce_text(value: Any) -> str:
@@ -90,7 +89,7 @@ class ConversationRecord:
         """Serialize to the on-disk row dict, stamping ``ts`` and redacting the prompt / response text."""
         return {
             "session_id": str(self.session_id),
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "component": str(self.component),
             "call_id": _coerce_optional_str(self.call_id),
             "role": _coerce_optional_str(self.role),

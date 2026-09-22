@@ -94,7 +94,6 @@ def new_call_id() -> str:
 
 
 # Canonical timestamp helper; kept importable for callers.
-_now_iso = now_iso
 
 
 @dataclass
@@ -136,7 +135,7 @@ class LLMCallRecord:
         """Serialize to the on-disk row dict, stamping ``ts`` (UTC µs)."""
         return {
             "session_id": str(self.session_id),
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "component": str(self.component),
             "call_id": _coerce_optional_str(self.call_id),
             "role": _coerce_optional_str(self.role),

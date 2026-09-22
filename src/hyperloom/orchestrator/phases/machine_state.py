@@ -2222,7 +2222,8 @@ def record_lifecycle_event(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """Append a structured lifecycle event marking a phase/step boundary."""
-    from ..state.shared_state import _LIFECYCLE_CAP, _now_iso
+    from ..state.shared_state import _LIFECYCLE_CAP
+    from hyperloom.common.timeutil import now_iso
 
     events = state.lifecycle
     if events is None:
@@ -2237,7 +2238,7 @@ def record_lifecycle_event(
         detail=detail,
         duration_s=duration_s,
         seq=next_seq,
-        ts=ts or _now_iso(),
+        ts=ts or now_iso(),
     )
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)

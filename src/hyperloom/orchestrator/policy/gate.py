@@ -1832,7 +1832,7 @@ def record_policy_denial(
         int: The new consecutive-denial streak value for this
             (action, rule) pair.
     """
-    from ..state.shared_state import _now_iso
+    from hyperloom.common.timeutil import now_iso
 
     key = f"{action_name or '*'}:{rule}"
     streak = int(state.policy_denial_streak.get(key, 0)) + 1
@@ -1844,7 +1844,7 @@ def record_policy_denial(
         "hint": hint or "",
         "intent_type": intent_type,
         "streak": streak,
-        "ts": _now_iso(),
+        "ts": now_iso(),
     }
     if intent_payload:
         entry["intent_payload_keys"] = sorted(intent_payload.keys())

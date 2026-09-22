@@ -130,7 +130,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 )
 
 
-_now_iso = now_iso
 
 
 _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
@@ -835,7 +834,7 @@ class SpecialistRunner:
         try:
             path = specialist_intel_path(self.session_dir)
             path.parent.mkdir(parents=True, exist_ok=True)
-            ts = _now_iso()
+            ts = now_iso()
             with path.open("a", encoding="utf-8") as f:
                 for call in tool_calls:
                     if not isinstance(call, dict):
@@ -1643,7 +1642,7 @@ class SpecialistRunner:
         line = json.dumps(
             {
                 "turn": turn,
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 **safe_entry,
             },
             sort_keys=True,
@@ -1675,7 +1674,7 @@ class SpecialistRunner:
         if path is None:
             return
         payload = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "ts_unix": time.time(),
             "turn": turn,
             "max_turns": max_turns,
@@ -1700,7 +1699,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": _now_iso(), **payload}, make_parents=False)
+        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
 
     def _write_specialist_done_partial(
         self,
@@ -1722,7 +1721,7 @@ class SpecialistRunner:
             return
         _common_io.atomic_write_json(
             path,
-            {"ts": _now_iso(), "_recovered_from_partial": True, **payload},
+            {"ts": now_iso(), "_recovered_from_partial": True, **payload},
             make_parents=False,
         )
 

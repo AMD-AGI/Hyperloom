@@ -7,12 +7,10 @@ from __future__ import annotations
 
 import os
 
-from hyperloom.common.timeutil import now_iso
 
 
 # microseconds + ``+00:00`` (canonical helper; kept importable via shared_state for callers that still use that legacy
 # path).
-_now_iso = now_iso
 
 # Default partial-attempt cap for run_optimization; override via env in the integrate lane's retirement check (1
 # disables second chance).

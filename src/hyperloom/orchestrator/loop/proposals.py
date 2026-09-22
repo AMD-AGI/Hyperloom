@@ -618,13 +618,13 @@ class ProposalsCollaborator:
         if not proposal_msg_id or not task_id:
             return
         try:
-            from ..trace.llm_trace import _now_iso
+            from hyperloom.common.timeutil import now_iso
             from hyperloom.common.io import append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)
             row = {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }

@@ -21,11 +21,11 @@ from .patch_landing import (
     patch_budget,
     record_source_path,
 )
+from hyperloom.common.timeutil import now_iso as _now_iso
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
     _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
-    _now_iso,
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
     resolve_hot_kernel_min_gpu_pct,
