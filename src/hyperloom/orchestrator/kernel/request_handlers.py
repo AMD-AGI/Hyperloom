@@ -1838,24 +1838,6 @@ def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
         return None
 
 
-def _read_forge_result_json(workspace: Path) -> dict[str, Any]:
-    """Read forge's on-disk ``result.json`` from the tuning workspace.
-
-    forge always writes the full report (including ``tuners_skipped``) to
-    ``<output_dir>/result.json``, even when the stdout sentinel omits some
-    fields. Returns ``{}`` when missing or unparseable.
-    """
-    try:
-        path = workspace / "result.json"
-        if path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-            if isinstance(data, dict):
-                return data
-    except (OSError, json.JSONDecodeError, ValueError):
-        pass
-    return {}
-
-
 def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
     """Join forge per-tuner skip reasons into one concise human-readable string."""
     if not isinstance(tuners_skipped, list):
@@ -1963,12 +1945,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
     current_best = getattr(state, "current_best", None) or {}
-    try:
-        server_args = resolve_runtime_workload(state, arm="current_best").server_args
-    except Exception:  # noqa: BLE001 - best-effort fallback for partial state/test doubles
-        server_args = ""
-        if isinstance(current_best, dict):
-            server_args = str(current_best.get("extra_server_args") or "")
+    server_args = resolve_runtime_workload(state, arm="current_best").server_args
     extra_envs = dict(current_best.get("extra_envs") or {}) if isinstance(current_best, dict) else {}
     ref_envs = dict(getattr(state, "reference_envs", None) or {})
     per_token_signal = is_truthy(extra_envs.get("SGLANG_USE_AITER_FP8_PER_TOKEN")) or is_truthy(
@@ -4297,28 +4274,11 @@ async def _run_forge_gemm_tuning(
             },
         )
 
-    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
-    # result.json and derive a top-level skip_reason.
-    if not result.get("tuners_skipped"):
-        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
-        if disk_skipped:
-            result["tuners_skipped"] = disk_skipped
     if not result.get("skip_reason"):
         reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
         if reason:
             result["skip_reason"] = reason
 
-    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision, but this array was previously dropped
-    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
-    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
-    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
-    # keep it on the envelope for the trace row / breakdown, and log it so the
-    # failure is never silent even when the session is kept.
-    if not result.get("failed_tuners"):
-        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
-        if disk_failed:
-            result["failed_tuners"] = disk_failed
     _failed_tuners = result.get("failed_tuners")
     if isinstance(_failed_tuners, list) and _failed_tuners:
         for _f in _failed_tuners:

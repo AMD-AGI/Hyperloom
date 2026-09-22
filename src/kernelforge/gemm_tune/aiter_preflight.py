@@ -58,10 +58,8 @@ def classify(serve: str | None, root: str | None, commit: str | None) -> tuple[l
 
 def _installed_aiter_version() -> str | None:
     """``<dist>==<version>`` for the installed aiter, or None."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
-    except Exception:  # noqa: BLE001 - stdlib shape differs on exotic runtimes
-        return None
+    from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+
     for dist in ("amd-aiter", "aiter"):
         try:
             found = version(dist)

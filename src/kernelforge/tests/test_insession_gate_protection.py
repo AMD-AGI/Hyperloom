@@ -265,6 +265,7 @@ def test_safe_stop_runs_canonical_validation_and_converges(
 
     monkeypatch.setattr(gate_module, "test_correctness", _corr, raising=False)
     monkeypatch.setattr(gate_module, "measure_wallclock", _bench, raising=False)
+    monkeypatch.setattr(gate_module, "force_jit_rebuild_for_changes", lambda *_args: None)
     monkeypatch.setattr(
         gate,
         "_candidate_diff_sha256",

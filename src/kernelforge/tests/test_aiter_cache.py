@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,33 @@ def test_source_hash_cache_reuses_and_rotates_on_edit(tmp_path):
     assert first.cache_root == second.cache_root
     assert third.cache_root != first.cache_root
     assert "AITER_REBUILD" not in os.environ
+
+
+def test_source_hash_failure_does_not_select_an_unverified_cache(tmp_path, monkeypatch):
+    isolation = aiter_cache.configure_aiter_cache_isolation(tmp_path)
+    source = tmp_path / "kernel.cu"
+    source.write_text("kernel", encoding="utf-8")
+
+    def unreadable(_path):
+        raise PermissionError("source unavailable")
+
+    monkeypatch.setattr(Path, "read_bytes", unreadable)
+    with pytest.raises(PermissionError, match="source unavailable"):
+        aiter_cache.activate_aiter_cache_for_sources([str(source)])
+    assert os.environ["AITER_ROOT_DIR"] == str(isolation.aiter_root_dir)
+
+
+def test_removing_a_declared_source_hint_rotates_the_cache(tmp_path):
+    aiter_cache.configure_aiter_cache_isolation(tmp_path)
+    source = tmp_path / "helper.cuh"
+    source.write_text("helper", encoding="utf-8")
+    original = aiter_cache.activate_aiter_cache_for_sources([str(source)])
+    source.unlink()
+
+    removed = aiter_cache.activate_aiter_cache_for_sources([str(source)])
+
+    assert removed.cache_root != original.cache_root
+    assert aiter_cache.activate_aiter_cache_for_sources([str(source)]).cache_root == removed.cache_root
 
 
 def test_source_hash_ignores_unrelated_tracked_changes(tmp_path):

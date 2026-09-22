@@ -62,6 +62,8 @@ def test_multi_prompt_multiple_recipes():
     assert "FLAG_A" in p and "FLAG_B" in p
     assert "env_flags=FLAG_A FLAG_B" in p
     assert "/tmp/h.py" in p  # harness block wired in
+    assert "missing Triton or kernel failures must surface" in p
+    assert "original eager path only when that flag is disabled" in p
 
 
 def test_multi_prompt_rocm_absent_when_none_native():
@@ -1379,9 +1381,10 @@ def test_a_timeout_is_never_retried(tmp_path):
     assert calls == 1
 
 
-def test_a_task_level_refusal_is_not_retried(tmp_path):
+@pytest.mark.parametrize("end_reason", ["turn_cap", ""])
+def test_a_task_level_refusal_is_not_retried(tmp_path, end_reason):
     """A model that will not write a conforming harness answers the same way every time."""
-    backend = _counting_backend(AgentRunResult(text="I cannot benchmark these in isolation", end_reason="turn_cap"))
+    backend = _counting_backend(AgentRunResult(text="I cannot benchmark these in isolation", end_reason=end_reason))
 
     rc, calls = _author_with(tmp_path, backend)
 

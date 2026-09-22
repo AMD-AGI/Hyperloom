@@ -254,30 +254,26 @@ def derive_implementation_symbols(
             and not _ITANIUM_MANGLED_RE.match(value)
         }
 
-    source_symbols: set[str] = set()
-    try:
-        from kernelforge.mcp_server.tools.pmc import derive_kernel_names
+    from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 
-        seen_paths: set[str] = set()
-        for raw in [kernel_path, *(source_files or [])]:
-            if not raw or str(raw) in seen_paths:
-                continue
-            seen_paths.add(str(raw))
-            try:
-                source = None
-                if source_contents is not None:
-                    source = source_contents.get(str(raw))
-                if source is None:
-                    path = Path(raw)
-                    if not path.is_absolute() and workspace:
-                        path = Path(workspace) / path
-                    source = path.read_text(errors="replace")
-            except OSError:
-                continue
-            source_symbols.update(stable(derive_kernel_names(source)))
-    except Exception:
-        # Identity extraction is best-effort; callers safely fall back to path identity.
-        pass
+    source_symbols: set[str] = set()
+    seen_paths: set[str] = set()
+    for raw in [kernel_path, *(source_files or [])]:
+        if not raw or str(raw) in seen_paths:
+            continue
+        seen_paths.add(str(raw))
+        try:
+            source = None
+            if source_contents is not None:
+                source = source_contents.get(str(raw))
+            if source is None:
+                path = Path(raw)
+                if not path.is_absolute() and workspace:
+                    path = Path(workspace) / path
+                source = path.read_text(errors="replace")
+        except OSError:
+            continue
+        source_symbols.update(stable(derive_kernel_names(source)))
     return sorted(source_symbols)
 
 

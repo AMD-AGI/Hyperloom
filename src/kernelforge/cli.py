@@ -165,15 +165,10 @@ def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
         return
     from kernelforge.loop.task_preparer import _materialize_invocation_spec
 
-    destination, _ = _materialize_invocation_spec(
+    _materialize_invocation_spec(
         invocation_spec_file,
         Path(driver).resolve().parent,
     )
-    if destination is None:
-        print(
-            f"  [prepare] could not place {invocation_spec_file} beside {driver}; "
-            "the driver will only be able to read it from where it was passed"
-        )
 
 
 def _validate_max_hours(ctx, param, value):
@@ -714,7 +709,7 @@ def _make_lane_agent_factory(
 @click.option(
     "--kernel-backend",
     default=None,
-    help=("Fresh campaign: kernel backend override. Unsupported kernel backends fall back to flydsl."),
+    help="Fresh campaign: kernel backend override. Unsupported kernel backends are rejected.",
 )
 @click.option("--program-md-file", default=None, help="Fresh campaign: optional task context copied into the campaign")
 @click.option(

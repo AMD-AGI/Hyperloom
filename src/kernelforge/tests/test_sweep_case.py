@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-import sys
-import types
 
 import pytest
 
-from kernelforge.loop import task_preparer
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     EXPLORATORY_KIND,
@@ -717,40 +714,3 @@ def test_scoring_refuses_an_exploratory_measurement():
     benchmark = {"success": True, "measurements": [_exploratory_measurement()]}
     with pytest.raises(CaseCoverageError, match="exploratory sweep"):
         calculate_measurement_case_speedups(benchmark, {"sq64": 1.0}, expected_measurements=1)
-
-
-# ---------- the contract the primitive asks drivers to satisfy -------------
-
-
-def _reference_template_main(monkeypatch, argv: list[str]):
-    """Execute the reference driver template's ``main`` off the device."""
-    torch = types.ModuleType("torch")
-    torch.cuda = types.SimpleNamespace(is_available=lambda: True, synchronize=lambda: None)
-    torch.manual_seed = lambda *_args: None
-    harness = types.ModuleType("graph_harness")
-    harness.cuda_graph_bench = lambda *_a, **_k: {"times_ms": [0.5]}
-    kernel = types.ModuleType("your_kernel_module")
-    kernel.your_entry_point = lambda *_a, **_k: None
-    for name, module in (("torch", torch), ("graph_harness", harness), ("your_kernel_module", kernel)):
-        monkeypatch.setitem(sys.modules, name, module)
-
-    namespace: dict = {"__file__": "driver_template.py"}
-    exec(compile(task_preparer.REFERENCE_DRIVER_TEMPLATE, "driver_template.py", "exec"), namespace)
-    namespace["CASES"].update({"sq64": {"M": 8, "N": 8}, "sq7211": {"M": 8, "N": 9}})
-    benched: list[str] = []
-    namespace["_run_bench"] = lambda _d, case_id, *_a: benched.append(case_id)
-    monkeypatch.setattr(sys, "argv", ["driver_template.py", *argv])
-    return namespace["main"](), benched
-
-
-def test_reference_template_rejects_an_undeclared_sweep_case(monkeypatch, capsys):
-    status, benched = _reference_template_main(monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq999"])
-    assert status == 1
-    assert benched == []
-    assert "unknown case sq999" in capsys.readouterr().out
-
-
-def test_reference_template_benchmarks_only_the_requested_case(monkeypatch):
-    status, benched = _reference_template_main(monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq7211"])
-    assert status == 0
-    assert benched == ["sq7211"]

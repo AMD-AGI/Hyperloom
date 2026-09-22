@@ -16,7 +16,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
+from kernelforge.agent_backends.base import AgentBackend, AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
@@ -992,7 +992,7 @@ def _restore_changed_protected_files(
 
 
 def _run_agent_discovery_once(
-    backend: Any,
+    backend: AgentBackend,
     spec: AgentRunSpec,
     *,
     timeout_s: int,
@@ -1021,7 +1021,7 @@ def _run_agent_discovery_once(
 
 
 def registered_agent_llm_fn(
-    backend: Any,
+    backend: AgentBackend,
     *,
     model: str = "",
     timeout_s: int = 900,
@@ -1038,7 +1038,7 @@ def registered_agent_llm_fn(
     """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
-    selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    selected_model = model.strip() or backend.runtime.model
     resolved_attempts = (
         int(attempts)
         if attempts is not None
@@ -1134,8 +1134,8 @@ def registered_agent_llm_fn(
                     timeout_s=timeout_s,
                     protected_files=protected,
                 )
-                text = str(getattr(result, "text", "") or "").strip()
-                end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
+                text = result.text.strip()
+                end_reason = result.end_reason
                 cut_short = end_reason in {"turn_cap", "timeout"}
                 # A cut-short session still answered if it got its proposals out first, and discovery spends turns by
                 # design -- it is handed read and search tools precisely so it explores.

@@ -147,8 +147,9 @@ def _source_digest(source_files: list[str]) -> str:
         digest.update(b"\0")
         try:
             digest.update(path.read_bytes())
-        except OSError:
-            digest.update(b"<unreadable>")
+        except FileNotFoundError:
+            # Declared source hints can be deleted by a valid repository refactor.
+            digest.update(b"<missing>")
         digest.update(b"\0")
     return digest.hexdigest()[:24]
 

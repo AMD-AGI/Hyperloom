@@ -31,7 +31,7 @@ from kernelforge.agent_backends.base import (
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.llm.git import ensure_commit_identity, git
+from kernelforge.llm.git import GitError, ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
@@ -853,15 +853,13 @@ def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
     """Record current bytes (or None if absent) for each path, for rollback."""
     snap: dict[Path, bytes | None] = {}
     for p in paths:
-        try:
-            snap[p] = p.read_bytes() if p.is_file() else None
-        except Exception:
-            snap[p] = None
+        snap[p] = p.read_bytes() if p.is_file() else None
     return snap
 
 
 def _restore(snapshot: dict[Path, bytes | None]) -> None:
     """Restore snapshotted paths: rewrite originals, delete ones that were absent."""
+    failure = None
     for p, original in snapshot.items():
         try:
             if original is None:
@@ -869,8 +867,11 @@ def _restore(snapshot: dict[Path, bytes | None]) -> None:
                     p.unlink()
             else:
                 p.write_bytes(original)
-        except Exception:
-            continue
+        except OSError as error:
+            if failure is None:
+                failure = error
+    if failure is not None:
+        raise failure
 
 
 def _abs(workspace: Path, path_like: str) -> Path:
@@ -908,9 +909,7 @@ def _git_apply_patch(workspace: Path, patch: str) -> None:
 
 def _git_untracked(workspace: Path) -> set[str]:
     """Set of untracked (and not-ignored) paths, relative to the workspace."""
-    code, out = _git(workspace, "ls-files", "--others", "--exclude-standard")
-    if code != 0:
-        return set()
+    out = git("ls-files", "--others", "--exclude-standard", cwd=workspace).stdout
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
@@ -971,7 +970,7 @@ def _safe_unlink(path: Path) -> None:
             path.unlink()
 
 
-def _dist_harness_text() -> str | None:
+def _dist_harness_text() -> str:
     """Return the shipped distributed harness's own source.
 
     Read from this package rather than from the reference examples the way
@@ -979,16 +978,11 @@ def _dist_harness_text() -> str | None:
     preparation deletes, while a multi-rank driver imports this module on every
     later run of the loop, so it has to come from something the wheel carries.
     """
-    try:
-        return (Path(__file__).parent / "dist_harness.py").read_text(encoding="utf-8")
-    except OSError:
-        return None
+    return (Path(__file__).parent / "dist_harness.py").read_text(encoding="utf-8")
 
 
-def _find_reference_harness(ref_dir: Path | None) -> str | None:
+def _find_reference_harness(ref_dir: Path) -> str | None:
     """Return the text of a capture-guarded graph harness from the reference tree."""
-    if ref_dir is None or not ref_dir.is_dir():
-        return None
     for cand in sorted(ref_dir.rglob("graph_harness.py")):
         try:
             text = cand.read_text()
@@ -999,35 +993,17 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
     return None
 
 
-def _materialize_reference(workspace: Path) -> Path | None:
+def _materialize_reference(workspace: Path) -> Path:
     """Make the shipped reference examples available for the agent to Read."""
     ref_dir = workspace / REFERENCE_SUBDIR
     _safe_rmtree(ref_dir)
 
-    examples = resource_path("examples", missing_ok=True)
-    try:
-        if examples and Path(examples).is_dir():
-            shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)
-            return ref_dir
-    except Exception:
-        _safe_rmtree(ref_dir)
-
-    # Fallback: no examples tree resolved — materialize the compact contract and a driver template so the agent still
-    # has real files to Read.
-    try:
-        ref_dir.mkdir(parents=True, exist_ok=True)
-        (ref_dir / "CONTRACT.md").write_text(DRIVER_CONTRACT_SPEC)
-        (ref_dir / "driver_template.py").write_text(REFERENCE_DRIVER_TEMPLATE.lstrip("\n"))
-        return ref_dir
-    except Exception:
-        _safe_rmtree(ref_dir)
-        return None
+    shutil.copytree(resource_path("examples"), ref_dir, ignore=_REFERENCE_IGNORE)
+    return ref_dir
 
 
-def _reference_note(ref_dir: Path | None, workspace: Path) -> str:
+def _reference_note(ref_dir: Path, workspace: Path) -> str:
     """Prompt block that points the agent at the on-disk reference files to Read."""
-    if ref_dir is None or not ref_dir.is_dir():
-        return "No reference files were available; follow the contract above."
     rel_root = os.path.relpath(ref_dir, workspace)
     lines = [
         "## Reference files to Read (real, complete — do NOT rely on memory)",
@@ -1055,52 +1031,35 @@ def _reference_note(ref_dir: Path | None, workspace: Path) -> str:
             extras = [f.name for f in sub.iterdir() if f.name in ("graph_harness.py", "program.md")]
             extra = f" (+ {', '.join(sorted(extras))})" if extras else ""
             lines.append(f"- `./{rel}/driver.py`{extra} — a complete working reference driver")
-    tmpl = ref_dir / "driver_template.py"
-    if tmpl.is_file():
-        lines.append(f"- `./{rel_root}/driver_template.py` — a minimal driver skeleton to adapt")
     return "\n".join(lines)
 
 
 def _materialize_invocation_spec(
     source_file: str,
-    durable_dir: Path | None,
+    durable_dir: Path,
 ) -> tuple[Path | None, str]:
     """Place the invocation spec where the prepared driver can keep reading it."""
-    if not source_file or durable_dir is None:
+    if not source_file:
         return None, ""
-    try:
-        source = Path(source_file).expanduser().resolve()
-        if not source.is_file() or source.stat().st_size > MAX_INVOCATION_SPEC_BYTES:
-            return None, ""
-        payload = json.loads(source.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return None, ""
-        destination_name = source.name if _INVOCATION_SPEC_NAME_RE.fullmatch(source.name) else INVOCATION_SPEC_FILENAME
-        destination = durable_dir / destination_name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.is_symlink():
-            log.warning(
-                "invocation specification destination %s is a symbolic link; "
-                "leaving it alone rather than writing through it",
-                destination,
-            )
-            return None, ""
-        if destination.exists():
-            with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):
-                existing = destination.read_text(encoding="utf-8")
-                if json.loads(existing) == payload:
-                    return destination, existing
-            log.warning(
-                "invocation specification destination %s already holds different "
-                "content; leaving it alone rather than replacing it",
-                destination,
-            )
-            return None, ""
-        canonical = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-        destination.write_text(canonical, encoding="utf-8")
-        return destination, canonical
-    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
-        return None, ""
+    source = Path(source_file).expanduser().resolve()
+    if source.stat().st_size > MAX_INVOCATION_SPEC_BYTES:
+        raise ValueError(f"invocation specification exceeds {MAX_INVOCATION_SPEC_BYTES} bytes: {source}")
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"invocation specification must contain a JSON object: {source}")
+    destination_name = source.name if _INVOCATION_SPEC_NAME_RE.fullmatch(source.name) else INVOCATION_SPEC_FILENAME
+    destination = durable_dir / destination_name
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise ValueError(f"invocation specification destination is a symbolic link: {destination}")
+    if destination.exists():
+        existing = destination.read_text(encoding="utf-8")
+        if json.loads(existing) == payload:
+            return destination, existing
+        raise ValueError(f"invocation specification destination already holds different content: {destination}")
+    canonical = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    destination.write_text(canonical, encoding="utf-8")
+    return destination, canonical
 
 
 def declared_case_ids(spec_path: Path | str | None) -> list[str]:
@@ -1630,6 +1589,50 @@ async def prepare_task(
         audit_dir = None
     audit_dir_str = str(audit_dir) if audit_dir is not None else ""
 
+    # (1) Protect ONLY the source under optimization: kernel + declared source files.
+    protected = {_abs(workspace, kernel)}
+    for s in source_files:
+        if s:
+            protected.add(_abs(workspace, s))
+
+    # Rollback anchors: a byte-snapshot of the protected source (guaranteed restore even if untracked) plus the git
+    # state, so ANY other file the agent creates/modifies can be undone on failure without knowing it in advance.
+    src_snapshot = _snapshot(list(protected))
+    prep_base_sha = _git_head(workspace)
+    # An external driver can use a plain source directory. Its rollback needs only
+    # the protected source snapshot; Git-backed workspaces must establish ownership
+    # successfully before any preparation writes occur.
+    plain_source_directory = (
+        driver_external
+        and not prep_base_sha
+        and not any((directory / ".git").exists() for directory in (workspace, *workspace.parents))
+    )
+    pre_untracked = set() if plain_source_directory else _git_untracked(workspace)
+    # The caller's pre-prep uncommitted tracked modifications, captured so a failure rollback restores them instead of
+    # resetting the whole tree to HEAD.
+    pre_diff = _git_diff_patch(workspace, prep_base_sha)
+
+    def _restore_sources() -> None:
+        _restore(src_snapshot)
+        if prep_base_sha:
+            _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
+
+    def _restore_kernel_workspace() -> None:
+        # Undo everything the agent did while preserving the caller's pre-prep state: reset tracked files to HEAD,
+        # drop only prep-created untracked files, re-apply the caller's original uncommitted tracked modifications,
+        # then authoritatively restore the protected source bytes (covers untracked source too).
+        try:
+            if prep_base_sha:
+                _git(workspace, "reset", "-q")
+                _git(workspace, "checkout", "--", ".")
+                _remove_new_untracked(workspace, pre_untracked)
+                _git_apply_patch(workspace, pre_diff)
+        finally:
+            _restore(src_snapshot)
+
+    def _rollback() -> None:
+        _restore_kernel_workspace()
+
     external_transaction: ExternalArtifactTransaction | None = None
     agent_workspace = workspace
     if driver_external:
@@ -1726,40 +1729,6 @@ async def prepare_task(
     if preflight is not None:
         _audit_json("initial_preflight.json", asdict(preflight))
 
-    # (1) Protect ONLY the source under optimization: kernel + declared source files.
-    protected = {_abs(workspace, kernel)}
-    for s in source_files:
-        if s:
-            protected.add(_abs(workspace, s))
-
-    # Rollback anchors: a byte-snapshot of the protected source (guaranteed restore even if untracked) plus the git
-    # state, so ANY other file the agent creates/modifies can be undone on failure without knowing it in advance.
-    src_snapshot = _snapshot(list(protected))
-    prep_base_sha = _git_head(workspace)
-    pre_untracked = _git_untracked(workspace)
-    # The caller's pre-prep uncommitted tracked modifications, captured so a failure rollback restores them instead of
-    # resetting the whole tree to HEAD.
-    pre_diff = _git_diff_patch(workspace, prep_base_sha)
-
-    def _restore_sources() -> None:
-        _restore(src_snapshot)
-        if prep_base_sha:
-            _git(workspace, "checkout", "--", *[p.as_posix() for p in protected])
-
-    def _restore_kernel_workspace() -> None:
-        # Undo everything the agent did while preserving the caller's pre-prep state: reset tracked files to HEAD,
-        # drop only prep-created untracked files, re-apply the caller's original uncommitted tracked modifications,
-        # then authoritatively restore the protected source bytes (covers untracked source too).
-        if prep_base_sha:
-            _git(workspace, "reset", "-q")
-            _git(workspace, "checkout", "--", ".")
-            _remove_new_untracked(workspace, pre_untracked)
-            _git_apply_patch(workspace, pre_diff)
-        _restore(src_snapshot)
-
-    def _rollback() -> None:
-        _restore_kernel_workspace()
-
     driver_rel = os.path.relpath(driver_path, agent_workspace)
     evidence = _build_evidence(
         workspace=workspace,
@@ -1771,95 +1740,13 @@ async def prepare_task(
         preflight=preflight,
     )
 
-    # Give the agent REAL reference files to Read (copied into the workspace so they are inside its cwd).
-    ref_dir = _materialize_reference(workspace)
-    # Kept apart from the bundle's own file list so an attempt whose re-materialization failed can drop that list and
-    # keep these (see ``_open_scaffold``).
-    reference_prefix = ""
-    if driver_external:
-        reference_prefix = (
-            "## Transactional external driver staging\n"
-            f"The driver and every helper it imports MUST be written under the "
-            f"isolated staging directory "
-            f"`{driver_access_dir}`. The kernel workspace is source evidence only; "
-            "changes are published to the caller's artifact directory only after "
-            "deterministic validation succeeds. Existing task metadata and invocation "
-            "specifications are read-only.\n\n"
-        )
-    # The spec lives beside the driver, NOT in the reference bundle: the driver may read it at runtime, so it has to
-    # outlive preparation and be committed alongside the driver it feeds.
-    spec_path, canonical_spec = _materialize_invocation_spec(
-        invocation_spec_file,
-        driver_path.parent,
-    )
-    if invocation_spec_file and spec_path is None:
-        # Not a default: an explicitly supplied spec that cannot be used costs the prompt's case table, the driver's
-        # durable runtime input and the committed-alongside check all at once, and the caller asked for it.
-        log.warning(
-            "could not materialize the invocation specification %s beside the "
-            "driver; preparation continues without its case table, without a "
-            "durable runtime input for the driver, and without the check that the "
-            "spec is committed with it",
-            invocation_spec_file,
-        )
-    invocation_note = _invocation_spec_note(spec_path, agent_workspace)
-    expected_case_ids = list(expected_case_ids or [])
-    backend_protected_files = [
-        *(path.as_posix() for path in protected),
-        *(read_only_files or []),
-        *([spec_path.as_posix()] if spec_path is not None else []),
-        # Protected rather than merely discouraged: the distributed guarantees
-        # are only guarantees while this file is the one KernelForge shipped.
-        *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
-    ]
-
-    # (2) Pre-place a correct, capture-guarded graph_harness.py so the agent can import a known-good cuda_graph_bench
-    # (accepting dirty/verify) instead of writing its own — a self-written harness can silently mismatch its driver
-    # calls and degrade graph timing to eager.
-    canonical_harness = None if harness_path.is_file() else _find_reference_harness(ref_dir)
-    provided_harness = canonical_harness is not None
-    if provided_harness:
-        harness_path.write_text(canonical_harness)
-        harness_display = str(harness_path) if driver_external else "./graph_harness.py"
-        reference_prefix = (
-            "## Graph timing harness (already available beside the driver)\n"
-            f"`{harness_display}` is a correct, capture-guarded harness. Import it —\n"
-            "`from graph_harness import cuda_graph_bench` (it accepts optional\n"
-            "`dirty`/`verify`). Do NOT rewrite it. Only implement custom timing in the\n"
-            "driver if this operator genuinely cannot be captured into a static-input\n"
-            "graph.\n\n" + reference_prefix
-        )
-
-    # (3) A multi-rank task measures inside dist_harness or it is not measured,
-    # so the module is placed before the agent is asked for anything.
-    canonical_dist_harness = _dist_harness_text() if nproc_per_node > 1 else None
-    if canonical_dist_harness is not None:
-        dist_harness_path.write_text(canonical_dist_harness, encoding="utf-8")
-    elif nproc_per_node > 1:
-        # Not fatal here so the failure is reported by preflight, against the
-        # driver, in the same shape as every other distributed refusal.
-        log.error(
-            "could not read the packaged dist_harness source; this %d-rank task has no harness to "
-            "measure inside and its driver will be refused",
-            nproc_per_node,
-        )
-    reference_note = reference_prefix + _reference_note(ref_dir, agent_workspace)
+    ref_dir = workspace / REFERENCE_SUBDIR
 
     def _open_scaffold() -> None:
         """Put the authoring-only reference bundle back for the next attempt."""
-        nonlocal reference_note
-        if ref_dir is None or ref_dir.is_dir():
+        if ref_dir.is_dir():
             return
-        materialized = _materialize_reference(workspace)
-        if materialized is None:
-            # The note enumerates the contract and the reference drivers by path, in a prompt that also tells the
-            # agent not to rely on memory, so keeping it would send this attempt to Read files that are gone.
-            log.warning(
-                "could not re-materialize the authoring reference bundle at %s; "
-                "this attempt's prompt drops its file list",
-                ref_dir,
-            )
-        reference_note = reference_prefix + _reference_note(materialized, agent_workspace)
+        _materialize_reference(workspace)
 
     def _reset_scaffold() -> None:
         # Put the workspace into the exact state the driver will be judged in — which is also the state the loop's
@@ -1870,7 +1757,7 @@ async def prepare_task(
         else:
             _restore_sources()
         _safe_rmtree(ref_dir)
-        if ref_dir is not None and ref_dir.exists():
+        if ref_dir.exists():
             # A partial removal leaves both halves of the invariant broken at once and neither is visible later:
             # preflight judges the driver against scaffolding the prep commit then deletes, and `git add -A` carries
             # what survived into the pristine commit.
@@ -2022,6 +1909,60 @@ async def prepare_task(
     starved_retry_sec = 0.0
     scaffold_error = ""
     try:
+        # Give the agent REAL reference files to Read (copied into the workspace so they are inside its cwd).
+        ref_dir = _materialize_reference(workspace)
+        reference_prefix = ""
+        if driver_external:
+            reference_prefix = (
+                "## Transactional external driver staging\n"
+                f"The driver and every helper it imports MUST be written under the "
+                f"isolated staging directory "
+                f"`{driver_access_dir}`. The kernel workspace is source evidence only; "
+                "changes are published to the caller's artifact directory only after "
+                "deterministic validation succeeds. Existing task metadata and invocation "
+                "specifications are read-only.\n\n"
+            )
+        # The spec lives beside the driver, NOT in the reference bundle: the driver may read it at runtime, so it has to
+        # outlive preparation and be committed alongside the driver it feeds.
+        spec_path, canonical_spec = _materialize_invocation_spec(
+            invocation_spec_file,
+            driver_path.parent,
+        )
+        invocation_note = _invocation_spec_note(spec_path, agent_workspace)
+        expected_case_ids = list(expected_case_ids or [])
+        backend_protected_files = [
+            *(path.as_posix() for path in protected),
+            *(read_only_files or []),
+            *([spec_path.as_posix()] if spec_path is not None else []),
+            # Protected rather than merely discouraged: the distributed guarantees
+            # are only guarantees while this file is the one KernelForge shipped.
+            *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
+        ]
+
+        # (2) Pre-place a correct, capture-guarded graph_harness.py so the agent can import a known-good cuda_graph_bench
+        # (accepting dirty/verify) instead of writing its own — a self-written harness can silently mismatch its driver
+        # calls and degrade graph timing to eager.
+        canonical_harness = None if harness_path.is_file() else _find_reference_harness(ref_dir)
+        provided_harness = canonical_harness is not None
+        if provided_harness:
+            harness_path.write_text(canonical_harness)
+            harness_display = str(harness_path) if driver_external else "./graph_harness.py"
+            reference_prefix = (
+                "## Graph timing harness (already available beside the driver)\n"
+                f"`{harness_display}` is a correct, capture-guarded harness. Import it —\n"
+                "`from graph_harness import cuda_graph_bench` (it accepts optional\n"
+                "`dirty`/`verify`). Do NOT rewrite it. Only implement custom timing in the\n"
+                "driver if this operator genuinely cannot be captured into a static-input\n"
+                "graph.\n\n" + reference_prefix
+            )
+
+        # (3) A multi-rank task measures inside dist_harness or it is not measured,
+        # so the module is placed before the agent is asked for anything.
+        canonical_dist_harness = _dist_harness_text() if nproc_per_node > 1 else None
+        if canonical_dist_harness is not None:
+            dist_harness_path.write_text(canonical_dist_harness, encoding="utf-8")
+        reference_note = reference_prefix + _reference_note(ref_dir, agent_workspace)
+
         while attempts < PREPARE_MAX_ATTEMPTS:
             remaining = deadline_sec - (time.monotonic() - start)
             if remaining <= 10:
@@ -2229,6 +2170,9 @@ async def prepare_task(
             )
     except ScaffoldRetirementError as exc:
         scaffold_error = str(exc)
+    except (OSError, ValueError, GitError):
+        _rollback()
+        raise
     finally:
         # Never leave reference or external staging bundles behind.
         _safe_rmtree(ref_dir)
@@ -2238,13 +2182,15 @@ async def prepare_task(
                     external_transaction.rollback()
                 except ExternalArtifactError as exc:
                     external_rollback_error = str(exc)
-            if not external_transaction.published:
-                _rollback()
             try:
-                external_transaction.close()
-            except OSError as exc:
-                if not external_rollback_error:
-                    external_rollback_error = f"staging cleanup failed: {exc}"
+                if not external_transaction.published:
+                    _rollback()
+            finally:
+                try:
+                    external_transaction.close()
+                except OSError as exc:
+                    if not external_rollback_error:
+                        external_rollback_error = f"staging cleanup failed: {exc}"
 
     # (3) Failure: roll the workspace back to its exact pre-prep state (tracked files reset to HEAD, caller's
     # uncommitted mods re-applied, prep-created untracked removed, protected source restored).
@@ -2298,7 +2244,7 @@ def prepare_task_sync(**kwargs) -> PrepareResult:
     return asyncio.run(prepare_task(**kwargs))
 
 
-# Embedded canonical assets (examples/ is not packaged in the wheel)
+# Driver contract included in the preparation prompt
 
 DRIVER_CONTRACT_SPEC = """\
 ## forge-loop driver contract (what the driver MUST satisfy)
@@ -2371,129 +2317,3 @@ eager fallback) performs no replays and is rejected. Make the capture work
 (allocate once, reuse the same output buffer, launch on the current stream) rather
 than settling for eager timing.
 """
-
-
-REFERENCE_DRIVER_TEMPLATE = r'''
-"""Measurement driver — correctness (SNR) + graph-timed benchmark + profiling."""
-from __future__ import annotations
-
-import argparse
-import math
-import sys
-from pathlib import Path
-
-import torch
-
-from graph_harness import cuda_graph_bench
-# Import the kernel's STABLE public entry point (adapt this import + call):
-from your_kernel_module import your_entry_point  # noqa: F401
-
-_SEED = 0
-
-# Load every scored case from the task's existing harness or configuration. Do
-# not invent dimensions here. Keys are the case IDs used in case_ms lines (the
-# invocation spec's CASE_ID values when the task declares them). Resolve any file
-# you read here against _HERE, and only read files that outlive preparation.
-_HERE = Path(__file__).resolve().parent
-CASES = {}
-
-
-def _make_inputs(dims, mode, device):
-    torch.manual_seed(_SEED)
-    x = torch.randn(dims["M"], dims["N"], device=device, dtype=torch.float16)
-    if mode == "stability":
-        x = x * 50.0
-    return x
-
-
-def _reference(x):
-    # Replace with the operator's reference (e.g. torch.softmax(x, dim=-1)).
-    raise NotImplementedError
-
-
-def _snr_db(ref, test):
-    ref = ref.float(); test = test.float()
-    noise = test - ref
-    sp = torch.mean(ref * ref).item(); npow = torch.mean(noise * noise).item()
-    if npow <= 0:
-        return 100.0
-    if sp <= 0:
-        return 0.0
-    return 10.0 * math.log10(sp / npow)
-
-
-def _run_correctness(device):
-    snrs = []
-    close = True
-    for dims in CASES.values():
-        x = _make_inputs(dims, "full", device)
-        out = your_entry_point(x)
-        ref = _reference(x)
-        snrs.append(_snr_db(ref, out))
-        close = close and torch.allclose(out, ref, atol=1e-2, rtol=1e-2)
-    print(f"SNR: {min(snrs):.2f} dB")
-    print(f"allclose: {close}")
-    return 0
-
-
-def _run_bench(dims, case_id, warmup, iters, device):
-    x = _make_inputs(dims, "full", device)
-    ref = _reference(x)
-    out = torch.empty_like(x)
-    step = lambda: your_entry_point(x, out)  # noqa: E731
-    res = cuda_graph_bench(
-        step, warmup=warmup, iters=iters,
-        dirty=lambda: out.zero_(),
-        verify=lambda: _snr_db(ref, out) > 30.0,
-    )
-    for t in res["times_ms"]:
-        print(f"wall_ms: {t:.6f}")
-    times = sorted(res["times_ms"])
-    print(f"case_ms: {case_id} {times[len(times) // 2]:.6f}")
-    return 0
-
-
-def _run_profile(dims, device):
-    x = _make_inputs(dims, "full", device)
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    for _ in range(3):
-        your_entry_point(x)
-    torch.cuda.synchronize()
-    return 0
-
-
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--bench-mode", action="store_true")
-    p.add_argument("--bench-case", default="")
-    p.add_argument("--profile-run", action="store_true")
-    p.add_argument("--warmup", type=int, default=10)
-    p.add_argument("--iters", type=int, default=30)
-    args, _ = p.parse_known_args()
-
-    if not torch.cuda.is_available():
-        print("error: no GPU"); return 1
-    device = "cuda"
-
-    if args.profile_run:
-        profile_dims = next(iter(CASES.values()))
-        return _run_profile(profile_dims, device)
-
-    if args.bench_mode:
-        selected = CASES
-        if args.bench_case:
-            if args.bench_case not in CASES:
-                print(f"error: unknown case {args.bench_case}"); return 1
-            selected = {args.bench_case: CASES[args.bench_case]}
-        for case_id, case_dims in selected.items():
-            _run_bench(case_dims, case_id, args.warmup, args.iters, device)
-        return 0
-
-    return _run_correctness(device)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''

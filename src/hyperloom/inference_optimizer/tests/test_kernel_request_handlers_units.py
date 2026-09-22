@@ -260,17 +260,24 @@ class TestForgeGemmHelperCoverage:
         assert "preflight timed out" in caplog.text
         assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
-    def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
+    def test_resolve_forge_precision_defaults_to_bf16(self):
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
         state = SharedState(precision="")
         state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+
+    def test_resolve_forge_precision_propagates_runtime_workload_errors(self, monkeypatch):
         import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+
+        state = SharedState(precision="bf16")
+        state.current_best = {"extra_server_args": "--quantization fp4", "extra_envs": {}}
 
         def _raise(*_a, **_k):
             raise RuntimeError("no runtime workload")
 
         monkeypatch.setattr(rc, "resolve_runtime_workload", _raise)
-        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
+        with pytest.raises(RuntimeError, match="no runtime workload"):
+            krh._resolve_forge_precision_and_quant(state, {})
 
     def test_resolve_forge_server_log_uses_baseline_when_no_current_best(self, tmp_path):
         state = SharedState()
@@ -392,15 +399,6 @@ class TestForgeGemmHelperCoverage:
         assert krh._csv_matches_model(csv_match, model_path) is True
         # No model_path / unreadable config -> cannot validate -> accept.
         assert krh._csv_matches_model(csv_mismatch, "") is True
-
-    def test_read_forge_result_json(self, tmp_path):
-        (tmp_path / "result.json").write_text(
-            json.dumps({"status": "skipped", "tuners_skipped": [{"tuner": "a8w8"}]}),
-            encoding="utf-8",
-        )
-        out = krh._read_forge_result_json(tmp_path)
-        assert out["status"] == "skipped"
-        assert krh._read_forge_result_json(tmp_path / "missing") == {}
 
     def test_derive_gemm_skip_reason(self):
         skipped = [
@@ -1665,27 +1663,30 @@ class TestForgeGemmHelperCoverage:
     @pytest.mark.asyncio
     async def test_a_candidate_keeps_both_the_env_and_a_sibling_crash(self, tmp_path, monkeypatch):
         """One tuner crashed, another delivered: forge reports ``candidate``, so the env is measured and the crash is still named."""
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from kernelforge.gemm_tune.report import TuneReport
+        from kernelforge.gemm_tune.utils import emit_result_json
+
         self._moe_state(tmp_path)
         monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
         monkeypatch.setattr(krh, "_persist_forge_gemm_csv_durably", lambda envs, **_kw: (dict(envs), ""))
-        sentinel = (
-            "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
-            + json.dumps(
-                {
-                    "status": "ok",
-                    "micro_decision": "candidate",
-                    "recommended_env": {"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
-                    "tuners_run": [
-                        {"tuner": "a8w8", "status": "failed", "error_class": "codegen_crash"},
-                        {"tuner": "fmoe_ck", "status": "ok"},
-                    ],
-                }
-            )
-            + "\nFORGE_GEMM_TUNE_RESULT_END\n"
+        failed = {"tuner": "a8w8", "status": "failed", "error_class": "codegen_crash"}
+        report = TuneReport(
+            status="ok",
+            micro_decision="candidate",
+            recommended_env={"AITER_CONFIG_FMOE": "/ws/tuned_fmoe.csv"},
+            tuners_run=[failed, {"tuner": "fmoe_ck", "status": "ok"}],
+            failed_tuners=[failed],
+            tuners_skipped=[{"tuner": "a8w8_blockscale", "skip_reason": "not routed"}],
         )
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            emit_result_json(report.to_dict())
 
         async def _fake_subprocess(cmd, *, timeout_sec):
-            return 0, sentinel, ""
+            return 0, stdout.getvalue(), ""
 
         monkeypatch.setattr(krh, "_run_subprocess", _fake_subprocess)
 
@@ -1694,6 +1695,10 @@ class TestForgeGemmHelperCoverage:
         assert result["decision"] == "KEEP"
         assert result["requires_e2e_validation"] is True
         assert result["error_class"] == "codegen_crash"
+        assert result["extra_envs"] == report.recommended_env
+        assert result["failed_tuners"] == report.failed_tuners
+        assert result["tuners_skipped"] == report.tuners_skipped
+        assert result["skip_reason"] == "a8w8_blockscale: not routed"
         # status decides promotability; a named crash must not demote the run.
         assert result["status"] != "failed"
 

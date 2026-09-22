@@ -392,28 +392,27 @@ def test_infer_kernel_backend_requires_unambiguous_backend(tmp_path, monkeypatch
         infer_kernel_backend([unknown_kernel])
 
 
-def test_infer_kernel_backend_falls_back_from_unknown_environment_override(monkeypatch):
+def test_infer_kernel_backend_rejects_unknown_environment_override(monkeypatch):
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "tilelang")
 
-    assert infer_kernel_backend([]) == "flydsl"
+    with pytest.raises(ValueError, match="unknown kernel backend 'tilelang'"):
+        infer_kernel_backend([])
 
 
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
         ("hip", "hip"),
-        ("hip", "hip"),
         ("triton", "triton"),
-        ("tilelang", "flydsl"),
-        ("tilelang", "flydsl"),
+        (" flydsl ", "flydsl"),
     ],
 )
 def test_resolve_kernel_backend_override(requested, expected):
     assert resolve_kernel_backend_override(requested) == expected
 
 
-@pytest.mark.parametrize("kernel_backend", ["tilelang", "tilelang"])
-def test_create_campaign_falls_back_from_unsupported_kernel_backend(
+@pytest.mark.parametrize("kernel_backend", ["tilelang", "unknown"])
+def test_create_campaign_rejects_unsupported_kernel_backend(
     tmp_path,
     monkeypatch,
     kernel_backend,
@@ -421,16 +420,20 @@ def test_create_campaign_falls_back_from_unsupported_kernel_backend(
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
-    config = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-        kernel_backend=kernel_backend,
-    )
+    with pytest.raises(ValueError, match="unknown kernel backend"):
+        create_campaign_config(
+            workspace_dir=str(workspace),
+            kernel=str(kernel),
+            driver=str(driver),
+            source_files=[],
+            program_md_file=None,
+            kernel_backend=kernel_backend,
+        )
 
-    assert config.kernel_backend == "flydsl"
+
+def test_infer_kernel_backend_does_not_guess_from_an_unreadable_source(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        infer_kernel_backend([tmp_path / "missing.hip"])
 
 
 def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
@@ -840,7 +843,7 @@ def test_infer_kernel_backend_prefers_the_more_specific_backend(
     assert infer_kernel_backend([path]) == expected
 
 
-def test_infer_kernel_backend_falls_back_to_the_path_when_content_is_unreadable(
+def test_infer_kernel_backend_rejects_unreadable_content(
     tmp_path,
     monkeypatch,
 ):
@@ -848,7 +851,8 @@ def test_infer_kernel_backend_falls_back_to_the_path_when_content_is_unreadable(
     unreadable = tmp_path / "aiter" / "ops"
     unreadable.mkdir(parents=True)
 
-    assert infer_kernel_backend([unreadable]) == "aiter"
+    with pytest.raises(IsADirectoryError):
+        infer_kernel_backend([unreadable])
 
 
 def test_implementation_contract_is_rederived_from_the_pristine_lineage(

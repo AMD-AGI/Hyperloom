@@ -42,8 +42,6 @@ _AMDGPU_ASSEMBLY_RE = re.compile(
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 log = logging.getLogger(__name__)
 
-_FALLBACK_KERNEL_BACKEND = "flydsl"
-
 
 @dataclass(frozen=True)
 class CampaignConfig:
@@ -350,7 +348,7 @@ def resolve_kernel_backend_override(kernel_backend: str) -> str:
     """Resolve an override against the registered kernel-building backends."""
     name = normalize_kernel_backend_name(kernel_backend)
     if name not in KERNEL_BACKENDS:
-        return _FALLBACK_KERNEL_BACKEND
+        raise ValueError(f"unknown kernel backend {name!r}; expected one of: {', '.join(sorted(KERNEL_BACKENDS))}")
     return name
 
 
@@ -361,10 +359,7 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
         return resolve_kernel_backend_override(override)
 
     for path in source_paths:
-        try:
-            text = path.read_text(errors="replace").lower()
-        except Exception:
-            text = ""
+        text = path.read_text(errors="replace").lower()
         path_text = str(path).lower()
         suffix = path.suffix.lower()
         if suffix in {".s", ".asm"} and _AMDGPU_ASSEMBLY_RE.search(text):
@@ -401,10 +396,7 @@ def _derive_target_functions(
         absolute = str((workspace / relative).resolve())
         source = source_contents.get(absolute) if source_contents is not None else None
         if source is None:
-            try:
-                source = Path(absolute).read_text(errors="replace")
-            except Exception:
-                continue
+            source = Path(absolute).read_text(errors="replace")
         for name in derive_kernel_names(source):
             if name not in functions:
                 functions.append(name)

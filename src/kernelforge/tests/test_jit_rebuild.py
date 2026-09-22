@@ -1,6 +1,6 @@
 # Copyright Advanced Micro Devices, Inc. All rights reserved.
 
-"""Unit tests for the JIT-rebuild safety net (loop/jit_rebuild.py)."""
+"""JIT rebuilds must measure current sources or report the failure."""
 
 from __future__ import annotations
 
@@ -74,23 +74,26 @@ def test_various_cpp_extensions_detected(tmp_path, monkeypatch):
     monkeypatch.setenv("FORGE_AITER_CACHE_ROOT", str(tmp_path / "cache"))
     for ext in (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp"):
         monkeypatch.delenv("AITER_REBUILD", raising=False)
-        force_jit_rebuild([f"/work/aiter/csrc/kernel{ext}"])
+        source = tmp_path / "aiter" / f"kernel{ext}"
+        source.parent.mkdir(exist_ok=True)
+        source.write_text("kernel", encoding="utf-8")
+        force_jit_rebuild([str(source)])
         assert "sources" in os.environ.get("AITER_ROOT_DIR", ""), ext
         assert "AITER_REBUILD" not in os.environ
 
 
-def test_exception_is_swallowed(monkeypatch):
-    monkeypatch.delenv("AITER_REBUILD", raising=False)
+def test_cache_activation_failure_stops_rebuild(monkeypatch):
+    def fail(_paths):
+        raise OSError("cache disk full")
 
-    class Boom:
-        def __bool__(self):
-            # __bool__ must raise TypeError (its standard exception) rather than a non-standard one; the test only
-            # needs truthiness to raise so the caller's exception handling can be exercised.
-            raise TypeError("boom")
+    monkeypatch.setattr("kernelforge.loop.jit_rebuild.activate_aiter_cache_for_sources", fail)
+    with pytest.raises(OSError, match="cache disk full"):
+        force_jit_rebuild(["/work/aiter/csrc/kernel.cu"])
 
-    # A non-string, non-empty path whose truthiness raises must be swallowed.
-    force_jit_rebuild([Boom()])
-    assert "AITER_REBUILD" not in os.environ
+
+def test_tracked_source_changes_reports_git_failure(tmp_path):
+    with pytest.raises(subprocess.CalledProcessError):
+        tracked_source_changes(tmp_path)
 
 
 def test_tracked_source_changes_include_undeclared_edits(tmp_path: Path):

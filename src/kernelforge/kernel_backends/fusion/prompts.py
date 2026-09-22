@@ -45,7 +45,8 @@ _PROVEN_PATTERNS = """\
    import intact.
 6. ROCm-native Triton only. Never reuse a framework CUDA-only fused op — e.g.
    `fused_qk_norm_rope` pulls in `cuda_bf16.h` and will not build on ROCm.
-7. If Triton is unavailable, fall back to eager. Never crash."""
+7. When the fusion flag is enabled, missing Triton or kernel failures must surface
+   as errors. Keep the original eager path only when the flag is disabled."""
 
 
 def build_system_prompt(

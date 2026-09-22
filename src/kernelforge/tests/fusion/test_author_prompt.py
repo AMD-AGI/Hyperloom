@@ -30,6 +30,8 @@ def test_prompt_contains_recipe_fields():
     assert "+ residual" in p and "RMSNorm(" in p  # source anchors
     assert "Import the framework RMSNorm" in p  # eager reference (no re-derive)
     assert "run the A/B" in p  # validation hint
+    assert "missing Triton or kernel failures must surface" in p
+    assert "original eager path only when the flag is disabled" in p
 
 
 def test_rocm_guard_present_when_native():

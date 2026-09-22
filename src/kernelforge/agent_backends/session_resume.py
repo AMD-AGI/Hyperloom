@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import random
 import time
@@ -105,16 +106,17 @@ RESUME_PROMPT = (
 
 
 def _env_number(name: str, default: float, *, cast: Callable[[str], Any]) -> Any:
-    """Read one operator override, ignoring anything unparseable."""
+    """Read one finite, non-negative operator override."""
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:
         value = cast(raw)
-    except ValueError:
-        log.warning("ignoring unparseable %s=%r", name, raw)
-        return default
-    return value if value >= 0 else default
+    except ValueError as error:
+        raise ValueError(f"{name} must be a finite non-negative {cast.__name__}") from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a finite non-negative {cast.__name__}")
+    return value
 
 
 def is_api_failure(result: Any) -> bool:

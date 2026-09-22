@@ -544,6 +544,30 @@ def test_a_borrow_records_the_inventory_for_whoever_has_to_hand_it_back(
     assert read_campaign_baseline(repo) is None
 
 
+def test_a_borrow_requires_a_durable_baseline_before_changing_the_repository(
+    tmp_path: Path, editable, monkeypatch
+) -> None:
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    original_branch = _git(repo, "branch", "--show-current")
+
+    def failed_write(*_args, **_kwargs):
+        raise OSError("baseline disk is full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worktree_module, "atomic_write_text", failed_write)
+        with pytest.raises(OSError, match="baseline disk is full"):
+            create_operator_worktree(task, layout)
+
+    assert _git(repo, "branch", "--show-current") == original_branch
+    assert _git(repo, "rev-parse", "HEAD") == base_commit
+    assert not _git(repo, "branch", "--list", f"{CAMPAIGN_BRANCH_PREFIX}*")
+    borrowed = create_operator_worktree(task, layout)
+    release_operator_worktree(borrowed)
+
+
 def test_a_later_borrow_reclaims_a_killed_campaign_from_the_record(
     tmp_path: Path,
     editable,
@@ -617,25 +641,32 @@ def test_a_leftover_campaign_is_archived_before_the_next_borrow(
         release_operator_worktree(borrowed)
 
 
-def test_an_archive_that_failed_says_so(tmp_path: Path, monkeypatch, caplog) -> None:
-    """A silent failure here is the undiagnosable dispatch refusal this archive exists to end."""
+def test_a_borrow_stops_before_changing_branches_if_a_stale_archive_fails(
+    tmp_path: Path, editable, monkeypatch
+) -> None:
     import shutil as shutil_module
 
-    from kernelforge.kernel_rewrite_controller import worktree as worktree_module
-
-    repo = tmp_path / "repo"
+    repo, base_commit = _source_repo(tmp_path)
+    editable(repo)
+    task, _ = _task(tmp_path, repo, base_commit)
+    layout = ControllerLayout(tmp_path / "output")
+    original_branch = _git(repo, "branch", "--show-current")
     (repo / FORGE_LOOP_OUTPUT_DIRNAME).mkdir(parents=True)
-    monkeypatch.setattr(
-        worktree_module.shutil,
-        "move",
-        lambda *_a, **_k: (_ for _ in ()).throw(shutil_module.Error("workspace.lock is held")),
-    )
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            worktree_module.shutil,
+            "move",
+            lambda *_a, **_k: (_ for _ in ()).throw(shutil_module.Error("workspace.lock is held")),
+        )
+        with pytest.raises(shutil_module.Error, match="workspace.lock is held"):
+            create_operator_worktree(task, layout)
 
-    with caplog.at_level("WARNING"):
-        worktree_module._archive_stale_campaign_output(repo, tmp_path / "archive")
-
-    assert "could not archive" in caplog.text
-    assert "workspace.lock is held" in caplog.text
+    assert _git(repo, "branch", "--show-current") == original_branch
+    assert _git(repo, "rev-parse", "HEAD") == base_commit
+    assert (repo / FORGE_LOOP_OUTPUT_DIRNAME).is_dir()
+    assert read_campaign_baseline(repo) is None
+    borrowed = create_operator_worktree(task, layout)
+    release_operator_worktree(borrowed)
 
 
 def test_a_borrow_without_a_leftover_archives_nothing(tmp_path: Path, editable) -> None:

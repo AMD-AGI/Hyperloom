@@ -18,7 +18,6 @@ def _workspace(tmp_path):
 
 
 def _patch_git(monkeypatch):
-    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
     monkeypatch.setattr(task_preparer, "_git_head", lambda _w: "base-head")
     monkeypatch.setattr(task_preparer, "_git_untracked", lambda _w: set())
     monkeypatch.setattr(task_preparer, "_git_diff_patch", lambda *_a: "")

@@ -25,9 +25,7 @@ from kernelforge.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps a package-style prefix even though this module now lives in ``kernelforge.llm``: the group name is the
-# published contract third-party providers register against, and renaming it would drop every existing plugin without
-# a word -- a plugin that fails to load is recorded as one log line, not raised.
+# These names are published plugin contracts, including the deprecated group.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
 LEGACY_PROVIDER_ENTRY_POINT_GROUP = "kernel_agents.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -111,13 +109,12 @@ def discover_agent_providers(*, force: bool = False) -> None:
         try:
             discovered = metadata.entry_points()
 
-            def _select(group: str):
-                if hasattr(discovered, "select"):
-                    return list(discovered.select(group=group))
-                return list(discovered.get(group, []))
-
-            entries = _select(PROVIDER_ENTRY_POINT_GROUP)
-            legacy = [e for e in _select(LEGACY_PROVIDER_ENTRY_POINT_GROUP) if e.name not in {x.name for x in entries}]
+            entries = list(discovered.select(group=PROVIDER_ENTRY_POINT_GROUP))
+            legacy = [
+                e
+                for e in discovered.select(group=LEGACY_PROVIDER_ENTRY_POINT_GROUP)
+                if e.name not in {x.name for x in entries}
+            ]
             if legacy:
                 warnings.warn(
                     f"Agent provider entry-point group {LEGACY_PROVIDER_ENTRY_POINT_GROUP!r} is deprecated; "

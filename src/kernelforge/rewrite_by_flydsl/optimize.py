@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -113,62 +112,28 @@ def _latest_ledger(*snapshots: dict | None) -> dict:
     return latest
 
 
-def _forge_loop_argv() -> list[str]:
-    """Invoke forge-loop with the SAME interpreter + package as THIS process."""
-    if sys.executable:
-        return [sys.executable, "-m", "kernelforge.cli"]
-    exe = shutil.which("kernelforge")
-    return [exe] if exe else ["kernelforge"]
-
-
-def _poll_process(proc) -> int | None:
-    """Return a subprocess status while remaining compatible with test doubles."""
-    poll = getattr(proc, "poll", None)
-    if callable(poll):
-        return poll()
-    return getattr(proc, "returncode", 0)
-
-
-def _wait_process(proc, timeout: float | None = None) -> int | None:
-    """Wait for a subprocess, tolerating minimal test doubles."""
-    wait = getattr(proc, "wait", None)
-    if not callable(wait):
-        return _poll_process(proc)
-    try:
-        return wait(timeout=timeout)
-    except TypeError:
-        return wait()
-
-
-def _terminate_process_group(proc, grace_sec: float = 10.0) -> None:
+def _terminate_process_group(proc: subprocess.Popen[str], grace_sec: float = 10.0) -> None:
     """Terminate the complete forge-loop process group, then force-kill it."""
-    if _poll_process(proc) is not None:
+    if proc.poll() is not None:
         return
-    pid = getattr(proc, "pid", None)
     try:
-        if pid:
-            os.killpg(pid, signal.SIGTERM)
-        else:
-            proc.terminate()
-    except (AttributeError, OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
         # The process may have exited between poll and signal delivery.
         pass
     try:
-        _wait_process(proc, timeout=grace_sec)
+        proc.wait(timeout=grace_sec)
         return
     except subprocess.TimeoutExpired:
         # Escalate below when the graceful termination window expires.
         pass
     try:
-        if pid:
-            os.killpg(pid, signal.SIGKILL)
-        else:
-            proc.kill()
-    except (AttributeError, OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
         # A concurrent process exit makes the force-kill unnecessary.
         pass
     try:
-        _wait_process(proc, timeout=5.0)
+        proc.wait(timeout=5.0)
     except subprocess.TimeoutExpired:
         # Best-effort final reap; the caller will still restore the verified best.
         pass
@@ -272,7 +237,10 @@ def run_optimize(
         )
         baseline_json = str(baseline_path)
 
-    cmd = _forge_loop_argv() + [
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
         spec.flydsl_kernel,
@@ -382,7 +350,7 @@ def run_optimize(
             return commit
 
         next_poll = time.monotonic()
-        while _poll_process(proc) is None:
+        while proc.poll() is None:
             if stop_at_unix and time.time() >= stop_at_unix:
                 terminated_for_deadline = True
                 print(
@@ -396,7 +364,7 @@ def run_optimize(
                 published_commit = _publish_new_best()
                 next_poll = time.monotonic() + max(_TICK_SEC, new_best_poll_sec)
             time.sleep(_TICK_SEC)
-        _wait_process(proc)
+        proc.wait()
         stream_thread.join(timeout=5.0)
         # The loop may have recorded a KEEP between the last poll and its exit,
         # including one it produced while being terminated for the deadline.
@@ -470,7 +438,7 @@ def run_optimize(
     )
     # Only a loop that reported its own result on a clean exit has closed its ledger; every other exit truncates it at
     # the last session boundary it managed to checkpoint.
-    usage_complete = bool(result) and not terminated_for_deadline and _poll_process(proc) == 0
+    usage_complete = bool(result) and not terminated_for_deadline and proc.returncode == 0
 
     if not result and not terminated_for_deadline and not nested_usage:
         return {}

@@ -26,7 +26,7 @@ def test_each_bound_can_be_overridden(monkeypatch, variable, resolve, value, exp
     assert resolve() == pytest.approx(expected)
 
 
-@pytest.mark.parametrize("junk", ["", "   ", "not-a-number", "0", "-3"])
+@pytest.mark.parametrize("value", ["", "   "])
 @pytest.mark.parametrize(
     ("variable", "resolve", "default"),
     [
@@ -35,16 +35,30 @@ def test_each_bound_can_be_overridden(monkeypatch, variable, resolve, value, exp
         ("FORGE_KB_WARMSTART_BUDGET_SEC", policy.budget_sec, 1800.0),
     ],
 )
-def test_an_unusable_override_falls_back_to_the_default(
+def test_an_empty_override_uses_the_default(
     monkeypatch,
-    junk,
+    value,
     variable,
     resolve,
     default,
 ):
-    """A zero or negative bound would disable the search, not widen it."""
-    monkeypatch.setenv(variable, junk)
+    monkeypatch.setenv(variable, value)
     assert resolve() == pytest.approx(default)
+
+
+@pytest.mark.parametrize("value", ["not-a-number", "0", "-3", "nan", "inf"])
+@pytest.mark.parametrize(
+    ("variable", "resolve"),
+    [
+        ("FORGE_KB_WARMSTART_TOP_K", policy.top_k),
+        ("FORGE_KB_WARMSTART_MIN_SPEEDUP", policy.min_claimed_speedup),
+        ("FORGE_KB_WARMSTART_BUDGET_SEC", policy.budget_sec),
+    ],
+)
+def test_invalid_overrides_are_rejected_without_substituting_search_bounds(monkeypatch, value, variable, resolve):
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(ValueError, match=variable):
+        resolve()
 
 
 def test_a_claim_under_the_floor_is_refused():

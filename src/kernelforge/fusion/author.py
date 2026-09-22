@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from kernelforge.agent_backends.base import (
+    AgentBackend,
     AgentHook,
     AgentHooks,
+    AgentRunResult,
     AgentRunSpec,
     AgentToolPolicy,
     watchdog_timeout_sec,
@@ -183,7 +185,8 @@ Grep the model file for these anchors and fuse the chain they mark:
 - Keep all public function/class signatures and imports intact.
 - Add a pure-torch reference and assert parity BEFORE trusting the kernel.
   {recipe.get("eager_reference_hint")}
-- If Triton is unavailable, fall back to eager (never crash).
+- When the fusion flag is enabled, missing Triton or kernel failures must surface
+  as errors. Keep the original eager path only when the flag is disabled.
 {harness_block}
 ## How to validate (the ONLY success signal)
 Run this A/B (boots the model twice; eager vs `{env_flag}=1`), decode-step median:
@@ -272,7 +275,9 @@ kernel fusions on {_arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; no 
 {rocm_line}- Cast to fp32 inside the fused kernel; one launch instead of the op chain.
 - CUDA-graph safe (preallocate outputs; tl.constexpr shapes; no host sync in decode).
 - Keep public signatures/imports intact; import the REAL eager op for the parity ref.
-- Add a parity self-check before trusting each kernel; fall back to eager if Triton is missing.
+- Add a parity self-check before trusting each kernel.
+- When a fusion flag is enabled, missing Triton or kernel failures must surface
+  as errors. Keep the original eager path only when that flag is disabled.
 {harness_block}
 ## Validate (the ONLY success signal) — all flags ON together:
     {ab_hint}
@@ -1064,7 +1069,7 @@ def _write_registered_author_log(
 
 
 def _run_registered_author(
-    backend: Any,
+    backend: AgentBackend,
     prompt: str,
     *,
     workdir: str,
@@ -1127,7 +1132,7 @@ def _run_registered_author(
 
 
 def _run_registered_author_once(
-    backend: Any,
+    backend: AgentBackend,
     prompt: str,
     *,
     workdir: str,
@@ -1190,7 +1195,7 @@ def _run_registered_author_once(
         progress_log=progress,
     )
 
-    async def _run() -> Any:
+    async def _run() -> AgentRunResult:
         return await asyncio.wait_for(
             backend.run(spec),
             timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
@@ -1232,7 +1237,7 @@ def _run_registered_author_once(
             _write_registered_author_log(
                 log_path,
                 progress,
-                text=str(getattr(result, "text", "") or ""),
+                text=result.text if result is not None else "",
                 error=reason,
             )
         except OSError:
@@ -1245,7 +1250,7 @@ def _run_registered_author_once(
             _write_registered_author_log(
                 log_path,
                 progress,
-                text=str(getattr(result, "text", "") or ""),
+                text=result.text if result is not None else "",
                 error=_with_run_error(f"author workspace safety rejection: {detail}"),
             )
         except OSError:
@@ -1265,7 +1270,7 @@ def _run_registered_author_once(
             _write_registered_author_log(
                 log_path,
                 progress,
-                text=str(getattr(result, "text", "") or ""),
+                text=result.text if result is not None else "",
                 error=reason,
             )
         except OSError:
@@ -1322,7 +1327,7 @@ def _run_registered_author_once(
         return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
 
     assert result is not None
-    final_text = str(getattr(result, "text", "") or "")
+    final_text = result.text
     try:
         _write_registered_author_log(
             log_path,
@@ -1332,8 +1337,8 @@ def _run_registered_author_once(
         )
     except OSError:
         log.warning("could not write registered author log %s", log_path)
-    end_reason = str(getattr(result, "end_reason", "agent_stopped") or "agent_stopped")
-    subtype = str(getattr(result, "subtype", "") or "")
+    end_reason = result.end_reason
+    subtype = result.subtype
     ok = end_reason == "agent_stopped" and subtype in {"", "success"}
     if not ok:
         log.warning(
@@ -1358,14 +1363,12 @@ def run_author(
     model: Optional[str] = None,
     max_turns: int = 100,
     timeout_s: int = 7200,
-    backend: Any,
+    backend: AgentBackend,
     target_files: Optional[list[str]] = None,
     new_module_dirs: Optional[list[str]] = None,
 ) -> int:
-    """Drive the selected Agent backend and return the legacy process-style code."""
-    if callable(backend) and not hasattr(backend, "run"):
-        backend = backend()
-    selected_model = str(model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    """Drive the selected Agent backend and return its process-style code."""
+    selected_model = (model or "").strip() or backend.runtime.model
     log.info(
         "running %s Agent author (model=%s max_turns=%d workdir=%s)",
         backend.name,

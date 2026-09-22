@@ -571,7 +571,7 @@ class TestCampaignCommand:
             gpu_target="gfx950",
             fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py",
         )
-        assert "forge-loop" in cmd
+        assert cmd[:4] == [campaign_module.sys.executable, "-m", "kernelforge.cli", "forge-loop"]
         assert cmd[cmd.index("--kernel-backend") + 1] == "fusion"
         assert cmd[cmd.index("--task-type") + 1] == "repository"
         # The loop refuses an unnamed / main / master branch, and a shadow repository is freshly initialized onto

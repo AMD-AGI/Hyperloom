@@ -389,6 +389,82 @@ def test_the_retry_budget_is_tunable_without_a_redeploy(monkeypatch):
     assert result.end_reason == EXHAUSTED_END_REASON
 
 
+@pytest.mark.parametrize("value", ["not-a-number", "-1", "nan", "inf"])
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "FORGE_AGENT_API_MAX_RESUMES",
+        "FORGE_AGENT_API_RETRY_BASE_SEC",
+        "FORGE_AGENT_API_RETRY_MAX_SEC",
+        "FORGE_AGENT_API_RETRY_DEADLINE_SEC",
+    ],
+)
+def test_invalid_retry_overrides_fail_before_the_provider_runs(monkeypatch, value, variable):
+    monkeypatch.setenv(variable, value)
+    backend = _Backend([_api_failure()])
+
+    with pytest.raises(ValueError, match=variable):
+        _run(backend)
+
+    assert backend.run_calls == 0
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_empty_retry_overrides_use_the_defaults(monkeypatch, value):
+    for variable in (
+        "FORGE_AGENT_API_MAX_RESUMES",
+        "FORGE_AGENT_API_RETRY_BASE_SEC",
+        "FORGE_AGENT_API_RETRY_MAX_SEC",
+        "FORGE_AGENT_API_RETRY_DEADLINE_SEC",
+    ):
+        monkeypatch.setenv(variable, value)
+    backend = _Backend([_api_failure()], [_api_failure()])
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    _run(backend, sleep=record_delay)
+
+    assert len(backend.resume_calls) == 3
+    assert delays == [5.0, 15.0, 45.0]
+
+
+def test_zero_resume_override_disables_retries(monkeypatch):
+    monkeypatch.setenv("FORGE_AGENT_API_MAX_RESUMES", "0")
+    backend = _Backend([_api_failure()])
+
+    result = _run(backend)
+
+    assert result.end_reason == EXHAUSTED_END_REASON
+    assert backend.resume_calls == []
+
+
+@pytest.mark.parametrize("variable", ["FORGE_AGENT_API_RETRY_BASE_SEC", "FORGE_AGENT_API_RETRY_MAX_SEC"])
+def test_zero_delay_override_keeps_retries_immediate(monkeypatch, variable):
+    monkeypatch.setenv(variable, "0")
+    backend = _Backend([_api_failure()], [AgentRunResult()])
+    delays = []
+
+    async def record_delay(seconds):
+        delays.append(seconds)
+
+    _run(backend, sleep=record_delay)
+
+    assert delays == [0.0]
+
+
+def test_zero_deadline_override_removes_the_retry_deadline(monkeypatch):
+    monkeypatch.setenv("FORGE_AGENT_API_RETRY_DEADLINE_SEC", "0")
+    backend = _Backend([_api_failure()], [AgentRunResult(text="done")])
+    ticks = iter((0.0, 5000.0))
+
+    result = _run(backend, monotonic=lambda: next(ticks))
+
+    assert result.text == "done"
+    assert len(backend.resume_calls) == 1
+
+
 def test_backoff_grows_between_resume_attempts():
     slept: list[float] = []
 

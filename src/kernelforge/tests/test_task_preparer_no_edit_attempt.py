@@ -24,7 +24,6 @@ def _failing_preflight(reason="driver missing"):
 
 
 def _patch_git(monkeypatch):
-    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _w: None)
     monkeypatch.setattr(task_preparer, "_git_head", lambda _w: "base-head")
     monkeypatch.setattr(task_preparer, "_git_untracked", lambda _w: set())
     monkeypatch.setattr(task_preparer, "_git_diff_patch", lambda *_a: "")
@@ -137,23 +136,7 @@ def test_system_prompt_orders_writing_before_further_reading():
     assert prompt.index("profiling contract") < prompt.index("Working order")
 
 
-def test_reference_template_covers_the_full_contract():
-    """The template the agent reads must demonstrate the COMPLETE contract."""
-    tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
-
-    assert "case_ms:" in tmpl
-    assert "--profile-run" in tmpl
-    assert "--profile-case" not in tmpl
-    assert "--shape" not in tmpl
-    assert "CASES" in tmpl
-
-
-def test_template_verify_uses_snr_not_allclose():
-    """The verify callback must use SNR, not allclose."""
-    tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
-    assert "_snr_db" in tmpl
-    assert "allclose" not in tmpl.split("_run_bench")[1].split("def ")[0]
-
+def test_prompt_verify_requires_snr_not_allclose():
     prompt_text = task_preparer._build_prompt(
         evidence="## Task metadata",
         driver_rel=".forge_driver_x.py",

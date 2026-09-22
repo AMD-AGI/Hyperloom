@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import importlib
-import logging
 from pathlib import Path
 
 from kernelforge.config import Config
@@ -15,9 +14,6 @@ from kernelforge.kernel_backends.constants import (
     resolve_language_dirs,
 )
 from kernelforge.loop.scoring import canonical_gate_prompt
-
-log = logging.getLogger(__name__)
-
 
 # Whole-repo task families that can carry an AITER-framework operator.
 _AITER_TASK_TYPES = {"image_kernel", "repository"}
@@ -44,12 +40,12 @@ def build_single_kernel_backend_prompt(
     assembled in layers from the curated ``local_knowledge/`` tree (see
     ``build_forge_knowledge``). Under ``Config.defer_knowledge_maps``
     (experimental, off) every level is a one-line pointer instead of an inlined
-    map. Returns the prompt text, or "" for an unknown kernel_backend.
+    map. Raises ValueError for an unknown kernel_backend.
     """
     backend = (kernel_backend_name or "").strip()
     module_path = KERNEL_BACKEND_PROMPT_MODULES.get(backend)
     if module_path is None:
-        return ""
+        raise ValueError(f"unsupported kernel backend: {kernel_backend_name!r}")
 
     from kernelforge.knowledge import build_forge_knowledge
 
@@ -57,14 +53,14 @@ def build_single_kernel_backend_prompt(
     language = resolve_language_dirs(backend, root)
     include_aiter = backend == "aiter" or _is_aiter_operator(task_type, source_paths)
     # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
-    include_mori = bool(getattr(config, "include_mori_kb", False))
+    include_mori = config.include_mori_kb
 
     knowledge = build_forge_knowledge(
         root,
         language=language,
         include_aiter=include_aiter,
         include_mori=include_mori,
-        defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
+        defer_all=config.defer_knowledge_maps,
     )
 
     # The backend is resolved here and nowhere else, so this is the one place that can pair a prompt with the gate the

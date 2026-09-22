@@ -9,6 +9,7 @@ identities, so their records never mix, but the search is the same shape and two
 
 from __future__ import annotations
 
+import math
 import os
 
 #: How many best-ranked prior solutions a warm start reads. More than one, so a champion that fails to apply still
@@ -30,18 +31,22 @@ DEFAULT_BUDGET_SEC = 1800
 
 def _positive_int(name: str, default: int) -> int:
     try:
-        value = int(str(os.environ.get(name, "")).strip() or default)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+        value = int(os.environ.get(name, "").strip() or default)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def _positive_float(name: str, default: float) -> float:
     try:
-        value = float(str(os.environ.get(name, "")).strip() or default)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+        value = float(os.environ.get(name, "").strip() or default)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a finite positive number") from error
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number")
+    return value
 
 
 def top_k() -> int:

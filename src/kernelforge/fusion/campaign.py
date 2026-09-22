@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -42,14 +41,6 @@ def fused_module_path(recipe: Recipe) -> str:
     stem = Path(recipe.source_file).stem or "model"
     tag = re.sub(r"[^A-Za-z0-9]+", "_", recipe.pattern_id).strip("_").lower()[:48]
     return str(Path(recipe.source_file).parent / f"{stem}_fused_{tag or 'chain'}.py")
-
-
-def _forge_loop_argv() -> list[str]:
-    """Invoke forge-loop with the same interpreter and package as this process."""
-    if sys.executable:
-        return [sys.executable, "-m", "kernelforge.cli"]
-    exe = shutil.which("kernelforge")
-    return [exe] if exe else ["kernelforge"]
 
 
 @dataclass
@@ -186,7 +177,10 @@ def build_forge_loop_command(
 ) -> list[str]:
     """Assemble the forge-loop invocation for one recipe."""
     source_files = [recipe.source_file] + ([fused_module] if fused_module else [])
-    cmd = _forge_loop_argv() + [
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernelforge.cli",
         "forge-loop",
         "--workspace",
         workspace,

@@ -88,8 +88,8 @@ def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None
     """Wire the tuner so run() executes without aiter, and capture its argv."""
     monkeypatch.setattr(sd, "probe_script", surface or _permissive_surface)
     monkeypatch.setattr(sd, "resolve_aiter_root", lambda: root or _aiter_root(tmp_path))
-    monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(_NK))
-    monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
+    monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda **kw: list(_NK))
+    monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(_M))
     captured: dict = {}
 
     def _fake_run(cmd, **kwargs):
@@ -339,8 +339,8 @@ class TestStaleArtifactsAreCleared:
 
         monkeypatch.setattr(sd, "probe_script", _permissive_surface)
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(_NK))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda **kw: list(_NK))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(_M))
         monkeypatch.setattr(sd, "run_subprocess", _writes_nothing)
 
         result = _run(tmp_path)
@@ -464,8 +464,8 @@ class TestDerivedShapesRespectTheBudget:
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(nk))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda **kw: list(nk))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(ms))
 
         _run(tmp_path, timeout_s=1_800, thorough=True)
 
@@ -484,8 +484,8 @@ class TestDerivedShapesRespectTheBudget:
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(nk))
-        monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
+        monkeypatch.setattr(sd, "compute_dense_nk_shapes", lambda **kw: list(nk))
+        monkeypatch.setattr(sd, "compute_dense_m_values", lambda conc, thorough=False: list(ms))
 
         _run(tmp_path, timeout_s=1_800, thorough=False)
 

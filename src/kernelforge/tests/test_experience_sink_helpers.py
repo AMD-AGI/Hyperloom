@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.knowledge import experience_sink as sink
 
 
@@ -43,14 +45,15 @@ def test_resolve_operation_fallback_is_order_independent(monkeypatch):
     assert c == "gemm_kernel"
 
 
-def test_resolve_operation_survives_derive_exception(monkeypatch):
+def test_resolve_operation_does_not_replace_extraction_errors_with_a_file_identity(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     def boom(_src):
         raise RuntimeError("derive failed")
 
     monkeypatch.setattr(pmc, "derive_kernel_names", boom)
-    assert sink.resolve_operation("", "/p/stem.py") == "stem"
+    with pytest.raises(RuntimeError, match="derive failed"):
+        sink.resolve_operation("", "/p/stem.py")
 
 
 # --------------------------------------------------------------------------- # detect_backend_language

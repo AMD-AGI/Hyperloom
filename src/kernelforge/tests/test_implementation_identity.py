@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kernelforge.knowledge.implementation_identity import (
     canonical_editable_source_paths,
     canonical_framework_version,
@@ -308,3 +310,22 @@ def test_signature_uses_empty_symbols_when_source_has_no_kernel_entry(tmp_path):
     )
 
     assert identity["implementation_symbols"] == []
+
+
+def test_signature_does_not_publish_partial_symbols_after_extraction_failure(tmp_path, monkeypatch):
+    import kernelforge.mcp_server.tools.pmc as pmc
+
+    def fail_extraction(_source):
+        raise RuntimeError("kernel parser failed")
+
+    monkeypatch.setattr(pmc, "derive_kernel_names", fail_extraction)
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("@triton.jit\ndef target_kernel(x):\n    return x\n")
+
+    with pytest.raises(RuntimeError, match="kernel parser failed"):
+        implementation_signature(
+            workspace=str(tmp_path),
+            kernel_path=str(kernel),
+            source_files=[],
+            framework="unknown",
+        )

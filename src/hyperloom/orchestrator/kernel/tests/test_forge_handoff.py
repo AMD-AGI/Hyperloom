@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     _additional_directories,
@@ -134,6 +136,20 @@ def test_write_forge_handoff_survives_missing_trace_artifacts(tmp_path: Path) ->
     assert f"`{missing_candidates.resolve()}` (missing)" in evidence
     assert "Profile raw trace:** not provided" in evidence
     assert "Kernel source resolution:" in evidence
+
+
+def test_handoff_reports_a_broken_workload_context_instead_of_using_stale_state(tmp_path: Path, monkeypatch) -> None:
+    state = _state()
+
+    def broken_context():
+        raise RuntimeError("current profile cannot be resolved")
+
+    monkeypatch.setattr(state, "current_profile_workload_context", broken_context)
+
+    with pytest.raises(RuntimeError, match="current profile cannot be resolved"):
+        write_forge_handoff(tmp_path / "session", state)
+
+    assert not (forge_cycle_dir(tmp_path / "session", state.macro_cycle) / "handoff").exists()
 
 
 def test_handoff_exposes_configured_git_source_roots_without_trace(

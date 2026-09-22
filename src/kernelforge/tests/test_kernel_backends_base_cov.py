@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
+
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import (
     _is_aiter_operator,
@@ -32,7 +36,25 @@ def test_is_aiter_operator_false_cases():
 
 def test_build_single_kernel_backend_prompt_unknown():
     config = Config(gpu_target="gfx950")
-    assert build_single_kernel_backend_prompt(config, "nope") == ""
+    with pytest.raises(ValueError, match="unsupported kernel backend: 'nope'"):
+        build_single_kernel_backend_prompt(config, "nope")
+
+
+@pytest.mark.parametrize("error", [ImportError("broken prompt module"), OSError("missing knowledge")])
+def test_implementer_does_not_start_with_generic_guidance_when_backend_prompt_fails(monkeypatch, error):
+    import kernelforge.kernel_backends.base as prompt_module
+    import kernelforge.orchestrator.agent as agent_module
+
+    config = Config(gpu_target="gfx950", agent_backend="codex", agent_precheck=False)
+    backend = SimpleNamespace(name="codex", runtime=config.agent_runtime())
+    monkeypatch.setattr(agent_module, "create_registered_backend", lambda *args, **kwargs: backend)
+
+    def fail_prompt(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(prompt_module, "build_single_kernel_backend_prompt", fail_prompt)
+    with pytest.raises(type(error), match=str(error)):
+        agent_module.make_agent_fn(config, "Optimize this kernel.", "triton")
 
 
 def test_build_single_kernel_backend_prompt_ck():

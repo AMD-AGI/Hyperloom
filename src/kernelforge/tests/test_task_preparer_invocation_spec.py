@@ -409,8 +409,8 @@ def test_a_conforming_driver_still_gets_its_spec_beside_it(tmp_path):
     assert json.loads((driver_dir / "invocation_spec_gemm.json").read_text()) == payload
 
 
-def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
-    """Say so and carry on: the driver conformed without the spec beside it."""
+def test_refused_spec_destination_aborts_even_for_a_conforming_driver(tmp_path):
+    """A supplied runtime input must survive even when preparation is skipped."""
     from kernelforge.cli import _persist_declared_spec
 
     driver_dir = tmp_path / "artifacts"
@@ -422,9 +422,9 @@ def test_a_refused_destination_is_reported_and_not_fatal(tmp_path, capsys):
     source = tmp_path / "invocation_spec_gemm.json"
     source.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
 
-    _persist_declared_spec(str(source), str(driver))
+    with pytest.raises(json.JSONDecodeError):
+        _persist_declared_spec(str(source), str(driver))
 
-    assert "could not place" in capsys.readouterr().out
     assert occupied.read_text(encoding="utf-8") == "the caller's own notes\n"
 
 
@@ -466,12 +466,8 @@ def test_materializes_only_valid_object_specs(tmp_path):
     assert json.loads(canonical) == payload
 
     source.write_text("[]", encoding="utf-8")
-    destination, canonical = task_preparer._materialize_invocation_spec(
-        str(source),
-        ref_dir,
-    )
-    assert destination is None
-    assert canonical == ""
+    with pytest.raises(ValueError, match="must contain a JSON object"):
+        task_preparer._materialize_invocation_spec(str(source), ref_dir)
 
 
 def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path):
@@ -503,13 +499,8 @@ def test_a_conflicting_file_beside_the_driver_is_never_overwritten(tmp_path):
     occupied = durable_dir / "invocation_spec_gemm.json"
     occupied.write_text("the caller's own notes, not JSON\n", encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
-        str(source),
-        durable_dir,
-    )
-
-    assert destination is None
-    assert canonical == ""
+    with pytest.raises(json.JSONDecodeError):
+        task_preparer._materialize_invocation_spec(str(source), durable_dir)
     assert occupied.read_text(encoding="utf-8") == "the caller's own notes, not JSON\n"
 
 
@@ -523,13 +514,8 @@ def test_a_symlinked_destination_is_never_written_through(tmp_path):
     source = tmp_path / "invocation_spec_gemm.json"
     source.write_text(json.dumps({"schema_version": 1}), encoding="utf-8")
 
-    destination, canonical = task_preparer._materialize_invocation_spec(
-        str(source),
-        durable_dir,
-    )
-
-    assert destination is None
-    assert canonical == ""
+    with pytest.raises(ValueError, match="symbolic link"):
+        task_preparer._materialize_invocation_spec(str(source), durable_dir)
     assert outside.read_text(encoding="utf-8") == '{"kernel": "not ours"}\n'
 
 

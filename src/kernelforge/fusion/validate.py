@@ -982,11 +982,11 @@ def classify_compile_error(error: str, recipe: Optional[Recipe] = None) -> str:
         return (
             "The Triton kernel failed to JIT-compile on this GPU arch (gfx942). "
             "Reduce BLOCK size / shared-memory usage or fix tl.constexpr shapes so "
-            "it builds, and keep an eager fallback when Triton is unavailable."
+            "it builds. Missing Triton or kernel failures must surface as errors when the fusion is enabled."
         )
     return (
         "The fused module failed to import/compile on ROCm. Ensure the kernel is "
-        "ROCm-native and falls back to eager when Triton is unavailable."
+        "ROCm-native and its dependencies are installed. Missing dependencies must fail when the fusion is enabled."
     )
 
 

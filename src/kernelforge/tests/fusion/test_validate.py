@@ -84,10 +84,12 @@ class TestClassifiers:
     def test_triton_build_lesson(self):
         msg = classify_compile_error("triton compilation failed: out of resource: shared memory")
         assert "gfx942" in msg or "shared-memory" in msg
+        assert "failures must surface as errors when the fusion is enabled" in msg
 
     def test_generic_compile_lesson(self):
         msg = classify_compile_error("ImportError: cannot import name 'foo'")
         assert "ROCm-native" in msg
+        assert "Missing dependencies must fail when the fusion is enabled" in msg
 
     def test_bench_skip_mamba(self):
         msg = classify_bench_skip("could not init mamba causal_conv1d backend")

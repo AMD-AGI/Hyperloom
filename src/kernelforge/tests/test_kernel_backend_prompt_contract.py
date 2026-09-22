@@ -92,7 +92,7 @@ _SHA256_FORGE_LOOP: dict[str, str] = {
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "2b3728b0d546a9e16427f1881d1c316bd0243ef57aeea2253bde566e7a92435f",
     "flydsl": "f65b1f31f2f4c881ab9a19e96a66140aa0608a06090793f6f4123a583eedfdbb",
-    "fusion": "cf383be0c7c747629dca1490a77de6c77c540b9f5fe74d2a53d5c9e5f5223f52",
+    "fusion": "a8826996f75aba1ae44c787013f7cbb0f884ee21ae2abc37ccdcc9b30c1eeef4",
     "gluon": "4b20a6be3cb41188ef76339920c01114c7f78e5a81f3a7c87fbc5c728ac328d2",
     "hip": "e8867227a644afee37b6fa96c7578376e9141f522236b5ebaa0cc2a9a0b83a8d",
     "hipblaslt": "0a5a2dc43b8ee3c8598a04b975c50ec7158219cb929b37d72da8071c75d9a11a",

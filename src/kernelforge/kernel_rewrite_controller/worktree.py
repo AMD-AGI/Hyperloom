@@ -205,20 +205,19 @@ def record_campaign_baseline(
     inherits a repository on an abandoned branch and no account of what was in
     it beforehand.
     """
-    with contextlib.suppress(OSError, TypeError, ValueError):
-        atomic_write_text(
-            _baseline_path(repo_root),
-            json.dumps(
-                {
-                    "base_commit": base_commit,
-                    "origin_ref": origin_ref,
-                    "untracked": sorted(untracked),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+    atomic_write_text(
+        _baseline_path(repo_root),
+        json.dumps(
+            {
+                "base_commit": base_commit,
+                "origin_ref": origin_ref,
+                "untracked": sorted(untracked),
+            },
+            indent=2,
+            sort_keys=True,
         )
+        + "\n",
+    )
 
 
 def read_campaign_baseline(repo_root: Path) -> CampaignBaselineRecord | None:
@@ -397,23 +396,10 @@ def _archive_stale_campaign_output(repo_root: Path, destination: Path) -> None:
     source = repo_root / FORGE_LOOP_OUTPUT_DIRNAME
     if not source.is_dir():
         return
-    try:
-        destination.mkdir(parents=True, exist_ok=True)
-        target = destination / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}"
-        shutil.rmtree(target, ignore_errors=True)
-        shutil.move(str(source), str(target))
-    except (OSError, shutil.Error) as exc:
-        # The borrow continues either way, and forge-loop then refuses the workspace for a
-        # leftover that is still there. Saying so here is the difference between that refusal
-        # being diagnosable and it being the undiagnosable failure this archive exists to end.
-        log.warning(
-            "could not archive a previous campaign's %s from %s (%s); the next task will be "
-            "refused for a leftover campaign until it is moved by hand",
-            FORGE_LOOP_OUTPUT_DIRNAME,
-            repo_root,
-            exc,
-        )
-        return
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / f"stale_{FORGE_LOOP_OUTPUT_DIRNAME}"
+    shutil.rmtree(target, ignore_errors=True)
+    shutil.move(str(source), str(target))
     log.warning(
         "archived a previous campaign's %s from %s; it was left by a run that did not release the repository",
         FORGE_LOOP_OUTPUT_DIRNAME,
@@ -461,6 +447,7 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
     try:
         reclaim_campaign_branch(repo_root, task.base_commit)
         _require_tree_at(repo_root, task.base_commit)
+        _archive_stale_campaign_output(repo_root, layout.workspace_dir(task.operator_id))
         origin_ref = _head_ref(repo_root)
         # Taken before the branch is cut, so it describes the repository as its
         # owner left it and not as the campaign will.
@@ -470,7 +457,6 @@ def _borrow_live_repository(task: KernelRewriteTask, layout: ControllerLayout) -
         git("branch", "-D", branch, cwd=repo_root, check=False)
         git("checkout", "-b", branch, task.base_commit, cwd=repo_root)
         kernel_path, source_files = _validate_declared_sources(repo_root, task)
-        _archive_stale_campaign_output(repo_root, layout.workspace_dir(task.operator_id))
         _ignore_forge_loop_output(repo_root)
         return OperatorWorktree(
             repo_root=repo_root,

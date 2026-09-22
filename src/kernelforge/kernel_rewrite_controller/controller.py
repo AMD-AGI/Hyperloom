@@ -19,6 +19,7 @@ from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_COMPLETED,
+    OpportunityAnalysisResult,
     run_opportunity_analysis,
 )
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
@@ -135,20 +136,20 @@ def _forge_llm_usage(results: Iterable[SingleTaskResult]) -> tuple[dict[str, Any
     return tuple(rows)
 
 
-def _analysis_llm_usage(analysis: Any) -> tuple[dict[str, Any], ...]:
+def _analysis_llm_usage(analysis: OpportunityAnalysisResult) -> tuple[dict[str, Any], ...]:
     """Render the analysis session's spend as one ledger row, or none.
 
     ``ANALYSIS_ID`` stands in for the operator id the forge-loop rows carry:
     the analysis is what chooses the operators, so it belongs to none of
     them, and the ledger still needs something to file the row against.
     """
-    usage = getattr(analysis, "llm_usage", None)
-    if not isinstance(usage, dict) or int(usage.get("calls") or 0) <= 0:
+    usage = analysis.llm_usage
+    if int(usage.get("calls") or 0) <= 0:
         return ()
     return (
         {
             "operator_id": ANALYSIS_LEDGER_ID,
-            "model": str(getattr(analysis, "agent_model", "") or ""),
+            "model": analysis.agent_model,
             **usage,
         },
     )

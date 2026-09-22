@@ -2310,6 +2310,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     monkeypatch.setattr(runner_module, "measure_wallclock", fake_benchmark)
     monkeypatch.setattr(runner_module, "check_registers", fake_registers)
     monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    monkeypatch.setattr(runner_module, "tracked_source_changes", lambda _workspace: [])
 
     loop = object.__new__(IterationLoop)
     loop.ic = SimpleNamespace(

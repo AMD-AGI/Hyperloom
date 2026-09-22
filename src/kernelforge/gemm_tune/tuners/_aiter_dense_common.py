@@ -989,14 +989,11 @@ def run_aiter_dense_tuner(
     # kernel is worse than not validating.
     support_fn = None
     if os.environ.get("FORGE_SPLITK_TRIAL", "1") != "0":
-        try:
-            from ..aiter_splitk_validate import make_support_fn
+        from ..aiter_splitk_validate import make_support_fn
 
-            # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-            # may not be device 0.
-            support_fn = make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-        except Exception:  # noqa: BLE001 — fall back to the static cap
-            support_fn = None
+        # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+        # may not be device 0.
+        support_fn = make_support_fn(op=script_key, gpu_ids=ctx.gpu_ids)
     n_capped, force_candidate = _cap_splitk_to_serve_safe(
         Path(artifact),
         profile_csv,
@@ -1183,7 +1180,8 @@ def _cap_splitk_to_serve_safe(
     profile_csv: Path,
     max_splitk: int,
     support_fn=None,
-    forwarding_libtypes: frozenset[str] | None = None,
+    *,
+    forwarding_libtypes: frozenset[str],
 ) -> tuple[int, bool]:
     """Rewrite deployed rows whose splitK production cannot dispatch or forward.
 
@@ -1196,8 +1194,7 @@ def _cap_splitk_to_serve_safe(
 
     ``forwarding_libtypes`` is the set of libtypes whose wrapper forwards splitK
     for this op (see ``_SPLITK_FORWARDING_LIBTYPES``); a row on any other
-    libtype is capped at 0 regardless of dispatch support, and ``None`` disables
-    the check.
+    libtype is capped at 0 regardless of dispatch support.
     """
     try:
         with artifact_csv.open() as f:
@@ -1247,8 +1244,6 @@ def _cap_splitk_to_serve_safe(
     lti = _col.get("libtype")
 
     def _forwards(row: list[str]) -> bool:
-        if forwarding_libtypes is None:
-            return True
         if lti is None or lti >= len(row):
             # No libtype column to check against a contract that is keyed on it;
             # treat as non-forwarding, matching the fail-closed default.
@@ -1258,10 +1253,7 @@ def _cap_splitk_to_serve_safe(
     def _shape_max(m: int, n: int, k: int) -> int:
         if support_fn is None:
             return max_splitk
-        try:
-            v = support_fn(m, n, k)
-        except Exception:  # noqa: BLE001 — trial failure must not abort the cap
-            return max_splitk  # degrade to the static cap, never crash the tuner
+        v = support_fn(m, n, k)
         return max_splitk if v is None else int(v)
 
     out, changed, has_splitk = [hdr], 0, False

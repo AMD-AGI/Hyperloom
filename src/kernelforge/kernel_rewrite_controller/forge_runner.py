@@ -28,7 +28,6 @@ from kernelforge.kernel_rewrite_controller.worktree import (
 
 log = logging.getLogger(__name__)
 
-_RESULT_SENTINEL = "__FORGE_RESULT__"
 _TERMINATE_GRACE_SEC = 5.0
 _CHECKPOINT_POLL_SEC = 1.0
 
@@ -56,12 +55,7 @@ class ForgeLoopOutcome:
 
     @property
     def best_commit(self) -> str:
-        payload = self.result or {}
-        direct = str(payload.get("best_commit") or "").strip()
-        if direct:
-            return direct
-        checkpoint = payload.get("checkpoint")
-        return str(checkpoint.get("best_commit") or "").strip() if isinstance(checkpoint, dict) else ""
+        return str((self.result or {}).get("best_commit") or "").strip()
 
     @property
     def improved(self) -> bool:
@@ -173,22 +167,12 @@ def _terminate_process_group(process: subprocess.Popen) -> tuple[str, str]:
         return process.communicate()
 
 
-def _read_result(path: Path, stdout: str) -> dict[str, Any] | None:
-    if path.is_file():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                return payload
-        except (OSError, json.JSONDecodeError):
-            pass
-    parts = stdout.split(_RESULT_SENTINEL)
-    if len(parts) >= 3:
-        try:
-            payload = json.loads(parts[-2])
-            return payload if isinstance(payload, dict) else None
-        except json.JSONDecodeError:
-            return None
-    return None
+def _read_result(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _notify_checkpoint(callback: Callable[[], None] | None) -> bool:
@@ -214,7 +198,7 @@ def run_forge_loop(
             returncode=-1,
             stdout="",
             stderr="controller deadline reached before forge-loop started",
-            result=_read_result(invocation.result_json, ""),
+            result=_read_result(invocation.result_json),
             timed_out=True,
             command=invocation.command,
         )
@@ -253,7 +237,7 @@ def run_forge_loop(
         returncode=int(process.returncode if process.returncode is not None else -1),
         stdout=stdout,
         stderr=stderr,
-        result=_read_result(invocation.result_json, stdout),
+        result=_read_result(invocation.result_json),
         timed_out=timed_out,
         command=invocation.command,
     )

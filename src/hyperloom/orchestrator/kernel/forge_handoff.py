@@ -31,17 +31,9 @@ def _absolute_path(value: Any) -> str:
     return str(Path(raw).expanduser().resolve(strict=False))
 
 
-def _workload_context(state: Any) -> dict[str, Any]:
-    try:
-        context = state.current_profile_workload_context()
-    except Exception:
-        context = {}
-    return dict(context) if isinstance(context, Mapping) else {}
-
-
 def build_workload_md(state: Any) -> str:
     """Render the active workload without deriving optimization candidates."""
-    context = _workload_context(state)
+    context = state.current_profile_workload_context()
     fields = (
         ("Model name", getattr(state, "model_name", "")),
         ("Model path", context.get("model_path") or getattr(state, "model_path", "")),
@@ -84,7 +76,7 @@ def build_serving_context_md(
     baselines: Mapping[str, Any] | None = None,
 ) -> str:
     """Render the framework, serving arguments, and environment overrides."""
-    context = _workload_context(state)
+    context = state.current_profile_workload_context()
     spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
     config = spec.get("config") if isinstance(spec.get("config"), Mapping) else {}
     current_best = getattr(state, "current_best", None)

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import re
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from kernelforge.loop.campaign_config import (
     CampaignConfigStore,
     create_campaign_config,
     env_backend_override,
-    normalize_kernel_backend_name,
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
@@ -98,15 +96,7 @@ def resolve_campaign(
     if not resolved_kernel_backend:
         resolved_kernel_backend = env_backend_override()
     if resolved_kernel_backend:
-        # ``normalize_kernel_backend_name`` already returns the bare backend key, so this is the name the operator
-        # asked for, spelled canonically.
-        normalized = normalize_kernel_backend_name(resolved_kernel_backend)
         resolved_kernel_backend = resolve_kernel_backend_override(resolved_kernel_backend)
-        if resolved_kernel_backend != normalized:
-            print(
-                f"Warning: Unknown kernel backend '{normalized}'; falling back to '{resolved_kernel_backend}'.",
-                file=sys.stderr,
-            )
 
     if not kernel or not driver:
         raise ValueError("fresh campaign requires --kernel and --driver")

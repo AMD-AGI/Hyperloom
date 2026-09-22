@@ -1298,16 +1298,11 @@ class IterationLoop(AnalysisRuntimeMixin):
     def _jit_source_files(self) -> list[str]:
         """Declared hints plus actual tracked edits that may require recompilation."""
 
-        workspace = getattr(
-            self.ic,
-            "workspace_dir",
-            str(Path(self.ic.kernel_file).resolve().parent),
-        )
         return list(
             dict.fromkeys(
                 [
                     *self._target_source_files(),
-                    *tracked_source_changes(workspace),
+                    *tracked_source_changes(self.ic.workspace_dir),
                 ]
             )
         )

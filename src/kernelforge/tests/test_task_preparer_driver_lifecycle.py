@@ -288,8 +288,8 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp
     assert task_preparer.REFERENCE_SUBDIR not in tracked
 
 
-def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(tmp_path, monkeypatch, caplog):
-    """The caller's list is the one list, so it survives a materialization failure."""
+def test_unreadable_invocation_spec_aborts_before_authoring(tmp_path, monkeypatch):
+    """A supplied specification is required even when its case IDs are known."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
@@ -297,33 +297,15 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
     driver = workspace / "driver.py"
     _init_repo(workspace)
     source_spec = tmp_path / "invocation_spec_aiter_hipb_mm.json"
-    source_spec.write_text(json.dumps(_SPEC_PAYLOAD), encoding="utf-8")
-    captured: dict = {}
+    original_kernel = kernel.read_bytes()
 
-    async def fake_agent(**_kwargs):
-        driver.write_text("# prepared driver\n", encoding="utf-8")
-        return "prepared"
+    async def must_not_run(*_args, **_kwargs):
+        pytest.fail("preparation must stop before authoring or preflight")
 
-    async def recording_preflight(*_args, **kwargs):
-        captured["expected_case_ids"] = kwargs.get("expected_case_ids")
-        return task_preparer.PreflightResult(
-            ok=False,
-            correctness_ok=False,
-            bench_ok=False,
-            reasons=["bench produced no timing"],
-        )
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", must_not_run)
+    monkeypatch.setattr(task_preparer, "_preflight_async", must_not_run)
 
-    monkeypatch.setattr(
-        task_preparer,
-        "_materialize_invocation_spec",
-        lambda *_args, **_kwargs: (None, ""),
-    )
-    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _workspace: None)
-    monkeypatch.setattr(task_preparer, "_run_prepare_agent", fake_agent)
-    monkeypatch.setattr(task_preparer, "_preflight_async", recording_preflight)
-    monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
-
-    with caplog.at_level("WARNING", logger="kernelforge.loop.task_preparer"):
+    with pytest.raises(FileNotFoundError, match="invocation_spec_aiter_hipb_mm.json"):
         asyncio.run(
             task_preparer.prepare_task(
                 config=SimpleNamespace(
@@ -341,25 +323,27 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(t
             )
         )
 
-    assert captured["expected_case_ids"] == ["case_001", "case_002"]
-    assert "could not materialize the invocation specification" in caplog.text
+    assert not driver.exists()
+    assert kernel.read_bytes() == original_kernel
+    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
 
 
-def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path, monkeypatch, caplog):
-    """Attempt 2 must not be told to Read a contract that is no longer there."""
+def test_failed_reference_rematerialization_aborts_retry(tmp_path, monkeypatch):
+    """A missing reference bundle must not become a reduced-contract retry."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     kernel = workspace / "kernel.py"
     kernel.write_text("def hipb_mm(a, b):\n    return a @ b\n", encoding="utf-8")
     driver = workspace / "driver.py"
     _init_repo(workspace)
+    original_kernel = kernel.read_bytes()
     prompts: list[str] = []
     materializations: list[int] = []
 
     def flaky_materialize_reference(target_workspace):
         materializations.append(1)
         if len(materializations) > 1:
-            return None
+            raise OSError("could not copy packaged examples")
         ref_dir = Path(target_workspace) / task_preparer.REFERENCE_SUBDIR
         ref_dir.mkdir(parents=True, exist_ok=True)
         (ref_dir / "README.md").write_text("contract\n", encoding="utf-8")
@@ -384,7 +368,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(task_preparer, "PREPARE_MIN_RETRY_SEC", 0)
 
-    with caplog.at_level("WARNING", logger="kernelforge.loop.task_preparer"):
+    with pytest.raises(OSError, match="could not copy packaged examples"):
         asyncio.run(
             task_preparer.prepare_task(
                 config=SimpleNamespace(
@@ -400,11 +384,151 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path
             )
         )
 
-    assert len(prompts) == 2, prompts
+    assert len(prompts) == 1, prompts
     assert f"{task_preparer.REFERENCE_SUBDIR}/README.md" in prompts[0]
-    assert f"{task_preparer.REFERENCE_SUBDIR}/README.md" not in prompts[1]
-    assert "No reference files were available" in prompts[1]
-    assert "could not re-materialize the authoring reference bundle" in caplog.text
+    assert kernel.read_bytes() == original_kernel
+    assert not driver.exists()
+    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
+
+
+@pytest.mark.parametrize("failure", ["snapshot", "references", "dist_harness", "untracked"])
+def test_setup_failures_abort_before_authoring_and_release_external_lock(tmp_path, monkeypatch, failure):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    kernel.write_text("def kernel(): pass\n", encoding="utf-8")
+    _init_repo(workspace)
+    preexisting = workspace / "caller.cache"
+    preexisting.write_text("caller data\n", encoding="utf-8")
+    output_dir = tmp_path / "artifacts"
+    output_dir.mkdir()
+    driver = output_dir / "driver.py"
+    driver.write_text("original driver\n", encoding="utf-8")
+
+    async def must_not_run(*_args, **_kwargs):
+        pytest.fail("preparation must stop before authoring or preflight")
+
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", must_not_run)
+    monkeypatch.setattr(task_preparer, "_preflight_async", must_not_run)
+    real_read_bytes = Path.read_bytes
+    real_read_text = Path.read_text
+    real_git = task_preparer.git
+    if failure == "snapshot":
+
+        def fail_snapshot(path):
+            if path == kernel:
+                raise OSError("snapshot unavailable")
+            return real_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_snapshot)
+    elif failure == "references":
+        monkeypatch.setattr(task_preparer, "resource_path", lambda _name: tmp_path / "missing-examples")
+    elif failure == "dist_harness":
+        packaged_harness = Path(task_preparer.__file__).parent / "dist_harness.py"
+
+        def fail_harness_read(path, *args, **kwargs):
+            if path == packaged_harness:
+                raise OSError("distributed harness unavailable")
+            return real_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_harness_read)
+    else:
+
+        def fail_untracked(*args, **kwargs):
+            if args[:2] == ("ls-files", "--others"):
+                raise task_preparer.GitError(128, ["git", *args], stderr="ownership probe failed")
+            return real_git(*args, **kwargs)
+
+        monkeypatch.setattr(task_preparer, "git", fail_untracked)
+
+    with pytest.raises((OSError, task_preparer.GitError)):
+        asyncio.run(
+            task_preparer.prepare_task(
+                config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=["kernel"],
+                source_files=[str(kernel)],
+                nproc_per_node=2 if failure == "dist_harness" else 1,
+            )
+        )
+
+    assert real_read_bytes(kernel) == b"def kernel(): pass\n"
+    assert preexisting.read_text(encoding="utf-8") == "caller data\n"
+    assert driver.read_text(encoding="utf-8") == "original driver\n"
+    assert not (workspace / task_preparer.REFERENCE_SUBDIR).exists()
+    transaction = task_preparer.ExternalArtifactTransaction(driver_path=driver)
+    transaction.close()
+
+
+def test_restore_attempts_every_protected_source_before_raising(tmp_path, monkeypatch):
+    unreadable = tmp_path / "first.py"
+    later = tmp_path / "second.py"
+    created = tmp_path / "created.py"
+    for path in (unreadable, later, created):
+        path.write_bytes(b"agent changes\n")
+    real_write_bytes = Path.write_bytes
+
+    def fail_first_restore(path, contents):
+        if path == unreadable:
+            raise OSError("protected source is unwritable")
+        return real_write_bytes(path, contents)
+
+    monkeypatch.setattr(Path, "write_bytes", fail_first_restore)
+    with pytest.raises(OSError, match="protected source is unwritable"):
+        task_preparer._restore({unreadable: b"first\n", later: b"second\n", created: None})
+
+    assert later.read_bytes() == b"second\n"
+    assert not created.exists()
+
+
+@pytest.mark.parametrize("rollback_step", ["_remove_new_untracked", "_git_apply_patch"])
+def test_git_rollback_failure_still_restores_protected_sources(tmp_path, monkeypatch, rollback_step):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    kernel = workspace / "kernel.py"
+    kernel.write_text("original kernel\n", encoding="utf-8")
+    _init_repo(workspace)
+    untracked_source = workspace / "untracked.py"
+    untracked_source.write_text("original untracked source\n", encoding="utf-8")
+    output_dir = tmp_path / "artifacts"
+    output_dir.mkdir()
+    driver = output_dir / "driver.py"
+    driver.write_text("original driver\n", encoding="utf-8")
+
+    async def modifying_agent(**_kwargs):
+        untracked_source.write_text("agent source edit\n", encoding="utf-8")
+        return "prepared"
+
+    async def must_not_preflight(*_args, **_kwargs):
+        pytest.fail("preflight must not run after an incomplete rollback")
+
+    def failed_git_restore(*_args):
+        raise task_preparer.GitError(128, ["git", "restore"], stderr="rollback failed")
+
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", modifying_agent)
+    monkeypatch.setattr(task_preparer, "_preflight_async", must_not_preflight)
+    monkeypatch.setattr(task_preparer, rollback_step, failed_git_restore)
+    with pytest.raises(task_preparer.GitError, match="rollback failed"):
+        asyncio.run(
+            task_preparer.prepare_task(
+                config=SimpleNamespace(model="test-model", experiments_dir=tmp_path / "experiments"),
+                workspace_dir=str(workspace),
+                kernel=str(kernel),
+                driver=str(driver),
+                program_md="# Task",
+                target_functions=[],
+                source_files=[str(kernel), str(untracked_source)],
+            )
+        )
+
+    assert untracked_source.read_text(encoding="utf-8") == "original untracked source\n"
+    assert kernel.read_text(encoding="utf-8") == "original kernel\n"
+    assert driver.read_text(encoding="utf-8") == "original driver\n"
+    transaction = task_preparer.ExternalArtifactTransaction(driver_path=driver)
+    transaction.close()
 
 
 def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):

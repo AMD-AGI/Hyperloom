@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -116,11 +117,6 @@ def test_port_program_md_handles_missing_and_oversized(tmp_path):
 # ── optimize: forge-loop launch + result trust ───────────────────────────────
 
 
-def test_optimize_argv_uses_current_interpreter():
-    argv = optimize._forge_loop_argv()
-    assert argv[-2:] == ["-m", "kernelforge.cli"]
-
-
 def test_optimize_announced_experiment_id():
     assert optimize._announced_experiment_id("x\nExperiment: abc123\ny") == "abc123"
     assert optimize._announced_experiment_id("no id here") is None
@@ -147,6 +143,7 @@ def test_optimize_does_not_forward_shapes_to_forge_loop(tmp_path, monkeypatch):
     )
 
     assert result["best_ms"] == 0.7
+    assert captured["command"][:3] == [sys.executable, "-m", "kernelforge.cli"]
     assert "--shapes-json" not in captured["command"]
     assert "--no-experience-kb" in captured["command"]
     assert "--no-prepare-task" in captured["command"]
@@ -157,7 +154,10 @@ class _FakeProc:
         self.stdout = iter(lines)
         self.returncode = returncode
 
-    def wait(self):
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
         return self.returncode
 
 
@@ -500,12 +500,6 @@ def test_optimize_marks_a_cleanly_finished_ledger_complete(tmp_path, monkeypatch
     assert out["llm_usage_complete"] is True
 
 
-def test_optimize_argv_falls_back_to_console_script(monkeypatch):
-    monkeypatch.setattr(optimize.sys, "executable", "")
-    monkeypatch.setattr(optimize.shutil, "which", lambda name: "/usr/bin/kernelforge")
-    assert optimize._forge_loop_argv() == ["/usr/bin/kernelforge"]
-
-
 def test_optimize_no_trusted_result_returns_empty(tmp_path, monkeypatch):
     # Default result_json path (result_json=None) is never written and stdout has neither a trusted experiment_id
     # match nor a sentinel -> {}.
@@ -539,7 +533,7 @@ def test_optimize_cutoff_terminates_loop_and_restores_port_kernel(
     kernel.write_text("verified port\n")
 
     class RunningProc:
-        pid = None
+        pid = 12345
 
         def __init__(self):
             self.stdout = iter(())
@@ -548,22 +542,26 @@ def test_optimize_cutoff_terminates_loop_and_restores_port_kernel(
         def poll(self):
             return self.returncode
 
-        def terminate(self):
-            self.returncode = -15
-
-        def kill(self):
-            self.returncode = -9
-
         def wait(self, timeout=None):
             if self.returncode is None:
                 raise subprocess.TimeoutExpired("forge-loop", timeout or 0)
             return self.returncode
 
-    def fake_popen(command, **_kwargs):
+    proc = RunningProc()
+
+    def fake_popen(command, **kwargs):
+        assert kwargs["start_new_session"] is True
         kernel.write_text("unverified in-flight candidate\n")
-        return RunningProc()
+        return proc
+
+    signals = []
+
+    def killpg(pid, sig):
+        signals.append((pid, sig))
+        proc.returncode = -sig
 
     monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize.os, "killpg", killpg, raising=False)
     out = optimize.run_optimize(
         s,
         "driver.py",
@@ -574,6 +572,7 @@ def test_optimize_cutoff_terminates_loop_and_restores_port_kernel(
     )
 
     assert out["terminated_for_deadline"] is True
+    assert signals == [(proc.pid, optimize.signal.SIGTERM)]
     assert kernel.read_text() == "verified port\n"
 
 

@@ -945,7 +945,7 @@ def test_forge_loop_rejects_return_after_read_when_experience_kb_is_disabled(
     assert "cannot be used with --no-experience-kb" in result.output
 
 
-def test_forge_loop_falls_back_from_unsupported_kernel_backend(tmp_path, monkeypatch):
+def test_forge_loop_rejects_unsupported_kernel_backend(tmp_path, monkeypatch):
     _install_cli_fakes(monkeypatch, tmp_path)
 
     result, workspace = _invoke_forge_loop(
@@ -953,13 +953,12 @@ def test_forge_loop_falls_back_from_unsupported_kernel_backend(tmp_path, monkeyp
         ["--kernel-backend", "tilelang"],
     )
 
-    assert result.exit_code == 0, result.output
-    assert "Unknown kernel backend 'tilelang'" in result.output
-    assert "falling back to 'flydsl'" in result.output
-    assert CampaignConfigStore(str(workspace)).load().kernel_backend == "flydsl"
+    assert result.exit_code != 0
+    assert "unknown kernel backend 'tilelang'" in result.output
+    assert not CampaignConfigStore(str(workspace)).exists()
 
 
-def test_forge_loop_falls_back_from_unknown_environment_kernel_backend(
+def test_forge_loop_rejects_unknown_environment_kernel_backend(
     tmp_path,
     monkeypatch,
 ):
@@ -968,10 +967,9 @@ def test_forge_loop_falls_back_from_unknown_environment_kernel_backend(
 
     result, workspace = _invoke_forge_loop(tmp_path, [])
 
-    assert result.exit_code == 0, result.output
-    assert "Unknown kernel backend 'tilelang'" in result.output
-    assert "falling back to 'flydsl'" in result.output
-    assert CampaignConfigStore(str(workspace)).load().kernel_backend == "flydsl"
+    assert result.exit_code != 0
+    assert "unknown kernel backend 'tilelang'" in result.output
+    assert not CampaignConfigStore(str(workspace)).exists()
 
 
 def test_forge_loop_persists_deadline_read_status(tmp_path, monkeypatch):

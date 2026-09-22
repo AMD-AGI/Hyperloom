@@ -3,17 +3,16 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from kernelforge.kernel_rewrite_controller import parse_task_payload
 from kernelforge.kernel_rewrite_controller.forge_runner import (
-    _RESULT_SENTINEL,
     ForgeLoopInvocation,
-    _read_result,
     build_forge_loop_invocation,
     run_forge_loop,
 )
@@ -148,7 +147,7 @@ def test_invocation_forwards_world_size_as_nproc_per_node(tmp_path: Path) -> Non
     assert command[command.index("--nproc-per-node") + 1] == "8"
 
 
-def test_runner_prefers_the_result_json_written_by_the_child(tmp_path: Path) -> None:
+def test_runner_reads_the_result_json_written_by_the_child(tmp_path: Path) -> None:
     result_json = tmp_path / "result.json"
     payload = {"improved": True, "best_commit": "b" * 40}
     script = "import json, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(json.dumps(" + repr(payload) + "))"
@@ -190,20 +189,27 @@ def test_runner_imports_kernelforge_from_this_repository_src(
     assert Path(outcome.stdout.strip()) == expected
 
 
-def test_runner_recovers_a_sentinel_result_when_no_result_file_exists(tmp_path: Path) -> None:
-    payload = {"improved": False, "best_commit": ""}
+@pytest.mark.parametrize("file_contents", [None, '{"improved": tr', "[1, 2, 3]"])
+def test_runner_does_not_replace_a_missing_or_invalid_result_file_with_stdout(
+    tmp_path: Path,
+    file_contents: str | None,
+) -> None:
+    result_path = tmp_path / "result.json"
+    if file_contents is not None:
+        result_path.write_text(file_contents, encoding="utf-8")
+    payload = {"improved": True, "best_commit": "b" * 40}
     script = f"import json; print('__FORGE_RESULT__' + json.dumps({payload!r}) + '__FORGE_RESULT__')"
     invocation = ForgeLoopInvocation(
         command=(sys.executable, "-c", script),
         workspace=tmp_path,
-        result_json=tmp_path / "missing.json",
+        result_json=result_path,
         deadline_unix=time.time() + 10,
     )
 
     outcome = run_forge_loop(invocation)
 
     assert outcome.returncode == 0
-    assert outcome.result == json.loads(json.dumps(payload))
+    assert outcome.result is None
     assert outcome.improved is False
 
 
@@ -270,36 +276,3 @@ def test_a_checkpoint_probe_that_always_raises_is_reported_once(
     probe_warnings = [record for record in caplog.records if "checkpoint recovery probe failed" in record.message]
     assert len(probe_warnings) == 1
     assert probe_warnings[0].args[0] >= 2
-
-
-def test_a_corrupt_result_file_falls_back_to_the_sentinel_in_stdout(tmp_path: Path) -> None:
-    """A truncated result file must not hide a result forge-loop already announced."""
-    result_path = tmp_path / "result.json"
-    result_path.write_text('{"improved": tr', encoding="utf-8")
-    stdout = f"log line\n{_RESULT_SENTINEL}\n{json.dumps({'improved': True})}\n{_RESULT_SENTINEL}\n"
-
-    assert _read_result(result_path, stdout) == {"improved": True}
-
-
-def test_a_result_file_holding_a_non_object_falls_back_to_stdout(tmp_path: Path) -> None:
-    """The contract is an object; a bare list is not a result."""
-    result_path = tmp_path / "result.json"
-    result_path.write_text("[1, 2, 3]", encoding="utf-8")
-    stdout = f"{_RESULT_SENTINEL}{json.dumps({'improved': False})}{_RESULT_SENTINEL}"
-
-    assert _read_result(result_path, stdout) == {"improved": False}
-
-
-def test_a_sentinel_block_that_is_not_json_yields_no_result(tmp_path: Path) -> None:
-    """Garbage between the sentinels is reported as absent, not guessed at."""
-    assert _read_result(tmp_path / "absent.json", f"{_RESULT_SENTINEL}not json{_RESULT_SENTINEL}") is None
-
-
-def test_a_sentinel_block_holding_a_non_object_yields_no_result(tmp_path: Path) -> None:
-    """A scalar between the sentinels is not a result payload."""
-    assert _read_result(tmp_path / "absent.json", f"{_RESULT_SENTINEL}42{_RESULT_SENTINEL}") is None
-
-
-def test_stdout_without_a_sentinel_pair_yields_no_result(tmp_path: Path) -> None:
-    """A crash before the result is announced leaves nothing to read."""
-    assert _read_result(tmp_path / "absent.json", "forge-loop crashed\n") is None

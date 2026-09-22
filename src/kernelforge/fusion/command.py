@@ -902,7 +902,7 @@ def run(
                     gpu=gpu,
                     model=llm_model,
                     max_turns=max_turns,
-                    backend=require_agent_backend,
+                    backend=require_agent_backend(),
                     timeout_s=_agent_timeout_sec(),
                     target_files=[*author_sources, prompt_harness_path],
                     new_module_dirs=_author_module_dirs(author_sources),
