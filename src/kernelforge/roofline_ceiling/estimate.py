@@ -16,7 +16,6 @@ box's rather than a record of some earlier box's.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,8 +29,6 @@ from kernelforge.roofline_ceiling.report import (
     REPORT_FILENAME,
     WORKSPACE_SUBDIR,
 )
-
-log = logging.getLogger("kernelforge.roofline_ceiling")
 
 SOURCE_ANALYST = "analyst"
 

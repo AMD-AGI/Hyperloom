@@ -11,14 +11,11 @@ planning prompt.
 from __future__ import annotations
 
 import json
-import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kernelforge.roofline_ceiling.attainment import measure_attainment
 from kernelforge.roofline_ceiling.contract import CeilingReport, load_report
-
-log = logging.getLogger("kernelforge.roofline_ceiling")
 
 #: The answer, machine-readable: ``cases`` and ``mean_ideal_ms``.
 REPORT_FILENAME = "performance_ceiling.json"

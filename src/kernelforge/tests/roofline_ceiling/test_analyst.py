@@ -209,9 +209,7 @@ def test_the_kernel_under_optimization_stays_out_of_reach(tmp_path):
 
 def _deny_reason(hooks, tool_name: str, file_path: str):
     hook = hooks.pre_tool_use[0]
-    verdict = asyncio.run(
-        hook.callback({"tool_name": tool_name, "tool_input": {"file_path": file_path}}, None, None)
-    )
+    verdict = asyncio.run(hook.callback({"tool_name": tool_name, "tool_input": {"file_path": file_path}}, None, None))
     return (verdict.get("hookSpecificOutput") or {}).get("permissionDecisionReason")
 
 

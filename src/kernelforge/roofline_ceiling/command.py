@@ -30,8 +30,6 @@ from kernelforge.roofline_ceiling.estimate import (
 from kernelforge.roofline_ceiling.report import WORKSPACE_SUBDIR
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
 
-log = logging.getLogger("kernelforge.roofline_ceiling")
-
 CONFIG_FILENAME = "config.yaml"
 
 #: Printed around the machine-readable result so a caller driving this command
