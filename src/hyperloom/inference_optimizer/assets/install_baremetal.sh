@@ -2350,6 +2350,8 @@ resolve_credentials() {
     unset LLM_GATEWAY_KEY
     if [ "$DUAL_PROTOCOL_GATEWAY" -eq 0 ]; then
       unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_CUSTOM_HEADERS
+      # Clear the resolved copies too, so the codex acceptance below reads the scrubbed state and not a stale local.
+      dual_url=""; dual_secret=""
     fi
   fi
 
@@ -2388,11 +2390,19 @@ resolve_credentials() {
 
   { [ -n "$anthropic_url" ] || [ -n "$oauth_token" ]; } && has_url=1
   { [ -n "$anthropic_key" ] || [ -n "$anthropic_token" ] || [ -n "$oauth_token" ]; } && has_key=1
-  if [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; then
+  # The codex backend drives the OpenAI side on its own, which ``llm_config.has_openai_side`` and the CLI's
+  # ``_provider_only_mode`` both already accept, so that pair is a complete credential here and not only a rider.
+  local has_openai_side=0
+  if [ -n "$dual_url" ] && [ -n "$dual_secret" ]; then
+    has_openai_side=1
+    export OPENAI_BASE_URL="$dual_url"
+    export OPENAI_API_KEY="$dual_secret"
+  fi
+  if { [ "$has_url" -eq 0 ] || [ "$has_key" -eq 0 ]; } && [ "$has_openai_side" -eq 0 ]; then
     if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
       warn "LLM credentials not fully resolved (continuing: --check-only / --dry-run)"
     else
-      die "no usable LLM endpoint: configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN). A dual-protocol gateway such as DeepSeek also sets OPENAI_BASE_URL + OPENAI_API_KEY."
+      die "no usable LLM endpoint: for the claude backend configure ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN, or a Claude subscription token (CLAUDE_CODE_OAUTH_TOKEN); for the codex backend configure OPENAI_BASE_URL + OPENAI_API_KEY. A dual-protocol gateway serves both sides from one host and sets all four."
     fi
   fi
 
@@ -2424,7 +2434,7 @@ resolve_credentials() {
     else
       remove_dotenv_var CLAUDE_CODE_OAUTH_TOKEN
     fi
-    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ]; then
+    if [ "$DUAL_PROTOCOL_GATEWAY" -eq 1 ] || [ "$has_openai_side" -eq 1 ]; then
       [ -n "${OPENAI_BASE_URL:-}" ] && upsert_dotenv_var OPENAI_BASE_URL "$OPENAI_BASE_URL"
       [ -n "${OPENAI_API_KEY:-}" ] && upsert_dotenv_var OPENAI_API_KEY "$OPENAI_API_KEY"
       [ -n "${CLAUDE_MODEL:-}" ] && upsert_dotenv_var CLAUDE_MODEL "$CLAUDE_MODEL"
