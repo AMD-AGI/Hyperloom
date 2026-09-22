@@ -150,12 +150,17 @@ _HYPERLOOM_DTYPE_TO_MATRIX_KEY: dict[str, str] = {
 
 
 def build_hyperloom_arch_spec(platform: str) -> dict | None:
-    """Build a TraceLens arch spec from hyperloom's own achievable-TFLOPS table."""
+    """Build a TraceLens arch spec from hyperloom's own hardware tables."""
     try:
-        from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS_ACHIEVABLE
+        from hyperloom.orchestrator.kernel.roofline_ceiling import HW_SPECS, HW_SPECS_ACHIEVABLE
     except Exception:
         return None
-    spec = HW_SPECS_ACHIEVABLE.get((platform or "").strip().lower())
+    key = (platform or "").strip().lower()
+    # Achievable first, vendor theoretical when a GPU has no measured entry: the same order the
+    # model-level ceiling and the bypass roofline already resolve peaks in.
+    spec = HW_SPECS_ACHIEVABLE.get(key)
+    if not isinstance(spec, dict):
+        spec = HW_SPECS.get(key)
     if not isinstance(spec, dict):
         return None
     table = spec.get("peak_tflops")
