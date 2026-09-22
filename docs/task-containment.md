@@ -153,6 +153,15 @@ The deployment deliberately removes exactly the privileges needed to construct
 an isolation domain from inside a container. Being unable to build one is the
 security model working, not a misconfiguration to route around.
 
+## A cheaper direction, once containment is ruled out
+
+Containment tries to make survivors impossible. A separate reading of the same
+incident asks why a lock outlived its holder at all, and finds that the mutex is
+persisted for a single-process, single-event-loop user that does not need it.
+That direction deletes a subsystem instead of adding one, and it does not need
+any privilege this deployment withholds. See `lane-ownership.md`; it depends on
+a measurement this work has not taken.
+
 ## Conclusion: retention is the mechanism
 
 There is no portable way to prove a lane is free. Quoting the design review:
