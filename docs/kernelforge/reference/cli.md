@@ -422,10 +422,10 @@ how, in the derivation. Nothing is cached and no measured figure is written to
 a shipped artifact: the roofs belong to the run that measured them.
 
 Recalled peaks are the fallback when no profiler can be reached, and the
-derivation has to say so. The gap to a real card is not a fixed discount — on
-gfx950 it runs from 1.2% for FP32 matrix to 50.8% for FP16 matrix — so cases of
-different dtypes stop being comparable and attainment reads far too low to
-reach a target. That is the safe direction to fail in: a campaign runs longer
+derivation has to say so. No card sustains its datasheet, and the shortfall is
+not a fixed discount: it differs from one instruction path to the next, so
+cases of different dtypes stop being comparable and attainment reads too low to
+reach a target. That is the safe direction to fail in — a campaign runs longer
 than it needed to rather than stopping with the work half done.
 
 The analyst session therefore runs with a shell and may install what it needs.

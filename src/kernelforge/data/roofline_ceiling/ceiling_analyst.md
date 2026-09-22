@@ -32,11 +32,12 @@ directory is kept as the record of how the roofs were established.
 
 ## Step 0 — establish this machine's roofs
 
-Measure them. Do not recall them. A peak you remember is the datasheet, and the
-datasheet is not a fixed discount away from a real card: on gfx950 the gap runs
-from 1.2% for FP32 matrix to 50.8% for FP16 matrix. A ceiling divided by a
-recalled figure is wrong by an amount that changes per dtype, which makes cases
-of different dtypes stop being comparable.
+Measure them. Do not recall them. A peak you remember is the datasheet, and no
+card sustains its datasheet. The shortfall is not a fixed discount either: it
+differs from one instruction path to the next, so a ceiling divided by a
+recalled figure is wrong by an amount that changes with dtype, and cases of
+different dtypes stop being comparable with each other. Only measurement tells
+you what this machine actually does.
 
 ```bash
 rocprof-compute profile --roof-only --name ceiling --path <evidence_dir>/roofs \
@@ -69,8 +70,9 @@ seen:
    uncorrected, every bf16 ceiling is twice as loose as it should be, and
    nothing downstream will notice.
 7. **Time the dispatch floor from a captured graph, never eagerly.** Eager
-   timing also pays the framework's per-op host submission, which a graph-timed
-   driver never pays: 4.27 us against 1.55 us for the same kernel on an MI355X.
+   timing also pays the framework's per-op host submission for every launch,
+   which a graph-timed driver never pays, and it can dominate the figure. Time
+   a replayed graph and you get the device cost the methodology asks for.
 
 Map columns to paths: `MFMAF16Flops`→`fp16_mfma` (and `bf16_mfma`, corrected),
 `MFMAF8Flops`→`fp8_mfma`+`mxfp8_scaled_mfma`, `MFMAF6Flops`→`fp6_mfma`+
