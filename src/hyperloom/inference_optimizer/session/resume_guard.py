@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read-only resume admission and explicit operator confirmation of legacy cleanup."""
+"""Read-only resume admission and explicit operator confirmation of task cleanup."""
 
 from __future__ import annotations
 
@@ -161,9 +161,10 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             + "\n  ".join(diagnostics)
             + "\nNo ownership was cleared. Inspect and finish cleanup in the original execution environment "
             "before retrying; do not start replacement work on the same resources. "
-            "For legacy empty-scope ownership only, after verifying the task's entire process tree and any "
+            "After verifying the task's entire process tree and any "
             "remote workers/Ray actors have stopped, record that confirmation with recover-session "
-            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>."
+            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>. "
+            "For recorded nonempty ownership, also pass --confirm-owner-scope <exact-recorded-scope>."
         )
 
 
@@ -174,6 +175,7 @@ def _confirm_task_stopped_in_transaction(
     reason: str,
     operator: str,
     confirmed_at: str,
+    expected_owner_scope: str = "",
 ) -> dict:
     """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
     tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -202,9 +204,10 @@ def _confirm_task_stopped_in_transaction(
             else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
         )
         rows = list(db.execute(query, (task_id,)))
-        if any(row["owner_scope"] != "" for row in rows):
+        if any(row["owner_scope"] != expected_owner_scope for row in rows):
             raise CleanupConfirmationError(
-                "confirmation is limited to strictly empty owner scope on every target lease"
+                "confirmation requires every target lease to match the explicitly confirmed owner scope "
+                "(strictly empty by default)"
             )
         leases = [
             {"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"
@@ -264,6 +267,7 @@ def _confirm_task_stopped_in_transaction(
         "cleanup_confirmed": True,
         "operator": operator,
         "confirmation_reason": reason,
+        "confirmed_owner_scope": expected_owner_scope,
         "released_leases": leases,
         "released_gpu_leases": gpu_leases,
         "outcome": {
@@ -297,8 +301,8 @@ def _confirm_task_stopped_in_transaction(
     return result
 
 
-def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
-    """Record an operator's explicit physical-cleanup confirmation for one legacy task.
+def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str, expected_owner_scope: str = "") -> dict:
+    """Record an operator's explicit physical-cleanup confirmation for one task in the specified ownership scope.
 
     This does not stop or inspect processes or Ray actors. The operator must first
     verify their exit. Only empty-scope execution ownership is eligible. The session
@@ -328,6 +332,7 @@ def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dic
                     reason=reason,
                     operator=pwd.getpwuid(os.getuid()).pw_name,
                     confirmed_at=now_iso(),
+                    expected_owner_scope=expected_owner_scope,
                 )
         finally:
             lock.release()

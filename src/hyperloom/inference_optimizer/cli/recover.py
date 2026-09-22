@@ -56,11 +56,15 @@ def _run_recover_session(args: argparse.Namespace) -> int:
 
     task_id = getattr(args, "confirm_stopped", None)
     reason = getattr(args, "confirmation_reason", None)
-    if task_id is not None or reason is not None:
+    owner_scope = getattr(args, "confirm_owner_scope", None)
+    if task_id is not None or reason is not None or owner_scope is not None:
         if not task_id or not task_id.strip() or not reason or not reason.strip():
             print(
                 "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
             )
+            return 2
+        if owner_scope is not None and not owner_scope.strip():
+            print("ERROR: --confirm-owner-scope must be nonempty when provided.", file=sys.stderr)
             return 2
         if getattr(args, "force", False) or getattr(args, "backfill_trace", False):
             print("ERROR: cleanup confirmation cannot be combined with --force or --backfill-trace.", file=sys.stderr)
@@ -68,7 +72,8 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
 
         try:
-            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
+            kwargs = {"expected_owner_scope": owner_scope} if owner_scope is not None else {}
+            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason, **kwargs)
         except CleanupConfirmationError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 2

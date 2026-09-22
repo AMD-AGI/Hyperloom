@@ -362,6 +362,13 @@ the specialist. The task becomes terminal and its result is delivered only after
 cleanup is confirmed. An unconfirmed or unreachable owner retains capacity;
 shutdown does not treat cancellation as proof of cleanup.
 
+If the old execution environment has been independently verified stopped (for
+example, its campaign container was removed), use `recover-session` with
+`--confirm-stopped TASK_ID`, `--confirm-owner-scope RECORDED_SCOPE`, and
+`--confirmation-reason TEXT`. Every target lease must match that exact scope.
+This records an operator attestation and releases only the task's ownership;
+it does not stop workers or promote the task's optimization result.
+
 Scriptable forward-pass workloads (`custom` and `xdit`) skip the final request
 concurrency sweep with reason `non_serving_workload`. Serving workloads retain
 the sweep.

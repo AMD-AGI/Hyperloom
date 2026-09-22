@@ -24,7 +24,22 @@ _script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${_script_dir}/../../../.." && pwd)}"
 
 ENV_TEMPLATE="${REPO_ROOT}/.env.template"
-DOTENV="${REPO_ROOT}/.env"
+
+# Same HYPERLOOM_ENV_FILE contract as the other installers and the CLI
+# preflight, except that this script *writes* configuration: "no file" leaves
+# it nowhere to persist to, so that selection is an error here rather than a
+# silent fallback to the checkout.
+if [ -z "${HYPERLOOM_ENV_FILE+x}" ]; then
+  DOTENV="${REPO_ROOT}/.env"
+else
+  case "$HYPERLOOM_ENV_FILE" in
+    ""|none|NONE)
+      echo "[install_baremetal] HYPERLOOM_ENV_FILE selects no configuration file," >&2
+      echo "[install_baremetal] but this installer persists configuration. Give it a path." >&2
+      exit 2 ;;
+    *) DOTENV="$HYPERLOOM_ENV_FILE" ;;
+  esac
+fi
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"

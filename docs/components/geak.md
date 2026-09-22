@@ -23,6 +23,11 @@ candidate kernels then happens inside GEAK's Workflows on the on-box GPUs.
 - **Source**: <https://github.com/AMD-AGI/GEAK>
 - **License**: MIT
 
+The installer defaults `GEAK_REF` to `feat/physical-ai` for gfx11/gfx1151
+support. It resolves the branch to a commit for the cached checkout; an explicit
+`GEAK_REF` or operator-managed `GEAK_ROOT` overrides this selection. Startup
+failures from the GEAK child process are forwarded to the Hyperloom log.
+
 ## Role in Hyperloom
 
 Hyperloom uses GEAK as the **whole-pipeline e2e delegate** when

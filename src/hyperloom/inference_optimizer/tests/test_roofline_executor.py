@@ -375,7 +375,8 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_primary_rank_missing_is_not_retried(tmp_path):
+@pytest.mark.parametrize("error_class", ["primary_rank_trace_missing", "orchestrator_cancelled"])
+async def test_non_retryable_profile_failure_is_not_retried(tmp_path, error_class):
     calls = 0
 
     async def fake_profile(_ctx):
@@ -383,7 +384,7 @@ async def test_primary_rank_missing_is_not_retried(tmp_path):
         calls += 1
         return {
             "status": "failed",
-            "error_class": "primary_rank_trace_missing",
+            "error_class": error_class,
             "error": "no rank-0 trace",
             "trace_input_ready": False,
             "trace_files": ["/tmp/merged.trace.json.gz"],

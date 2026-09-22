@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GEAK e2e optimizer submission (whole-pipeline; GEAK@GEAK main)."""
+"""GEAK e2e optimizer submission (whole-pipeline; GEAK)."""
 
 from __future__ import annotations
 
@@ -145,6 +145,9 @@ def _main(argv: list[str]) -> int:
 
     handoff = json.loads(Path(args.handoff_json).read_text(encoding="utf-8"))
     out = call_geak(handoff, Path(args.output_dir), timeout_s=timeout_s)
+    if out.get("status") in ("error", None):
+        diagnostic = out.get("stderr_tail") or out.get("stdout_tail") or out.get("error") or "unknown GEAK failure"
+        print(f"GEAK failed (rc={out.get('returncode')}): {diagnostic}", file=sys.stderr)
     print(
         json.dumps(
             {

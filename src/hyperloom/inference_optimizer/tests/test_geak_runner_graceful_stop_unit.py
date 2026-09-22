@@ -188,3 +188,15 @@ def test_sigkill_escalation_when_child_ignores_sigterm(tmp_path, monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_cli_exposes_child_startup_failure(tmp_path, monkeypatch, capsys):
+    runner = _write_fake_runner(tmp_path, 'raise RuntimeError("absolute benchmark path rejected")')
+    monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
+    handoff = tmp_path / "input.json"
+    handoff.write_text(json.dumps(_handoff()))
+    assert psr._main([str(handoff), str(tmp_path / "output"), "--timeout-s", "5"]) == 1
+    output = capsys.readouterr()
+    assert "absolute benchmark path rejected" in output.err
+    assert "Traceback" in output.err
+    assert json.loads(output.out)["status"] == "error"

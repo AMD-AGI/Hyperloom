@@ -86,7 +86,22 @@ _ANTHROPIC_FALLBACK_KEYS: tuple[str, ...] = (
 
 
 def _resolve_dotenv_file() -> Path | None:
-    """Resolve the trusted repo ``.env`` file without trusting arbitrary cwd."""
+    """Resolve the trusted configuration file without trusting arbitrary cwd.
+
+    Honours the same ``HYPERLOOM_ENV_FILE`` contract as the installers: unset
+    selects ``$REPO_ROOT/.env``, a path selects that file, and ``""`` or
+    ``none`` selects no file, making the caller's environment the
+    configuration. Reading the checkout here independently of the installers is
+    how a caller that had opted out still inherited previous-run settings.
+    """
+    configured = os.environ.get("HYPERLOOM_ENV_FILE")
+    if configured is not None:
+        stripped = configured.strip()
+        if stripped.lower() in ("", "none"):
+            return None
+        candidate = Path(stripped)
+        return candidate if candidate.is_file() else None
+
     explicit_root = os.environ.get("REPO_ROOT", "").strip()
     candidates: list[Path] = []
     if explicit_root:

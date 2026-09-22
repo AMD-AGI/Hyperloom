@@ -728,3 +728,40 @@ def test_specialist_budget_uses_shared_benchmark_timeout(tmp_path, monkeypatch):
         )
     finally:
         dispatcher.db.close()
+
+
+def test_shutdown_does_not_cancel_or_await_its_own_inline_caller(tmp_path, monkeypatch):
+    dispatcher = _dispatcher(tmp_path)
+    monkeypatch.setattr(dispatcher_module, "_COOPERATIVE_CANCEL_GRACE_SEC", 0)
+    monkeypatch.setattr(dispatcher_module, "_CANCEL_NOTICE_SEC", 0)
+
+    async def run():
+        finish = asyncio.Event()
+
+        async def execute(_ctx):
+            await finish.wait()
+            return {"status": "ok"}
+
+        dispatcher.sub.register_executor("shutdown_test", execute)
+        task = await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="inline-shutdown")
+        # Python 3.11+ wait_for runs the awaited coroutine in the caller task.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(dispatcher.run_task_registered(task), timeout=0.01)
+        entry = dispatcher._inflight_actions[task.task_id]
+        if entry.atask is not asyncio.current_task():
+            finish.set()
+            await asyncio.gather(*dispatcher._executions)
+            pytest.skip("wait_for uses a separate task on this Python version")
+        cancelled = await dispatcher.cancel_inflight_actions(reason="coordinator_stop")
+        assert cancelled == [task.task_id]
+        assert entry.scope.cancelled
+        assert not asyncio.current_task().cancelling()
+        finish.set()
+        await asyncio.gather(*dispatcher._executions)
+        assert not dispatcher._inflight_actions
+        await _close(dispatcher)
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()

@@ -298,13 +298,17 @@ class DispatcherCollaborator:
         )
         for _task_id, entry in victims:
             entry.scope.cancel(reason=reason)
+        # An inline action may have registered this caller before returning.
+        # Waiting on or cancelling ourselves creates a cyclic task dependency.
+        current = asyncio.current_task()
+        waitable = [(task_id, entry) for task_id, entry in victims if entry.atask is not current]
         try:
-            await self._wait_for_cooperative_stop(victims)
+            await self._wait_for_cooperative_stop(waitable)
         finally:
-            for _task_id, entry in victims:
+            for _task_id, entry in waitable:
                 if not entry.atask.done():
                     entry.atask.cancel()
-        await asyncio.gather(*(entry.atask for _task_id, entry in victims), return_exceptions=True)
+        await asyncio.gather(*(entry.atask for _task_id, entry in waitable), return_exceptions=True)
         return [task_id for task_id, _entry in victims]
 
     async def _wait_for_cooperative_stop(self, victims: list[tuple[str, _InflightAction]]) -> None:

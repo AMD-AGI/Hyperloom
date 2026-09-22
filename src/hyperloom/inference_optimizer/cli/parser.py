@@ -1188,8 +1188,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="TASK_ID",
         help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
         "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
-        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "and --confirmation-reason; nonempty owner scopes additionally require --confirm-owner-scope. Does not stop processes, "
         "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirm-owner-scope",
+        metavar="SCOPE",
+        help="Exact recorded owner scope whose entire execution environment has been verified stopped "
+        "(for example, a removed campaign container). Requires --confirm-stopped and --confirmation-reason; "
+        "every target lease must match. This is an operator attestation, not automatic process detection.",
     )
     rec.add_argument(
         "--confirmation-reason",

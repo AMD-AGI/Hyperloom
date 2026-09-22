@@ -78,9 +78,37 @@ resolve_repo_root() {
 REPO_ROOT="$(resolve_repo_root)"
 DOTENV_LOADED_COUNT=0
 
+# Which file, if any, supplies configuration. Default is the source checkout's
+# .env, as before.
+#
+# HYPERLOOM_ENV_FILE lets a caller own its own configuration:
+#   unset        $REPO_ROOT/.env (previous behaviour)
+#   <path>       that file instead
+#   "" | none    no file; the caller's exported environment is the configuration
+#
+# Needed because the checkout is shared across runs while USER_DATA_PATH,
+# HYPERLOOM_RUNTIME_DIR and the *_ROOT paths are per-run. When a checkout .env
+# is authoritative, scrub_stale_workspace_env_for_setup_dotenv unsets those
+# before the no-clobber load, so a caller that exported a fresh USER_DATA_PATH
+# silently gets the previous run's. A caller with no way to opt out had to
+# mutate or mask the shared checkout to launch safely.
+resolve_env_file() {
+  if [ -z "${HYPERLOOM_ENV_FILE+x}" ]; then
+    printf '%s\n' "$REPO_ROOT/.env"
+    return 0
+  fi
+  case "$HYPERLOOM_ENV_FILE" in
+    ""|none|NONE) printf '%s\n' "" ;;
+    *) printf '%s\n' "$HYPERLOOM_ENV_FILE" ;;
+  esac
+}
+
+HYPERLOOM_RESOLVED_ENV_FILE="$(resolve_env_file)"
+
 setup_dotenv_is_authoritative() {
-  [ -f "$REPO_ROOT/.env" ] || return 1
-  grep -q '^HYPERLOOM_RUN_MODE=' "$REPO_ROOT/.env" 2>/dev/null
+  [ -n "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 1
+  [ -f "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 1
+  grep -q '^HYPERLOOM_RUN_MODE=' "$HYPERLOOM_RESOLVED_ENV_FILE" 2>/dev/null
 }
 
 scrub_stale_workspace_env_for_setup_dotenv() {
@@ -98,7 +126,8 @@ scrub_stale_workspace_env_for_setup_dotenv() {
 
 load_dotenv_no_clobber() {
   DOTENV_LOADED_COUNT=0
-  [ -f "$REPO_ROOT/.env" ] || return 0
+  [ -n "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 0
+  [ -f "$HYPERLOOM_RESOLVED_ENV_FILE" ] || return 0
   local loaded=0
   local raw key value
   while IFS= read -r raw || [ -n "$raw" ]; do
@@ -122,7 +151,7 @@ load_dotenv_no_clobber() {
       export "$key=$value"
       loaded=$((loaded + 1))
     fi
-  done < "$REPO_ROOT/.env"
+  done < "$HYPERLOOM_RESOLVED_ENV_FILE"
   DOTENV_LOADED_COUNT="$loaded"
   return 0
 }

@@ -245,7 +245,17 @@ TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-int
 # Credentials fallback: env always wins. If any supported LLM credential is
 # missing from env, source $REPO_ROOT/.env but protect already-set values.
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
-DOTENV="${REPO_ROOT}/.env"
+resolve_env_file() {
+  if [ -z "${HYPERLOOM_ENV_FILE+x}" ]; then
+    printf '%s\n' "$REPO_ROOT/.env"
+    return 0
+  fi
+  case "$HYPERLOOM_ENV_FILE" in
+    ""|none|NONE) printf '%s\n' "" ;;
+    *) printf '%s\n' "$HYPERLOOM_ENV_FILE" ;;
+  esac
+}
+DOTENV="$(resolve_env_file)"
 
 # Vars whose already-resolved value must survive the `. $REPO_ROOT/.env` below.
 # The dotenv is a *credentials* fallback, but it is a full env file: sourcing it
@@ -261,7 +271,7 @@ GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
    || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  if [ -f "$REPO_ROOT/.env" ]; then
+  if [ -n "$DOTENV" ] && [ -f "$DOTENV" ]; then
     _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
     _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
     _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
@@ -277,7 +287,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     set -a
     # shellcheck disable=SC1091
-    . "$REPO_ROOT/.env"
+    . "$DOTENV"
     set +a
     [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
     [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
@@ -297,7 +307,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_claude_oauth _snap_anthropic_headers
-    echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
+    echo "[kernel-agent] loaded credentials fallback from $DOTENV (env wins)"
   fi
 fi
 # kernel-agent consumes ANTHROPIC_* and nothing else. Translating a retired
@@ -312,13 +322,13 @@ fi
 # on it.
 # e2e whole-pipeline optimizer — Hyperloom calls it simply "geak" (formerly the
 # standalone PerfSkills repo / GEAK_v4). Its code lives IN GEAK (interface/run_e2e.py
-# + e2e_workflow/), tracked on the ``main`` branch. Hyperloom calls
+# + e2e_workflow/). The default branch includes gfx11/gfx1151 support. Hyperloom calls
 # interface/run_e2e.py at the KERNEL_AGENT phase when
 # KERNEL_OPT_BACKEND_ORDER=geak. It owns the GEAK_* handle; operators override
 # repo/ref/root with GEAK_REPO / GEAK_REF / GEAK_ROOT. NOTE: only Hyperloom's
 # internal naming changed — no upstream GEAK branch was renamed.
 GEAK_REPO="${GEAK_REPO:-https://github.com/AMD-AGI/GEAK.git}"
-GEAK_REF="${GEAK_REF:-main}"
+GEAK_REF="${GEAK_REF:-feat/physical-ai}"
 _geak_root_is_operator_override=""
 if [ -n "${GEAK_ROOT:-}" ]; then
   # Re-exported GEAK@* cache paths remain installer-managed across reruns.
@@ -329,7 +339,7 @@ if [ -n "${GEAK_ROOT:-}" ]; then
     _geak_root_is_operator_override=1
   fi
 fi
-# GEAK_REF defaults to a branch (`main`), so resolving it to a SHA hits the
+# GEAK_REF defaults to a branch, so resolving it to a SHA hits the
 # network (git ls-remote). Only do that when GEAK_ROOT was not overridden -- an
 # operator-pinned root must not pay for (or fail on) a network round-trip.
 if [ -z "${GEAK_ROOT:-}" ]; then

@@ -65,6 +65,7 @@ _TRACE_SUFFIXES = (".pt.trace.json.gz", ".pt.trace.json", ".trace.json.gz", ".tr
 _PREFLIGHT_STALE_TRACE_LIMIT = 20
 _NON_RETRYABLE_PROFILE_ERRORS = frozenset(
     {
+        "orchestrator_cancelled",
         "agentx_multi_node_profile_unsupported",
         "primary_rank_trace_missing",
     }
