@@ -305,6 +305,16 @@ class KernelPhase(PhaseHandler):
                 reason=idempotency_reason,
                 inline_event=recorder.event_id if recorder is not None else "",
             )
+            if reprofile_task is None:
+                _note_reprofile(
+                    ran=False,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason="gpu_trace_unsupported",
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
+                return
             # An idempotent reuse can return a task that already reached a terminal state (its snapshot from a prior
             # cycle is still valid). run_task would then attempt succeeded->running -> IllegalTransition, so reuse the
             # existing snapshot instead of re-running.
@@ -4180,6 +4190,8 @@ class KernelPhase(PhaseHandler):
     def _needs_roofline_for_watermark(self) -> bool:
         """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight)."""
         state = self.shared_state
+        if str(getattr(state, "gpu_trace_unsupported_reason", "") or ""):
+            return False
         try:
             last_rl = float(state.last_roofline_tput or 0.0)
         except (TypeError, ValueError):
@@ -4240,6 +4252,8 @@ class KernelPhase(PhaseHandler):
                 reason,
                 exc,
             )
+            return False
+        if task is None:
             return False
         self.shared_state.auto_roofline_pending_task_id = task.task_id
         log.info(
