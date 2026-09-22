@@ -14,9 +14,9 @@ machine, not of the day: a shipped device profile keyed on architecture, device
 name and partition mode, and the vendor datasheet behind it when no profile
 covers the machine. Measuring at run time bought a figure that moved with the
 box's mood and needed a profiler installed; committing it buys one that has
-been reviewed and that two campaigns a month apart both divide by. See
-``docs/kernelforge/reference/device-profiles.md`` for how a machine gets a
-profile.
+been reviewed and that two campaigns a month apart both divide by. A machine
+gets a profile by being measured once and having the result committed to
+:mod:`~kernelforge.roofline_ceiling.device_profile`.
 
 ``peak_source`` is a required field rather than a nicety. A ceiling against a
 measured profile and one against a datasheet differ by roughly a factor of two,

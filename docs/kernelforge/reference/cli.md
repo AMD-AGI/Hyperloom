@@ -426,10 +426,10 @@ the day, so they are looked up rather than measured at run time:
 Device profiles live in `kernelforge/data/roofline_ceiling/device_profiles/` and
 record when, with which tool versions, and under which partition and power cap
 they were measured, plus any figure their author did not trust. Adding a machine
-means measuring it once and committing the result: see
-[device profiles](device-profiles.md) for the procedure, which is worth
-following exactly — nothing cross-checks a committed figure, and a roof that
-reads low makes the ceiling too loose, so an attainment target fires early.
+means measuring it once and committing the result. Nothing cross-checks a
+committed figure against a fresh measurement, and a roof that reads low makes
+the ceiling too loose, so an attainment target fires early — which is why a
+profile whose figures contradict the datasheet is refused rather than used.
 
 The scored case set comes from the driver's own `case_ms:` lines, not from a
 configuration file, and cases the driver tags `unscored` get no ceiling.
