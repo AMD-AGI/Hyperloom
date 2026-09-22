@@ -778,6 +778,7 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     """Trace directories to probe for a Magpie profile workspace."""
     return [
         workspace / "torch_trace",
+        workspace,
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
     ]

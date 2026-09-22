@@ -2418,8 +2418,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 
 @pytest.mark.asyncio
-async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
+async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2448,10 +2447,10 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
                 }
             )
         )
-        capture_dir = output_dir / "capture_traces"
+        _gz_trace(workspace / "rank0.177.pt.trace.json.gz", 128)
+        capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
-        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
-        (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
@@ -2464,12 +2463,15 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
 
-    capture_dir = output_dir / "capture_traces"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    complete_trace = workspace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(capture_dir)
-    assert len(res.result["trace_files"]) == 2
-    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    assert res.result["trace_dir"] == str(workspace)
+    assert res.result["trace_files"] == [str(complete_trace)]
+    assert res.result["main_trace_path"] == str(workspace)
+    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
+    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 
