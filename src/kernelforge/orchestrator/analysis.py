@@ -282,6 +282,10 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
     return digest.hexdigest()
 
 
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
 _GLOBAL_ARTIFACTS = {
     "request.json": (
         "analysis_request",
@@ -563,37 +567,27 @@ class AnalysisAgentService:
             case_root = work_root / "cases" / case.directory
             case_root.mkdir(parents=True, exist_ok=True)
             if not (case_root / "case.json").is_file():
-                atomic_write_text(case_root / "case.json", json.dumps(case.to_dict(), indent=2, sort_keys=True) + "\n")
+                _atomic_write_json(case_root / "case.json", case.to_dict())
         inventory_path = work_root / "case_inventory.json"
         if not inventory_path.is_file():
-            atomic_write_text(
+            _atomic_write_json(
                 inventory_path,
-                json.dumps(
-                    {
-                        "schema_version": ANALYSIS_SCHEMA_VERSION,
-                        "analysis_commit": context.analysis_commit,
-                        "cases": [case.to_dict() for case in cases],
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": context.analysis_commit,
+                    "cases": [case.to_dict() for case in cases],
+                },
             )
         progress_path = work_root / "progress.json"
         if not progress_path.is_file():
-            atomic_write_text(
+            _atomic_write_json(
                 progress_path,
-                json.dumps(
-                    {
-                        "schema_version": ANALYSIS_SCHEMA_VERSION,
-                        "analysis_commit": context.analysis_commit,
-                        "status": "RUNNING",
-                        "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n",
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": context.analysis_commit,
+                    "status": "RUNNING",
+                    "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
+                },
             )
 
     @staticmethod
@@ -651,20 +645,15 @@ class AnalysisAgentService:
                 stream.write(json.dumps(provenance_payload, sort_keys=True) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-        atomic_write_text(
+        _atomic_write_json(
             profile_root.parent / "profile_provenance.json",
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "case_id": case.case_id,
-                    "framework_owned": True,
-                    "artifacts": provenance_payload["artifacts"],
-                    "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "case_id": case.case_id,
+                "framework_owned": True,
+                "artifacts": provenance_payload["artifacts"],
+                "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
+            },
         )
         return True
 
@@ -685,7 +674,7 @@ class AnalysisAgentService:
         case_states = []
         for case in cases:
             case_root = work_root / "cases" / case.directory
-            atomic_write_text(case_root / "case.json", json.dumps(case.to_dict(), indent=2, sort_keys=True) + "\n")
+            _atomic_write_json(case_root / "case.json", case.to_dict())
             analysis_path = case_root / "analysis.md"
             profile_root = case_root / "profile"
             has_analysis = cls._nonempty_file(analysis_path)
@@ -717,58 +706,43 @@ class AnalysisAgentService:
             )
 
         status = "READY" if len(completed) == len(cases) else "PARTIAL"
-        atomic_write_text(
+        _atomic_write_json(
             work_root / "case_inventory.json",
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": context.analysis_commit,
-                    "cases": case_states,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "analysis_commit": context.analysis_commit,
+                "cases": case_states,
+            },
         )
-        atomic_write_text(
+        _atomic_write_json(
             work_root / "progress.json",
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": context.analysis_commit,
-                    "status": status,
-                    "cases": [
-                        {
-                            "case_id": case["case_id"],
-                            "status": case["status"],
-                        }
-                        for case in case_states
-                    ],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "analysis_commit": context.analysis_commit,
+                "status": status,
+                "cases": [
+                    {
+                        "case_id": case["case_id"],
+                        "status": case["status"],
+                    }
+                    for case in case_states
+                ],
+            },
         )
-        atomic_write_text(
+        _atomic_write_json(
             work_root / "manifest.json",
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": context.analysis_commit,
-                    "driver_digest": driver_digest,
-                    "source_digest": source_digest,
-                    "status": status,
-                    "expected_case_ids": [case.case_id for case in cases],
-                    "completed_case_ids": completed,
-                    "failed_case_ids": failed,
-                    "skipped_case_ids": skipped,
-                    "report": "report.md",
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "analysis_commit": context.analysis_commit,
+                "driver_digest": driver_digest,
+                "source_digest": source_digest,
+                "status": status,
+                "expected_case_ids": [case.case_id for case in cases],
+                "completed_case_ids": completed,
+                "failed_case_ids": failed,
+                "skipped_case_ids": skipped,
+                "report": "report.md",
+            },
         )
 
     async def ensure_bundle(
@@ -1001,13 +975,13 @@ class AnalysisAgentService:
                 if retry_published_bundle:
                     durable_request["analysis_profiling_enabled"] = self.profiling_enabled
                     request_payload = durable_request
-                    atomic_write_text(request_path, json.dumps(request_payload, indent=2, sort_keys=True) + "\n")
+                    _atomic_write_json(request_path, request_payload)
                 else:
                     request_payload = durable_request
             except json.JSONDecodeError as error:
                 raise AnalysisBundleError(f"durable analysis request is invalid: {error}") from error
         else:
-            atomic_write_text(request_path, json.dumps(request_payload, indent=2, sort_keys=True) + "\n")
+            _atomic_write_json(request_path, request_payload)
         (work_root / "commands.jsonl").touch(exist_ok=True)
         try:
             workflow = AnalysisSessionJournal(
@@ -1219,20 +1193,15 @@ class AnalysisAgentService:
                 ],
             }
         )
-        atomic_write_text(
+        _atomic_write_json(
             catalog_path,
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": workflow.analysis_commit,
-                    "workflow_status": workflow.state["status"],
-                    "analysis_session_status": workflow.status,
-                    "artifacts": artifacts,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "analysis_commit": workflow.analysis_commit,
+                "workflow_status": workflow.state["status"],
+                "analysis_session_status": workflow.status,
+                "artifacts": artifacts,
+            },
         )
         return catalog_path
 
@@ -2110,18 +2079,13 @@ Update analysis incrementally:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-        atomic_write_text(
+        _atomic_write_json(
             commit_root / "published.json",
-            json.dumps(
-                {
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "generation_root": generation_root.name,
-                    "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n",
+            {
+                "schema_version": ANALYSIS_SCHEMA_VERSION,
+                "generation_root": generation_root.name,
+                "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
         )
         return generation_root
 

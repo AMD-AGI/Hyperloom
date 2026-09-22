@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``) and unified-diff parsing (``_audit_common``)."""
+"""Unit tests for framework-agent KB prior-scoring (``decision``) and unified-diff parsing."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.agents.framework import _audit_common as ac
+from hyperloom.common import unified_diff as ac
 from hyperloom.agents.framework.decision import (
     candidate_score,
     prior_score,
@@ -102,7 +102,7 @@ def test_candidate_score_and_winner_decision() -> None:
     assert winner_decision(req, 101.0, 0.80, "")[0] is False  # ratio below floor
 
 
-# _audit_common.py
+# unified_diff.py
 def test_parse_unified_diff_with_and_without_git_header() -> None:
     patch = (
         "diff --git a/src/foo.py b/src/foo.py\n"

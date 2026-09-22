@@ -54,7 +54,6 @@ __all__ = [
     "ENV_LANGFUSE_PUBLIC_KEY",
     "ENV_LANGFUSE_SECRET_KEY",
     "apply_flush_defaults",
-    "env_flag",
     "langfuse_credentials",
     "langfuse_credentials_complete",
     "langfuse_live_enabled",

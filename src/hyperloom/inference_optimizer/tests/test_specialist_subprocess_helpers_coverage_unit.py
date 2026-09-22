@@ -168,6 +168,7 @@ def test_build_claude_cmd_minimal_no_model_no_mcp(tmp_path: Path) -> None:
 
 
 def test_build_claude_cmd_injects_leaf_agents_when_task_allowed(tmp_path: Path) -> None:
+
     from hyperloom.orchestrator.specialists.leaf import LEAF_AGENT_NAME
 
     d = _dispatcher()

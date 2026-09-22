@@ -600,10 +600,10 @@ def _render_attempted_row(
         "kernel_name": str(top_entry.get("name") or ""),
         "kernel_category": str(top_entry.get("kernel_category") or ""),
         "source_file": str(top_entry.get("source_file") or attempt.get("last_source_file") or ""),
-        "gpu_pct": _round4(to_float(top_entry.get("gpu_pct"))),
-        "efficiency_pct": _round4(to_float(top_entry.get("efficiency_percent"))),
+        "gpu_pct": _to_float(top_entry.get("gpu_pct")),
+        "efficiency_pct": _to_float(top_entry.get("efficiency_percent")),
         "bound_type": str(top_entry.get("bound_type") or ""),
-        "arithmetic_intensity": _round4(to_float(top_entry.get("arithmetic_intensity"))),
+        "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
         "category": category,
         "outcome_class": _kernel_outcome_class(category, ladder),
         "rejected_reason": _rejected_reason_of(attempt),
@@ -613,7 +613,7 @@ def _render_attempted_row(
         "failure_count": int(attempt.get("failure_count") or 0),
         "last_decision": str(attempt.get("last_decision") or ""),
         "last_status": str(attempt.get("last_status") or ""),
-        "last_micro_speedup": _round4(to_float(attempt.get("last_micro_speedup"))) or 0.0,
+        "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")) or 0.0,
         "last_ts": str(attempt.get("last_ts") or ""),
         "verification": verification,
         "backend_ladder": ladder,
@@ -753,9 +753,10 @@ def _find_highest_impact_missed(
     return best
 
 
-def _round4(v: float | None) -> float | None:
-    """Round a finite float to 4 decimal places, pass ``None`` through."""
-    return round(v, 4) if v is not None else None
+def _to_float(v: Any) -> float | None:
+    """Coerce a value to a 4-decimal float, or ``None`` on failure."""
+    parsed = to_float(v)
+    return round(parsed, 4) if parsed is not None else None
 
 
 __all__ = [

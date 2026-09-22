@@ -222,7 +222,7 @@ class SqliteLeaseBackend:
             raise ValueError("acquire_many called with no lanes")
         expanded = _expand_lanes(lanes)
         now_ts = time.time()
-        _ts = now_iso()
+        stamp = now_iso()
         expires_ts = now_ts + ttl_sec
         expires_iso = _lease_iso(expires_ts)
 
@@ -288,9 +288,9 @@ class SqliteLeaseBackend:
                         task_id,
                         action,
                         os.getpid(),
-                        _ts,
+                        stamp,
                         expires_iso,
-                        _ts,
+                        stamp,
                         local_owner_scope(),
                     ),
                 )
@@ -307,12 +307,12 @@ class SqliteLeaseBackend:
     async def heartbeat(self, lease: Lease, *, ttl_sec: int) -> None:
         """Refresh ``expires_at`` for every lane this holder owns (keyed on ``(lane, holder_id)`` PK)."""
         new_expires_iso = _lease_iso(time.time() + ttl_sec)
-        _ts = now_iso()
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             placeholders = ",".join("?" * len(lease.lanes))
             cur.execute(
                 f"UPDATE leases SET expires_at=?, heartbeat_at=? WHERE lane IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
-                (new_expires_iso, _ts, *lease.lanes, lease.holder_id),
+                (new_expires_iso, stamp, *lease.lanes, lease.holder_id),
             )
             if cur.rowcount != len(lease.lanes):
                 raise StaleLeaseError(f"heartbeat mismatch: expected {len(lease.lanes)} rows, got {cur.rowcount}")
@@ -320,14 +320,14 @@ class SqliteLeaseBackend:
     async def heartbeat_by_task(self, task_id: str, *, ttl_sec: int) -> list[str]:
         """Refresh every lane row a task holds, whoever the holder is."""
         new_expires_iso = _lease_iso(time.time() + ttl_sec)
-        _ts = now_iso()
+        stamp = now_iso()
         async with self.db.transaction() as cur:
             cur.execute("SELECT lane FROM leases WHERE task_id=?", (task_id,))
             lanes = sorted(str(r["lane"]) for r in cur.fetchall())
             if lanes:
                 cur.execute(
                     "UPDATE leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                    (new_expires_iso, _ts, task_id),
+                    (new_expires_iso, stamp, task_id),
                 )
         return lanes
 

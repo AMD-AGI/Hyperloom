@@ -645,8 +645,6 @@ def _build_multinode_launch_entrypoint(
     log_dir: str,
 ) -> str:
     """Compose the head-pod entrypoint that spawns one rank per node via heredoc-embedded launch_multinode.py."""
-    denylist = _read_pod_script("_server_flag_denylist.py")
-    sglang_gate = _read_pod_script("_sglang_shape_gate.py")
     py = _read_pod_script("launch_multinode.py")
     wait_flag = "--no-wait-health" if args.no_wait_health else ""
     try:
@@ -707,10 +705,6 @@ def _build_multinode_launch_entrypoint(
         pd_args = " ".join(chunks) + " "
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f"cat > \"$WORK_DIR/_server_flag_denylist.py\" <<'__MN_DENYLIST_EOF__'\n"
-        f"{denylist}__MN_DENYLIST_EOF__\n"
-        f"cat > \"$WORK_DIR/_sglang_shape_gate.py\" <<'__MN_SGLANG_GATE_EOF__'\n"
-        f"{sglang_gate}__MN_SGLANG_GATE_EOF__\n"
         f"cat > \"$WORK_DIR/launch_multinode.py\" <<'__MN_LAUNCH_PY_EOF__'\n"
         f"{py}__MN_LAUNCH_PY_EOF__\n"
         f'python3 "$WORK_DIR/launch_multinode.py" '

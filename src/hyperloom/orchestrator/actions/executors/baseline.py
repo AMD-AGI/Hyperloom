@@ -19,7 +19,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -1594,14 +1594,8 @@ def _rollback_warm_kernel_apply_results(
 _LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
 
 
-def _scan_log_tail_for_hit(
-    root: Path,
-    hit: Callable[[str], str | None],
-    *,
-    max_bytes: int,
-    limit: int = 64,
-) -> str | None:
-    """Scan the tail of each named log under *root*, return the first hit or ``None``."""
+def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, tail)`` for each known log under *root*, over at most *limit* files."""
     seen = 0
     try:
         for path in root.rglob("*.log"):
@@ -1611,19 +1605,16 @@ def _scan_log_tail_for_hit(
             if seen > limit:
                 break
             try:
-                with path.open("rb") as f:
-                    f.seek(0, 2)
-                    size = f.tell()
-                    f.seek(max(0, size - max_bytes))
-                    chunk = f.read().decode("utf-8", "replace")
+                with path.open("rb") as handle:
+                    handle.seek(0, 2)
+                    size = handle.tell()
+                    handle.seek(max(0, size - max_bytes))
+                    tail = handle.read().decode("utf-8", "replace")
             except OSError:
                 continue
-            result = hit(chunk)
-            if result is not None:
-                return result
+            yield path, tail
     except OSError:
-        return None
-    return None
+        return
 
 
 class BaselineExecutor:
@@ -1941,9 +1932,7 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False
-        return (
-            _scan_log_tail_for_hit(root, lambda c: "" if _hit(c) else None, max_bytes=_LOG_SCAN_MAX_BYTES) is not None
-        )
+        return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
     def _record_baseline_convergence(
@@ -2004,27 +1993,10 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False, ""
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in _LOG_NAMES:
-                    continue
-                seen += 1
-                if seen > 64:
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                w = _window(chunk)
-                if w is not None:
-                    return True, f"{path.name}: {w}"
-        except OSError:
-            return False, ""
+        for path, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES):
+            window = _window(tail)
+            if window is not None:
+                return True, f"{path.name}: {window}"
         return False, ""
 
     @staticmethod
@@ -2056,13 +2028,10 @@ class BaselineExecutor:
         root = Path(out_dir)
         if not root.is_dir():
             return False
-        return (
-            _scan_log_tail_for_hit(
-                root,
-                lambda c: "" if any(m in c for m in _EVAL_SERVER_UNREACHABLE_MARKERS) else None,
-                max_bytes=_LOG_SCAN_MAX_BYTES,
-            )
-            is not None
+        return any(
+            marker in tail
+            for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES)
+            for marker in _EVAL_SERVER_UNREACHABLE_MARKERS
         )
 
     @staticmethod

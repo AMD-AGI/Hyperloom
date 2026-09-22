@@ -1680,16 +1680,16 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.trace import trace_env
+    from hyperloom.common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
-    assert trace_env.env_flag("HL_TEST_FLAG") is True
+    assert common_env.env_flag("HL_TEST_FLAG") is True
     monkeypatch.setenv("HL_TEST_FLAG", "off")
-    assert trace_env.env_flag("HL_TEST_FLAG") is False
+    assert common_env.env_flag("HL_TEST_FLAG") is False
     monkeypatch.setenv("HL_TEST_FLAG", "maybe")
-    assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
+    assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
+    assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
 # orchestrator.bus.gpu_pool._parse_gpu_list
