@@ -59,6 +59,14 @@ class ClosePhase(PhaseHandler):
             if (row.get("to_phase") or "").strip().upper() != _phase_state.PHASE_CLOSE:
                 continue
             reason = (row.get("reason") or "").strip()
+            evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+            if (
+                reason == "sweep_done"
+                and evidence.get("sweep_was_skipped")
+                and evidence.get("sweep_skip_budget_exhausted")
+                and str(evidence.get("sweep_skip_reason") or "") == "budget_exhausted_no_successful_pairs"
+            ):
+                return "sweep_failed"
             if reason and _phase_state.is_valid_stop_reason(reason):
                 return reason
             # Newest CLOSE-bound row had no usable reason — stop rather than use a stale older one.

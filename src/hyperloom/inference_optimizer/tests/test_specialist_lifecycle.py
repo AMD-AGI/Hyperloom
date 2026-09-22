@@ -490,7 +490,7 @@ async def test_force_stalled_idempotency_key_is_cycle_scoped(force_coord):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("task_state", ["running", "failed"])
+@pytest.mark.parametrize("task_state", ["queued", "running", "failed", "succeeded", "cancelled"])
 async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord, task_state):
     state = force_coord.shared_state
     for _ in range(10):

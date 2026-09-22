@@ -675,6 +675,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 budget_state=_budget_state,
                 base_yaml_path=base_yaml_path,
                 base_extra_args="",
+                base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
                 grid=[boot_variant],
                 output_root=workspace,
                 model_path=model_path,
@@ -685,6 +686,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                 preclean_before_run=True,
                 warmup_before_measure=False,
                 serving_lease=arm_lease,
+                lifecycle_boot_only=True,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -774,6 +776,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
         # Boot succeeded (br is not None here — boot_failed guarded above).
         assert br is not None
         boot_succeeded = True
+        boot_only = str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
         # Commit the higher-CONC failed boots (genuine capacity failures) first.
         for fb in failed_boots:
             arm_results.append(fb)
@@ -785,8 +788,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     conc=variant_conc(fb),
                     point=_point_from_variant(fb, arm=arm_name),
                 )
-        arm_results.append(br)
-        _all_results_ref.append(br)
+        if not boot_only:
+            arm_results.append(br)
+            _all_results_ref.append(br)
         _record_rung(
             recorder,
             arm_name,
@@ -860,7 +864,9 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
     # Server is up: sweep remaining CONCs by reuse.
     reuse_failure: BaseException | None = None
     try:
-        reuse_grid = grid[boot_idx + 1 :]
+        reuse_grid = grid[boot_idx:] if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only" else grid[
+            boot_idx + 1 :
+        ]
         for r_idx, variant in enumerate(reuse_grid):
             _reuse_remaining = session_deadline_to_remaining_sec(session_deadline_sec)
             # Check session deadline before each reuse point.

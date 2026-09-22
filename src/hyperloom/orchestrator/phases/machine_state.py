@@ -1583,6 +1583,13 @@ def exit_normal_sweep(
                 evidence["sweep_was_skipped"] = True
                 evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
                 evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+                summary = last_conc.get("summary") if isinstance(last_conc.get("summary"), dict) else {}
+                spent_budget_without_pair = bool(last_conc.get("budget_exhausted")) or (
+                    str(last_conc.get("skip_reason") or "") == "budget_exhausted_no_successful_pairs"
+                )
+                ran_but_reported_no_pair = bool(summary) and int(summary.get("successful_pairs") or 0) <= 0
+                if spent_budget_without_pair or (ran_but_reported_no_pair and not evidence["sweep_skip_reason"]):
+                    return "sweep_failed", evidence
             return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,

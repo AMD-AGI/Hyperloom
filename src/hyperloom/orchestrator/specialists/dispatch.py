@@ -562,7 +562,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             lookup = getattr(self.tasks, "find_by_idempotency_key", None)
             if callable(lookup):
                 existing = await lookup(idempotency_key)
-                if existing is not None and str(getattr(existing, "state", "") or "") in {"running", "failed"}:
+                if existing is not None:
                     continue
             await self._warm_specialist_params(params)
             if is_source_patch:

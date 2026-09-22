@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+import asyncio
 import logging as _logging
 from typing import Any
 from . import geak_rebench as _geak_rebench
@@ -319,18 +320,28 @@ class MachinePhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged only.
-        try:
-            await self._on_phase_entered(
+        # Phase-entry side effects are additive; hook failures are logged only. Run them out-of-band so a long KERNEL
+        # entry action does not freeze the coordinator tick loop and starve the idle guard.
+        task = asyncio.create_task(
+            self._on_phase_entered(
                 from_phase=prior or "",
                 to_phase=target,
                 reason=reason or "",
                 evidence=evidence if isinstance(evidence, dict) else None,
             )
+        )
+        task.add_done_callback(lambda done: self._record_phase_entry_task_result(done))
+
+    def _record_phase_entry_task_result(self, task: "asyncio.Task[Any]") -> None:
+        """Log phase-entry hook failures after the transition tick has returned."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            log.warning("Coordinator: _on_phase_entered hook was cancelled")
         except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
             log.exception("Coordinator: _on_phase_entered hook failed")
-            # This hook is also what closes the left phase's event, so a raise
-            # here is the case where that event never got its exit evidence.
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
             self._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     async def _on_phase_entered(

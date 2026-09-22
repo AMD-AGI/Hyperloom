@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import asyncio
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -100,6 +101,37 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     assert row["evidence"]["evidence"] == "kernel_idle_no_progress"
     # The ledger still says there is work; that must no longer suppress the exit.
     assert ps.kernel_work_pending(st) is True
+
+
+@pytest.mark.asyncio
+async def test_phase_entry_hook_cannot_starve_the_next_tick(kernel_coordinator, monkeypatch):
+    """Phase entry side effects are long-running work; they must not freeze the coordinator tick loop."""
+    from hyperloom.orchestrator.phases import machine as phase_machine_mod
+
+    c = kernel_coordinator
+    st = c.shared_state
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
+    st.phase_started_ts = datetime.now(timezone.utc).isoformat()
+    st.max_minutes = 96 * 60
+    entered = asyncio.Event()
+
+    async def _slow_entry(**_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _slow_entry)
+    monkeypatch.setattr(
+        phase_machine_mod._phase_state,
+        "compute_next_phase",
+        lambda *_args, **_kwargs: (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"}),
+    )
+
+    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=0.2)
+    await asyncio.sleep(0)
+
+    assert entered.is_set()
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.phase_history[-1]["reason"] == "test_enter_kernel"
 
 
 @pytest.mark.asyncio
