@@ -42,6 +42,8 @@ _MI355X_PEAK_TFLOPS: dict[str, float] = {
     "mxfp4": 10066.4,
     "fp4": 10066.4,
     "float4": 10066.4,
+    "fp32": 157.3,
+    "float32": 157.3,
 }
 HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {
@@ -1146,21 +1148,6 @@ _MI325X_ACHIEVABLE_TFLOPS: dict[str, float] = {
     "fp32": 194.0,
     "float32": 194.0,
 }
-_MI355X_ACHIEVABLE_TFLOPS: dict[str, float] = {
-    "bf16": 1686.0,
-    "bfloat16": 1686.0,
-    "fp16": 1686.0,
-    "float16": 1686.0,
-    "fp8": 3567.0,
-    "float8_e4m3fn": 3567.0,
-    "float8_e5m2": 3567.0,
-    "mxfp4": 5663.0,
-    "fp4": 5663.0,
-    "float4": 5663.0,
-    "fp32": 137.0,
-    "float32": 137.0,
-}
-
 HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
     "mi300x": {
         "hbm_bw_gbps": 5300.0,
@@ -1171,11 +1158,6 @@ HW_SPECS_ACHIEVABLE: dict[str, dict[str, Any]] = {
         "hbm_bw_gbps": 6000.0,
         "hbm_gb": 256.0,
         "peak_tflops": _MI325X_ACHIEVABLE_TFLOPS,
-    },
-    "mi355x": {
-        "hbm_bw_gbps": 8000.0,
-        "hbm_gb": 288.0,
-        "peak_tflops": _MI355X_ACHIEVABLE_TFLOPS,
     },
 }
 

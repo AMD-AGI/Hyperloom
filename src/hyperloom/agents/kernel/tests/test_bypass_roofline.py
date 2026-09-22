@@ -119,6 +119,16 @@ def test_unestimable_returns_none():
     assert compute_roofline(category="GEMM", shape_str="(128,) bf16", gpu_time_us=10.0) is None  # only 1-D
 
 
+def test_unknown_gpu_returns_none():
+    r = compute_roofline(
+        category="GEMM",
+        shape_str="(128,128) bf16<br>(128,128) bf16",
+        gpu_time_us=10.0,
+        gpu_type="mi355x",
+    )
+    assert r is None
+
+
 def test_efficiency_capped_flag_when_estimate_overshoots():
     # Implausibly tiny time -> estimated achieved FLOPS >> peak -> clamped to 100% AND flagged, so a capped 100% isn't
     # mistaken for a real measurement.

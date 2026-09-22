@@ -43,30 +43,11 @@ _PEAK_TFLOPS_MI325: dict[str, float] = {
     "f32": 194.0,
     "float32": 194.0,
 }
-_PEAK_TFLOPS_MI355: dict[str, float] = {
-    "bf16": 1686.0,
-    "bfloat16": 1686.0,
-    "f16": 1686.0,
-    "fp16": 1686.0,
-    "float16": 1686.0,
-    "fp8": 3567.0,
-    "f8": 3567.0,
-    "float8_e4m3fn": 3567.0,
-    "float8_e5m2": 3567.0,
-    "mxfp4": 5663.0,
-    "fp4": 5663.0,
-    "float4": 5663.0,
-    "fp32": 137.0,
-    "f32": 137.0,
-    "float32": 137.0,
-}
 _HW_SPECS: dict[str, dict[str, Any]] = {
     "mi300x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
     "mi308x": {"hbm_bw_gbps": 5300.0, "peak_tflops": _PEAK_TFLOPS_MI300},
     "mi325x": {"hbm_bw_gbps": 6000.0, "peak_tflops": _PEAK_TFLOPS_MI325},
-    "mi355x": {"hbm_bw_gbps": 8000.0, "peak_tflops": _PEAK_TFLOPS_MI355},
 }
-_DEFAULT_GPU = "mi300x"
 
 _DTYPE_BYTES: dict[str, float] = {
     "f32": 4.0,
@@ -226,7 +207,9 @@ def compute_roofline(
     if flops <= 0 or nbytes <= 0:
         return None
 
-    spec = _HW_SPECS.get((gpu_type or "").strip().lower()) or _HW_SPECS[_DEFAULT_GPU]
+    spec = _HW_SPECS.get((gpu_type or "").strip().lower())
+    if spec is None:
+        return None
     peak_tflops = spec["peak_tflops"].get(op_dtype, spec["peak_tflops"].get("bf16", 0.0))
     peak_flops = peak_tflops * 1e12
     peak_bw = spec["hbm_bw_gbps"] * 1e9

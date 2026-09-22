@@ -441,7 +441,7 @@ def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
             num_attention_heads=8,
         )
         b = rc.compute_roofline_from_perfmodel(
-            meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="mxfp4"
+            meta=meta, gpu_type="mi300x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="bf16"
         )
         return next(o for o in b.ops if o.name == "moe_fused")
 
@@ -489,7 +489,7 @@ def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
     expert_elems = 4 * 512 * 3 * 512 * 2048
     meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
     breakdown = rc.compute_roofline_from_perfmodel(
-        meta=meta, gpu_type="mi355x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="mxfp4"
+        meta=meta, gpu_type="mi300x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="bf16"
     )
 
     ops = {o.name: o.pct_time for o in breakdown.ops}
