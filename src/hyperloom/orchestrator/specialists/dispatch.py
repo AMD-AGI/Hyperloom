@@ -24,7 +24,7 @@ from ..policy.gate import (
     PolicyDenied,
     validate_freeform_wave_task,
 )
-from .runner import SpecialistFailureType
+from .runner import SpecialistFailureType, specialist_patch_preflight_error
 
 if TYPE_CHECKING:
     from ..loop.sub_agent_runner import SubAgentResult
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 log = _logging.getLogger(__name__)
 
 __all__ = ["SpecialistDispatchCollaborator"]
+
+_SOURCE_PATCH_FAMILY = "source_patch"
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):
@@ -551,12 +553,49 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "source": "coordinator_internal",
                 "reason": f"stalled_domain_force:{anchor}",
             }
+            from .profile import MODE_PATCH, resolve_specialist_profile
+
+            is_source_patch = resolve_specialist_profile(params, domain=dom).mode == MODE_PATCH
+            if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
+                continue
+            idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"
+            lookup = getattr(self.tasks, "find_by_idempotency_key", None)
+            if callable(lookup):
+                existing = await lookup(idempotency_key)
+                if existing is not None and str(getattr(existing, "state", "") or "") in {"running", "failed"}:
+                    continue
+            await self._warm_specialist_params(params)
+            if is_source_patch:
+                preflight_error = specialist_patch_preflight_error(
+                    params,
+                    framework_repo_path=str(getattr(state, "framework_repo_path", "") or ""),
+                )
+                if preflight_error:
+                    if state.add_pruned_family(_SOURCE_PATCH_FAMILY):
+                        state.record_action_failure(
+                            action="specialist",
+                            task_id=idempotency_key,
+                            result={
+                                "error_class": preflight_error,
+                                "error": preflight_error,
+                            },
+                        )
+                        try:
+                            state.save(self.session_dir)
+                        except Exception:  # noqa: BLE001
+                            log.exception("stalled-domain force: source-patch prune save failed")
+                        log.error(
+                            "stalled-domain force: pruned %s after deterministic failure: %s",
+                            _SOURCE_PATCH_FAMILY,
+                            preflight_error,
+                        )
+                    continue
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={
                     "action_name": "specialist",
                     "params": params,
-                    "idempotency_key": (f"forced-stalled-{anchor}-round{round_id}{self._cycle_idem_suffix()}"),
+                    "idempotency_key": idempotency_key,
                 },
             )
             # Zero the counter up-front so a slow enqueue can't re-fire next tick.
