@@ -49,13 +49,12 @@ def _format_ms(value: float) -> str:
 def render_document(report: CeilingReport) -> str:
     """Render the operator-facing analysis document.
 
-    A framework-owned header -- the answer, the figures it was taken against,
-    and anything the validator objected to -- followed verbatim by the analyst's
-    own derivation. The header is what a reader checks first and the only part
-    that cannot drift from the published JSON; the derivation is the only record
-    of how the numbers were reached, so it is reproduced rather than summarized.
+    A framework-owned header -- the answer, where the roofs came from, and
+    anything the validator objected to -- followed verbatim by the analyst's own
+    derivation. The published file carries only the latencies and their mean, so
+    this document is where a reader deciding whether to believe them looks.
     """
-    hardware = report.hardware
+    mean = report.mean_ideal_ms()
     lines: list[str] = [
         "# Performance ceiling",
         "",
@@ -65,41 +64,23 @@ def render_document(report: CeilingReport) -> str:
         "hardware limits and legal algorithm constraints; it does not claim an implementation",
         "reaching it exists.",
         "",
-        "| Case | Ideal latency (ms) | Bound | Observed under profiler (ms) |",
-        "|:--|--:|:--|--:|",
+        "| Case | Ideal latency (ms) |",
+        "|:--|--:|",
     ]
-    for case in report.cases:
-        observed = _format_ms(case.profiler_observed_ms) if case.profiler_observed_ms is not None else "n/a"
-        lines.append(f"| `{case.case_id}` | {_format_ms(case.t_ideal_ms)} | {case.bound} | {observed} |")
+    lines += [f"| `{case.case_id}` | {_format_ms(case.t_ideal_ms)} |" for case in report.cases]
+    if mean is not None:
+        lines.append(f"| **mean (equal weight)** | **{_format_ms(mean)}** |")
 
     lines += [
         "",
-        f"Confidence: **{report.confidence}**.",
+        f"Roofs: `{report.peak_source}` — {peak_source_meaning(report.peak_source)}.",
         "",
-        "## Hardware the estimate was taken against",
-        "",
-        f"- Architecture: `{hardware.arch}`",
-        f"- Peak source: `{hardware.peak_source}` — {peak_source_meaning(hardware.peak_source)}",
     ]
-    for tier, value in sorted(hardware.bandwidth.items()):
-        lines.append(f"- Bandwidth ({tier}): {value / 1e12:.4g} TB/s")
-    if hardware.dispatch_floor_s > 0:
-        lines.append(f"- Dispatch floor: {hardware.dispatch_floor_s * 1e6:.4g} us")
-    else:
-        lines.append("- Dispatch floor: not measured")
-    for path, value in sorted(hardware.peak_flops.items()):
-        lines.append(f"- Peak ({path}): {value / 1e12:.4g} TFLOP/s")
-    lines.append("")
 
     flagged = [(case.case_id, issue) for case in report.cases for issue in case.issues]
     if flagged:
         lines += ["## Findings", ""]
         lines += [f"- `{case_id}`: {issue}" for case_id, issue in flagged]
-        lines.append("")
-
-    if report.caveats:
-        lines += ["## Caveats", ""]
-        lines += [f"- {caveat}" for caveat in report.caveats]
         lines.append("")
 
     lines += [
@@ -162,21 +143,18 @@ def render_for_prompt(
 
     if standing.cases:
         lines += [
-            "| Case | Attainment | Ceiling (ms) | Measured (ms) | Bound | Speedup to ceiling |",
-            "|:--|--:|--:|--:|:--|--:|",
+            "| Case | Attainment | Ceiling (ms) | Measured (ms) | Speedup to ceiling |",
+            "|:--|--:|--:|--:|--:|",
         ]
         for entry in sorted(standing.cases, key=lambda c: c.attainment):
             lines.append(
                 f"| `{entry.case_id}` | {entry.attainment * 100:.1f}% | {_format_ms(entry.t_ideal_ms)} "
-                f"| {_format_ms(entry.t_current_ms)} | {entry.bound} | {entry.remaining_speedup:.2f}x |"
+                f"| {_format_ms(entry.t_current_ms)} | {entry.remaining_speedup:.2f}x |"
             )
         lines.append("")
     else:
-        lines += [
-            "| Case | Ceiling (ms) | Bound |",
-            "|:--|--:|:--|",
-        ]
-        lines += [f"| `{case.case_id}` | {_format_ms(case.t_ideal_ms)} | {case.bound} |" for case in report.cases]
+        lines += ["| Case | Ceiling (ms) |", "|:--|--:|"]
+        lines += [f"| `{case.case_id}` | {_format_ms(case.t_ideal_ms)} |" for case in report.cases]
         lines.append("")
 
     if standing.excluded:
@@ -184,15 +162,6 @@ def render_for_prompt(
         lines += [f"- `{case_id}`: {reason}" for case_id, reason in sorted(standing.excluded.items())]
         lines.append("")
 
-    if not report.hardware.is_measured:
-        lines.append(
-            "Peaks are vendor datasheet figures, not measured on any card, so every ceiling here is "
-            "an absolute lower bound that no implementation reaches: attainment reads far lower than "
-            "the kernel deserves. Compare cases against each other, not against the target."
-        )
-    lines.append(f"Ceiling confidence: {report.confidence}.")
-    for caveat in report.caveats:
-        lines.append(f"- {caveat}")
     return "\n".join(lines).rstrip() + "\n"
 
 

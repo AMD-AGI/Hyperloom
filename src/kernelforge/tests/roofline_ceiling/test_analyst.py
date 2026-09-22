@@ -65,8 +65,7 @@ _HARDWARE = {
 _GOOD = json.dumps(
     {
         "hardware": _HARDWARE,
-        "cases": [{"case_id": "c0", "t_ideal_ms": 12.8, "bound": "memory"}],
-        "confidence": "high",
+        "cases": [{"case_id": "c0", "t_ideal_ms": 12.8}],
         "analysis_md": "# Performance ceiling analysis\n\nCase `c0`: 8e10 bytes / 6.24 TB/s = 12.8 ms.",
     }
 )
@@ -215,7 +214,7 @@ def test_a_well_formed_answer_becomes_a_report(tmp_path):
     report = _analyse(_Backend(_GOOD), tmp_path)
 
     assert list(report.ideal_ms()) == ["c0"]
-    assert report.confidence == "high"
+    assert report.peak_source == PEAK_SOURCE_MEASURED
 
 
 def test_a_fenced_answer_is_still_read(tmp_path):

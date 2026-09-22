@@ -22,9 +22,8 @@ _HARDWARE = {
 
 def _report(cases):
     payload = {
-        "cases": [{"case_id": case_id, "t_ideal_ms": ideal, "bound": "memory"} for case_id, ideal in cases],
+        "cases": [{"case_id": case_id, "t_ideal_ms": ideal} for case_id, ideal in cases],
         "hardware": _HARDWARE,
-        "confidence": "high",
         "analysis_md": "\n".join(f"Case `{case_id}` at {ideal} ms." for case_id, ideal in cases),
     }
     return build_report(

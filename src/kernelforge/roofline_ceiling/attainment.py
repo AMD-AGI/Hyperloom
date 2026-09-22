@@ -48,7 +48,6 @@ class CaseAttainment:
     t_ideal_ms: float
     t_current_ms: float
     attainment: float
-    bound: str
 
     @property
     def remaining_speedup(self) -> float:
@@ -151,7 +150,6 @@ def measure_attainment(
                 t_ideal_ms=t_ideal,
                 t_current_ms=t_current,
                 attainment=ratio,
-                bound=str(getattr(case, "bound", "") or ""),
             )
         )
 

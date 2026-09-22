@@ -125,11 +125,8 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
     payload = {
         "source": source,
         "report_path": str(report_path) if report_path else "",
-        "arch": report.hardware.arch,
-        "peak_source": report.hardware.peak_source,
-        "confidence": report.confidence,
         "ideal_ms": report.ideal_ms(),
-        "bound": {case.case_id: case.bound for case in report.cases},
+        "mean_ideal_ms": report.mean_ideal_ms(),
     }
     click.echo(RESULT_SENTINEL)
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -218,10 +215,8 @@ def roofline_ceiling_command(
 
     for note in outcome.notes:
         click.echo(f"[ceiling] note: {note}")
-    hardware = outcome.report.hardware
     click.echo(
-        f"[ceiling] arch={hardware.arch} peaks={hardware.peak_source} "
-        f"dispatch_floor={hardware.dispatch_floor_s * 1e6:.3g}us cases={len(outcome.scored_case_ids)}"
+        f"[ceiling] peaks={outcome.report.peak_source} cases={len(outcome.scored_case_ids)}"
     )
     for case in outcome.report.cases:
         for issue in case.issues:
