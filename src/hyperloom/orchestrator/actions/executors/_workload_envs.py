@@ -69,6 +69,7 @@ from ._grid_server_args import (
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
+from ._recipe_env_scan import recipe_overwritten_env_names
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -1812,7 +1813,17 @@ def materialize_config_with_envs(
     )
     for _dk in dropped_extra_envs:
         log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+    recipe_overwritten = recipe_overwritten_env_names(
+        effective_inferencex_path, str(bench.get("benchmark_script") or "")
+    )
+    silently_dropped = recipe_overwritten & safe_extra_envs.keys()
+    for _dk in silently_dropped:
+        log.warning(
+            "extra_envs key %s is unconditionally re-exported by the recipe script and would have no effect", _dk
+        )
     for key, value in safe_extra_envs.items():
+        if key in silently_dropped:
+            continue
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
     # aiter logs a line for every tuned-GEMM table lookup it MISSES
