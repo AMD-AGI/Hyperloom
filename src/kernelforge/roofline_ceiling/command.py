@@ -96,7 +96,7 @@ def _resolve_kernel_files(explicit: Sequence[str], document: dict[str, Any], wor
 
 
 def resolve_analyst_backend(provider: str, model: str, timeout_sec: int):
-    """Build the read-only backend the ceiling analyst session runs on.
+    """Build the backend the ceiling analyst session runs on.
 
     Follows the same provider/model ladder forge-loop reads, so a campaign that
     estimates its own ceiling reaches the same agent the standalone command
@@ -110,9 +110,14 @@ def resolve_analyst_backend(provider: str, model: str, timeout_sec: int):
         model=selected,
         timeout_sec=timeout_sec,
         reasoning_effort=resolve_agent_reasoning_effort(),
-        # The analyst only reads. It never needs to write, so it is never given
-        # a runtime that could.
-        sandbox_mode="read-only",
+        # No sandbox is named, so the analyst runs under the same deployment
+        # default every other session does. It used to pin ``read-only``, which
+        # Claude ignores in favour of the spec and Codex honours: there the
+        # session could not write the answer it had derived, and a narrower
+        # sandbox could not reach /dev/kfd either, so the roofs silently fell
+        # back to datasheet figures. The analyst is already the more confined
+        # role -- it measures and writes two files, under a guard that
+        # snapshots the whole workspace -- so it needs no sandbox of its own.
         fallback_provider="",
     )
     return create_registered_backend(runtime)
