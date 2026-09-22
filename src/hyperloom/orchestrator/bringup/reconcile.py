@@ -290,46 +290,25 @@ class Reconciler:
         and keep their lanes. What this pass ends is the RECURRENCE -- the same
         failure under code that records a group id, which a probe can settle.
 
-        What the second pass adds is not "the holder is terminal". A holder
-        that ended with its cleanup unconfirmed keeps its lane ON PURPOSE,
-        because its process tree may still be running and holding the lane is
-        what stops conflicting work from starting. The pass reclaims only a
-        holder that can show its lane is free -- the release ran, or the tree it
-        recorded no longer answers a probe. See
-        :func:`~hyperloom.orchestrator.bus.resource_lock._holder_stopped_using_the_lane`.
+        A holder that ended with its cleanup unconfirmed keeps its lane, and
+        nothing here takes it back. Seven rounds of review each proposed a
+        cheaper proof that the lane was free -- the holder is terminal, its
+        recorded process group is empty, no pidfile names a live server -- and
+        each was shown by probe to be a proxy a real process can slip out of. A
+        served process is setsid'd by design, its pidfile appears only after it
+        answers, and a cmdline is a guess. Releasing a lane wrongly puts two
+        rounds on the same cards, which corrupts quietly; holding one wrongly
+        stalls a queue until an operator spends 90 seconds. The asymmetry
+        decides it.
 
-        Note the deliberately different bar from :func:`_terminal_by_observation`
-        below: that asks whether a holder ended *cleanly* enough to move a round
-        on, whereas a lane only asks whether anybody is still using it, so a
-        holder can clear one and fail the other in either direction.
-
-        Running here, ahead of :meth:`_resolve_open_rounds`, also changes what
-        that rule sees, and does so deliberately.
-        :meth:`_holder_has_resources` reads the very lane rows this sweep
-        clears, so a round whose holder is terminal *by observation* and retains
-        nothing but lane rows used to sit open with no way out: not for a pass
-        or two, but indefinitely, because the recorded pid is this live
-        coordinator and the release that would have dropped those rows is the
-        one that never ran. Such a round now hands off -- or expires on its cap
-        -- in the same pass that frees its lanes, which is the same starvation
-        defect one level up, settled on the same evidence.
-
-        Two cases are deliberately left as they were, and they are the ones
-        correctness rests on: a holder still on the cards keeps its lanes and so
-        its round, via the ``gpu_leases`` exemption in the sweep; and a holder
-        that left nothing probeable keeps its lanes too, so its round stays
-        exactly where it was.
-        ``test_a_round_wedged_by_lane_rows_alone_is_freed_in_the_same_pass``
-        pins the timing.
-
-        Whatever the sweep leaves behind is then counted and, once per
-        ``(lane, holder)``, logged with the statement that releases it by hand:
-        the rows the incident actually left carry no process-group id, so they
-        stay held for good and an operator is the only way out of them.
+        So this pass reclaims only what liveness alone settles
+        (:meth:`reap_dead_holders`), and everything else is counted and handed
+        to an operator by :meth:`diagnose_unverifiable_holders`, once per
+        ``(lane, holder)``, with the statement that releases it. Closing that
+        gap for real needs an identity a descendant cannot escape -- a
+        per-execution cgroup -- which is its own project.
         """
-        report.leases_reaped = len(await self._locks.reap_dead_holders()) + len(
-            await self._locks.reap_finished_holders()
-        )
+        report.leases_reaped = len(await self._locks.reap_dead_holders())
         # After the sweep, so a row it just took back is not also reported stuck.
         report.leases_unverifiable = len(await self._locks.diagnose_unverifiable_holders())
 

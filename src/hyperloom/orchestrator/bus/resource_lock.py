@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hyperloom.common.proctree import collect_tree, group_alive, tree_alive
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
@@ -188,9 +187,21 @@ CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
 
 #: Why a retained row could not be verified. Logged verbatim to the operator,
 #: so each one reads as a cause rather than a code.
-UNVERIFIABLE_NO_IDENTITY = "the holder's terminal row records no process-group id"
-UNVERIFIABLE_UNREADABLE = "the recorded process group could not be read from /proc"
 UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot or PID namespace"
+#: The ordinary case: the holder ended without confirming its cleanup, so the
+#: release was skipped on purpose and its work may still be running. Nothing
+#: this process can observe settles it -- every cheaper proof tried during
+#: review (terminal state, an empty spawn process group, no pidfile naming a
+#: live server) turned out to be a proxy a real process slips out of, because a
+#: served process is setsid'd by design and its pidfile appears only after it
+#: answers. The lane stays held and an operator decides.
+UNVERIFIABLE_CLEANUP_UNCONFIRMED = "the holder ended without confirming its cleanup"
+#: The odd one: cleanup WAS confirmed, which means the release ran -- so this
+#: row should not exist. It is reported rather than reclaimed because nothing
+#: here can tell a release that half-happened from one whose row simply
+#: outlived it, and because a lane nobody is coming back for is exactly what an
+#: operator needs to hear about.
+UNVERIFIABLE_CONFIRMED_BUT_HELD = "the holder confirmed its cleanup yet its lane row is still here"
 #: Distinct from the above: the row may well be ours, but this process cannot
 #: name its own ownership domain (an unreadable /proc), so nothing here may be
 #: judged at all. Labelling this "another namespace" would tell an operator to
@@ -234,125 +245,6 @@ def _last_cleanup_evidence(history_json: str) -> dict:
         if isinstance(evidence, dict) and CLEANUP_CONFIRMED_KEY in evidence:
             return evidence
     return {}
-
-
-def _process_group_is_gone(pgid: int) -> bool | None:
-    """Whether anything from the recorded process group can still be observed.
-
-    The recorded number is a process-GROUP id, and that is the whole reason this
-    probe is worth running. Both launch sites spawn with
-    ``start_new_session=True`` (``specialists/subprocess_.py`` and
-    ``enablement/runtime/targeted_build.py``), so the root starts out the leader
-    of a brand-new group and session: pid == pgid == sid. A pid stops naming
-    anything the instant its process exits, but the group id keeps naming the
-    group for as long as any member lives, and a plainly forked child stays in
-    it. That is the common survivor shape -- root exits, child keeps running in
-    the root's group -- and ``group_alive`` catches it.
-
-    WHAT THIS PROBE CANNOT SEE, stated plainly because it is a real hole rather
-    than an oversight: a descendant that calls ``setsid`` itself leaves the
-    recorded group for one of its own. It is no longer under the (dead) root, so
-    walking the tree misses it; it is no longer in the group, so ``killpg``
-    misses it too. Nothing else in ``/proc`` ties it back to the recorded id --
-    its ppid has been rewritten to the reaper and its session is its own. Such a
-    survivor is reported gone here and its lane is handed on while it runs. A
-    per-spawn cgroup WOULD name it, since cgroup membership is inherited and
-    ``setsid`` does not change it, and that is deliberately a separate project:
-    it needs the spawn sites, the cgroup lifetime and the delegation designed
-    together, which is more than a lane reaper may settle on its own.
-    ``test_a_survivor_that_calls_setsid_is_past_what_this_probe_can_see`` pins
-    the gap so a reader finds it known rather than missed.
-
-    So the honest reading of a True answer is "nothing we can observe remains",
-    not "the tree is gone".
-
-    This only ever asks. A reaper that killed what it found would be ending work
-    on behalf of a holder that never asked it to -- and from the maintenance
-    loop, outside any action's cancellation path -- so
-    :func:`~hyperloom.common.proctree.kill_tree` has no place here, even though
-    the raise site that recorded this id reached it through exactly that call.
-
-    :func:`~hyperloom.common.proctree.collect_tree` enumerates the descendants
-    while the root still holds them, and ``tree_alive`` answers for every pid it
-    pinned; the group probe then covers the case where the root has already gone
-    and its children have re-parented away from it.
-
-    Args:
-        pgid: The process group recorded when cleanup was left unconfirmed,
-            already established by the caller to belong to this boot and PID
-            namespace.
-
-    Returns:
-        bool | None: True when nothing from that group answers, False when
-        something does, and None when the question could not be put at all --
-        an ``OSError`` listing ``/proc``. Only True releases a lane; None hands
-        the row to the operator diagnostic instead.
-    """
-    if pgid <= 0:
-        return False
-    try:
-        tree = collect_tree([pgid])
-    except OSError:
-        return None
-    if tree_alive(tree):
-        return False
-    # ``group_alive`` also answers True for an indeterminate reading -- a
-    # sandbox refusing ``killpg`` -- which keeps the lane held. It is not told
-    # apart from a real member here because either way somebody may still be
-    # there, and only an affirmative empty reading may free a lane.
-    return not group_alive(pgid)
-
-
-def _holder_stopped_using_the_lane(evidence: dict) -> tuple[bool, str]:
-    """Whether a terminal holder's own record proves its lane is free.
-
-    Being terminal does not prove it. :meth:`SubAgentRunner.run_task`
-    (``loop/sub_agent_runner``) writes the terminal row on the
-    :class:`ExecutionCleanupUnconfirmed` path too, and on that path it
-    deliberately SKIPS the release: the processes may still be running, and
-    holding the lane is what keeps conflicting work off the machine. Terminal
-    state is therefore evidence about the task, not about the lane.
-
-    So a holder that has ended is asked for one of two proofs:
-
-    * ``cleanup_confirmed`` -- the release ran and physical teardown was
-      acknowledged. Nothing is left to probe.
-    * a recorded process group that no longer answers. A raise site that failed
-      to confirm a LOCAL group names it (``specialists/subprocess_.py``,
-      ``actions/executors/targeted_build_executor.py``), and
-      :class:`ExecutionCleanupUnconfirmed` carries it to the terminal row.
-
-    With neither, the lane stays held indefinitely, which is the intended answer
-    rather than a gap: most of those raise sites hold no GPU lease at all, so
-    the ``gpu_leases`` exemption does not speak for them, and a holder whose
-    group cannot be probed reads exactly like one whose processes are still
-    working. No age or TTL is consulted to break the tie -- a row that cannot be
-    verified is held, for the life of the session if need be, and
-    :func:`_unverifiable_holders` tells the operator how to end it by hand.
-
-    The one raise site that names no group is the Ray-actor cleanup, whose pid
-    belongs to another node; it holds GPU cards for its whole run, so the
-    ``gpu_leases`` exemption is what covers its lane instead.
-
-    Args:
-        evidence: Cleanup evidence from the holder's terminal transition.
-
-    Returns:
-        tuple[bool, str]: Whether the lane may be reclaimed, and why it could
-        not be verified when it may not. That reason is empty when the holder's
-        processes were positively observed alive: such a row is not stuck, it is
-        in use, and the operator has nothing to do about it.
-    """
-    if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
-        return True, ""
-    pgid = evidence.get(CLEANUP_TREE_PGID_KEY)
-    # ``True`` is an ``int`` in Python and survives a JSON round-trip as one.
-    if not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0:
-        return False, UNVERIFIABLE_NO_IDENTITY
-    gone = _process_group_is_gone(pgid)
-    if gone is None:
-        return False, UNVERIFIABLE_UNREADABLE
-    return gone, ""
 
 
 def _ended_holder_rows(cur: sqlite3.Cursor, lanes: list[str], *, extra_where: str, extra_params: tuple) -> list[dict]:
@@ -410,7 +302,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
 
     This is the whole operator story for a leaked lane: there is no cleanup
     command, so :func:`_report_unverifiable` logging the remedy IS the
-    interface. It runs after :func:`_reclaim_finished_holders` in the same tick,
+    interface. Nothing reclaims these rows any more, so everything it
     so everything it returns is a row that survived reclamation.
 
     Unlike that pass it does NOT filter on ``owner_scope``. A row this process
@@ -459,7 +351,14 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
         if str(state) not in TERMINAL_STATES:
             continue
         evidence = _last_cleanup_evidence(history)
+        # Carried for the operator log only; see _report_unverifiable.
+        row["pgid"] = evidence.get(CLEANUP_TREE_PGID_KEY)
         if evidence.get(CLEANUP_CONFIRMED_KEY) is True:
+            # Nothing reclaims rows any more, so a confirmed holder whose row
+            # survived is no longer quietly cleaned up behind the scenes: it
+            # sits there like any other. Say so instead of skipping it.
+            row["reason"] = UNVERIFIABLE_CONFIRMED_BUT_HELD
+            stuck.append(row)
             continue
         if holds_gpu:
             row["reason"] = UNVERIFIABLE_HOLDS_GPU
@@ -475,21 +374,18 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             row["reason"] = UNVERIFIABLE_NO_LOCAL_SCOPE if not scope else UNVERIFIABLE_FOREIGN_SCOPE
             stuck.append(row)
             continue
-        reclaimable, reason = _holder_stopped_using_the_lane(evidence)
-        if reclaimable or not reason:
-            # An empty reason means the group answered, i.e. something is still
-            # alive under it. Deliberately NOT reported: that is the normal
-            # shape of a holder still winding down, and reporting it would put
-            # a remedy in the log for every orderly teardown.
-            #
-            # Known limitation, accepted rather than overlooked: an unrelated
-            # process that recycled the recorded group id answers exactly the
-            # same way, so a lane whose real survivors are long gone can sit
-            # held and unreported. Distinguishing the two needs an identity
-            # that cannot be recycled (a per-spawn cgroup), which is a separate
-            # project -- the same boundary the probe's own docstring names.
-            continue
-        row["reason"] = reason
+        # Nothing here tries to decide whether the lane is free. Seven rounds of
+        # review established that this process cannot know: a served process is
+        # setsid'd by design (:mod:`actions.executors._server_lifecycle` says so
+        # where it reads a pidfile), so it leaves the group recorded at spawn;
+        # its pidfile is written only after the server answers, so the whole
+        # model-load window has a live server nothing names; and matching a
+        # cmdline is the same kind of guess as matching a group. Each candidate
+        # proof turned out to be a proxy with a way around it, and releasing a
+        # lane wrongly lets two rounds onto the same cards -- silent corruption,
+        # against a deadlock an operator clears in 90 seconds. So the lane is
+        # kept and the operator is told; that asymmetry is the design.
+        row["reason"] = UNVERIFIABLE_CLEANUP_UNCONFIRMED
         stuck.append(row)
     return stuck
 
@@ -522,7 +418,7 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
             "resource_lock: lane %s is held by ended task %s (holder %s) and cannot be verified free: %s. "
             "It is retained on purpose -- nothing observable proves that task's processes stopped, and "
             "releasing it would let conflicting work onto the machine. To release it by hand, FIRST confirm "
-            "no process of task %s is still running, then run: "
+            "no process of task %s is still running%s, then run: "
             'sqlite3 "%s" '
             "\"DELETE FROM leases WHERE lane='%s' AND holder_id='%s';\"",
             row["lane"],
@@ -530,80 +426,16 @@ def _report_unverifiable(rows: list[dict], *, db_path: str = "") -> None:
             row["holder_id"],
             row["reason"],
             row["task_id"],
+            # The spawn process group, when one was recorded. It is no longer
+            # evidence -- a served process setsid's out of it -- but it is still
+            # the best starting point a human has for "what did this task leave".
+            f" (its spawn process group was {row['pgid']}; a server it started may have left it)"
+            if row.get("pgid")
+            else "",
             db_path or "$SESSION_DIR/storage/coordinator.db",
             row["lane"],
             row["holder_id"],
         )
-
-
-def _reclaim_finished_holders(cur: sqlite3.Cursor, lanes: list[str], *, scope: str) -> list[dict]:
-    """Drop lane rows whose holder ended and left the lane unused, in the caller's transaction.
-
-    The rows leaked on 2026-09-21 belonged to holders already recorded terminal,
-    and reclaiming on that alone is what this pass must not do: see
-    :func:`_holder_stopped_using_the_lane` for the proof each candidate owes.
-    Terminal state is only the cheap prefilter that makes the probe worth
-    running -- a task that is still queued or running has not stopped using
-    anything, and a task that reached a terminal state never resumes.
-
-    ``expires_at`` is not consulted at all, and neither is any other clock. A
-    TTL is a static per-action budget that nothing enforces, so a lapse says
-    only that a legitimately long run outlived its estimate (``explore`` budgets
-    7200s and holds ``server_lifecycle`` plus ``benchmark_lane`` across a
-    benchmark that can exceed it). Age is not evidence either: a row that cannot
-    be verified is held however old it gets, and :func:`_unverifiable_holders`
-    hands it to the operator instead.
-
-    Sharing the caller's cursor keeps the sweep and the read that follows it in
-    one ``BEGIN IMMEDIATE``, so no second acquirer can see a row this one has
-    already reclaimed.
-
-    Args:
-        cur: Cursor of the transaction that acts on the surviving rows.
-        lanes: Lanes to sweep; empty sweeps every lane but the round lane.
-        scope: The boot/PID namespace whose rows this process may judge.
-
-    Returns:
-        list[dict]: The rows reclaimed.
-    """
-    # Same first act as :meth:`SqliteLeaseBackend.holder_is_dead`: with no
-    # observable ownership domain, no row here is ours to judge. It is also what
-    # makes the recorded process-group id mean anything -- a pgid is an identity
-    # only inside one boot and PID namespace, and the row's ``owner_scope`` is
-    # the namespace the holder ran in, because the process that acquired the
-    # lane is the same process that later wrote the terminal evidence read here.
-    #
-    # Pre-existing, inherited here, and deliberately NOT fixed by this change: a
-    # row acquired while /proc is unreadable is stored with ``owner_scope=''``
-    # (:func:`local_owner_scope` returns "" on OSError), and no reaper can ever
-    # take it back. ``holder_is_dead`` rejects it on this same guard while /proc
-    # stays unreadable and on ``row["owner_scope"] != scope`` once /proc
-    # recovers; this pass rejects it here and again on the ``owner_scope = ?``
-    # predicate below. :meth:`release` still drops such a row -- it keys on
-    # ``(lane, holder_id)`` with no scope predicate -- so a holder that ends by
-    # releasing is fine; what no reaper can do is take the row back for a holder
-    # that ends without releasing, which is precisely the case this pass exists
-    # for. Closing that means giving ownership a fallback identity for the case
-    # where the kernel will not name one, which changes what a scope asserts; it
-    # is its own change, not a widening smuggled into this one, which only
-    # reuses the guard already in force. What IS new is that such a row no
-    # longer goes unmentioned: :func:`_unverifiable_holders` ignores scope and
-    # logs it with its remedy.
-    if not scope:
-        return []
-    candidates = _ended_holder_rows(cur, lanes, extra_where="leases.owner_scope = ?", extra_params=(scope,))
-    reclaimed: list[dict] = []
-    for row in candidates:
-        reclaimable, _reason = _holder_stopped_using_the_lane(_last_cleanup_evidence(row.pop("holder_history")))
-        if not reclaimable:
-            continue
-        cur.execute(
-            "DELETE FROM leases WHERE lane=? AND holder_id=?",
-            (row["lane"], row["holder_id"]),
-        )
-        _DIAGNOSED.discard((str(row["lane"]), str(row["holder_id"])))
-        reclaimed.append(row)
-    return reclaimed
 
 
 @dataclass
@@ -667,25 +499,6 @@ class SqliteLeaseBackend:
         expires_iso = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
 
         async with self.db.transaction() as cur:
-            # 2026-09-21: a dispatcher that deliberately retained capacity on
-            # an unconfirmed cleanup left six lanes held by holders already
-            # recorded terminal, whose process trees had in fact gone. The rows
-            # still occupied the lanes two hours later, with 19 queued tasks
-            # starved behind them. Sweeping here as well as in the standalone
-            # pass keeps the capacity read below from being decided against a
-            # holder that ended since that pass ran. Only a holder that can
-            # prove its lane is free is taken; see
-            # :func:`_holder_stopped_using_the_lane`.
-            reclaimed = _reclaim_finished_holders(cur, expanded, scope=local_owner_scope())
-            if reclaimed:
-                # A lane that vanishes on the acquire path leaves no other trace
-                # to attribute it to; the standalone sweep logs its own.
-                log.warning(
-                    "resource_lock: acquire reclaimed %d lease(s) from ended holders: %s",
-                    len(reclaimed),
-                    ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(task={r['task_id'][:12]})" for r in reclaimed),
-                )
-
             # Resolve capacity per lane (fallback for unseeded DBs).
             capacity_by_lane: dict[str, int] = {}
             placeholders = ",".join("?" * len(expanded))
@@ -852,35 +665,10 @@ class SqliteLeaseBackend:
             )
         return reaped
 
-    async def reap_finished_holders(self) -> list[dict]:
-        """Release every lane whose holder ended and proved the lane unused.
-
-        A pass of its own because the dispatcher's lane gate reads
-        :meth:`lane_holders` before it attempts an acquire: a leaked row starves
-        the queue without any acquire ever running to reclaim it.
-
-        A holder that ended without that proof keeps its lane, by design -- see
-        :func:`_holder_stopped_using_the_lane`, and
-        :meth:`diagnose_unverifiable_holders` for what the operator is told
-        about it.
-
-        Returns:
-            list[dict]: The rows reclaimed.
-        """
-        async with self.db.transaction() as cur:
-            reaped = _reclaim_finished_holders(cur, [], scope=local_owner_scope())
-        if reaped:
-            log.warning(
-                "resource_lock: reclaimed %d lease(s) from ended holders: %s",
-                len(reaped),
-                ", ".join(f"{r['lane']}<-{r['holder_id'][:12]}(task={r['task_id'][:12]})" for r in reaped),
-            )
-        return reaped
-
     async def diagnose_unverifiable_holders(self) -> list[dict]:
         """Report every retained row nothing can prove free, and how to free it.
 
-        Run after :meth:`reap_finished_holders` on the same tick. There is no
+        Run after :meth:`reap_dead_holders` on the same tick. There is no
         cleanup command and there will not be one -- a row is released by an
         operator who has checked what the reaper could not -- so this warning is
         the entire remedy path.
@@ -975,13 +763,6 @@ class ResourceLockManager:
             return []
         return await fn()
 
-    async def reap_finished_holders(self) -> list[dict]:
-        """Release lanes whose holder ended and left them unused, via the backend."""
-        fn = getattr(self.backend, "reap_finished_holders", None)
-        if not callable(fn):
-            return []
-        return await fn()
-
     async def diagnose_unverifiable_holders(self) -> list[dict]:
         """Report retained lanes nothing can prove free, via the backend."""
         fn = getattr(self.backend, "diagnose_unverifiable_holders", None)
@@ -1022,8 +803,8 @@ __all__ = [
     "LANE_CONFLICTS",
     "ROUND_LEASE_PID",
     "UNVERIFIABLE_FOREIGN_SCOPE",
-    "UNVERIFIABLE_NO_IDENTITY",
-    "UNVERIFIABLE_UNREADABLE",
+    "UNVERIFIABLE_CONFIRMED_BUT_HELD",
+    "UNVERIFIABLE_CLEANUP_UNCONFIRMED",
     "LaneBusy",
     "LaneFull",
     "Lease",

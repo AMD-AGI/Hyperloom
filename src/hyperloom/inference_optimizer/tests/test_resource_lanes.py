@@ -9,11 +9,8 @@ import asyncio
 import contextlib
 import json
 import logging
-import os
-import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -21,15 +18,12 @@ import pytest
 from hyperloom.orchestrator.bus import resource_lock
 from hyperloom.orchestrator.bus.gpu_pool import SpecialistGpuPool
 from hyperloom.orchestrator.bus.resource_lock import (
-    BRINGUP_ROUND_LANE,
     KNOWN_LANES,
     LANE_CONFLICTS,
     LaneBusy,
     LaneFull,
     ResourceLockManager,
     SqliteLeaseBackend,
-    StaleLeaseError,
-    hold_round_lane,
 )
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import (
@@ -558,204 +552,8 @@ def _live_tree(*, own_session: bool = True):
         proc.wait()
 
 
-@pytest.mark.asyncio
-async def test_a_holder_that_confirmed_its_cleanup_stops_blocking_its_lanes(conn, locks):
-    """Cleanup confirmed means the release ran: nothing is left on the lane to wait for."""
-    _seed_task(conn, "told", "failed")
-    # Well inside its TTL: the holder's own account of stopping frees the lane.
-    lease = await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="old", task_id="told", action="specialist", ttl_sec=3600
-    )
-    # The pid on the row is this very process, so liveness cannot refute it.
-    assert await locks.reap_dead_holders() == []
-    assert (
-        await locks.try_acquire_many(
-            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
-        )
-        is not None
-    )
-    assert {r["holder_id"] for r in await conn.fetchall("SELECT holder_id FROM leases")} == {"next"}
-    # Release is holder-keyed, so the old holder's late release misses the successor.
-    assert await locks.release(lease) == 0
-
-
-@pytest.mark.asyncio
-async def test_a_cleanup_unconfirmed_holder_keeps_its_lane_while_its_tree_runs(conn, locks):
-    """The retention ExecutionCleanupUnconfirmed exists for: the tree may still be working.
-
-    This is the case the ``TERMINAL_STATES`` rule got wrong on its own. The
-    task row says failed and the release never ran, and that is exactly when
-    the lane must stay taken -- a live tree is still using the machine.
-    """
-    with _live_tree() as tree:
-        _seed_task(conn, "tlive", "failed", evidence=_unconfirmed(tree.pid))
-        await locks.acquire_many(
-            ["gpu_research_lane"], holder_id="live", task_id="tlive", action="specialist", ttl_sec=3600
-        )
-        assert await locks.reap_finished_holders() == []
-        assert (
-            await locks.try_acquire_many(
-                ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
-            )
-            is None
-        )
-        assert (await locks.lane_holders())["gpu_research_lane"] == 1
-        # Reclamation answers a question; it never ends the work it asked about.
-        assert tree.poll() is None
-
-
-@pytest.mark.asyncio
-async def test_a_live_root_outside_a_group_of_its_own_keeps_its_lane(conn, locks):
-    """A root that shares its launcher's group is invisible to a group probe.
-
-    ``killpg`` on such a root's pid names no group and reads exactly like an
-    empty one, so enumerating the tree from the root is the only thing standing
-    between a running process and having its lane handed to somebody else.
-    """
-    with _live_tree(own_session=False) as tree:
-        _seed_task(conn, "tnogroup", "failed", evidence=_unconfirmed(tree.pid))
-        await locks.acquire_many(
-            ["gpu_research_lane"], holder_id="nogroup", task_id="tnogroup", action="specialist", ttl_sec=3600
-        )
-        assert await locks.reap_finished_holders() == []
-        assert (await locks.lane_holders())["gpu_research_lane"] == 1
-        assert tree.poll() is None
-
-
-@contextlib.contextmanager
-def _orphaned_tree_root():
-    """A root that exits leaving a live child behind in the group it created.
-
-    The ``"exited root has no verifiable tree"`` case, built for real: the child
-    re-parents away and no longer appears under the root, so walking the tree
-    from the root finds nothing, while the process group the root started still
-    has a member using the machine.
-    """
-    spawn = "import subprocess,sys;p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)']);print(p.pid)"
-    root = subprocess.Popen(  # nosec B603
-        [sys.executable, "-c", spawn], start_new_session=True, stdout=subprocess.PIPE, text=True
-    )
-    child_pid = int(root.stdout.readline())
-    root.wait()
-    try:
-        yield root.pid, child_pid
-    finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
-
-
-@pytest.mark.asyncio
-async def test_a_holder_whose_root_died_but_left_the_group_running_keeps_its_lane(conn, locks):
-    """The root being gone is not the tree being gone, which is why the group is probed too.
-
-    A descendant that outlived its root is still doing whatever the lane
-    serialises, and walking down from a dead root would report an empty tree and
-    hand the lane away underneath it.
-    """
-    with _orphaned_tree_root() as (root_pid, child_pid):
-        _seed_task(conn, "torphan", "failed", evidence=_unconfirmed(root_pid))
-        await locks.acquire_many(
-            ["gpu_research_lane"], holder_id="orphan", task_id="torphan", action="specialist", ttl_sec=3600
-        )
-        assert await locks.reap_finished_holders() == []
-        assert (await locks.lane_holders())["gpu_research_lane"] == 1
-        # And the survivor was only ever asked about, never ended.
-        assert os.kill(child_pid, 0) is None
-
-
-@pytest.mark.asyncio
-async def test_a_cleanup_unconfirmed_holder_is_reclaimed_once_its_tree_is_gone(conn, locks):
-    """A RECURRENCE of 2026-09-21 under code that records a group, and so heals it.
-
-    Cleanup never confirmed, yet nothing of the execution is left. Reclaiming on
-    ``cleanup_confirmed`` alone would hold these lanes for ever, which is the
-    incident; probing the recorded process group is what tells them apart from
-    the live holder above. The incident's own rows are NOT this shape -- they
-    carry no group id at all; see
-    ``test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_remedy``.
-    """
-    _seed_task(conn, "tgone", "failed", evidence=_unconfirmed(_dead_tree_pgid()))
-    await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="gone", task_id="tgone", action="specialist", ttl_sec=3600
-    )
-    reaped = await locks.reap_finished_holders()
-    # The acquire took gpu_research_lane plus the three lanes it mutexes with.
-    assert {r["lane"] for r in reaped} == {
-        "gpu_research_lane",
-        "benchmark_lane",
-        "profile_lane",
-        "server_lifecycle",
-    }
-    assert await locks.lane_holders() == {}
-
-
-@pytest.mark.asyncio
-async def test_a_holder_whose_group_was_never_recorded_keeps_its_lane(conn, locks):
-    """Nothing to probe is not proof of anything, so the lane is never taken back.
-
-    Silence reads the same whether the processes finished or are still running,
-    and most raise sites hold no GPU lease, so nothing else speaks for the lane
-    either. Held indefinitely is the deliberate answer -- no age, no TTL, no
-    guess.
-    """
-    _seed_task(conn, "tmute", "failed", evidence=_unconfirmed())
-    await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="mute", task_id="tmute", action="specialist", ttl_sec=3600
-    )
-    assert await locks.reap_finished_holders() == []
-    assert (await locks.lane_holders())["gpu_research_lane"] == 1
-
-
-@contextlib.contextmanager
-def _survivor_that_left_the_group():
-    """A root that exits leaving a child which gave itself a session of its own.
-
-    The one survivor shape the probe is blind to, built for real: the child
-    re-parents away from the dead root AND ``setsid``s out of the root's group,
-    so neither walking the tree nor ``killpg`` on the recorded id finds it.
-    """
-    spawn = (
-        "import subprocess,sys;"
-        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True);"
-        "print(p.pid)"
-    )
-    root = subprocess.Popen(  # nosec B603
-        [sys.executable, "-c", spawn], start_new_session=True, stdout=subprocess.PIPE, text=True
-    )
-    child_pid = int(root.stdout.readline())
-    root.wait()
-    try:
-        yield root.pid, child_pid
-    finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(child_pid, signal.SIGKILL)
-
-
-@pytest.mark.asyncio
-async def test_a_survivor_that_calls_setsid_is_past_what_this_probe_can_see(conn, locks):
-    """The known limitation, pinned so a reader finds it stated rather than missed.
-
-    A descendant that gives itself a new session leaves the recorded group, and
-    with its root already dead nothing in ``/proc`` ties it back to the recorded
-    id. The lane is therefore released while that process is still running --
-    asserted here deliberately, because the alternative is a reader assuming the
-    group probe covers every survivor. A per-spawn cgroup would name it, and is
-    a separate project.
-    """
-    with _survivor_that_left_the_group() as (pgid, survivor_pid):
-        _seed_task(conn, "tsetsid", "failed", evidence=_unconfirmed(pgid))
-        await locks.acquire_many(
-            ["build_lane"], holder_id="setsid", task_id="tsetsid", action="specialist", ttl_sec=3600
-        )
-
-        assert [r["lane"] for r in await locks.reap_finished_holders()] == ["build_lane"]
-        assert await locks.lane_holders() == {}
-        # The blind spot in one line: still running, and its lane already gone.
-        assert os.kill(survivor_pid, 0) is None
-
-
 def _remedies(caplog) -> list[str]:
-    """Every operator-facing warning the lane sweep logged."""
+    """Every operator-facing warning the lane diagnostic logged."""
     return [r.getMessage() for r in caplog.records if r.name == "hyperloom.orchestrator.bus.resource_lock"]
 
 
@@ -777,7 +575,6 @@ async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_reme
     await locks.acquire_many(
         ["build_lane"], holder_id="incident", task_id="tincident", action="specialist", ttl_sec=3600
     )
-    assert await locks.reap_finished_holders() == []
 
     with caplog.at_level(logging.WARNING):
         stuck = await locks.diagnose_unverifiable_holders()
@@ -785,12 +582,12 @@ async def test_an_incident_shaped_row_stays_held_and_hands_the_operator_the_reme
         assert len(await locks.diagnose_unverifiable_holders()) == 1
 
     assert [(r["lane"], r["task_id"], r["reason"]) for r in stuck] == [
-        ("build_lane", "tincident", resource_lock.UNVERIFIABLE_NO_IDENTITY)
+        ("build_lane", "tincident", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)
     ]
     assert (await locks.lane_holders())["build_lane"] == 1
     remedies = _remedies(caplog)
     assert len(remedies) == 1
-    assert resource_lock.UNVERIFIABLE_NO_IDENTITY in remedies[0]
+    assert resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED in remedies[0]
     assert "FIRST confirm no process of task tincident is still running" in remedies[0]
     # The remedy names this session's real database, not a $SESSION_DIR the
     # operator would have to resolve before they could paste it.
@@ -845,22 +642,41 @@ async def test_a_gpu_exempt_holder_is_retained_but_still_reported(conn, locks, c
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         stuck = await locks.diagnose_unverifiable_holders()
-        reaped = await locks.reap_finished_holders()
 
-    assert reaped == []  # the exemption still protects it from reclamation
+    # Nothing reclaims it either way now; the point is that it is REPORTED.
     assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_HOLDS_GPU)]
     assert len(_remedies(caplog)) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_holder_still_working_is_not_reported_as_stuck(conn, locks, caplog):
-    """A lane in use is not a lane to be told about; only an unanswerable one is."""
+async def test_a_holder_whose_work_may_still_run_is_reported_too(conn, locks, caplog):
+    """The accepted cost of refusing to guess: a winding-down holder is reported as well.
+
+    Earlier revisions tried to stay quiet while "something still answers under
+    the recorded process group", so an orderly teardown would not put a remedy
+    in the log. Every version of that test turned out to be a proxy a served
+    process escapes -- it is setsid'd by design -- so this pass no longer claims
+    to tell a busy holder from an abandoned one. It reports both, once per
+    ``(lane, holder)``, and lets the operator look.
+
+    The noise is the price of the asymmetry: a lane reported while its work
+    winds down costs a glance at a log, whereas a lane released while its work
+    runs puts two rounds on the same cards.
+    """
     with _live_tree() as tree:
         _seed_task(conn, "tbusy", "failed", evidence=_unconfirmed(tree.pid))
         await locks.acquire_many(["build_lane"], holder_id="busy", task_id="tbusy", action="specialist", ttl_sec=3600)
         with caplog.at_level(logging.WARNING):
-            assert await locks.diagnose_unverifiable_holders() == []
-        assert _remedies(caplog) == []
+            stuck = await locks.diagnose_unverifiable_holders()
+            # A second pass must not repeat itself, however long the holder lingers.
+            assert await locks.diagnose_unverifiable_holders() == stuck
+
+    assert [(r["lane"], r["reason"]) for r in stuck] == [("build_lane", resource_lock.UNVERIFIABLE_CLEANUP_UNCONFIRMED)]
+    assert (await locks.lane_holders())["build_lane"] == 1
+    remedies = _remedies(caplog)
+    assert len(remedies) == 1
+    # The recorded spawn group is offered as a lead, explicitly not as proof.
+    assert f"its spawn process group was {tree.pid}" in remedies[0]
 
 
 @pytest.mark.asyncio
@@ -884,116 +700,6 @@ async def test_a_row_this_process_may_not_judge_is_still_reported(conn, locks, c
 
     assert [r["reason"] for r in stuck] == [resource_lock.UNVERIFIABLE_FOREIGN_SCOPE]
     assert resource_lock.UNVERIFIABLE_FOREIGN_SCOPE in _remedies(caplog)[0]
-
-
-@pytest.mark.asyncio
-async def test_a_group_that_cannot_be_enumerated_keeps_its_lane(conn, locks, monkeypatch):
-    """An unreadable /proc is an unanswered question, and only an answer frees a lane."""
-    _seed_task(conn, "tblind", "failed", evidence=_unconfirmed(_dead_tree_pgid()))
-    await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="blind", task_id="tblind", action="specialist", ttl_sec=3600
-    )
-
-    def _unreadable(_pids):
-        raise OSError(13, "Permission denied: /proc")
-
-    monkeypatch.setattr(resource_lock, "collect_tree", _unreadable)
-    assert await locks.reap_finished_holders() == []
-    assert (await locks.lane_holders())["gpu_research_lane"] == 1
-    # And it is reported as such, rather than sitting silently at capacity.
-    assert {r["reason"] for r in await locks.diagnose_unverifiable_holders()} == {resource_lock.UNVERIFIABLE_UNREADABLE}
-
-
-@pytest.mark.asyncio
-async def test_running_holder_keeps_lanes_past_its_ttl(conn, locks):
-    """A lane TTL is a static per-action budget and nothing ends the action when it lapses."""
-    _seed_task(conn, "texplore", "running")
-    lease = await locks.acquire_many(
-        ["server_lifecycle"], holder_id="explore", task_id="texplore", action="explore", ttl_sec=-1
-    )
-    assert await locks.reap_finished_holders() == []
-    assert (
-        await locks.try_acquire_many(
-            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
-        )
-        is None
-    )
-    await locks.release(lease)
-
-
-@pytest.mark.asyncio
-async def test_terminal_holder_with_live_gpu_leases_keeps_its_lanes(conn, locks):
-    """A lane records its coordinator, not the specialist GPU worker still holding cards."""
-    _seed_task(conn, "tgpu", "succeeded")
-    lease = await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="gpu", task_id="tgpu", action="specialist", ttl_sec=-1
-    )
-    conn.raw.execute(
-        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
-        "VALUES (0,?,?,?,?,?)",
-        ("gpu", "tgpu", _T0, _T0, _T0),
-    )
-    conn.raw.commit()
-    assert await locks.reap_finished_holders() == []
-    assert (
-        await locks.try_acquire_many(
-            ["benchmark_lane"], holder_id="next", task_id="tnext", action="baseline", ttl_sec=60
-        )
-        is None
-    )
-    await locks.release(lease)
-
-
-@pytest.mark.asyncio
-async def test_terminal_holder_from_another_scope_is_left_alone(conn, locks):
-    """A pid means something only in the boot and PID namespace that recorded it."""
-    _seed_task(conn, "tfar", "failed", evidence=_unconfirmed(_dead_tree_pgid()))
-    await locks.acquire_many(["research_lane"], holder_id="far", task_id="tfar", action="specialist", ttl_sec=60)
-    conn.raw.execute("UPDATE leases SET owner_scope='other-boot:4026531836'")
-    conn.raw.commit()
-    assert await locks.reap_finished_holders() == []
-    assert (await locks.lane_holders())["research_lane"] == 1
-
-
-@pytest.mark.asyncio
-async def test_finished_holders_are_swept_without_an_acquire(conn, locks):
-    """The dispatcher's lane gate reads holder counts before it ever attempts an acquire."""
-    _seed_task(conn, "tdone", "cancelled")
-    _seed_task(conn, "tlive", "running")
-    _seed_task(conn, "tround", "failed")
-    await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="done", task_id="tdone", action="specialist", ttl_sec=3600
-    )
-    await locks.acquire_many(["research_lane"], holder_id="live", task_id="tlive", action="specialist", ttl_sec=3600)
-    hold_round_lane(
-        conn.raw.cursor(),
-        round_id="r1",
-        holder_task_id="tround",
-        expires_unix=time.time() + 600,
-        now_unix=time.time(),
-    )
-    conn.raw.commit()
-    reaped = await locks.reap_finished_holders()
-    assert {r["holder_id"] for r in reaped} == {"done"}
-    # A round ends in RoundStore alone, even once its holder task is terminal.
-    assert await locks.lane_holders() == {"research_lane": 1, BRINGUP_ROUND_LANE: 1}
-
-
-@pytest.mark.asyncio
-async def test_reclaimed_holder_cannot_disturb_its_successor(conn, locks):
-    """Release and heartbeat are holder-keyed, so a late one never lands on the successor."""
-    _seed_task(conn, "tdone", "failed")
-    stale = await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="done", task_id="tdone", action="specialist", ttl_sec=3600
-    )
-    successor = await locks.acquire_many(
-        ["gpu_research_lane"], holder_id="next", task_id="tnext", action="specialist", ttl_sec=600
-    )
-    assert await locks.release(stale) == 0
-    with pytest.raises(StaleLeaseError):
-        await locks.heartbeat(stale, ttl_sec=600)
-    assert (await locks.lane_holders())["gpu_research_lane"] == 1
-    await locks.release(successor)
 
 
 @pytest.mark.asyncio
