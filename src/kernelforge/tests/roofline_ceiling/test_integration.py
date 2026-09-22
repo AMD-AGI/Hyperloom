@@ -6,40 +6,34 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import click
 import pytest
 
 from kernelforge import cli as cli_module
-from kernelforge.roofline_ceiling.contract import build_report
-from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR, publish
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_MEASURED
+from kernelforge.roofline_ceiling.contract import load_report
+from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 
 
-_HARDWARE = {
-    "peak_source": PEAK_SOURCE_MEASURED,
-    "peak_flops": {"bf16_mfma": 1.23e15, "fp16_mfma": 1.23e15},
-    "bandwidth": {"hbm": 6.24e12, "mall": 8.49e12},
-    "dispatch_floor_s": 3.0e-6,
-    "method": "rocprof-compute --roof-only",
-}
-
 
 def _report(cases=(("decode-t1", 12.8),)):
-    payload = {
-        "cases": [{"case_id": case_id, "t_ideal_ms": ideal} for case_id, ideal in cases],
-        "hardware": _HARDWARE,
-        "analysis_md": "# Performance ceiling analysis\n\n"
-        + "\n".join(f"Case `{case_id}`: 8e10 B / 6.24 TB/s = {ideal} ms." for case_id, ideal in cases),
-    }
-    return build_report(
-        payload,
-        canonical_id="roofline-ceiling:op:gfx950",
-        arch="gfx950",
-        expected_case_ids=[case_id for case_id, _ in cases],
+    return load_report({"cases": {case_id: ideal for case_id, ideal in cases}})
+
+
+def _publish(report, directory) -> Path:
+    """Write what the analyst would have written, so a consumer can read it."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / REPORT_FILENAME
+    path.write_text(
+        json.dumps({"cases": report.ideal_ms(), "mean_ideal_ms": report.mean_ideal_ms()}),
+        encoding="utf-8",
     )
+    return path
 
 
 def _loop(
@@ -70,7 +64,7 @@ def test_a_campaign_without_a_ceiling_injects_nothing():
 
 
 def test_a_published_ceiling_reaches_the_implementer_with_its_attainment(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
 
     rendered = _loop(str(path))._render_ceiling_advisory()
 
@@ -176,7 +170,7 @@ def test_no_estimator_is_built_unless_compute_was_asked_for():
 
 
 def test_the_target_ends_the_campaign_once_the_mean_reaches_it(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
     # 12.8 / 14.0 = 91.4%, above the target.
     loop = _loop(str(path), target=0.86, case_times={"decode-t1": 14.0})
 
@@ -184,7 +178,7 @@ def test_the_target_ends_the_campaign_once_the_mean_reaches_it(tmp_path):
 
 
 def test_the_target_does_not_fire_while_a_case_is_still_short(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
     # 12.8 / 20.0 = 64%.
     loop = _loop(str(path), target=0.86, case_times={"decode-t1": 20.0})
 
@@ -192,7 +186,7 @@ def test_the_target_does_not_fire_while_a_case_is_still_short(tmp_path):
 
 
 def test_the_mean_is_equal_weight_across_cases_like_the_keep_objective(tmp_path):
-    path = publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     # 90% and 80% -> mean 85%, just under the target. A latency-weighted mean
     # would read differently, and would then disagree with what a KEEP scores.
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 5.0})
@@ -203,7 +197,7 @@ def test_the_mean_is_equal_weight_across_cases_like_the_keep_objective(tmp_path)
 
 def test_a_ceiling_below_the_measured_latency_cannot_end_the_campaign(tmp_path):
     """The estimate contradicting itself must not read as a finished kernel."""
-    path = publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     # `b`'s ceiling is above its measurement, so it is excluded; `a` alone would
     # average 90% and clear the target on a case set of two.
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 2.0})
@@ -215,7 +209,7 @@ def test_a_ceiling_below_the_measured_latency_cannot_end_the_campaign(tmp_path):
 
 
 def test_a_case_the_ceiling_never_answered_cannot_end_the_campaign(tmp_path):
-    path = publish(_report((("a", 9.0),)), tmp_path)
+    path = _publish(_report((("a", 9.0),)), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 5.0})
 
     assert loop._roofline_attainment().mean == pytest.approx(0.9)
@@ -223,7 +217,7 @@ def test_a_case_the_ceiling_never_answered_cannot_end_the_campaign(tmp_path):
 
 
 def test_without_a_target_the_ceiling_ends_nothing(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
     loop = _loop(str(path), target=0.0, case_times={"decode-t1": 12.8})
 
     assert loop._roofline_attainment().mean == pytest.approx(1.0)
@@ -231,7 +225,7 @@ def test_without_a_target_the_ceiling_ends_nothing(tmp_path):
 
 
 def test_attainment_follows_the_incumbent_not_the_frozen_anchor(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"decode-t1": 40.0})
 
     assert loop._roofline_attainment().mean == pytest.approx(0.32)
@@ -241,7 +235,7 @@ def test_attainment_follows_the_incumbent_not_the_frozen_anchor(tmp_path):
 
 def test_the_campaign_estimates_its_ceiling_from_the_baseline_it_measured(tmp_path):
     """The estimator is handed the scored case set and the campaign's own clock."""
-    published = publish(_report(), tmp_path)
+    published = _publish(_report(), tmp_path)
     seen = {}
 
     async def estimator(*, case_ids, case_ms):
@@ -259,7 +253,7 @@ def test_the_campaign_estimates_its_ceiling_from_the_baseline_it_measured(tmp_pa
 
 
 def test_a_ceiling_already_published_is_not_estimated_again(tmp_path):
-    path = publish(_report(), tmp_path)
+    path = _publish(_report(), tmp_path)
 
     async def estimator(**_kwargs):
         raise AssertionError("an estimate was paid for twice")
@@ -293,7 +287,7 @@ def test_no_estimate_is_attempted_before_the_case_set_is_known():
 
 
 def test_an_unscored_case_is_left_out_of_the_standing(tmp_path):
-    path = publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
     loop = _loop(str(path), target=0.86, case_times={"a": 10.0, "b": 8.0})
     loop._unscored_cases = {"b"}
 
@@ -304,7 +298,7 @@ def test_an_unscored_case_is_left_out_of_the_standing(tmp_path):
 
 
 def test_auto_finds_a_ceiling_the_command_published_into_the_workspace(tmp_path):
-    publish(_report(), tmp_path / WORKSPACE_SUBDIR)
+    _publish(_report(), tmp_path / WORKSPACE_SUBDIR)
 
     resolved = cli_module._resolve_ceiling_report("auto", str(tmp_path))
 
@@ -316,7 +310,7 @@ def test_auto_without_a_published_ceiling_is_simply_no_ceiling(tmp_path):
 
 
 def test_off_declines_a_ceiling_that_is_sitting_right_there(tmp_path):
-    publish(_report(), tmp_path / WORKSPACE_SUBDIR)
+    _publish(_report(), tmp_path / WORKSPACE_SUBDIR)
 
     assert cli_module._resolve_ceiling_report("off", str(tmp_path)) == ""
 
@@ -328,7 +322,7 @@ def test_an_explicit_path_that_does_not_exist_is_an_error_not_a_shrug(tmp_path):
 
 
 def test_an_explicit_path_is_used_verbatim(tmp_path):
-    path = publish(_report(), tmp_path / "elsewhere")
+    path = _publish(_report(), tmp_path / "elsewhere")
 
     assert cli_module._resolve_ceiling_report(str(path), str(tmp_path)) == str(path)
 

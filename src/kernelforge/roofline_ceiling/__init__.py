@@ -6,20 +6,22 @@
 Two questions, deliberately kept apart.
 
 **The ceiling** is the best latency this operator could have on this box, per
-scored shape. The framework measures the box and fixes the case set; the analyst
-derives the minimum legal work and composes it into a latency, writing the
-derivation that defends it. Nothing recomputes that estimate, so the published
-document is the audit trail rather than a summary of one.
+scored shape. The analyst owns all of it: it measures the machine's roofs
+during its session, derives the minimum legal work, composes the two into a
+latency, and writes both the answer and the derivation behind it. The framework
+settles what must not vary between runs -- which shapes are scored, which
+machine this is, what the kernel really dispatches -- and then reads back one
+file, checking only that it can be read.
 
-**Attainment** is ``ceiling / measured``, and it is computed in
+**Attainment** is ``ceiling / measured``, computed in
 :mod:`~kernelforge.roofline_ceiling.attainment` against whatever latencies the
-caller measured itself -- never against the figure this module timed under a
-profiler. One ratio built from two clocks is how an efficiency number stops
-meaning anything, so the divisor stays with whoever owns the measurement.
+caller measured itself. One ratio built from two clocks is how an efficiency
+number stops meaning anything, so the divisor stays with whoever owns the
+measurement.
 
 What the ceiling may and may not decide is worth stating exactly, because it is
-now both. A campaign may **stop** on attainment: reaching the estimated ceiling
-is a reason to stop spending budget. A campaign may not **KEEP** on it: whether
+both. A campaign may **stop** on attainment: reaching the estimated ceiling is
+a reason to stop spending budget. A campaign may not **KEEP** on it: whether
 one candidate beats another is a measurement, settled the same way it always
 was. The ceiling says when to stop trying, not what is better.
 """
@@ -33,7 +35,6 @@ from kernelforge.roofline_ceiling.contract import (
     CaseCeiling,
     CeilingContractError,
     CeilingReport,
-    Hardware,
 )
 from kernelforge.roofline_ceiling.report import (
     read_report,
@@ -46,7 +47,6 @@ __all__ = [
     "CaseCeiling",
     "CeilingContractError",
     "CeilingReport",
-    "Hardware",
     "measure_attainment",
     "read_report",
     "render_for_prompt",

@@ -155,7 +155,6 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
 )
 @click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}.")
 @click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted.")
-@click.option("--op-name", default="", help="Operator name recorded on the report. Defaults to the workspace name.")
 @click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
 @click.option("--agent-model", default="", help="Agent model. Falls back to the provider default.")
 @click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session")
@@ -168,7 +167,6 @@ def roofline_ceiling_command(
     performance_command: str,
     output_dir: str,
     arch: str,
-    op_name: str,
     agent_provider: str,
     agent_model: str,
     agent_timeout_sec: int,
@@ -203,7 +201,6 @@ def roofline_ceiling_command(
                 driver_script=driver_script,
                 case_params=document.get("shapes") or document.get("cases") or {},
                 output_dir=Path(output_dir).expanduser() if output_dir.strip() else None,
-                op_name=op_name,
                 arch=arch,
                 agent_model=agent_model,
                 agent_timeout_sec=agent_timeout_sec,
@@ -215,12 +212,7 @@ def roofline_ceiling_command(
 
     for note in outcome.notes:
         click.echo(f"[ceiling] note: {note}")
-    click.echo(
-        f"[ceiling] peaks={outcome.report.peak_source} cases={len(outcome.scored_case_ids)}"
-    )
-    for case in outcome.report.cases:
-        for issue in case.issues:
-            click.echo(f"[ceiling] {case.case_id}: {issue}")
+    click.echo(f"[ceiling] {len(outcome.scored_case_ids)} scored case(s)")
     _emit(outcome.report, source=outcome.source, report_path=outcome.report_path)
 
 

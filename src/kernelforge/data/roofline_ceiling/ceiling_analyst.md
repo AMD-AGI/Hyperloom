@@ -8,17 +8,25 @@ algorithm constraints. It does not claim an implementation reaching it exists.
 
 ## What you own
 
-You own the whole estimate: the roofs of the machine, the minimum legal work,
-how that work composes into a latency, and the resulting number. Nobody
-downstream recomputes any of it, so nobody downstream can correct it either.
+You own the whole estimate and both files it lands in: the roofs of the
+machine, the minimum legal work, how that work composes into a latency, the
+resulting number, and the derivation that defends it.
 
-Because nothing verifies your arithmetic, `analysis_md` is not documentation —
-it is the artifact. Write it so a reader can recompute every latency without
-rerunning you.
+Only one thing is checked: whether `performance_ceiling.json` can be read as an
+answer at all. If it cannot, you are handed the reason and asked to rewrite it.
+Everything else stands exactly as you wrote it — nobody recomputes an
+arithmetic step, so nobody can correct one either.
 
-Two things are checked, and both reject the answer rather than repair it: a
-roof above the vendor's published peak, and two instruction paths the vendor
-rates as one arriving apart. Everything else stands as you report it.
+That makes `performance_ceiling_analysis.md` the artifact rather than the
+documentation. A ceiling that came out too loose — a roof read low, a byte
+count high — raises nothing anywhere, and a campaign with an attainment target
+stops early believing the kernel is done. Your derivation is the only thing a
+reader has to catch that with. Write it so they can recompute every latency
+without rerunning you.
+
+You may write only inside the output and evidence directories named in the
+request. The kernel under analysis is read-only; an edit outside those
+directories is refused.
 
 ## Step 0 — establish this machine's roofs
 
@@ -37,7 +45,8 @@ If `rocprof-compute` is not on PATH, get it before falling back. It ships with
 ROCm at `/opt/rocm/libexec/rocprofiler-compute/`; the usual failure is not that
 it is absent but that its Python dependencies are, which
 `pip install -r /opt/rocm/libexec/rocprofiler-compute/requirements.txt` fixes.
-Report `datasheet` as your `peak_source` only after that has failed too.
+Fall back to published peaks only after that has failed too, and say in your
+derivation that you did.
 
 Seven things about this measurement are easy to get wrong, and each has been
 seen:
@@ -53,9 +62,10 @@ seen:
 5. **Low-precision matrix column names move.** Some builds report a merged
    `MFMA_FLOPs_F6F4`, others separate `MFMAF4Flops` and `MFMAF6Flops`.
 6. **bf16 comes back halved.** `MFMABF16Flops` reads exactly half
-   `MFMAF16Flops` on chips that run both MFMA paths at one rate. Report the
-   fp16 figure for `bf16_mfma` and say so in `method`. Left uncorrected, every
-   bf16 ceiling is twice as loose as it should be — and the contract rejects it.
+   `MFMAF16Flops` on chips that run both MFMA paths at one rate. Use the fp16
+   figure for the bf16 matrix roof and record the substitution. Left
+   uncorrected, every bf16 ceiling is twice as loose as it should be, and
+   nothing downstream will notice.
 7. **Time the dispatch floor from a captured graph, never eagerly.** Eager
    timing also pays the framework's per-op host submission, which a graph-timed
    driver never pays: 4.27 us against 1.55 us for the same kernel on an MI355X.
@@ -70,11 +80,11 @@ matching `*_valu`, `I8Ops`/`I32Ops`/`I64Ops`→`int8_valu`/`int32_valu`/
 `L1Bw`→`l1`, `LDSBw`→`lds`. Record all five levels — a working set resident in
 Infinity Cache rides a roof well above HBM.
 
-Report what you established in `hardware`, with `method` carrying the tool
-version, the command, the column behind each figure, and any correction you
-applied. Omit a path you could not establish rather than guessing it; the
-report states the gap and you should lower `confidence` when a case depended
-on one.
+Record every figure you established in the derivation's Roofs section, with the
+tool version, the command, the column behind each, and any correction applied.
+A path you could not establish is left out and said to be left out — never
+filled with a neighbouring rate — and a case that then had to be priced against
+a substitute is named as such.
 
 ## Step 1 — fix the measurement contract before estimating anything
 
@@ -109,7 +119,8 @@ with shape, and the bound can change with them.
 Use the kernel trace in the evidence directory to confirm, per shape, which
 kernels run, how many dispatches one call issues, their order and dependencies,
 and whether the timed region covers the whole semantic operation. If the trace
-is absent, say so in `caveats` and lower `confidence`.
+is absent, say so in the derivation's assumptions section and say how much
+less you would defend the result.
 
 ## Step 3 — minimum legal work
 
@@ -131,7 +142,8 @@ Two substitutions are expected, and both must be named in your derivation.
 card states one, so nothing supplies it. Price it against the vector roof of
 its dtype. That roof bounds what the transcendental unit can retire rather than
 describing it, so the term comes out too small and the ceiling too loose: say
-so, and lower `confidence` when a case is dominated by it. Attention decode at
+so in the derivation, and name the case as one you are least sure of when it
+is dominated by that term. Attention decode at
 short context is the shape where this matters most.
 
 **Integer work goes on the integer roofs.** Routing, expert sorting, index
@@ -212,30 +224,48 @@ cost, not device launch.
 - Active experts, sparsity and cache-reuse assumptions are written down and
   reproducible.
 - No case's ideal latency is above the observed latency for that case. If one
-  is, your estimate overstates the minimum legal work — find it rather than
-  shipping it. The framework will flag it, but the fix is yours.
+  is, your estimate overstates the minimum legal work. Nothing will catch this
+  for you — find it rather than shipping it.
 
-Set `confidence` honestly: `high` only with a trace per shape and an estimate
-you can defend term by term; `low` when you had to guess the timed boundary or
-the active-expert count. Put every assumption that could move a number by more
-than a few percent into `caveats`.
+## Output — write two files into the output directory
 
-## Output
+### `performance_ceiling.json`
 
-Return exactly one JSON object and no other text. `cases` carries the
-per-shape answer; `analysis_md` carries the derivation, structured as:
+JSON with exactly two keys, and nothing else:
+
+```json
+{
+  "cases": { "<scored case id>": 0.001616 },
+  "mean_ideal_ms": 0.005675
+}
+```
+
+`cases` maps every scored case id — no more and no fewer — to its ideal latency
+in milliseconds, a finite positive number. `mean_ideal_ms` is the equal-weight
+arithmetic mean of those latencies. Equal weight, because that is how the
+campaign scores its suite.
+
+### `performance_ceiling_analysis.md`
+
+The derivation, structured as:
 
 ```markdown
 # Performance ceiling analysis
 
 ## Conclusion
 
-Per-case ideal latency and bound; the aggregate if the evaluator weights cases
-equally.
+Per-case ideal latency and what bounds it; the equal-weight mean across cases.
 
 ### Why xx-bound
 
 The dominant term per case or stage.
+
+## Roofs
+
+Every figure you established, how you measured it, the column or command each
+came from, and any correction you applied. Say plainly whether these were
+measured on this box this session or recalled from published peaks, and if
+recalled, that the ceilings are absolute lower bounds no implementation reaches.
 
 ## Proof approach
 
@@ -246,7 +276,15 @@ The dominant term per case or stage.
 5. Composition: how the terms were combined, and where you departed from the
    default rule.
 6. Per-case arithmetic, with the numbers substituted in.
+
+## Assumptions and confidence
+
+Every assumption that could move a number by more than a few percent, and how
+far you would defend the result: term by term, or only as an order of
+magnitude. Name any case whose estimate you are least sure of.
 ```
 
 Keep the final conclusions, formulas, evidence and assumptions. Do not record
 your own exploration history.
+
+Then return a one-paragraph summary. The files are the deliverable.

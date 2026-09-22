@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Publishing, caching and rendering one ceiling report."""
+"""Where a ceiling lands, how it is read back, and how a campaign shows it.
+
+Both files are written by the analyst, not by this module. It names them, reads
+one of them, and renders the attainment block a campaign injects into its
+planning prompt.
+"""
 
 from __future__ import annotations
 
@@ -11,14 +16,17 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from kernelforge.roofline_ceiling.attainment import measure_attainment
-from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport, load_report
-from kernelforge.roofline_ceiling.specs import peak_source_meaning
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.roofline_ceiling.contract import CeilingReport, load_report
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
+#: The answer, machine-readable: ``cases`` and ``mean_ideal_ms``.
 REPORT_FILENAME = "performance_ceiling.json"
+#: The derivation, for a reader deciding whether to believe the answer. Nothing
+#: recomputes the latencies, so this document is all there is to check them by.
 DOCUMENT_FILENAME = "performance_ceiling_analysis.md"
+#: Kernel trace, driver output, and whatever the analyst's own measurement left
+#: behind. Handed to the analyst as a place it may write.
 EVIDENCE_DIRNAME = "evidence"
 
 #: Where a ceiling lands when the caller names no output directory. Under the
@@ -26,73 +34,14 @@ EVIDENCE_DIRNAME = "evidence"
 WORKSPACE_SUBDIR = "forge_experiments/roofline_ceiling"
 
 
-def publish(report: CeilingReport, output_dir: str | Path) -> Path:
-    """Write the report and its human-readable companion; return the JSON path."""
-    destination = Path(output_dir)
-    destination.mkdir(parents=True, exist_ok=True)
-    json_path = destination / REPORT_FILENAME
-    atomic_write_text(json_path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
-    atomic_write_text(destination / DOCUMENT_FILENAME, render_document(report))
-    return json_path
-
-
 def read_report(path: str | Path) -> CeilingReport:
-    """Load a published report. Raises on anything unreadable."""
+    """Load a published ceiling file. Raises on anything unreadable."""
     return load_report(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def _format_ms(value: float) -> str:
     """Render a latency with enough digits to be useful at microsecond scale."""
     return f"{value:.6g}"
-
-
-def render_document(report: CeilingReport) -> str:
-    """Render the operator-facing analysis document.
-
-    A framework-owned header -- the answer, where the roofs came from, and
-    anything the validator objected to -- followed verbatim by the analyst's own
-    derivation. The published file carries only the latencies and their mean, so
-    this document is where a reader deciding whether to believe them looks.
-    """
-    mean = report.mean_ideal_ms()
-    lines: list[str] = [
-        "# Performance ceiling",
-        "",
-        "## Conclusion",
-        "",
-        "Theoretical achievable latency per scored case. This is an optimistic lower bound under",
-        "hardware limits and legal algorithm constraints; it does not claim an implementation",
-        "reaching it exists.",
-        "",
-        "| Case | Ideal latency (ms) |",
-        "|:--|--:|",
-    ]
-    lines += [f"| `{case.case_id}` | {_format_ms(case.t_ideal_ms)} |" for case in report.cases]
-    if mean is not None:
-        lines.append(f"| **mean (equal weight)** | **{_format_ms(mean)}** |")
-
-    lines += [
-        "",
-        f"Roofs: `{report.peak_source}` — {peak_source_meaning(report.peak_source)}.",
-        "",
-    ]
-
-    flagged = [(case.case_id, issue) for case in report.cases for issue in case.issues]
-    if flagged:
-        lines += ["## Findings", ""]
-        lines += [f"- `{case_id}`: {issue}" for case_id, issue in flagged]
-        lines.append("")
-
-    lines += [
-        "## Derivation",
-        "",
-        "Written by the analyst. Nothing downstream recomputes these latencies, so this is the",
-        "only record of how they were reached.",
-        "",
-        report.analysis_md.strip(),
-    ]
-
-    return "\n".join(lines).rstrip() + "\n"
 
 
 def render_for_prompt(
@@ -110,9 +59,9 @@ def render_for_prompt(
     where the next unit of effort buys most.
 
     A ceiling is derived, not measured, so a case reported near its ceiling is
-    also a reason to check the derivation before believing the headroom is gone.
-    Under a target the campaign stops on, that check is the reader's only
-    defence against a work model that understated the job.
+    also a reason to read the derivation before believing the headroom is gone.
+    Under a target the campaign stops on, that is the reader's only defence
+    against a work model that understated the job.
     """
     if not report.cases:
         return ""
@@ -121,9 +70,9 @@ def render_for_prompt(
     lines = [
         "### Roofline attainment",
         "",
-        "`attainment = ceiling / measured`: the fraction of the estimated best achievable latency",
-        "this kernel is delivering. The ceiling comes from a work model over measured hardware",
-        "roofs; it is an estimate, not a measurement, and it decides no KEEP.",
+        "`attainment = ceiling / measured`: the fraction of the estimated best achievable",
+        "latency this kernel is delivering. The ceiling is an estimate, not a measurement,",
+        "and it decides no KEEP.",
         "",
     ]
 
@@ -170,8 +119,6 @@ __all__ = [
     "EVIDENCE_DIRNAME",
     "REPORT_FILENAME",
     "WORKSPACE_SUBDIR",
-    "publish",
     "read_report",
-    "render_document",
     "render_for_prompt",
 ]
