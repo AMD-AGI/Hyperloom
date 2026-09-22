@@ -21,10 +21,10 @@ def _model_dir(tmp_path):
     return model
 
 
-def _stub_preflight(monkeypatch):
+def _stub_preflight(monkeypatch, *, soft=None, hard=None):
     monkeypatch.setattr(
         "kernelforge.gemm_tune.aiter_preflight.collect",
-        lambda: {"soft": [], "hard": [], "aligned": False},
+        lambda: {"soft": soft or [], "hard": hard or [], "aligned": False},
     )
 
 
@@ -39,7 +39,7 @@ def test_help_carries_no_knowledge_base_options():
 
 def test_every_runnable_tuner_is_executed(tmp_path, monkeypatch):
     """Nothing may stand between a runnable tuner and a real tuning run."""
-    _stub_preflight(monkeypatch)
+    _stub_preflight(monkeypatch, soft=["AITER_COMMIT unset"])
     model = _model_dir(tmp_path)
     output = tmp_path / "output"
     executed: list[str] = []
@@ -78,6 +78,42 @@ def test_every_runnable_tuner_is_executed(tmp_path, monkeypatch):
     report = json.loads((output / "result.json").read_text())
     assert [t["tuner"] for t in report["tuners_run"]] == ["a8w8"]
     assert all("kb_cache" not in t for t in report["tuners_run"])
+
+
+def test_hard_aiter_mismatch_aborts_before_tuning(tmp_path, monkeypatch):
+    _stub_preflight(monkeypatch, hard=["MISALIGNED: serving and tuner roots differ"])
+    model = _model_dir(tmp_path)
+    executed = []
+
+    class _Tuner:
+        def execute(self):
+            executed.append(True)
+            return TuneResult(tuner_name="a8w8", status="no_improvement")
+
+    monkeypatch.setattr(cli_mod, "_create_tuner", lambda _name, _ctx: _Tuner())
+    result = CliRunner().invoke(
+        gemm_tune,
+        [
+            "run",
+            "--model-path",
+            str(model),
+            "--framework",
+            "vllm",
+            "--precision",
+            "fp8",
+            "--gpu-type",
+            "mi300x",
+            "--tuner",
+            "a8w8",
+            "--skip-gpu-check",
+            "--output-dir",
+            str(tmp_path / "output"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "MISALIGNED" in result.output
+    assert executed == []
 
 
 def test_cli_resolves_auto_once_and_records_effective_gpu(tmp_path, monkeypatch):
