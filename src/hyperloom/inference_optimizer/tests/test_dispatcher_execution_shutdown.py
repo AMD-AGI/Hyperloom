@@ -374,8 +374,8 @@ def test_executor_cleanup_unconfirmed_keeps_result_and_ownership(tmp_path):
 
 
 @pytest.mark.parametrize("named_tree", [True, False])
-def test_an_unconfirmed_cleanup_records_the_group_a_reaper_must_probe(tmp_path, named_tree):
-    """The retained lane's only way back: the process group, as a number, not prose.
+def test_an_unconfirmed_cleanup_records_the_group_for_the_operator(tmp_path, named_tree):
+    """The lead an operator gets for a retained lane: the group, as a number, not prose.
 
     The lane stays held here on purpose, so the one thing that can ever release
     it is an observation that nothing of the execution is left -- and this row

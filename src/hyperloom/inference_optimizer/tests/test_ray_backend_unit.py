@@ -832,6 +832,43 @@ def test_serving_lease_round_that_never_schedules_times_out(monkeypatch: pytest.
     assert fake.cancelled
 
 
+def test_a_timed_out_lease_stays_quarantined_through_the_callers_teardown(monkeypatch: pytest.MonkeyPatch):
+    """The quarantine has to survive the caller's finally:, or it is not a quarantine.
+
+    A prior revision kept the actor alive inside ``_await_or_cancel`` and stopped
+    there. Every real caller — baseline, explore, integrate_patch — closes the
+    lease in a ``finally``, and ``close()`` kills the actor once its stop request
+    fails, handing those GPUs straight back to the scheduler while the served
+    tree may still map them. run_grid then moves to the next variant and is
+    placed on them. So the state is declared at the timeout and honoured at
+    every entry point: ensure, run_session_kill and close.
+    """
+    fake = _PendingFakeRay()
+    monkeypatch.setitem(sys.modules, "ray", fake)
+    monkeypatch.setenv(rs.ROUND_WAIT_TIMEOUT_ENV, "0.2")
+    monkeypatch.setattr(rs, "CANCEL_ROUND_GRACE_SEC", 0.5)
+    lease = ServingLease(num_gpus=1)
+    actor = _CooperativeFakeActor((0, "never", ""), fake.steps)
+    lease._actor = actor
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        lease.run_session_kill(["sleep", "99"], timeout=5)
+
+    assert lease._quarantined  # the round's label, whatever it is
+    # 1. The caller's teardown must not undo it.
+    lease.close()
+    assert actor not in fake.killed
+    assert lease._actor is actor
+    # 2. A second round on the same lease is refused, not attempted.
+    rc, _, err = lease.run_session_kill(["sleep", "1"], timeout=5)
+    assert rc == 1
+    assert "ray_lease_quarantined" in err
+    assert actor not in fake.killed
+    # 3. And nothing re-creates an actor behind its back.
+    with pytest.raises(rs.ServingLeaseQuarantined):
+        lease.ensure()
+
+
 def test_round_wait_ceiling_derives_from_the_rounds_own_cap(monkeypatch: pytest.MonkeyPatch):
     """Unset env must not cut a legitimately slow round short, nor invent a cap the caller declined."""
     monkeypatch.delenv(rs.ROUND_WAIT_TIMEOUT_ENV, raising=False)

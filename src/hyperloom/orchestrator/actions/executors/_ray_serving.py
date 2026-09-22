@@ -405,6 +405,16 @@ def make_gpu_specialist_actor(num_gpus: float, *, serving_slot: bool = False):
     return actor_cls.options(num_gpus=num_gpus, resources=resources).remote()
 
 
+class ServingLeaseQuarantined(RuntimeError):
+    """A lease whose devices are held by an actor that never answered.
+
+    Raised rather than silently reusing the lease: its round timed out, nothing
+    established what became of the served subprocess tree, and the actor is
+    deliberately still alive so the scheduler cannot place anything else on its
+    cards.
+    """
+
+
 class ServingLease:
     """A held Ray GPU lease spanning every round that shares one server."""
 
@@ -419,9 +429,22 @@ class ServingLease:
         self._serving_slot = bool(serving_slot)
         self._ensure_log_path = ensure_log_path
         self._actor: Any = None
+        # Non-empty once a round timed out with the actor unresponsive: the label
+        # of that round. The actor is then kept alive on purpose so its GPUs stay
+        # reserved, and every entry point below refuses to hand this lease out
+        # again. Declared in _await_or_cancel's timeout branch.
+        self._quarantined: str = ""
 
     def ensure(self) -> None:
-        """Ensure the Ray cluster is up and the serving actor is created."""
+        """Ensure the Ray cluster is up and the serving actor is created.
+
+        Raises:
+            RuntimeError: This lease is quarantined. Its devices are held by an
+                actor whose round never answered, so handing the caller a usable
+                lease would place the next round on cards a live server may
+                still map.
+        """
+        self._refuse_if_quarantined("ensure")
         if self._actor is not None:
             return
         from ._ray_backend import get_ray_backend  # noqa: PLC0415
@@ -445,6 +468,18 @@ class ServingLease:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener  # noqa: PLC0415
 
+        if self._quarantined:
+            # Reported the way an ensure failure is, rather than raised: callers
+            # such as run_grid move to the next variant on a non-zero rc, and
+            # every one of those attempts must be refused too. Raising here would
+            # instead escape the variant loop, a wider blast radius than this
+            # change is entitled to.
+            log.warning(
+                "ServingLease.run_session_kill: refusing a round on a lease quarantined by round %s; its GPUs "
+                "are still reserved by an actor that never answered",
+                self._quarantined,
+            )
+            return 1, "", f"ray_lease_quarantined: round {self._quarantined} timed out with its actor unresponsive"
         try:
             self.ensure()
         except (RayInfeasibleError, RuntimeError) as exc:
@@ -619,6 +654,12 @@ class ServingLease:
                     # settle on: a resource stuck is recoverable, a resource
                     # shared is not.
                     self._abandon_ref(ref)
+                    # Declared here, honoured by ensure(), run_session_kill() and
+                    # close(). Declaring it without those would be the same
+                    # half-measure a prior revision shipped: the quarantine held
+                    # inside this method while the caller's finally: close() went
+                    # on to kill the actor anyway.
+                    self._quarantined = _round_label(cmd)
                     log.warning(
                         "ServingLease: abandoning round %s after %.0fs without a response, and KEEPING its actor "
                         "alive on purpose: its subprocess tree cannot be confirmed gone, so its GPUs stay reserved "
@@ -673,7 +714,23 @@ class ServingLease:
             return False
 
     def close(self) -> None:
-        """Release the GPU lease: stop the server, then kill the actor. Idempotent."""
+        """Release the GPU lease: stop the server, then kill the actor. Idempotent.
+
+        A quarantined lease is the exception. Its round timed out without the
+        actor ever answering, so nothing established what became of the served
+        subprocess tree; killing the actor here would hand its GPUs back to the
+        scheduler while that tree may still map them. Ordinary teardown reaches
+        this method from a caller's ``finally``, which is precisely where the
+        quarantine would otherwise be undone, so it has to be honoured here
+        rather than only at the point it was declared.
+        """
+        if self._quarantined:
+            log.warning(
+                "ServingLease.close: leaving the quarantined actor for round %s alive; its GPUs stay reserved "
+                "until this session ends. Confirm no server of that round survives before killing it by hand",
+                self._quarantined,
+            )
+            return
         if self._actor is None:
             return
         try:
@@ -683,6 +740,21 @@ class ServingLease:
         except Exception as exc:  # noqa: BLE001 — the kill below is the backstop
             log.warning("ServingLease.close: the actor did not stop its server: %r", exc)
         self._kill_actor()
+
+    def _refuse_if_quarantined(self, op: str) -> None:
+        """Refuse an operation that would put work back on quarantined devices.
+
+        Args:
+            op: The operation being refused, named in the message.
+
+        Raises:
+            ServingLeaseQuarantined: Always, when this lease is quarantined.
+        """
+        if self._quarantined:
+            raise ServingLeaseQuarantined(
+                f"serving lease is quarantined after round {self._quarantined} timed out with its actor "
+                f"unresponsive; {op} would place work on GPUs its subprocess tree may still hold"
+            )
 
     def _kill_actor(self) -> None:
         """Kill the actor handle without waiting for it. Idempotent, never raises."""

@@ -682,13 +682,16 @@ async def test_resume_no_pending_is_noop(resume_coord):
 
 @pytest.mark.asyncio
 async def test_an_unconfirmed_build_records_the_group_not_the_dead_root(tmp_path, monkeypatch):
-    """The retained lane's only way back has to outlive the process that failed.
+    """The operator's lead has to outlive the process that failed.
 
     ``spawn_build`` detaches the build with ``start_new_session`` and resolves
     the group it leads onto the handle. ``proc.pid`` stops naming anything the
     moment that root exits, which on this path it may well have; the group id
-    keeps naming the group while any member of it runs, and that is what a later
-    reaper can actually probe.
+    still names the group while any member of it runs.
+
+    Nothing probes it -- the lane is retained either way -- but it is printed to
+    whoever has to clear that lane by hand, and a number that named a dead root
+    would send them nowhere.
     """
     from types import SimpleNamespace
     from unittest.mock import Mock

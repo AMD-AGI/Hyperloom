@@ -173,15 +173,19 @@ def _expand_lanes(lanes: list[str]) -> list[str]:
 
 #: Evidence keys :meth:`SubAgentRunner.run_task` builds and hands to
 #: :meth:`SubAgentRunner._write_terminal` on the terminal transition of a task
-#: it ran (``loop/sub_agent_runner``). They are the only durable trace a later
-#: reaper has of what became of that task's processes. ``cleanup_confirmed``
-#: rides every terminal transition; the process-group id is recorded only on the
-#: unconfirmed path, and only when the raise site knew which group it had failed
-#: to confirm.
+#: it ran (``loop/sub_agent_runner``). ``cleanup_confirmed`` rides every
+#: terminal transition; the process-group id is recorded only on the unconfirmed
+#: path, and only when the raise site knew which group it had failed to confirm.
 #:
-#: Writer and reader take both names from here so they cannot drift apart: a
-#: reader looking for a key the writer stopped writing would find no identity on
-#: any row, judge every one of them unverifiable, and never free a lane again.
+#: Neither is probed. Nothing reclaims a lane from them: a served process is
+#: setsid'd by design and leaves the group its spawn created, so three attempts
+#: to decide from such an identity whether a lane was free were refuted in
+#: review. They are read only to tell an operator WHY a lane is retained and
+#: where to start looking -- see :func:`_report_unverifiable`.
+#:
+#: Writer and reader still take both names from here so they cannot drift apart:
+#: a reader looking for a key the writer stopped writing would print a diagnostic
+#: that silently lost its only lead.
 CLEANUP_CONFIRMED_KEY = "cleanup_confirmed"
 CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
 
