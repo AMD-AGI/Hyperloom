@@ -88,6 +88,7 @@ from ._server_lifecycle import (
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
+    RecipeLeverUnavailableError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -512,6 +513,12 @@ class ExploreExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
             }
 

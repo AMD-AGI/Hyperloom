@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import shlex
 from pathlib import Path
 from typing import Any
 
@@ -63,18 +62,6 @@ def _binding_from_identity(identity: dict[str, Any]) -> dict[str, Any]:
         "dp": str(identity.get("dp_size") or ""),
         "pp": "",
     }
-
-
-def _missing_requested_flags(requested_args: str, observed_flags: str) -> list[str]:
-    """Return requested flag tokens absent from the server's observed argv."""
-    if not requested_args or not observed_flags:
-        return []
-    try:
-        requested_tokens = shlex.split(requested_args)
-        observed_tokens = set(shlex.split(observed_flags))
-    except ValueError:
-        return []
-    return [token for token in requested_tokens if token.startswith("--") and token not in observed_tokens]
 
 
 def build_launch_evidence(
@@ -140,7 +127,6 @@ def build_launch_evidence(
     actual_path = Path(actual_server_log) if actual_server_log else None
     reused_from_warmup = bool(actual_path and actual_path.is_relative_to(warmup_root))
     reused = bool(caller_reused_ready_server or reused_from_warmup)
-    missing_flags = _missing_requested_flags(requested_args, observed_flags)
     return {
         "schema_version": 1,
         "materialized_config_path": str(config_path) if raw_config else "",
@@ -154,8 +140,6 @@ def build_launch_evidence(
         "observed_server_launch_flags": observed_flags,
         "observed_server_identity": observed_server_identity,
         "observed_model_binding": observed_model_binding,
-        "missing_requested_flags": missing_flags,
-        "injection_ineffective": bool(missing_flags),
         "requested_model_digest": _digest_operand(
             str(model_path if model_path is not None else benchmark.get("model") or "")
         ),

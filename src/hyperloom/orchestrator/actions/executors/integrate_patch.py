@@ -111,6 +111,7 @@ from ._grid_variant_filter import (
 )
 from ._workload_envs import (
     FrameworkScriptMismatchError,
+    RecipeLeverUnavailableError,
     default_baseline_config,
     materialize_config_with_envs,
 )
@@ -3220,7 +3221,7 @@ class IntegratePatchExecutor:
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
-        except FrameworkScriptMismatchError as exc:
+        except (FrameworkScriptMismatchError, RecipeLeverUnavailableError) as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
@@ -3229,7 +3230,11 @@ class IntegratePatchExecutor:
                 stash_note,
                 {
                     "status": "reverted",
-                    "error_class": "framework_script_mismatch",
+                    "error_class": (
+                        "framework_script_mismatch"
+                        if isinstance(exc, FrameworkScriptMismatchError)
+                        else "recipe_lever_unavailable"
+                    ),
                     "error": str(exc),
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],

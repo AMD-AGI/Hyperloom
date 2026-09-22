@@ -96,6 +96,7 @@ from ._workload_envs import (
     _client_tokenizer_mode,
     _remove_moe_runner_backend_arg,
     FrameworkScriptMismatchError,
+    RecipeLeverUnavailableError,
     agentx_active,
     default_baseline_config,
     materialize_config_with_envs,
@@ -2723,6 +2724,13 @@ class BaselineExecutor:
             return {
                 "status": "failed",
                 "error_class": "framework_script_mismatch",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
+        except RecipeLeverUnavailableError as exc:
+            return {
+                "status": "failed",
+                "error_class": "recipe_lever_unavailable",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }

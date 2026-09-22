@@ -69,7 +69,7 @@ from ._grid_server_args import (
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
-from ._recipe_env_scan import recipe_overwritten_env_names
+from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -909,6 +909,15 @@ class FrameworkScriptMismatchError(ValueError):
 
     Subclasses ValueError so callers can catch it specifically and turn it
     into a structured action failure instead of an uncaught exception.
+    """
+
+
+class RecipeLeverUnavailableError(ValueError):
+    """Raised when the recipe cannot carry a lever the variant depends on.
+
+    Measuring such a variant produces a precise re-run of the baseline under
+    the variant's name, which no downstream reader can tell apart from a
+    change that simply had no effect.
     """
 
 
@@ -1788,7 +1797,14 @@ def materialize_config_with_envs(
 
         overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
         envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
+    reads_extra_args, recipe_overwritten = recipe_launch_contract(bench)
     if server_args:
+        if not reads_extra_args:
+            raise RecipeLeverUnavailableError(
+                f"the server script this recipe boots never reads "
+                f"{server_args_env_name(bench.get('framework'))}, so "
+                f"extra_server_args={server_args!r} would not reach the server"
+            )
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
         framework_env = server_args_env_name(bench.get("framework"))
@@ -1809,21 +1825,13 @@ def materialize_config_with_envs(
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         combined_extra,
-        allow_predicate=is_allowed_variant_env_key,
+        # A name the recipe re-exports unconditionally cannot be overridden
+        # here; carrying it into the YAML publishes a value the run never used.
+        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
-    recipe_overwritten = recipe_overwritten_env_names(
-        effective_inferencex_path, str(bench.get("benchmark_script") or "")
-    )
-    silently_dropped = recipe_overwritten & safe_extra_envs.keys()
-    for _dk in silently_dropped:
-        log.warning(
-            "extra_envs key %s is unconditionally re-exported by the recipe script and would have no effect", _dk
-        )
+        log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
-        if key in silently_dropped:
-            continue
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
     # aiter logs a line for every tuned-GEMM table lookup it MISSES
