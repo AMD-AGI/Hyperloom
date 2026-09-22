@@ -855,17 +855,18 @@ def _capture_status_path(res: Path) -> Path:
     return res / "agentx-profile" / "test-capture" / "capture-status.json"
 
 
-def _fast_trace_poll_env(bind, tmp_path):
+def _virtual_trace_clock_env(tmp_path, env=None):
     """Advance shell polling time without changing the real phase gate's clock."""
-    env = _client_only_env(bind, tmp_path)
+    env = dict(env or {})
     clock = tmp_path / "trace-clock.txt"
     clock.write_text("0\n", encoding="utf-8")
     env["AGENTX_TEST_TRACE_CLOCK"] = str(clock)
+    env.setdefault("BASH_ENV", str(tmp_path / "bash-env.sh"))
     with Path(env["BASH_ENV"]).open("a", encoding="utf-8") as handle:
         handle.write(
             r"""
 sleep() {
-  if [ "${0##*/}" = aiperf_client.sh ]; then
+  if [ "${0##*/}" = aiperf_client.sh ] && [ "${FUNCNAME[1]:-}" = _wait_for_trace_flush ]; then
     local elapsed
     read -r elapsed < "$AGENTX_TEST_TRACE_CLOCK"
     awk -v elapsed="$elapsed" -v duration="$1" 'BEGIN { printf "%.9f\n", elapsed + duration }' > "$AGENTX_TEST_TRACE_CLOCK"
@@ -885,6 +886,10 @@ date() {
 """
         )
     return env
+
+
+def _fast_trace_poll_env(bind, tmp_path):
+    return _virtual_trace_clock_env(tmp_path, _client_only_env(bind, tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -1704,6 +1709,7 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     source = tmp_path / "trace-source"
     source.mkdir()
     (source / "r0.trace.json").write_text("partial", encoding="utf-8")
+    env = _virtual_trace_clock_env(tmp_path)
 
     r = _run_profile(
         bench,
@@ -1714,6 +1720,7 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
         AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
         FAKE_TRACE_SOURCE=str(source),
         FAKE_TRACE_DEST=str(trace),
+        **env,
     )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
@@ -1722,6 +1729,7 @@ def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
     assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
     capture = json.loads(_capture_status_path(res).read_text())
     assert capture["reason"] == "trace_flush_timeout"
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 20
 
 
 def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
@@ -1734,6 +1742,7 @@ def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
     (source / "r0.trace.json").write_text(
         '{"traceEvents":[{"cat":"kernel","ph":"X","ts":1,"dur":2}]}', encoding="utf-8"
     )
+    env = _virtual_trace_clock_env(tmp_path)
 
     r = _run_profile(
         bench,
@@ -1744,11 +1753,13 @@ def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
         AGENTX_TRACE_FLUSH_TIMEOUT_S="20",
         FAKE_TRACE_SOURCE=str(source),
         FAKE_TRACE_DEST=str(trace),
+        **env,
     )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "trace flush did not settle" in out, out[-1500:]
     assert "expected 8 ranks" in out
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 20
 
 
 def test_the_wait_is_skipped_when_not_profiling(tmp_path):
@@ -1800,6 +1811,7 @@ def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
     """Zero files is a failed capture, not a slow one; bound it separately."""
     bench, bind, res = _sandbox(tmp_path)
     (res / "torch_trace").mkdir()  # exists, but nothing ever lands in it
+    env = _virtual_trace_clock_env(tmp_path)
 
     r = _run_profile(
         bench,
@@ -1809,21 +1821,25 @@ def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
         TP="8",
         AGENTX_TRACE_FLUSH_TIMEOUT_S="600",
         AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="15",
+        **env,
     )
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "no trace file appeared within 15s" in out, out[-1500:]
     # The shorter first-file bound must win over the flush budget, not the other way round.
     assert "trace flush did not settle" not in out
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 15
 
 
 def test_the_first_file_bound_never_exceeds_the_flush_budget(tmp_path):
     """An operator who lowers only the flush budget must still get that bound."""
     bench, bind, res = _sandbox(tmp_path)
     (res / "torch_trace").mkdir()
+    env = _virtual_trace_clock_env(tmp_path)
 
-    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="15")
+    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="15", **env)
     assert r.returncode == 0, r.stderr
     out = r.stdout + r.stderr
     assert "first-file bound 15s" in out, out[-1500:]
     assert "no trace file appeared within 15s" in out
+    assert float(Path(env["AGENTX_TEST_TRACE_CLOCK"]).read_text()) == 15

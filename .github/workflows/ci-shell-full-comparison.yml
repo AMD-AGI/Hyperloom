@@ -1,0 +1,241 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Shell full-suite comparison
+
+on:
+  push:
+    branches: [feature/leixin/ci-shell-full-comparison-20260922]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shell-full-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_CACHE_DIR: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated tool environment
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install \
+            'PyYAML==6.0.2' 'ruff==0.16.2' 'pytest==9.1.1' 'psutil==7.2.2'
+      - name: Validate workflow and experiment contracts
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$RUNNER_TEMP/actionlint.tar.gz"
+          printf '%s  %s\n' \
+            8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8 \
+            "$RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -shellcheck= -pyflakes= .github/workflows/ci-shell-full-comparison.yml
+          "$RUNNER_TEMP/tools/bin/python" -m ruff check --no-cache \
+            .github/scripts/ci_shell_full.py .github/scripts/ci_shell_full_plugin.py \
+            .github/scripts/tests/test_ci_shell_full.py \
+            src/hyperloom/inference_optimizer/tests/test_aiperf_client_sh.py
+          "$RUNNER_TEMP/tools/bin/python" -m ruff format --check \
+            .github/scripts/ci_shell_full.py .github/scripts/ci_shell_full_plugin.py \
+            .github/scripts/tests/test_ci_shell_full.py \
+            src/hyperloom/inference_optimizer/tests/test_aiperf_client_sh.py
+          "$RUNNER_TEMP/tools/bin/python" -m unittest discover \
+            -s .github/scripts/tests -p test_ci_shell_full.py -v
+      - name: Restore the single approved duration seed without saving
+        id: seed
+        uses: actions/cache/restore@v6
+        with:
+          path: .test_durations
+          key: test-durations-v1-35682438624
+          fail-on-cache-miss: true
+      - name: Freeze seed and source identities
+        env:
+          EXACT_HIT: ${{ steps.seed.outputs.cache-hit }}
+        run: |
+          test "$EXACT_HIT" = true
+          mkdir -p "$RUNNER_TEMP/seed"
+          mv .test_durations "$RUNNER_TEMP/seed/.test_durations"
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py prepare \
+            --seed "$RUNNER_TEMP/seed/.test_durations" --output "$RUNNER_TEMP/prepared"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-prepared
+          path: ${{ runner.temp }}/prepared/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  bootstrap:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated measurement tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'PyYAML==6.0.2' 'psutil==7.2.2'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-prepared
+          path: ${{ runner.temp }}/prepared
+      - name: Build the baseline subject and target environment
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py subject --path "$RUNNER_TEMP/subject"
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/target/bin/python" -m pip install -e "$RUNNER_TEMP/subject[test,ci]"
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+      - name: Freeze dependencies and compare catalogs and targeted contracts
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py bootstrap \
+            --python "$RUNNER_TEMP/target/bin/python" --prepared "$RUNNER_TEMP/prepared" \
+            --output "$RUNNER_TEMP/bootstrap"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap-${{ matrix.python }}
+          path: ${{ runner.temp }}/bootstrap/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  paired:
+    needs: [prepare, bootstrap]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        python: ["3.10", "3.11"]
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated measurement tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'PyYAML==6.0.2' 'psutil==7.2.2'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-prepared
+          path: ${{ runner.temp }}/prepared
+      - uses: actions/download-artifact@v7
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap-${{ matrix.python }}
+          path: ${{ runner.temp }}/bootstrap
+      - name: Recreate the subject and frozen target dependencies
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py subject --path "$RUNNER_TEMP/subject"
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/bootstrap/constraints.txt" --upgrade pip setuptools
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/bootstrap/constraints.txt" -e "$RUNNER_TEMP/subject[test,ci]"
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+      - name: Run both full-suite arms on the same runner
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py paired \
+            --python "$RUNNER_TEMP/target/bin/python" --prepared "$RUNNER_TEMP/prepared" \
+            --bootstrap "$RUNNER_TEMP/bootstrap" --shard "$SHARD" --output "$RUNNER_TEMP/paired"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-pair-${{ matrix.python }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/paired/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate:
+    needs: [prepare, bootstrap, paired]
+    if: ${{ always() && needs.bootstrap.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Prepare isolated measurement tools
+        run: |
+          python -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/python" -m pip install 'PyYAML==6.0.2' 'psutil==7.2.2'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v7
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-bootstrap-${{ matrix.python }}
+          path: ${{ runner.temp }}/bootstrap
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: full-${{ github.run_id }}-${{ github.run_attempt }}-pair-${{ matrix.python }}-*
+          path: ${{ runner.temp }}/inputs
+          merge-multiple: false
+      - name: Prepare the fixed coverage environment
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py subject --path "$RUNNER_TEMP/subject"
+          python -m venv "$RUNNER_TEMP/target"
+          "$RUNNER_TEMP/target/bin/python" -m pip install \
+            -c "$RUNNER_TEMP/bootstrap/constraints.txt" 'coverage[toml]'
+          "$RUNNER_TEMP/target/bin/python" -m pip check
+      - name: Verify completeness, outcomes and strict aggregate coverage
+        run: |
+          "$RUNNER_TEMP/tools/bin/python" .github/scripts/ci_shell_full.py aggregate \
+            --python "$RUNNER_TEMP/target/bin/python" --bootstrap "$RUNNER_TEMP/bootstrap" \
+            --inputs "$RUNNER_TEMP/inputs" --output "$RUNNER_TEMP/aggregate"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: full-${{ github.run_id }}-${{ github.run_attempt }}-aggregate-${{ matrix.python }}
+          path: ${{ runner.temp }}/aggregate/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
