@@ -330,8 +330,9 @@ to decide, from the neighbourhood evidence and the model source.
 
 The lever is launch count: each tiny op is a separate kernel launch and HBM
 round-trip, so collapsing the anchor together with the work adjacent to it removes
-launches and round-trips. Fusing into the epilogue of the compute kernel before it,
-or the prologue of the one after it, is in scope when the source supports it.
+launches and round-trips. Fusing into the prologue of the compute kernel after the
+anchor is the preferred direction; the epilogue of the one before it is in scope
+only when that kernel is not a tuned library call (see the constraints below).
 
 {describe_anchor(report)}
 

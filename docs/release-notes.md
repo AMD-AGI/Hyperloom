@@ -33,6 +33,11 @@ it.
 
 ### Fixed
 
+- **Fusion discovery no longer proposes folding work into a tuned library GEMM's
+  epilogue.** Prefer the consumer's prologue so a dtype change does not knock a
+  tuned GEMM off its table (anchored discovery names that direction). This is a
+  discovery-time constraint, not a post-fusion gate.
+
 - **`forge-fuse` forwards a concrete agent provider to `forge-loop`.** Default
   `--agent-backend auto` was passed through unchanged; `forge-loop` rejects
   `auto`, so campaigns died after discovery. The resolved provider is now

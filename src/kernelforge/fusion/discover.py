@@ -540,6 +540,18 @@ _FUSION_CONSTRAINTS = """Constraints for each proposed fusion:
   framework CUDA-only fused op.
 - Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
   their semantics, dtype, shape, and cache layout match.
+- Do NOT change what a library GEMM dispatches to. A tuned GEMM (flydsl / aiter /
+  hipBLASLt / CK) selects its kernel from the (dtype, layout, shape) of the call,
+  so asking that same call for a different output dtype (`out_dtype=`, `otype=`),
+  a transposed operand, or an `out=` buffer of another type drops it off the tuned
+  table onto a different, UNTUNED solution. The displaced kernel is typically
+  several times the size of the elementwise op being fused, so the substitution
+  costs far more than the fusion saves even though the fused call site alone
+  benchmarks faster. When the op you are fusing sits between a library GEMM and
+  its consumer, leave the GEMM call byte-identical and fuse into the PROLOGUE of
+  the CONSUMER instead -- consumers are frequently templated on their input dtype
+  already and upcast on load, which removes the same launch for free. A GEMM
+  epilogue is in scope only when the GEMM is one YOU author.
 - The correctness reference must be the REAL eager op imported from this source
   (say which symbol to import), never a re-derivation."""
 
