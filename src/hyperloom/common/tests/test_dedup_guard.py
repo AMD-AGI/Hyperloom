@@ -27,6 +27,7 @@ import pytest
 # Repo root discovery
 # ---------------------------------------------------------------------------
 
+
 def _find_repo_root() -> Path | None:
     for parent in Path(__file__).resolve().parents:
         if (parent / "pyproject.toml").is_file() and (parent / "src").is_dir():
@@ -43,10 +44,21 @@ pytestmark = pytest.mark.skipif(
 
 _SCAN_ROOTS: tuple[str, ...] = ("src/hyperloom", "src/kernelforge")
 
-_PRUNED_DIR_NAMES = frozenset({
-    ".cache", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".venv",
-    "__pycache__", "build", "dist", "node_modules", "venv",
-})
+_PRUNED_DIR_NAMES = frozenset(
+    {
+        ".cache",
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "venv",
+    }
+)
 
 _TEST_DIR_NAMES = frozenset({"tests", "test"})
 
@@ -67,17 +79,21 @@ def _is_test_file(relative: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 # Module-level _now_iso = now_iso (no functools.partial) outside common/timeutil.py.
-_DUP001_ALLOWLIST = frozenset({
-    "src/hyperloom/common/timeutil.py",
-})
+_DUP001_ALLOWLIST = frozenset(
+    {
+        "src/hyperloom/common/timeutil.py",
+    }
+)
 
 # Legitimate aliases with a precision argument (partial) that were intentionally left.
-_DUP001_PARTIAL_ALLOWLIST = frozenset({
-    "src/hyperloom/orchestrator/actions/executors/explore.py",
-    "src/hyperloom/orchestrator/actions/executors/integrate_patch.py",
-    "src/hyperloom/orchestrator/actions/executors/roofline.py",
-    "src/hyperloom/orchestrator/state/orchestration_memory.py",
-})
+_DUP001_PARTIAL_ALLOWLIST = frozenset(
+    {
+        "src/hyperloom/orchestrator/actions/executors/explore.py",
+        "src/hyperloom/orchestrator/actions/executors/integrate_patch.py",
+        "src/hyperloom/orchestrator/actions/executors/roofline.py",
+        "src/hyperloom/orchestrator/state/orchestration_memory.py",
+    }
+)
 
 
 def _scan_dup001(text: str, path: str) -> int:
@@ -104,12 +120,14 @@ def _scan_dup001(text: str, path: str) -> int:
 # ---------------------------------------------------------------------------
 
 # Files that are the canonical owners or have documented exemptions.
-_DUP002_ALLOWLIST = frozenset({
-    "src/hyperloom/common/env.py",
-    "src/hyperloom/orchestrator/trace/trace_env.py",   # shim re-exports env_flag, keeps no literals
-    "src/hyperloom/inference_optimizer/multi_node/scripts/_server_flag_denylist.py",
-    "src/hyperloom/inference_optimizer/multi_node/scripts/_sglang_shape_gate.py",
-})
+_DUP002_ALLOWLIST = frozenset(
+    {
+        "src/hyperloom/common/env.py",
+        "src/hyperloom/orchestrator/trace/trace_env.py",  # shim re-exports env_flag, keeps no literals
+        "src/hyperloom/inference_optimizer/multi_node/scripts/_server_flag_denylist.py",
+        "src/hyperloom/inference_optimizer/multi_node/scripts/_sglang_shape_gate.py",
+    }
+)
 
 # Current allowable counts per file (pin-to-zero means "this file must stay clean").
 # Files not listed here must have zero occurrences.
@@ -169,21 +187,23 @@ def _scan_dup002(text: str) -> int:
 # DUP003 — private numeric coercer helpers
 # ---------------------------------------------------------------------------
 
-_DUP003_ALLOWLIST = frozenset({
-    "src/hyperloom/common/coerce.py",
-    "src/hyperloom/orchestrator/bus/resource_lock.py",  # _lease_iso — timestamp, not numeric coercer
-})
+_DUP003_ALLOWLIST = frozenset(
+    {
+        "src/hyperloom/common/coerce.py",
+        "src/hyperloom/orchestrator/bus/resource_lock.py",  # _lease_iso — timestamp, not numeric coercer
+    }
+)
 
 # Per-file allowable counts.
 _DUP003_KNOWN: dict[str, int] = {
-    "src/hyperloom/common/provenance.py": 1,                                  # existing pre-branch
+    "src/hyperloom/common/provenance.py": 1,  # existing pre-branch
     "src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py": 1,  # existing pre-branch
     "src/hyperloom/inference_optimizer/breakdown/collectors/_common.py": 2,  # comma-stripping wrapper
-    "src/hyperloom/orchestrator/actions/executors/_gpu_metrics.py": 1,       # defensive: int/float only
+    "src/hyperloom/orchestrator/actions/executors/_gpu_metrics.py": 1,  # defensive: int/float only
 }
 
 _COERCER_PATTERN = re.compile(
-    r'def\s+_(?:to_float|to_int|float_or_none|int_or_none|_to_float|_to_int)\s*\(',
+    r"def\s+_(?:to_float|to_int|float_or_none|int_or_none|_to_float|_to_int)\s*\(",
 )
 
 
@@ -194,6 +214,7 @@ def _scan_dup003(text: str) -> int:
 # ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
+
 
 def _scan_all() -> dict[str, dict[str, int]]:
     """Return {rule: {posix_path: count}} for every scanned file."""
@@ -250,8 +271,7 @@ def _ratchet_problems(
             problems.append(f"  NEW {rule} in {path} ({a} found, {k} allowed)")
         else:
             problems.append(
-                f"  STALE {rule} pin for {path} ({k} pinned, {a} found): "
-                "shrink _DUP002_KNOWN / _DUP003_KNOWN to match"
+                f"  STALE {rule} pin for {path} ({k} pinned, {a} found): shrink _DUP002_KNOWN / _DUP003_KNOWN to match"
             )
     return problems
 
@@ -259,6 +279,7 @@ def _ratchet_problems(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_no_bare_now_iso_aliases() -> None:
     """No module outside common/timeutil.py should define a bare ``_now_iso = now_iso`` alias."""
@@ -278,8 +299,7 @@ def test_no_new_inline_bool_token_sets() -> None:
     problems = _ratchet_problems(counts, _DUP002_KNOWN, "DUP002")
     if problems:
         pytest.fail(
-            "DUP002: inline boolean token set (use env_flag / env_bool from common/env.py):\n"
-            + "\n".join(problems),
+            "DUP002: inline boolean token set (use env_flag / env_bool from common/env.py):\n" + "\n".join(problems),
             pytrace=False,
         )
 
@@ -290,7 +310,6 @@ def test_no_new_private_numeric_coercers() -> None:
     problems = _ratchet_problems(counts, _DUP003_KNOWN, "DUP003")
     if problems:
         pytest.fail(
-            "DUP003: private numeric coercer (use to_float/to_int from common/coerce.py):\n"
-            + "\n".join(problems),
+            "DUP003: private numeric coercer (use to_float/to_int from common/coerce.py):\n" + "\n".join(problems),
             pytrace=False,
         )

@@ -62,8 +62,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
 }
 
 
-
-
 @dataclass
 class Message:
     """One bus message persisted in the ``events`` table."""

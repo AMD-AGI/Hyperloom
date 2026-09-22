@@ -63,6 +63,8 @@ try:
     )
 except ImportError:
     pass  # functions already in namespace when inlined via _read_bundled_pod_python_script
+
+
 def _log(msg: str) -> None:
     """Write a timestamped launcher log line to stderr."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
@@ -233,6 +235,7 @@ try:
     )
 except ImportError:
     pass  # functions already in namespace when inlined via _read_bundled_pod_python_script
+
 
 def _subprocess_env() -> dict[str, str]:
     """Build the framework launcher subprocess env."""

@@ -130,8 +130,6 @@ SPECIALIST_TOOL_DENYLIST: frozenset[str] = frozenset(
 )
 
 
-
-
 _SECRET_ENV_NAMES: tuple[str, ...] = tuple(
     sorted(
         {

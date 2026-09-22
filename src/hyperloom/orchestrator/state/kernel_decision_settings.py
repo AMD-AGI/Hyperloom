@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 
 
-
 # microseconds + ``+00:00`` (canonical helper; kept importable via shared_state for callers that still use that legacy
 # path).
 

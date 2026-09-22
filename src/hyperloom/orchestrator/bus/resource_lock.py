@@ -74,8 +74,6 @@ ROUND_LEASE_PID = 0
 _ROUND_LEASE_ACTION = "bringup_round"
 
 
-
-
 def local_owner_scope() -> str:
     """Identify this boot and PID namespace, or leave ownership unobservable."""
     try:

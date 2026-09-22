@@ -12,7 +12,6 @@ from hyperloom.common.timeutil import now_iso
 from .storage.connection import SqliteConnection
 
 
-
 @dataclass
 class CursorState:
     """A single agent's bus-processing cursor."""

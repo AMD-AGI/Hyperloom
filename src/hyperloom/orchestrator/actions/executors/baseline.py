@@ -1941,7 +1941,9 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False
-        return _scan_log_tail_for_hit(root, lambda c: "" if _hit(c) else None, max_bytes=_LOG_SCAN_MAX_BYTES) is not None
+        return (
+            _scan_log_tail_for_hit(root, lambda c: "" if _hit(c) else None, max_bytes=_LOG_SCAN_MAX_BYTES) is not None
+        )
 
     @staticmethod
     def _record_baseline_convergence(

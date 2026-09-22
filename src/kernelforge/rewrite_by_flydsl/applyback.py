@@ -70,8 +70,6 @@ def _git(workspace: str | Path, *args: str) -> subprocess.CompletedProcess:
     return git("-C", str(workspace), *args, check=False)
 
 
-
-
 def _infer_framework(spec: RewriteSpec, explicit: str) -> str:
     if explicit.strip():
         return explicit.strip().lower()
@@ -665,10 +663,18 @@ def _publish_patch(
             "Standalone FlyDSL reference passed the rewrite correctness gate.\n"
             "Framework integration validation is intentionally pending in Hyperloom.\n",
         )
-        atomic_write_text(temporary / "benchmark.json", json.dumps({
-                "source_ms": source_ms,
-                "flydsl_best_ms": flydsl_best_ms,
-            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            temporary / "benchmark.json",
+            json.dumps(
+                {
+                    "source_ms": source_ms,
+                    "flydsl_best_ms": flydsl_best_ms,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
         atomic_write_text(temporary / "publication.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
         files_root = temporary / "files"
         files_root.mkdir(parents=True, exist_ok=True)

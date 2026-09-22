@@ -29,8 +29,6 @@ _RAY_OBS_ID_BASE = 100000
 GPU_LEASE_TTL_GRACE = 0.1
 
 
-
-
 def _parse_gpu_list(raw: str) -> list[int]:
     """Parse a GPU-id list through the shared visible-device parser."""
     return parse_device_list(raw)

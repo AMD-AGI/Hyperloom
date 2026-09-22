@@ -31,6 +31,8 @@ try:
     )
 except ImportError:
     pass
+
+
 def _log(msg: str) -> None:
     """Write a timestamped launcher log line to stderr."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
@@ -334,7 +336,6 @@ try:
     )
 except ImportError:
     pass
-
 
 
 def _build_sglang_cmd(

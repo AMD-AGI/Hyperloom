@@ -379,8 +379,6 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
     return points
 
 
-
-
 def record_close_settled(
     session_dir: Path | str | None,
     *,

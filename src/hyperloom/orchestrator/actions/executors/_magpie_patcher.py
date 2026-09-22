@@ -253,9 +253,7 @@ def _resolve_benchmark_scripts_dir(
     magpie_dir: Path | str | None,
 ) -> Path | None:
     """Resolve Magpie's ``scripts/benchmark`` directory when present."""
-    return _resolve_component_path(
-        magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", check="dir"
-    )
+    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", check="dir")
 
 
 def _resolve_inferencex_benchmarks_dir(

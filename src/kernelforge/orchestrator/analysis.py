@@ -282,8 +282,6 @@ def _source_digest(paths: tuple[Path, ...]) -> str:
     return digest.hexdigest()
 
 
-
-
 _GLOBAL_ARTIFACTS = {
     "request.json": (
         "analysis_request",
@@ -568,19 +566,35 @@ class AnalysisAgentService:
                 atomic_write_text(case_root / "case.json", json.dumps(case.to_dict(), indent=2, sort_keys=True) + "\n")
         inventory_path = work_root / "case_inventory.json"
         if not inventory_path.is_file():
-            atomic_write_text(inventory_path, json.dumps({
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": context.analysis_commit,
-                    "cases": [case.to_dict() for case in cases],
-                }, indent=2, sort_keys=True) + "\n")
+            atomic_write_text(
+                inventory_path,
+                json.dumps(
+                    {
+                        "schema_version": ANALYSIS_SCHEMA_VERSION,
+                        "analysis_commit": context.analysis_commit,
+                        "cases": [case.to_dict() for case in cases],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+            )
         progress_path = work_root / "progress.json"
         if not progress_path.is_file():
-            atomic_write_text(progress_path, json.dumps({
-                    "schema_version": ANALYSIS_SCHEMA_VERSION,
-                    "analysis_commit": context.analysis_commit,
-                    "status": "RUNNING",
-                    "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
-                }, indent=2, sort_keys=True) + "\n")
+            atomic_write_text(
+                progress_path,
+                json.dumps(
+                    {
+                        "schema_version": ANALYSIS_SCHEMA_VERSION,
+                        "analysis_commit": context.analysis_commit,
+                        "status": "RUNNING",
+                        "cases": [{"case_id": case.case_id, "status": "PENDING"} for case in cases],
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+            )
 
     @staticmethod
     def _nonempty_file(path: Path) -> bool:
@@ -637,13 +651,21 @@ class AnalysisAgentService:
                 stream.write(json.dumps(provenance_payload, sort_keys=True) + "\n")
                 stream.flush()
                 os.fsync(stream.fileno())
-        atomic_write_text(profile_root.parent / "profile_provenance.json", json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "case_id": case.case_id,
-                "framework_owned": True,
-                "artifacts": provenance_payload["artifacts"],
-                "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
-            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            profile_root.parent / "profile_provenance.json",
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "case_id": case.case_id,
+                    "framework_owned": True,
+                    "artifacts": provenance_payload["artifacts"],
+                    "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
         return True
 
     @classmethod
@@ -695,35 +717,59 @@ class AnalysisAgentService:
             )
 
         status = "READY" if len(completed) == len(cases) else "PARTIAL"
-        atomic_write_text(work_root / "case_inventory.json", json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "analysis_commit": context.analysis_commit,
-                "cases": case_states,
-            }, indent=2, sort_keys=True) + "\n")
-        atomic_write_text(work_root / "progress.json", json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "analysis_commit": context.analysis_commit,
-                "status": status,
-                "cases": [
-                    {
-                        "case_id": case["case_id"],
-                        "status": case["status"],
-                    }
-                    for case in case_states
-                ],
-            }, indent=2, sort_keys=True) + "\n")
-        atomic_write_text(work_root / "manifest.json", json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "analysis_commit": context.analysis_commit,
-                "driver_digest": driver_digest,
-                "source_digest": source_digest,
-                "status": status,
-                "expected_case_ids": [case.case_id for case in cases],
-                "completed_case_ids": completed,
-                "failed_case_ids": failed,
-                "skipped_case_ids": skipped,
-                "report": "report.md",
-            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            work_root / "case_inventory.json",
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": context.analysis_commit,
+                    "cases": case_states,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        atomic_write_text(
+            work_root / "progress.json",
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": context.analysis_commit,
+                    "status": status,
+                    "cases": [
+                        {
+                            "case_id": case["case_id"],
+                            "status": case["status"],
+                        }
+                        for case in case_states
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        atomic_write_text(
+            work_root / "manifest.json",
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": context.analysis_commit,
+                    "driver_digest": driver_digest,
+                    "source_digest": source_digest,
+                    "status": status,
+                    "expected_case_ids": [case.case_id for case in cases],
+                    "completed_case_ids": completed,
+                    "failed_case_ids": failed,
+                    "skipped_case_ids": skipped,
+                    "report": "report.md",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
 
     async def ensure_bundle(
         self,
@@ -1173,13 +1219,21 @@ class AnalysisAgentService:
                 ],
             }
         )
-        atomic_write_text(catalog_path, json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "analysis_commit": workflow.analysis_commit,
-                "workflow_status": workflow.state["status"],
-                "analysis_session_status": workflow.status,
-                "artifacts": artifacts,
-            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            catalog_path,
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "analysis_commit": workflow.analysis_commit,
+                    "workflow_status": workflow.state["status"],
+                    "analysis_session_status": workflow.status,
+                    "artifacts": artifacts,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
         return catalog_path
 
     def apply_checkpoint(
@@ -2056,11 +2110,19 @@ Update analysis incrementally:
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-        atomic_write_text(commit_root / "published.json", json.dumps({
-                "schema_version": ANALYSIS_SCHEMA_VERSION,
-                "generation_root": generation_root.name,
-                "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }, indent=2, sort_keys=True) + "\n")
+        atomic_write_text(
+            commit_root / "published.json",
+            json.dumps(
+                {
+                    "schema_version": ANALYSIS_SCHEMA_VERSION,
+                    "generation_root": generation_root.name,
+                    "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
         return generation_root
 
     @staticmethod

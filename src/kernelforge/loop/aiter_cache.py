@@ -52,8 +52,6 @@ class AiterCacheIsolation:
     owner_pid: int
 
 
-
-
 def configure_aiter_cache_isolation(
     experiments_dir: Path,
     *,
