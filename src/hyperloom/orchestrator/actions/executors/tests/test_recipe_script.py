@@ -29,7 +29,10 @@ def _checkout(tmp_path: Path, name: str, body: str) -> Path:
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     (benchmarks / "single_node" / "agentic").mkdir(parents=True)
     (benchmarks / "benchmark_lib.sh").write_text("# stub\n", encoding="utf-8")
-    (benchmarks / "single_node" / "agentic" / name).write_text(body, encoding="utf-8")
+    (benchmarks / name).write_text(body, encoding="utf-8")
+    # Same basename one level down: the client only ever runs the one beside
+    # itself, so this must not be what resolution returns.
+    (benchmarks / "single_node" / "agentic" / name).write_text("# a different recipe\n", encoding="utf-8")
     return benchmarks.parent
 
 
@@ -47,7 +50,8 @@ def test_the_agentx_client_resolves_to_the_server_script_it_delegates_to(tmp_pat
 
     resolved = resolve_launch_server_script(_bench(root, "dsv41flash.sh"))
 
-    assert Path(resolved).name == "dsv41flash.sh"
+    # The one beside the client, not the same-named recipe a directory down.
+    assert Path(resolved) == root / "benchmarks" / "dsv41flash.sh"
 
 
 def test_a_recipe_without_an_extra_args_sink_reports_the_lever_as_unavailable(tmp_path):
@@ -60,6 +64,14 @@ def test_a_recipe_without_an_extra_args_sink_reports_the_lever_as_unavailable(tm
 
 def test_a_recipe_that_reads_the_extra_args_variable_keeps_the_lever(tmp_path):
     root = _checkout(tmp_path, "sinked.sh", _AGENTIC_RECIPE + '\nvllm serve "$M" $EXTRA_VLLM_ARGS\n')
+
+    reads_extra_args, _ = recipe_launch_contract(_bench(root, "sinked.sh"))
+
+    assert reads_extra_args is True
+
+
+def test_a_recipe_that_forwards_its_positional_arguments_keeps_the_lever(tmp_path):
+    root = _checkout(tmp_path, "sinked.sh", _AGENTIC_RECIPE + '\nvllm serve "$M" "$@"\n')
 
     reads_extra_args, _ = recipe_launch_contract(_bench(root, "sinked.sh"))
 

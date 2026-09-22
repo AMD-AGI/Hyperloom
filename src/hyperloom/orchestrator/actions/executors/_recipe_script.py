@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 # wins over anything the caller exported under that name.
 _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(?!\"?\$\{?\1[:-])", re.MULTILINE)
 
+# ``"$@"`` / ``${@}``: forwarding its own positional arguments is the other way
+# a script accepts extra server args, alongside the framework's args variable.
+_POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
+
 
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
@@ -66,23 +70,23 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
         if not root:
             continue
         benchmarks = Path(root) / "benchmarks"
+        candidate = benchmarks / script
         # The builtin sources benchmark_lib.sh from its own directory and dies
         # without it, so a half-populated checkout resolves to nothing.
-        if (benchmarks / "benchmark_lib.sh").is_file():
-            for candidate in (benchmarks / script, *sorted(benchmarks.rglob(script))):
-                if candidate.is_file():
-                    return str(candidate)
+        if candidate.is_file() and (benchmarks / "benchmark_lib.sh").is_file():
+            return str(candidate)
     return ""
 
 
 def recipe_launch_contract(bench: Mapping[str, Any]) -> tuple[bool, frozenset[str]]:
     """What the resolved server script accepts: ``(reads_extra_args, names_it_overwrites)``.
 
-    ``reads_extra_args`` is False for a script with no reference to the
-    framework's extra-args variable, which makes every ``extra_server_args``
-    on that recipe a no-op the measurement cannot distinguish from a proposal
-    that simply did not help. Both answers default to "imposes nothing" when
-    the script cannot be read, so an unresolvable recipe never drops a lever.
+    ``reads_extra_args`` is False only for a script that names neither the
+    framework's extra-args variable nor its positional arguments, which makes
+    every ``extra_server_args`` on that recipe a no-op the measurement cannot
+    distinguish from a proposal that simply did not help. Both answers default
+    to "imposes nothing" when the script cannot be read, so an unresolvable
+    recipe never drops a lever.
     """
     path = resolve_launch_server_script(bench)
     if not path:
@@ -93,7 +97,8 @@ def recipe_launch_contract(bench: Mapping[str, Any]) -> tuple[bool, frozenset[st
         log.warning("recipe: could not read the server script %s; assuming it constrains nothing", path)
         return True, frozenset()
     args_env = server_args_env_name(bench.get("framework"))
-    return args_env in text, frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
+    reads_extra_args = args_env in text or bool(_POSITIONAL_ARGS_RE.search(text))
+    return reads_extra_args, frozenset(m.group(1) for m in _UNGUARDED_EXPORT_RE.finditer(text))
 
 
 __all__ = ["recipe_launch_contract", "resolve_launch_server_script"]
