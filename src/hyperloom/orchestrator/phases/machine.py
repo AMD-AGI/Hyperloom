@@ -320,17 +320,27 @@ class MachinePhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged only. Run them out-of-band so a long KERNEL
-        # entry action does not freeze the coordinator tick loop and starve the idle guard.
-        task = asyncio.create_task(
-            self._on_phase_entered(
-                from_phase=prior or "",
-                to_phase=target,
-                reason=reason or "",
-                evidence=evidence if isinstance(evidence, dict) else None,
-            )
-        )
-        task.add_done_callback(lambda done: self._record_phase_entry_task_result(done))
+        # Phase-entry side effects are additive; hook failures are logged only. Only KERNEL entry runs out-of-band:
+        # its reprofile and tuning work takes minutes, which would freeze the tick loop and starve the idle guard.
+        entry_kwargs: dict[str, Any] = {
+            "from_phase": prior or "",
+            "to_phase": target,
+            "reason": reason or "",
+            "evidence": evidence if isinstance(evidence, dict) else None,
+        }
+        if target_phase == _phase_state.PHASE_KERNEL_AGENT:
+            task = asyncio.create_task(self._on_phase_entered(**entry_kwargs))
+            task.add_done_callback(self._record_phase_entry_task_result)
+            return
+        # Every other phase keeps its entry effects on the transition itself, which is what callers advancing into
+        # CLOSE rely on to see the sequencer's settlement once the transition returns.
+        try:
+            await self._on_phase_entered(**entry_kwargs)
+        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
+            log.exception("Coordinator: _on_phase_entered hook failed")
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
+            self._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     def _record_phase_entry_task_result(self, task: "asyncio.Task[Any]") -> None:
         """Log phase-entry hook failures after the transition tick has returned."""
