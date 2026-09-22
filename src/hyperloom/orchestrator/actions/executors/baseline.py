@@ -19,7 +19,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterable, Mapping, Sequence
 
 import yaml
 
@@ -1591,6 +1591,41 @@ def _rollback_warm_kernel_apply_results(
     )
 
 
+_LOG_NAMES = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
+
+
+def _scan_log_tail_for_hit(
+    root: Path,
+    hit: Callable[[str], str | None],
+    *,
+    max_bytes: int,
+    limit: int = 64,
+) -> str | None:
+    """Scan the tail of each named log under *root*, return the first hit or ``None``."""
+    seen = 0
+    try:
+        for path in root.rglob("*.log"):
+            if path.name not in _LOG_NAMES:
+                continue
+            seen += 1
+            if seen > limit:
+                break
+            try:
+                with path.open("rb") as f:
+                    f.seek(0, 2)
+                    size = f.tell()
+                    f.seek(max(0, size - max_bytes))
+                    chunk = f.read().decode("utf-8", "replace")
+            except OSError:
+                continue
+            result = hit(chunk)
+            if result is not None:
+                return result
+    except OSError:
+        return None
+    return None
+
+
 class BaselineExecutor:
     """Class form for tests / DI; ``baseline_executor`` is the bare callable."""
 
@@ -1906,28 +1941,7 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if _hit(chunk):
-                    return True
-        except OSError:
-            return False
-        return False
+        return _scan_log_tail_for_hit(root, lambda c: "" if _hit(c) else None, max_bytes=_LOG_SCAN_MAX_BYTES) is not None
 
     @staticmethod
     def _record_baseline_convergence(
@@ -1988,14 +2002,13 @@ class BaselineExecutor:
             root = root.parent
         if not root.exists():
             return False, ""
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
         seen = 0
         try:
             for path in root.rglob("*.log"):
-                if path.name not in log_names:
+                if path.name not in _LOG_NAMES:
                     continue
                 seen += 1
-                if seen > 64:  # bound the scan on pathological trees
+                if seen > 64:
                     break
                 try:
                     with path.open("rb") as f:
@@ -2041,28 +2054,14 @@ class BaselineExecutor:
         root = Path(out_dir)
         if not root.is_dir():
             return False
-        log_names = ("benchmark_stderr.log", "benchmark_stdout.log", "server.log")
-        seen = 0
-        try:
-            for path in root.rglob("*.log"):
-                if path.name not in log_names:
-                    continue
-                seen += 1
-                if seen > 64:  # bound the scan on pathological trees
-                    break
-                try:
-                    with path.open("rb") as f:
-                        f.seek(0, 2)
-                        size = f.tell()
-                        f.seek(max(0, size - _LOG_SCAN_MAX_BYTES))
-                        chunk = f.read().decode("utf-8", "replace")
-                except OSError:
-                    continue
-                if any(marker in chunk for marker in _EVAL_SERVER_UNREACHABLE_MARKERS):
-                    return True
-        except OSError:
-            return False
-        return False
+        return (
+            _scan_log_tail_for_hit(
+                root,
+                lambda c: "" if any(m in c for m in _EVAL_SERVER_UNREACHABLE_MARKERS) else None,
+                max_bytes=_LOG_SCAN_MAX_BYTES,
+            )
+            is not None
+        )
 
     @staticmethod
     def _is_moe_runner_rooted_failure(result: dict[str, Any]) -> bool:
