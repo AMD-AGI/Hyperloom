@@ -168,6 +168,14 @@ class TestResolveKernelSearchRoots:
         monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
         assert f"{checkout}/" in fp.resolve_kernel_search_roots()
 
+    def test_includes_the_inferencex_checkout(self, monkeypatch, tmp_path):
+        """Its recipes decide how the server boots, so a patch has to reach them."""
+        checkout = tmp_path / "InferenceX"
+        checkout.mkdir()
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
+
 
 class TestResolveKnownSourcePrefixes:
     """Classification prefixes, not directories anyone opens.

@@ -361,6 +361,15 @@ def _discover_scriptable_repo_roots() -> tuple[str, ...]:
     return tuple(found)
 
 
+def _env_named_root(env_var: str) -> tuple[str, ...]:
+    """The checkout ``env_var`` names, or empty when unset or absent."""
+    candidate = os.environ.get(env_var, "").strip()
+    if not candidate or not Path(candidate).is_dir():
+        return ()
+    root = _normalize_root(candidate)
+    return (root,) if root else ()
+
+
 def _discover_explicit_framework_root() -> tuple[str, ...]:
     """Discover the framework checkout named by the framework-agnostic env var.
 
@@ -378,11 +387,7 @@ def _discover_explicit_framework_root() -> tuple[str, ...]:
     Returns:
         tuple[str, ...]: The normalised checkout root, or empty when unset or absent.
     """
-    candidate = os.environ.get(GENERIC_FRAMEWORK_ROOT_ENV, "").strip()
-    if not candidate or not Path(candidate).is_dir():
-        return ()
-    root = _normalize_root(candidate)
-    return (root,) if root else ()
+    return _env_named_root(GENERIC_FRAMEWORK_ROOT_ENV)
 
 
 def _env_source_roots() -> tuple[str, ...]:
@@ -410,21 +415,16 @@ def _env_source_roots() -> tuple[str, ...]:
 
 
 def _discover_inferencex_root() -> tuple[str, ...]:
-    """Discover the InferenceX recipe checkout named by ``$INFERENCEX_PATH``.
+    """Discover the InferenceX checkout named by ``$INFERENCEX_PATH``.
 
-    Recipe scripts under an AgentX InferenceX checkout are patch targets but
-    are not a framework Python package, so no other discovery path finds
-    them.
+    Its recipe scripts decide how the server boots, so under AgentX they are
+    what a patch has to reach -- but they are not a framework Python package,
+    so no other discovery path here names the tree holding them.
 
     Returns:
-        tuple[str, ...]: The normalised checkout root, or empty when unset
-            or absent.
+        tuple[str, ...]: The normalised checkout root, or empty when unset or absent.
     """
-    candidate = os.environ.get("INFERENCEX_PATH", "").strip()
-    if not candidate or not Path(candidate).is_dir():
-        return ()
-    root = _normalize_root(candidate)
-    return (root,) if root else ()
+    return _env_named_root("INFERENCEX_PATH")
 
 
 def resolve_session_framework_root() -> str:
