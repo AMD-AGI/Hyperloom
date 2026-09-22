@@ -199,12 +199,14 @@ def test_specialist_close_is_idempotent_after_forced_kill(monkeypatch):
     lease._actor = actor
     lease._start_ref = object()
 
-    assert lease.close() is True
+    confirmed_close = lease.close()
+    assert confirmed_close is True
     assert lease._actor is None
     assert lease._start_ref is None
     assert killed == [actor]
     assert len(stops) == 1
-    assert lease.close() is True
+    repeated_close = lease.close()
+    assert repeated_close is True
     assert killed == [actor]
     assert len(stops) == 1
 
