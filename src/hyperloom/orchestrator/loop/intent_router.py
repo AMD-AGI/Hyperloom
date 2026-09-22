@@ -108,22 +108,15 @@ def _record_config_proposal(router: Any, pending: Any) -> None:
         # assembler here loses nothing.
         producer, producer_ref = PRODUCER_ORCHESTRATION, ""
     scopes = {str(row.get("scope") or "").strip() for row in grid if str(row.get("scope") or "").strip()}
-    try:
-        recorder.record_proposal(
-            proposal_id,
-            arm=ARM_CONFIG,
-            producer=producer,
-            producer_ref=producer_ref,
-            lever_kind=LEVER_CONFIG,
-            scope=scopes.pop() if len(scopes) == 1 else "",
-        )
-        recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: config proposal row failed for %s",
-            proposal_id,
-            exc_info=True,
-        )
+    recorder.record_proposal(
+        proposal_id,
+        arm=ARM_CONFIG,
+        producer=producer,
+        producer_ref=producer_ref,
+        lever_kind=LEVER_CONFIG,
+        scope=scopes.pop() if len(scopes) == 1 else "",
+    )
+    recorder.record_proposal_step(proposal_id, step=STEP_PROPOSED, outcome="submitted")
 
 
 def _variant_review_rows(
@@ -315,36 +308,29 @@ def _record_critic_review(
 
     fields = payload or {}
     grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
-    try:
-        recorder.record_proposal_review(
+    recorder.record_proposal_review(
+        proposal_id,
+        verdict=authored or effective,
+        effective_verdict=effective,
+        held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+        reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+        reason=reason,
+        confidence=fields.get("confidence"),
+        failure_reason_code=str(fields.get("failure_reason_code") or ""),
+        advisory=advisory,
+        variants=variants,
+    )
+    recorder.record_proposal_step(
+        proposal_id,
+        step=STEP_REVIEWED,
+        outcome=effective,
+        reason=reason,
+    )
+    if effective == "reject":
+        recorder.settle_proposal(
             proposal_id,
-            verdict=authored or effective,
-            effective_verdict=effective,
-            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
-            reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
-            reason=reason,
-            confidence=fields.get("confidence"),
-            failure_reason_code=str(fields.get("failure_reason_code") or ""),
-            advisory=advisory,
-            variants=variants,
-        )
-        recorder.record_proposal_step(
-            proposal_id,
-            step=STEP_REVIEWED,
-            outcome=effective,
-            reason=reason,
-        )
-        if effective == "reject":
-            recorder.settle_proposal(
-                proposal_id,
-                disposition=DISPOSITION_DROPPED,
-                reason=reason or "critic_rejected",
-            )
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: critic review row failed for %s",
-            proposal_id,
-            exc_info=True,
+            disposition=DISPOSITION_DROPPED,
+            reason=reason or "critic_rejected",
         )
 
 
@@ -382,14 +368,7 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
     recorder = getter() if callable(getter) else None
     if recorder is None:
         return
-    try:
-        recorder.record_proposal_review_outcome(proposal_id, **outcome)
-    except Exception:  # noqa: BLE001 — observability cannot change routing
-        log.debug(
-            "framework timeline: review outcome row failed for %s",
-            proposal_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
 class IntentRouter:
@@ -1048,23 +1027,20 @@ class IntentRouter:
         timeline to account for it. Best-effort: a failed record never breaks
         the request.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
 
-            record_trace_analyze_request(
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                run_id=str(getattr(request_msg, "msg_id", "") or ""),
-                status=str(result.get("status") or ""),
-                result=result,
-                requested_by=source,
-                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
-                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
-                top_k=payload.get("top_k"),
-                snapshot=getattr(self.shared_state, "last_trace_analyze", None),
-                cache_hit=cache_hit,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change routing
-            log.debug("kernel timeline: trace_analyze request capture failed", exc_info=True)
+        record_trace_analyze_request(
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            run_id=str(getattr(request_msg, "msg_id", "") or ""),
+            status=str(result.get("status") or ""),
+            result=result,
+            requested_by=source,
+            request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+            trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+            top_k=payload.get("top_k"),
+            snapshot=getattr(self.shared_state, "last_trace_analyze", None),
+            cache_hit=cache_hit,
+        )
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""

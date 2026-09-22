@@ -633,35 +633,32 @@ class ConversationCollaborator:
 
         config_dry, config_ev = config
         source_dry, source_ev = source
-        try:
-            recorder.record_plateau(
-                arm=ARM_CONFIG,
-                path=PLATEAU_PATH_ADVISORY,
-                triggered=config_dry,
-                inputs={
-                    "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
-                    "empty_streak": config_ev.get("empty_streak"),
-                    "winners_seen": config_ev.get("winners_seen"),
-                    "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
-                },
-                thresholds={
-                    "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
-                    "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
-                    "lookback": config_ev.get("lookback"),
-                },
-            )
-            recorder.record_plateau(
-                arm=ARM_SOURCE,
-                path=PLATEAU_PATH_ADVISORY,
-                triggered=source_dry,
-                inputs={
-                    "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
-                    "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
-                },
-                thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change the advisory
-            log.debug("framework timeline: advisory plateau record failed", exc_info=True)
+        recorder.record_plateau(
+            arm=ARM_CONFIG,
+            path=PLATEAU_PATH_ADVISORY,
+            triggered=config_dry,
+            inputs={
+                "recent_keep_gain_pct": config_ev.get("recent_keep_gain_pct"),
+                "empty_streak": config_ev.get("empty_streak"),
+                "winners_seen": config_ev.get("winners_seen"),
+                "specialist_rounds_seen": config_ev.get("specialist_rounds_seen"),
+            },
+            thresholds={
+                "keep_gain_threshold_pct": config_ev.get("keep_gain_threshold_pct"),
+                "empty_streak_threshold": config_ev.get("empty_streak_threshold"),
+                "lookback": config_ev.get("lookback"),
+            },
+        )
+        recorder.record_plateau(
+            arm=ARM_SOURCE,
+            path=PLATEAU_PATH_ADVISORY,
+            triggered=source_dry,
+            inputs={
+                "consecutive_no_keep": source_ev.get("source_consecutive_no_keep"),
+                "candidates_exhausted": source_ev.get("source_candidates_exhausted"),
+            },
+            thresholds={"no_keep_streak_threshold": source_ev.get("source_threshold")},
+        )
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""

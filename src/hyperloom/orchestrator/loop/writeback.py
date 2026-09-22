@@ -402,76 +402,73 @@ def _record_config_attempts(
         # arms carry is projected from the gate that ruled. No gate row means
         # nothing gated the variant, which is not a gate that refused it.
         accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
-        try:
-            recorder.record_attempt(
+        recorder.record_attempt(
+            attempt_id,
+            arm=ARM_CONFIG,
+            round_id=round_id,
+            task_id=task_id,
+            proposal_ref=str(params.get("proposal_msg_id") or ""),
+            provenance=str(row.get("provenance") or ""),
+            outcome=outcome,
+            reason=str(row.get("reason") or ""),
+            stage=str(row.get("stage") or ""),
+            fingerprint=fingerprint,
+            # The fingerprint is the join key; the name is what a reader
+            # recognises the variant by.
+            variant_name=str(row.get("variant_name") or ""),
+            measurement={
+                # Both ends of the pair: the anchor advances on every KEEP,
+                # so a percentage without its denominator adds to nothing.
+                "before_tput": metrics.get("base_tput"),
+                "after_tput": metrics.get("tput"),
+                "gain_pct": metrics.get("gain_pct"),
+                "runtime_sec": metrics.get("runtime_sec"),
+                "estimated_output_throughput": metrics.get("estimated_output_throughput"),
+            },
+            config_delta={
+                "extra_server_args": variant.get("extra_server_args"),
+                "extra_envs": variant.get("extra_envs"),
+            },
+            accuracy={
+                "required": True if accuracy_gate else None,
+                "value": accuracy_gate.get("observed"),
+                "reference": accuracy_gate.get("threshold"),
+                "passed": accuracy_gate.get("passed"),
+            },
+            failure={
+                "error_class": str(row.get("error_class") or ""),
+                "error_excerpt": str(row.get("error_excerpt") or ""),
+            },
+            artifacts={
+                "workspace": str(row.get("workspace") or ""),
+                "server_log_path": str(row.get("server_log_path") or ""),
+                "raw_result_path": str(row.get("raw_result_path") or ""),
+            },
+            decision=outcome,
+            adopted=_is_kept(outcome),
+            # Recorded rather than referenced: every KEEP advances the
+            # stack, so the session's current config is not what this
+            # variant was measured on top of.
+            measured_against=row.get("measured_against") or {},
+            # What stood behind the verdict. Absent when nothing ruled.
+            validation_basis=str(row.get("validation_basis") or ""),
+            # A pair is what makes a gain addable, so eligibility follows
+            # the pair being present rather than the outcome being a KEEP.
+            attribution_eligible=(
+                _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
+            ),
+        )
+        for gate in gates:
+            if not str(gate.get("gate") or ""):
+                continue
+            recorder.record_attempt_gate(
                 attempt_id,
-                arm=ARM_CONFIG,
-                round_id=round_id,
-                task_id=task_id,
-                proposal_ref=str(params.get("proposal_msg_id") or ""),
-                provenance=str(row.get("provenance") or ""),
-                outcome=outcome,
-                reason=str(row.get("reason") or ""),
-                stage=str(row.get("stage") or ""),
-                fingerprint=fingerprint,
-                # The fingerprint is the join key; the name is what a reader
-                # recognises the variant by.
-                variant_name=str(row.get("variant_name") or ""),
-                measurement={
-                    # Both ends of the pair: the anchor advances on every KEEP,
-                    # so a percentage without its denominator adds to nothing.
-                    "before_tput": metrics.get("base_tput"),
-                    "after_tput": metrics.get("tput"),
-                    "gain_pct": metrics.get("gain_pct"),
-                    "runtime_sec": metrics.get("runtime_sec"),
-                    "estimated_output_throughput": metrics.get("estimated_output_throughput"),
-                },
-                config_delta={
-                    "extra_server_args": variant.get("extra_server_args"),
-                    "extra_envs": variant.get("extra_envs"),
-                },
-                accuracy={
-                    "required": True if accuracy_gate else None,
-                    "value": accuracy_gate.get("observed"),
-                    "reference": accuracy_gate.get("threshold"),
-                    "passed": accuracy_gate.get("passed"),
-                },
-                failure={
-                    "error_class": str(row.get("error_class") or ""),
-                    "error_excerpt": str(row.get("error_excerpt") or ""),
-                },
-                artifacts={
-                    "workspace": str(row.get("workspace") or ""),
-                    "server_log_path": str(row.get("server_log_path") or ""),
-                    "raw_result_path": str(row.get("raw_result_path") or ""),
-                },
-                decision=outcome,
-                adopted=_is_kept(outcome),
-                # Recorded rather than referenced: every KEEP advances the
-                # stack, so the session's current config is not what this
-                # variant was measured on top of.
-                measured_against=row.get("measured_against") or {},
-                # What stood behind the verdict. Absent when nothing ruled.
-                validation_basis=str(row.get("validation_basis") or ""),
-                # A pair is what makes a gain addable, so eligibility follows
-                # the pair being present rather than the outcome being a KEEP.
-                attribution_eligible=(
-                    _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
-                ),
+                str(gate.get("gate")),
+                passed=gate.get("passed"),
+                reason=str(gate.get("reason") or ""),
+                observed=gate.get("observed"),
+                threshold=gate.get("threshold"),
             )
-            for gate in gates:
-                if not str(gate.get("gate") or ""):
-                    continue
-                recorder.record_attempt_gate(
-                    attempt_id,
-                    str(gate.get("gate")),
-                    passed=gate.get("passed"),
-                    reason=str(gate.get("reason") or ""),
-                    observed=gate.get("observed"),
-                    threshold=gate.get("threshold"),
-                )
-        except Exception:  # noqa: BLE001 — observability cannot change write-back
-            log.debug("framework timeline: config attempt record failed", exc_info=True)
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")
     if not (recorded and proposal_ref):
@@ -484,11 +481,8 @@ def _record_config_attempts(
         STEP_ATTEMPTED,
     )
 
-    try:
-        recorder.record_proposal_step(proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
-        recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
-    except Exception:  # noqa: BLE001 — observability cannot change write-back
-        log.debug("framework timeline: config proposal settle failed", exc_info=True)
+    recorder.record_proposal_step(proposal_ref, step=STEP_ATTEMPTED, outcome=str(recorded))
+    recorder.settle_proposal(proposal_ref, disposition=DISPOSITION_ATTEMPTED)
 
 
 class WritebackCollaborator:
@@ -2832,10 +2826,7 @@ class WritebackCollaborator:
         source_phase = str(round_entry.get("source_phase") or "").strip().upper()
         recorder = getattr(self, "_framework_timeline_recorder", None)
         if recorder is not None and source_phase == PHASE_FRAMEWORK_AGENT:
-            try:
-                recorder.record_run(str(task.task_id or ""), **product)
-            except Exception:  # noqa: BLE001 — a round outranks its own record
-                log.debug("specialist bookkeeping: framework run product record failed", exc_info=True)
+            recorder.record_run(str(task.task_id or ""), **product)
             return
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import phase_event
@@ -4107,31 +4098,28 @@ class WritebackCollaborator:
         from ..phases.geak_rebench import MAX_REBENCH_ATTEMPTS_PER_CYCLE
 
         params = task.params or {}
-        try:
-            recorder.record_geak_rebench_attempt(
-                max_attempts=MAX_REBENCH_ATTEMPTS_PER_CYCLE,
-                attempt_id=str(task.idempotency_key or task.task_id or ""),
-                source_ref=None,
-                idempotency_key=str(task.idempotency_key or ""),
-                task_id=str(task.task_id or ""),
-                dispatched_at=None,
-                settled_at=None,
-                base_tput=params.get("base_tput"),
-                measured_tput=measured,
-                decision=decision,
-                decision_reason=str(params.get("reason") or ""),
-                status=pending_status,
-                engagement={
-                    "config_matched": config_matched,
-                    "overlay_loaded": overlay_loaded,
-                    "expected_cfg_hash": params.get("expected_cfg_hash"),
-                    "observed_cfg_hash": got_hash,
-                    "expected_overlay_digest": params.get("expected_overlay_digest"),
-                    "observed_overlay_digest": got_overlay_digest,
-                },
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change the verdict
-            log.debug("kernel timeline: geak rebench record failed", exc_info=True)
+        recorder.record_geak_rebench_attempt(
+            max_attempts=MAX_REBENCH_ATTEMPTS_PER_CYCLE,
+            attempt_id=str(task.idempotency_key or task.task_id or ""),
+            source_ref=None,
+            idempotency_key=str(task.idempotency_key or ""),
+            task_id=str(task.task_id or ""),
+            dispatched_at=None,
+            settled_at=None,
+            base_tput=params.get("base_tput"),
+            measured_tput=measured,
+            decision=decision,
+            decision_reason=str(params.get("reason") or ""),
+            status=pending_status,
+            engagement={
+                "config_matched": config_matched,
+                "overlay_loaded": overlay_loaded,
+                "expected_cfg_hash": params.get("expected_cfg_hash"),
+                "observed_cfg_hash": got_hash,
+                "expected_overlay_digest": params.get("expected_overlay_digest"),
+                "observed_overlay_digest": got_overlay_digest,
+            },
+        )
 
     def _record_geak_rebench_conclusion(
         self,
@@ -4150,14 +4138,11 @@ class WritebackCollaborator:
         recorder = self.phase_kernel._kernel_timeline()
         if recorder is None:
             return
-        try:
-            recorder.record_geak_rebench_conclusion(
-                final_status=final_status,
-                final_error_class=final_error_class,
-                final_error=final_error,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change the verdict
-            log.debug("kernel timeline: geak rebench conclusion record failed", exc_info=True)
+        recorder.record_geak_rebench_conclusion(
+            final_status=final_status,
+            final_error_class=final_error_class,
+            final_error=final_error,
+        )
 
     async def _promote_roofline(
         self,

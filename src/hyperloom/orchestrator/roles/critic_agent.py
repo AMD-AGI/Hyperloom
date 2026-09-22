@@ -868,54 +868,51 @@ class CriticAgentBackend:
             workdir (Path): This turn's workdir, holding the artifacts.
             kb_priors (dict[str, Any]): The priors trace for the turn.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import record_review_evidence
 
-            context = request.get("context") if isinstance(request.get("context"), dict) else {}
-            macro_cycle = context.get("macro_cycle")
-            if macro_cycle is None:
-                return
-            subjects = _review_subjects(judge_bundle)
-            writes: dict[str, dict[str, Any]] = {}
-            for write in emit.get("kb_writes") or []:
-                if not isinstance(write, dict):
-                    continue
-                target = str(write.get("target_proposal_msg_id") or "")
-                result = write.get("result") if isinstance(write.get("result"), dict) else {}
-                if target:
-                    writes[target] = {
-                        "trigger": str(write.get("trigger") or ""),
-                        "status": str(result.get("status") or ""),
-                        "detail": str(result.get("detail") or result.get("error") or ""),
-                    }
-            artifacts = {
-                name: str(workdir / filename)
-                for name, filename in (
-                    ("request_path", "request.json"),
-                    ("judge_bundle_path", "judge_bundle.json"),
-                    ("review_path", "review.json"),
-                    ("emit_path", "emit.json"),
-                )
-            }
-            for verdict in (review or {}).get("review_verdicts") or []:
-                if not isinstance(verdict, dict):
-                    continue
-                target = str(verdict.get("target_proposal_msg_id") or "")
-                if not target:
-                    continue
-                kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
-                if kb_priors:
-                    kb["priors"] = kb_priors
-                if target in writes:
-                    kb["write"] = writes[target]
-                record_review_evidence(
-                    macro_cycle=macro_cycle,
-                    proposal_id=subjects.get(target) or target,
-                    artifacts=artifacts,
-                    kb=kb,
-                )
-        except Exception:  # noqa: BLE001 — observability cannot break the review
-            log.debug("critic_agent: review evidence record failed", exc_info=True)
+        context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        macro_cycle = context.get("macro_cycle")
+        if macro_cycle is None:
+            return
+        subjects = _review_subjects(judge_bundle)
+        writes: dict[str, dict[str, Any]] = {}
+        for write in emit.get("kb_writes") or []:
+            if not isinstance(write, dict):
+                continue
+            target = str(write.get("target_proposal_msg_id") or "")
+            result = write.get("result") if isinstance(write.get("result"), dict) else {}
+            if target:
+                writes[target] = {
+                    "trigger": str(write.get("trigger") or ""),
+                    "status": str(result.get("status") or ""),
+                    "detail": str(result.get("detail") or result.get("error") or ""),
+                }
+        artifacts = {
+            name: str(workdir / filename)
+            for name, filename in (
+                ("request_path", "request.json"),
+                ("judge_bundle_path", "judge_bundle.json"),
+                ("review_path", "review.json"),
+                ("emit_path", "emit.json"),
+            )
+        }
+        for verdict in (review or {}).get("review_verdicts") or []:
+            if not isinstance(verdict, dict):
+                continue
+            target = str(verdict.get("target_proposal_msg_id") or "")
+            if not target:
+                continue
+            kb: dict[str, Any] = {"persist_requested": bool(verdict.get("persist_to_kb"))}
+            if kb_priors:
+                kb["priors"] = kb_priors
+            if target in writes:
+                kb["write"] = writes[target]
+            record_review_evidence(
+                macro_cycle=macro_cycle,
+                proposal_id=subjects.get(target) or target,
+                artifacts=artifacts,
+                kb=kb,
+            )
 
     @staticmethod
     def _build_kb_priors_trace(

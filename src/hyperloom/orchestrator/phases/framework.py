@@ -131,16 +131,13 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
     if not task_id:
         return
     fields.setdefault("dispatched_at" if status == "dispatched" else "completed_at", now_iso("seconds"))
-    try:
-        recorder.record_run(
-            task_id,
-            role=role,
-            arm=ARM_CONFIG if role == ROLE_CONFIG else ARM_SOURCE,
-            status=status,
-            **fields,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change dispatch
-        log.debug("framework timeline: run record failed", exc_info=True)
+    recorder.record_run(
+        task_id,
+        role=role,
+        arm=ARM_CONFIG if role == ROLE_CONFIG else ARM_SOURCE,
+        status=status,
+        **fields,
+    )
 
 
 def _record_step(
@@ -161,16 +158,13 @@ def _record_step(
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
-    try:
-        recorder.record_proposal_step(
-            proposal_id,
-            step=step,
-            run_ref=run_ref,
-            outcome=outcome,
-            reason=reason,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change the phase
-        log.debug("framework timeline: proposal step record failed", exc_info=True)
+    recorder.record_proposal_step(
+        proposal_id,
+        step=step,
+        run_ref=run_ref,
+        outcome=outcome,
+        reason=reason,
+    )
 
 
 def _record_review_outcome(
@@ -190,13 +184,10 @@ def _record_review_outcome(
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
-    try:
-        if verdict:
-            recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
-            recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
-        recorder.record_proposal_review_outcome(proposal_id, **outcome)
-    except Exception:  # noqa: BLE001 — observability cannot change the phase
-        log.debug("framework timeline: review outcome record failed", exc_info=True)
+    if verdict:
+        recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
+        recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
+    recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
 
 def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "") -> None:
@@ -204,10 +195,7 @@ def _settle(coord: Any, proposal_id: str, *, disposition: str, reason: str = "")
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
-    try:
-        recorder.settle_proposal(proposal_id, disposition=disposition, reason=reason)
-    except Exception:  # noqa: BLE001 — observability cannot change the phase
-        log.debug("framework timeline: settle record failed", exc_info=True)
+    recorder.settle_proposal(proposal_id, disposition=disposition, reason=reason)
 
 
 def _record_source_attempt(

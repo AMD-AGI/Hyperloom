@@ -104,19 +104,12 @@ def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import STEP_ROUTED
 
-    try:
-        recorder.record_proposal_step(
-            pending.proposal_msg_id,
-            step=STEP_ROUTED,
-            outcome="materialized",
-            reason=str(task_id or ""),
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config routed step failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(
+        pending.proposal_msg_id,
+        step=STEP_ROUTED,
+        outcome="materialized",
+        reason=str(task_id or ""),
+    )
 
 
 def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
@@ -135,19 +128,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
         STEP_DROPPED,
     )
 
-    try:
-        recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
-        recorder.settle_proposal(
-            pending.proposal_msg_id,
-            disposition=DISPOSITION_DROPPED,
-            reason=reason,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change materialization
-        log.debug(
-            "framework timeline: config drop row failed for %s",
-            pending.proposal_msg_id,
-            exc_info=True,
-        )
+    recorder.record_proposal_step(pending.proposal_msg_id, step=STEP_DROPPED, reason=reason)
+    recorder.settle_proposal(
+        pending.proposal_msg_id,
+        disposition=DISPOSITION_DROPPED,
+        reason=reason,
+    )
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:

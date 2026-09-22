@@ -1953,30 +1953,27 @@ class PreludePhase(PhaseHandler):
         can see the two diverge across a re-baseline.
         """
         params = dict(getattr(task, "params", None) or {})
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
 
-            recorder = make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                task_id=str(getattr(task, "task_id", "") or ""),
-                tier=str(params.get("warm_recipe_tier") or ""),
-                config_source=str(params.get("config_source") or ""),
-                config_donor_tier=str(params.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
-                expected_gain_pct=params.get("warm_expected_gain_pct"),
-                confidence=params.get("warm_recipe_conf"),
-                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-                session_baseline_tput=session_baseline_tput,
-                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-                recipe_suppressed=not str(params.get("config_source") or ""),
-            )
-            if recorder is not None:
-                self._record_warm_kernel_apply_items(recorder)
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: opening the event failed", exc_info=True)
+        recorder = make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            task_id=str(getattr(task, "task_id", "") or ""),
+            tier=str(params.get("warm_recipe_tier") or ""),
+            config_source=str(params.get("config_source") or ""),
+            config_donor_tier=str(params.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+            expected_gain_pct=params.get("warm_expected_gain_pct"),
+            confidence=params.get("warm_recipe_conf"),
+            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+            session_baseline_tput=session_baseline_tput,
+            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            recipe_suppressed=not str(params.get("config_source") or ""),
+        )
+        if recorder is not None:
+            self._record_warm_kernel_apply_items(recorder)
 
     def _record_warm_kernel_apply_items(self, recorder: Any) -> None:
         """State which kernel items the replay carried and which of them landed.
@@ -2045,31 +2042,27 @@ class PreludePhase(PhaseHandler):
         """
         params = dict(getattr(task, "params", None) or {})
         outcome = dict(getattr(self.shared_state, "warm_replay_outcome", None) or {})
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
 
-            return make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
-                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
-                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
-                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(outcome) or None,
-                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
-                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-                min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
-                session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
-                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-                # Rebinding, not opening: the enqueue seam already put this event
-                # on the timeline, and opening it twice would restate its start.
-                open_event_on_timeline=False,
-            )
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: rebinding to the event failed", exc_info=True)
-            return None
+        return make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+            tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+            config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+            config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(outcome) or None,
+            expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+            confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+            min_reproduce_pct=getattr(self, "_warm_replay_min_reproduce_pct", 0.8),
+            session_baseline_tput=getattr(self.shared_state, "baseline_tput", None),
+            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            # Rebinding, not opening: the enqueue seam already put this event
+            # on the timeline, and opening it twice would restate its start.
+            open_event_on_timeline=False,
+        )
 
     def _skip_warm_replay(
         self,
@@ -2109,31 +2102,28 @@ class PreludePhase(PhaseHandler):
         earliest refusals have no identity fields on ``outcome`` yet, and state
         an empty request rather than an invented one.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
-                make_warm_replay_recorder,
-            )
+        from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+            make_warm_replay_recorder,
+        )
 
-            recorder = make_warm_replay_recorder(
-                phase=_WARM_REPLAY_EVENT_PHASE,
-                macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-                tier=str(outcome.get("warm_recipe_tier") or ""),
-                config_source=str(outcome.get("config_source") or ""),
-                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
-                donor=self._warm_replay_donor(outcome) or None,
-                expected_gain_pct=outcome.get("expected_gain_pct"),
-                confidence=outcome.get("warm_recipe_conf"),
-            )
-            if recorder is None:
-                return
-            # A refusal rooted in the kernel preparation has a plan behind it,
-            # and which item refused to apply is the whole of what it means.
-            self._record_warm_kernel_apply_items(recorder)
-            if rollback := (outcome.get("rollback") if isinstance(outcome.get("rollback"), Mapping) else None):
-                recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
-            recorder.finish_skipped(code=code, outcome=outcome, details=details)
-        except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-            log.debug("warm replay timeline: recording the skip failed", exc_info=True)
+        recorder = make_warm_replay_recorder(
+            phase=_WARM_REPLAY_EVENT_PHASE,
+            macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            tier=str(outcome.get("warm_recipe_tier") or ""),
+            config_source=str(outcome.get("config_source") or ""),
+            config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+            donor=self._warm_replay_donor(outcome) or None,
+            expected_gain_pct=outcome.get("expected_gain_pct"),
+            confidence=outcome.get("warm_recipe_conf"),
+        )
+        if recorder is None:
+            return
+        # A refusal rooted in the kernel preparation has a plan behind it,
+        # and which item refused to apply is the whole of what it means.
+        self._record_warm_kernel_apply_items(recorder)
+        if rollback := (outcome.get("rollback") if isinstance(outcome.get("rollback"), Mapping) else None):
+            recorder.record_rollback(ok=rollback.get("ok"), errors=rollback.get("errors"))
+        recorder.finish_skipped(code=code, outcome=outcome, details=details)
 
     def _promote_warm_replay(
         self,

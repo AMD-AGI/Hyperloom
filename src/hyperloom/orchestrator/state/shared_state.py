@@ -1319,12 +1319,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import instrument
+        from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-            instrument.snapshot_state_sections(session_dir, self)
-        except Exception:  # noqa: BLE001 — author-time capture must never block save
-            log.debug("snapshot_state_sections failed", exc_info=True)
+        instrument.snapshot_state_sections(session_dir, self)
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:
@@ -1805,38 +1802,35 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """
         if not isinstance(entry, dict):
             return
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
-            last = (entry.get("attempts") or [{}])[-1]
-            last = last if isinstance(last, dict) else {}
-            rejected = entry.get("rejected")
-            record_integrate_verdict(
-                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                integration_id=str(entry.get("integration_id") or ""),
-                kernel_id=str(entry.get("kernel_id") or ""),
-                decision=str(entry.get("last_decision") or ""),
-                status=str(entry.get("last_status") or ""),
-                attempt_count=entry.get("attempt_count"),
-                fault_count=entry.get("fault_count"),
-                gain_pct=entry.get("best_gain_pct"),
-                accuracy_pass=last.get("accuracy_pass"),
-                validation_tier=str(last.get("validation_tier") or ""),
-                patch_path=str(entry.get("patch_path") or ""),
-                target_file=str(entry.get("target_file") or ""),
-                error_class=str(entry.get("last_error_class") or ""),
-                rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
-                retryable=bool(entry.get("retryable")),
-                settled_at=str(entry.get("updated_at") or ""),
-                extra_server_args=str(entry.get("extra_server_args") or ""),
-                basis=str(entry.get("basis") or ""),
-                alignment_status=str(entry.get("alignment_status") or ""),
-                # Absent means attributable: every writer that cannot pin the
-                # gain on this one kernel says so explicitly.
-                gain_attributed=bool(entry.get("validated", True)),
-            )
-        except Exception:  # noqa: BLE001 — author-time capture must never block record
-            log.debug("integrate verdict capture failed", exc_info=True)
+        last = (entry.get("attempts") or [{}])[-1]
+        last = last if isinstance(last, dict) else {}
+        rejected = entry.get("rejected")
+        record_integrate_verdict(
+            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+            integration_id=str(entry.get("integration_id") or ""),
+            kernel_id=str(entry.get("kernel_id") or ""),
+            decision=str(entry.get("last_decision") or ""),
+            status=str(entry.get("last_status") or ""),
+            attempt_count=entry.get("attempt_count"),
+            fault_count=entry.get("fault_count"),
+            gain_pct=entry.get("best_gain_pct"),
+            accuracy_pass=last.get("accuracy_pass"),
+            validation_tier=str(last.get("validation_tier") or ""),
+            patch_path=str(entry.get("patch_path") or ""),
+            target_file=str(entry.get("target_file") or ""),
+            error_class=str(entry.get("last_error_class") or ""),
+            rejected_reason=str(rejected.get("reason") or "") if isinstance(rejected, dict) else "",
+            retryable=bool(entry.get("retryable")),
+            settled_at=str(entry.get("updated_at") or ""),
+            extra_server_args=str(entry.get("extra_server_args") or ""),
+            basis=str(entry.get("basis") or ""),
+            alignment_status=str(entry.get("alignment_status") or ""),
+            # Absent means attributable: every writer that cannot pin the
+            # gain on this one kernel says so explicitly.
+            gain_attributed=bool(entry.get("validated", True)),
+        )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
@@ -2026,17 +2020,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         setattr(self, attempts_attr, history)
         setattr(self, last_attr, dict(entry))
         if action == "baseline":
-            try:
-                from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
+            from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import record_action_decision
 
-                record_action_decision(
-                    phase=str(getattr(self, "phase", "") or "unphased"),
-                    macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-                    task_id=str(entry.get("task_id") or ""),
-                    decision=str(entry.get("decision") or ""),
-                )
-            except Exception:  # noqa: BLE001 — author-time capture must never block record
-                log.debug("baseline decision capture failed", exc_info=True)
+            record_action_decision(
+                phase=str(getattr(self, "phase", "") or "unphased"),
+                macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
+                task_id=str(entry.get("task_id") or ""),
+                decision=str(entry.get("decision") or ""),
+            )
         return entry
 
     def record_action_failure(
