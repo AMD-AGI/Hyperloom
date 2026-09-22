@@ -15,6 +15,7 @@ from kernelforge.gemm_tune.tier3.dispatch import (
     GRAPH_INNER,
     MAX_RELATIVE_ERROR,
     _Bf16DenseAdapter,
+    _CaptureFailed,
     parse_config,
     relative_error,
 )
@@ -211,6 +212,15 @@ def adapter(monkeypatch: pytest.MonkeyPatch):
     return a
 
 
+@pytest.fixture
+def uncapturable_adapter(monkeypatch: pytest.MonkeyPatch):
+    """An adapter whose device refuses graph capture."""
+    torch = _FakeTorch(capture_raises=True)
+    a = _Bf16DenseAdapter()
+    monkeypatch.setattr(a, "_torch", lambda: torch)
+    return a
+
+
 # ── the config a candidate carries ───────────────────────────────────────────
 class TestReadingACandidatesConfig:
     def test_ints_and_bools_come_back_typed_not_as_strings(self):
@@ -275,15 +285,13 @@ class TestGraphCapture:
         # 5 warm-up calls outside the capture, GRAPH_INNER inside it.
         assert len(calls) == 5 + GRAPH_INNER
 
-    def test_a_kernel_that_cannot_be_captured_is_still_timed_raw(self, monkeypatch: pytest.MonkeyPatch):
-        torch = _FakeTorch(capture_raises=True)
-        a = _Bf16DenseAdapter()
-        monkeypatch.setattr(a, "_torch", lambda: torch)
+    def test_a_candidate_that_cannot_be_captured_is_dropped_not_timed_raw(self, uncapturable_adapter):
+        """Raw timing here would beat a captured baseline by GRAPH_INNER and win the shape."""
+        assert uncapturable_adapter.as_graph_or_skip(lambda: "raw") is None
 
-        def fn():
-            return "raw"
-
-        assert a.as_graph(fn) is fn
+    def test_a_baseline_that_cannot_be_captured_fails_the_attempt(self, uncapturable_adapter):
+        with pytest.raises(_CaptureFailed):
+            uncapturable_adapter.make_baseline("2x3x4")
 
     def test_the_baseline_is_the_unmodified_matmul_under_the_same_capture(self, adapter):
         assert adapter.make_baseline("2x3x4")() == "replayed"

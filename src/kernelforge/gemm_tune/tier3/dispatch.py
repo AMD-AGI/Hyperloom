@@ -90,6 +90,10 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
 }
 
 
+class _CaptureFailed(RuntimeError):
+    """The work could not be captured into a CUDA/HIP graph, so replay cannot time it."""
+
+
 def describe_correctness_rule(table: str) -> dict[str, Any] | None:
     """Return the adapter's referee rule, or ``None`` for the dense default.
 
@@ -419,6 +423,9 @@ class _FusedMoeAdapter:
     def as_graph(self, fn: Callable[[], Any]) -> Callable[[], Any]:
         return _Bf16DenseAdapter.as_graph(self, fn)  # type: ignore[arg-type]
 
+    def as_graph_or_skip(self, fn: Callable[[], Any] | None) -> Callable[[], Any] | None:
+        return _Bf16DenseAdapter.as_graph_or_skip(self, fn)  # type: ignore[arg-type]
+
     def make_baseline(self, shape: str) -> Callable[[], Any]:
         """Build an untuned baseline using an empty table, not installed rows."""
         self._point_at(self._baseline_csv)
@@ -434,7 +441,7 @@ class _FusedMoeAdapter:
         def dispatch(cand: dict[str, Any]) -> Callable[[], Any] | None:
             self._in_play[shape] = cand
             run = self._build(shape, cand)
-            return self.as_graph(run) if run is not None else None
+            return self.as_graph_or_skip(run)
 
         return dispatch
 
@@ -652,9 +659,20 @@ class _Bf16DenseAdapter:
                 for _ in range(GRAPH_INNER):
                     fn()
             return graph.replay
-        except Exception as exc:  # noqa: BLE001 - capture is an optimisation
-            log.debug("tier3: graph capture failed, timing raw: %r", exc)
-            return fn
+        except Exception as exc:  # noqa: BLE001 - narrowed into _CaptureFailed for the caller to route
+            # ``graph.replay`` runs GRAPH_INNER invocations per call where ``fn`` runs one, so an
+            # uncaptured callable cannot be timed against a captured baseline.
+            raise _CaptureFailed(f"graph capture failed: {exc!r}") from exc
+
+    def as_graph_or_skip(self, fn: Callable[[], Any] | None) -> Callable[[], Any] | None:
+        """Wrap a candidate for replay timing, or drop it when it cannot be captured."""
+        if fn is None:
+            return None
+        try:
+            return self.as_graph(fn)
+        except _CaptureFailed as exc:
+            log.warning("tier3: candidate dropped, %s", exc)
+            return None
 
     def make_baseline(self, shape: str) -> Callable[[], Any]:
         torch = self._torch()
@@ -670,7 +688,7 @@ class _Bf16DenseAdapter:
             # has to rebuild against fresh inputs rather than reuse this callable's fixed operands.
             self._in_play[shape] = cand
             call = self._build(key, cand)
-            return self.as_graph(call) if call is not None else None
+            return self.as_graph_or_skip(call)
 
         return dispatch
 

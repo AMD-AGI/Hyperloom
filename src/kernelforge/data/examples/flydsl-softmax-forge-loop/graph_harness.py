@@ -13,7 +13,7 @@ class _CaptureInvalid(RuntimeError):
 
 
 def _time_eager(step: Callable[[], object], iters: int) -> list[float]:
-    """Per-iteration event timing WITHOUT graph capture (fallback path)."""
+    """Per-iteration event timing WITHOUT graph capture (the ``capture=False`` path)."""
     times: list[float] = []
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
@@ -75,7 +75,11 @@ def cuda_graph_bench(
     dirty: Callable[[], None] | None = None,
     verify: Callable[[], bool] | None = None,
 ) -> dict:
-    """Benchmark ``step`` under CUDA/HIP graph replay (eager fallback)."""
+    """Benchmark ``step`` under CUDA/HIP graph replay, or eagerly when ``capture`` is off.
+
+    A capture failure raises: preflight counts real replays, so an eager result is rejected
+    anyway, and the capture error is what says how to fix the driver.
+    """
     if not torch.cuda.is_available():
         raise RuntimeError("no GPU available (torch.cuda.is_available() is False)")
 
@@ -90,12 +94,8 @@ def cuda_graph_bench(
     torch.cuda.synchronize()
 
     if capture:
-        try:
-            times = _time_graph(step, iters, dirty, verify)
-            mode = "cudagraph"
-        except Exception as e:  # noqa: BLE001 - fall back so a run always measures
-            times = _time_eager(step, iters)
-            mode = f"eager ({type(e).__name__}: {e})"
+        times = _time_graph(step, iters, dirty, verify)
+        mode = "cudagraph"
     else:
         times = _time_eager(step, iters)
         mode = "eager (capture disabled)"
