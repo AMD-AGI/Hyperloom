@@ -167,6 +167,91 @@ def test_setup_cli_scrubs_stale_workspace_runtime_env_when_dotenv_exists(tmp_pat
         assert key not in env
 
 
+def _credential_functions() -> str:
+    """The credential half of ``install_baremetal.sh``, runnable on its own with stubbed log/die helpers."""
+    install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
+    script_text = install_script.read_text(encoding="utf-8")
+    return script_text[script_text.index("read_dotenv_var() {") : script_text.index("\nwrite_runtime_dotenv() {")]
+
+
+def test_baremetal_setup_accepts_a_codex_only_gateway(tmp_path: Path):
+    """Hyperloom's runtime drives both claude and codex, and ``cli/preflight._provider_only_mode`` already treats an
+    OpenAI-only environment as a valid single provider; the bare-metal installer must not be the one place refusing it.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "OPENAI_API_KEY=ak-codex-only",
+                "CODEX_MODEL=glm-5-3",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 0, proc.stderr
+    text = dotenv.read_text(encoding="utf-8")
+    assert "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1" in text
+    assert "OPENAI_API_KEY=ak-codex-only" in text
+    assert "CODEX_MODEL=glm-5-3" in text
+
+
+def test_baremetal_setup_still_rejects_a_half_configured_openai_side(tmp_path: Path):
+    """A base URL with no key is not a codex deployment; accepting it would trade a clear setup error for a run that
+    fails much later, when the first agent call is made.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("HYPERLOOM_RUN_MODE=baremetal\n", encoding="utf-8")
+    runner = tmp_path / "run.sh"
+    runner.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                "set -euo pipefail",
+                f"DOTENV={dotenv}",
+                "CHECK_ONLY=0",
+                "DRY_RUN=0",
+                "OPENAI_BASE_URL_ARG=",
+                "log() { :; }",
+                "warn() { :; }",
+                'die() { echo "$*" >&2; exit 99; }',
+                "is_interactive() { return 1; }",
+                _credential_functions(),
+                "unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_OAUTH_TOKEN",
+                "unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL OPENAI_API_KEY",
+                "OPENAI_BASE_URL=https://gw.example.com/api/v1/llm-proxy/v1",
+                "resolve_credentials",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(["bash", str(runner)], capture_output=True, text=True)
+
+    assert proc.returncode == 99, proc.stdout + proc.stderr
+
+
 def test_baremetal_setup_authoritative_anthropic_env_removes_openai_keys(tmp_path: Path):
     install_script = Path(setup.__file__).resolve().parent / "assets" / "install_baremetal.sh"
     script_text = install_script.read_text(encoding="utf-8")
