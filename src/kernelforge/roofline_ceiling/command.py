@@ -158,27 +158,12 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
 )
 @click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}.")
 @click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted.")
-@click.option("--device", "device_id", default=0, type=int, help="GPU ordinal to measure and profile on")
-@click.option(
-    "--roof-only/--no-roof-only",
-    default=True,
-    help="Measure empirical roofs with rocprof-compute --roof-only. Disabling falls back to datasheet peaks.",
-)
-@click.option(
-    "--remeasure-device",
-    is_flag=True,
-    default=False,
-    help="Measure this box's roofs again instead of reading the profile an earlier run cached.",
-)
 @click.option("--cache/--no-cache", default=True, help="Reuse and update the cached ceiling for this identity")
 @click.option("--op-name", default="", help="Operator name used in the cache identity. Defaults to the workspace name.")
 @click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
 @click.option("--agent-model", default="", help="Agent model. Falls back to the provider default.")
 @click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session")
 @click.option("--run-timeout-sec", default=1800, type=int, help="Wall-clock budget for each measurement subprocess")
-@click.option(
-    "--roof-timeout-sec", default=3600, type=int, help="Wall-clock budget for the --roof-only microbenchmarks"
-)
 def roofline_ceiling_command(
     workspace_dir: str,
     kernel_files: tuple[str, ...],
@@ -187,16 +172,12 @@ def roofline_ceiling_command(
     performance_command: str,
     output_dir: str,
     arch: str,
-    device_id: int,
-    roof_only: bool,
-    remeasure_device: bool,
     cache: bool,
     op_name: str,
     agent_provider: str,
     agent_model: str,
     agent_timeout_sec: int,
     run_timeout_sec: int,
-    roof_timeout_sec: int,
 ) -> None:
     """Estimate the theoretical achievable latency of one kernel, per scored shape.
 
@@ -216,7 +197,7 @@ def roofline_ceiling_command(
     command = _resolve_performance_command(performance_command, document, config_file)
     sources = _resolve_kernel_files(kernel_files, document, workspace)
 
-    click.echo("[ceiling] collecting evidence (driver run, dispatch floor, roofs, trace)...")
+    click.echo("[ceiling] collecting evidence (driver run, device profile, trace)...")
     try:
         outcome = asyncio.run(
             estimate_ceiling(
@@ -229,14 +210,10 @@ def roofline_ceiling_command(
                 output_dir=Path(output_dir).expanduser() if output_dir.strip() else None,
                 op_name=op_name,
                 arch=arch,
-                device_id=device_id,
-                roof_only=roof_only,
-                remeasure_device=remeasure_device,
                 use_cache=cache,
                 agent_model=agent_model,
                 agent_timeout_sec=agent_timeout_sec,
                 run_timeout_sec=float(run_timeout_sec),
-                roof_timeout_sec=float(roof_timeout_sec),
             )
         )
     except (CeilingAnalysisError, NoScoredCasesError) as exc:

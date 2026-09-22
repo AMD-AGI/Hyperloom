@@ -88,7 +88,8 @@
   "notes": [
     "bf16_mfma is NOT the raw measurement. rocprofiler-compute 3.4.0 reported MFMABF16Flops at 620686940000000 (exactly half of MFMAF16Flops, ratio 1.991), but gfx950 runs both at the same matrix-core rate -- the knowledge base lists them as one entry, 'FP16/BF16 2.5 PF'. The raw figure is a tool artifact, not a property of the chip, and a ceiling divided by it comes out roughly twice as loose as it should, which reads as a bf16 kernel being twice as close to its ceiling as it is. The value here is therefore the measured fp16_mfma rate; see source_by_figure.bf16_mfma for the substitution.",
     "Measured with the card in SPX compute partition and NPS1 memory partition at a 1400 W cap. A differently partitioned or power-capped MI355X will not match these figures.",
-    "fp8_mfma, mxfp8_scaled_mfma share one measured column, as do the fp4/fp6 and their scaled twins: gfx950 runs the scaled variants on the same matrix cores."
+    "fp8_mfma, mxfp8_scaled_mfma share one measured column, as do the fp4/fp6 and their scaled twins: gfx950 runs the scaled variants on the same matrix cores.",
+    "int8_mfma measured at 1236900100000000, exactly half measured fp8_mfma, which is the same halving signature the bf16 column showed. The value here is the raw measurement and has NOT been substituted: unlike FP16/BF16, no vendor statement says gfx950 runs int8 MFMA at the fp8 rate, so correcting it would be a guess. If a ceiling for an int8 kernel looks twice as loose as it should, this figure is the first thing to re-measure."
   ],
   "peak_flops": {
     "bf16_mfma": 1235891500000000.0,

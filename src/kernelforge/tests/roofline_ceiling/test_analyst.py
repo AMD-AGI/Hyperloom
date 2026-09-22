@@ -18,7 +18,7 @@ from kernelforge.roofline_ceiling.analyst import (
 )
 from kernelforge.roofline_ceiling.contract import Hardware
 from kernelforge.roofline_ceiling.evidence import EvidenceBundle
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_DATASHEET, PEAK_SOURCE_REFERENCE
 
 
 class _Backend:
@@ -36,7 +36,7 @@ class _Backend:
         return type("Result", (), {"text": text, "end_reason": "agent_stopped"})()
 
 
-def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_EMPIRICAL) -> EvidenceBundle:
+def _bundle(tmp_path, peak_source: str = PEAK_SOURCE_REFERENCE) -> EvidenceBundle:
     artifacts = tmp_path / "evidence"
     artifacts.mkdir(parents=True, exist_ok=True)
     (artifacts / "trace").mkdir(exist_ok=True)
@@ -142,7 +142,7 @@ def test_the_request_says_whether_the_peaks_were_measured_or_read_off_a_datashee
             performance_command=[],
             case_ids=["c0"],
             case_params={},
-            evidence=_bundle(tmp_path, PEAK_SOURCE_EMPIRICAL),
+            evidence=_bundle(tmp_path, PEAK_SOURCE_REFERENCE),
         )
     )
     datasheet = json.loads(
@@ -156,7 +156,7 @@ def test_the_request_says_whether_the_peaks_were_measured_or_read_off_a_datashee
         )
     )
 
-    assert "roof-only" in measured["hardware"]["peak_source_meaning"]
+    assert "measured on a card" in measured["hardware"]["peak_source_meaning"]
     assert "not an achievable target" in datasheet["hardware"]["peak_source_meaning"]
 
 

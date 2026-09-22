@@ -8,7 +8,7 @@ import pytest
 
 from kernelforge.roofline_ceiling.attainment import measure_attainment
 from kernelforge.roofline_ceiling.contract import Hardware, build_report
-from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_EMPIRICAL
+from kernelforge.roofline_ceiling.specs import PEAK_SOURCE_REFERENCE
 
 
 def _report(cases):
@@ -24,7 +24,7 @@ def _report(cases):
             arch="gfx950",
             peak_flops={"bf16_mfma": 1.2e15},
             bandwidth={"hbm": 6.24e12},
-            peak_source=PEAK_SOURCE_EMPIRICAL,
+            peak_source=PEAK_SOURCE_REFERENCE,
             dispatch_floor_s=1.5e-6,
         ),
         expected_case_ids=[case_id for case_id, _ in cases],

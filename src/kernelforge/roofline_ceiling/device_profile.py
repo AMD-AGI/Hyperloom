@@ -1,29 +1,32 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Hardware roofs, measured once and read thereafter.
+"""Hardware roofs, measured once per machine configuration and committed.
 
-Peaks are a property of the machine, not of the operator being analysed. The
-first cut re-ran ``--roof-only`` for every ceiling because the cache was keyed
-by operator, so ten operators on one box measured the same roofs ten times.
-Worse, a host without ``rocprof-compute`` could never measure them at all and
-fell straight to vendor datasheet figures, which are around twice what the chip
-sustains.
+Peaks are a property of the machine, not of the operator being analysed, and
+not of the day. They are looked up here, never measured at run time: two
+ceilings taken a month apart divide by the same numbers, a campaign needs no
+profiler installed, and every figure a ceiling rests on has been through review
+rather than being whatever the box reported that morning.
 
-Both follow from storing the roofs in the wrong place. Here they get their own
-artifact, keyed by the machine:
+A profile is matched on architecture, device name and partition mode, and
+records when, with which tool versions, and under which partition and power cap
+it was measured. Partition mode is part of the identity rather than metadata on
+it: splitting an MI355X into CPX changes the bandwidth one slice can reach, so
+the same card under SPX is a different machine.
 
-1. A **local profile** under the writable state root, written the first time
-   this box measures itself and read by every run after.
-2. A **reference profile** shipped with the package, matched on architecture,
-   device name and partition mode. Measured on a real card, stamped with when,
-   with which tool versions, and under which partition and power cap. It is a
-   better answer than a datasheet for a host that cannot measure, and an honest
-   one because a reader can see it came from somewhere else.
-3. The datasheet, last, as before.
+Adding a machine means measuring it once and committing the result. See
+``docs/kernelforge/reference/device-profiles.md`` for the procedure, which is
+worth following exactly -- the figures are easy to transcribe wrongly, and
+:func:`validate_profile` catches only the mistakes that contradict the
+datasheet.
 
-A reference profile is not a measurement of *your* box and never claims to be:
-``peak_source`` distinguishes the three, and the report says which applied.
+Nothing cross-checks a committed profile against a fresh measurement, because
+there is no longer a fresh measurement. A roof that reads low is the dangerous
+direction: the ceiling derived from it is too loose, so the kernel reads as
+closer to done than it is, and a campaign with an attainment target stops with
+the work half finished. Hence the self-check, and hence a profile that fails it
+is refused rather than used.
 """
 
 from __future__ import annotations
@@ -37,14 +40,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from kernelforge.durable_io import atomic_write_text
 from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
-from kernelforge.resources import default_project_root, resource_path
+from kernelforge.resources import resource_path
+from kernelforge.roofline_ceiling.specs import arch_spec, equal_rate_paths
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
 
 PROFILE_SCHEMA_VERSION = 1
 REFERENCE_DIRNAME = "device_profiles"
+
+#: How far a committed figure may sit above its datasheet peak and still be
+#: read as rounding rather than a transcription error. A measurement cannot
+#: beat the vendor peak, so anything past this is wrong by construction.
+_OVER_DATASHEET_TOLERANCE = 1.02
+
+#: How far two instruction paths the datasheet rates identically may drift in a
+#: committed profile. The failure this catches is rocprofiler-compute reporting
+#: bf16 MFMA at exactly half fp16 on a chip that runs both at one rate; left in,
+#: every bf16 ceiling comes out twice as loose as it should.
+_EQUAL_RATE_TOLERANCE = 0.05
 
 _MARKETING_RE = re.compile(r"^\s*Marketing Name:\s*(AMD Instinct\s+\S+)", re.MULTILINE)
 _COMPUTE_PARTITION_RE = re.compile(r"Compute Partition:\s*(\S+)")
@@ -154,7 +168,62 @@ def describe_device(arch: str = "") -> DeviceIdentity:
     )
 
 
-def _parse_profile(payload: dict[str, Any], origin: str) -> DeviceProfile | None:
+def validate_profile(profile: DeviceProfile, arch: str) -> list[str]:
+    """Return everything wrong with a committed profile, judged against the datasheet.
+
+    This is the only check left on a hand-authored figure, so it is deliberately
+    narrow: it reports what the vendor's own numbers contradict and nothing it
+    would have to guess at. Two rules cover the transcription errors that
+    actually happen.
+
+    A figure above its datasheet peak cannot be a measurement. It is a column
+    read off by the wrong name, a unit left unscaled, or a row taken for the
+    wrong device.
+
+    Two instruction paths the vendor documents as a single rate must stay
+    together. The case this exists for is rocprofiler-compute reporting bf16
+    MFMA at exactly half fp16 on a chip that runs both at one rate: a roof wrong
+    in that direction makes the ceiling too loose, and a campaign with an
+    attainment target stops early believing the kernel is done.
+
+    The pairs come from :data:`~kernelforge.roofline_ceiling.specs.EQUAL_RATE_PATHS`
+    rather than from paths that happen to share a datasheet peak. Measured
+    throughput within one datasheet group legitimately differs -- gfx950 rates
+    fp4 and fp6 together and a real card measures them 17% apart -- so inferring
+    the rule from equal peaks flags the chip's own behaviour as a mistake.
+    """
+    spec = arch_spec(arch)
+    if spec is None:
+        return []
+
+    problems: list[str] = []
+    for path, value in sorted(profile.peak_flops.items()):
+        peak = float(spec.peak_flops.get(path) or 0.0)
+        if peak > 0 and value > peak * _OVER_DATASHEET_TOLERANCE:
+            problems.append(
+                f"{path} is {value:.6g} FLOP/s, above the {arch} datasheet peak of {peak:.6g}; "
+                "no measurement beats the vendor peak, so this figure was read off wrongly"
+            )
+    hbm = float(profile.bandwidth.get("hbm") or 0.0)
+    if spec.hbm_bw_bytes_per_s > 0 and hbm > spec.hbm_bw_bytes_per_s * _OVER_DATASHEET_TOLERANCE:
+        problems.append(
+            f"hbm bandwidth is {hbm:.6g} B/s, above the {arch} datasheet peak of "
+            f"{spec.hbm_bw_bytes_per_s:.6g}; no measurement beats the vendor peak"
+        )
+
+    for left, right in equal_rate_paths(arch):
+        a, b = float(profile.peak_flops.get(left) or 0.0), float(profile.peak_flops.get(right) or 0.0)
+        if a <= 0 or b <= 0:
+            continue
+        if abs(a / b - 1.0) > _EQUAL_RATE_TOLERANCE:
+            problems.append(
+                f"{left} is {a:.6g} and {right} is {b:.6g}, but {arch} runs both at one rate; "
+                "a profiler that halves one of them was transcribed without the correction"
+            )
+    return problems
+
+
+def _parse_profile(payload: dict[str, Any], origin: str, arch: str = "") -> DeviceProfile | None:
     """Read one profile document, or ``None`` when it cannot be trusted."""
     if payload.get("schema_version") != PROFILE_SCHEMA_VERSION:
         log.warning("ignoring device profile %s: schema %r", origin, payload.get("schema_version"))
@@ -172,37 +241,20 @@ def _parse_profile(payload: dict[str, Any], origin: str) -> DeviceProfile | None
     except (TypeError, ValueError) as exc:
         log.warning("ignoring malformed device profile %s: %s", origin, exc)
         return None
-    return profile if profile.usable else None
-
-
-def local_path(identity: DeviceIdentity, project_root: str | Path | None = None) -> Path:
-    """Where this box's own measurement is cached."""
-    root = Path(project_root) if project_root is not None else default_project_root()
-    return root / "device_profiles" / f"{identity.slug()}.json"
-
-
-def load_local(identity: DeviceIdentity, project_root: str | Path | None = None) -> DeviceProfile | None:
-    """Return this box's previously measured profile, if it has one."""
-    path = local_path(identity, project_root)
-    if not path.is_file():
+    if not profile.usable:
         return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("ignoring unreadable device profile %s: %s", path, exc)
+
+    problems = validate_profile(profile, arch or str(payload.get("match", {}).get("arch") or ""))
+    for problem in problems:
+        log.error("device profile %s is not self-consistent: %s", origin, problem)
+    if problems:
+        log.error(
+            "refusing device profile %s; the campaign falls back to datasheet peaks, which read "
+            "attainment far too low rather than far too high",
+            origin,
+        )
         return None
-    return _parse_profile(payload, origin=str(path))
-
-
-def store_local(
-    profile: DeviceProfile,
-    identity: DeviceIdentity,
-    project_root: str | Path | None = None,
-) -> Path:
-    """Cache a fresh measurement so later runs read it instead of remeasuring."""
-    path = local_path(identity, project_root)
-    atomic_write_text(path, json.dumps(profile.to_dict(), indent=2, sort_keys=True) + "\n")
-    return path
+    return profile
 
 
 def load_reference(identity: DeviceIdentity) -> DeviceProfile | None:
@@ -219,7 +271,7 @@ def load_reference(identity: DeviceIdentity) -> DeviceProfile | None:
             continue
         if not identity.matches(payload.get("match") or {}):
             continue
-        profile = _parse_profile(payload, origin=f"shipped:{path.name}")
+        profile = _parse_profile(payload, origin=f"shipped:{path.name}", arch=identity.arch)
         if profile is not None:
             return profile
     return None
@@ -231,8 +283,6 @@ __all__ = [
     "DeviceIdentity",
     "DeviceProfile",
     "describe_device",
-    "load_local",
     "load_reference",
-    "local_path",
-    "store_local",
+    "validate_profile",
 ]

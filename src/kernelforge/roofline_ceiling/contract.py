@@ -39,7 +39,6 @@ from typing import Any
 
 from kernelforge.roofline_ceiling.specs import (
     PEAK_SOURCE_DATASHEET,
-    PEAK_SOURCE_EMPIRICAL,
     PEAK_SOURCE_REFERENCE,
 )
 
@@ -80,14 +79,9 @@ class Hardware:
     provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def is_empirical(self) -> bool:
-        """Whether these were measured on this box rather than read off a datasheet."""
-        return self.peak_source == PEAK_SOURCE_EMPIRICAL
-
-    @property
     def is_measured(self) -> bool:
-        """Whether these came from a real card, here or on one of the same configuration."""
-        return self.peak_source in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_REFERENCE}
+        """Whether these came from a real card rather than off a datasheet."""
+        return self.peak_source == PEAK_SOURCE_REFERENCE
 
     @property
     def hbm_bw_bytes_per_s(self) -> float:
@@ -227,7 +221,7 @@ def build_report(
     the case's ``issues``, because a ceiling whose doubts are invisible is worse
     than one that names them.
     """
-    if hardware.peak_source not in {PEAK_SOURCE_EMPIRICAL, PEAK_SOURCE_REFERENCE, PEAK_SOURCE_DATASHEET}:
+    if hardware.peak_source not in {PEAK_SOURCE_REFERENCE, PEAK_SOURCE_DATASHEET}:
         raise CeilingContractError(f"unknown peak_source {hardware.peak_source!r}")
 
     raw_cases = payload.get("cases")
@@ -308,9 +302,9 @@ def build_report(
         )
     elif hardware.peak_source == PEAK_SOURCE_REFERENCE:
         caveats.append(
-            "Peaks come from a reference card of the same configuration, not from this box. Clocks, "
-            "power cap and cooling move them by a few percent, so read these latencies as close "
-            "rather than exact."
+            "Peaks come from a committed profile measured on a card of this configuration, not from "
+            "this box on this day. Clocks, power cap and cooling move them by a few percent, so read "
+            "these latencies as close rather than exact."
         )
     if hardware.dispatch_floor_s <= 0:
         caveats.append(
