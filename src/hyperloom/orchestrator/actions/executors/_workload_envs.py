@@ -667,6 +667,23 @@ def _resolve_framework_repo_path(
     return ""
 
 
+def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
+    """Route a prepared image checkout into the vLLM server launch."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return
+    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    if not repo_path:
+        return
+    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+        envs[name] = repo_path
+        os.environ[name] = repo_path
+    existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")
+    entries = [repo_path, *(part for part in existing.split(os.pathsep) if part)]
+    envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
+
+
 def _custom_script_path(runner_type: str) -> str:
     """Locate the operator's entrypoint inside ``$HYPERLOOM_BYPASS_SCRIPTS_DIR``.
 
@@ -2159,6 +2176,7 @@ def materialize_config_with_envs(
             extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
             if "--mark-trace" not in extra:
                 envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+    _apply_vllm_source_runtime(bench, envs)
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
