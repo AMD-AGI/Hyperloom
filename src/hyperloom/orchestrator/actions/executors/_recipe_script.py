@@ -24,6 +24,10 @@ _UNGUARDED_EXPORT_RE = re.compile(r"^[^\S\n]*export\s+([A-Za-z_][A-Za-z0-9_]*)=(
 # a script accepts extra server args, alongside the framework's args variable.
 _POSITIONAL_ARGS_RE = re.compile(r"\$\{?@")
 
+# Spelled out rather than imported from ``agentx.deploy``: this module is on the
+# default benchmark path, which is pinned not to import the agentx package.
+_AGENTX_CLIENT_SCRIPT = "aiperf_client.sh"
+
 
 def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
@@ -36,14 +40,12 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     directory and no recursive search. Recipe-recorded values beat the ambient
     env because the recipe is the record of what actually ran.
     """
-    from hyperloom.inference_optimizer.agentx.deploy import AGENTX_CLIENT_SCRIPT
-
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     script = Path(str(bench.get("benchmark_script") or "").strip()).name
     if not script:
         return ""
 
-    if script == AGENTX_CLIENT_SCRIPT:
+    if script == _AGENTX_CLIENT_SCRIPT:
         script = str(envs.get("AGENTX_SERVER_SCRIPT") or os.environ.get("AGENTX_SERVER_SCRIPT") or "").strip()
         if not script:
             framework = str(bench.get("framework") or envs.get("FRAMEWORK") or "").strip().lower()
