@@ -75,6 +75,10 @@ AITER_REF="${AITER_REF:-}"
 VLLM_VERSION="${VLLM_VERSION:-0.29.0}"
 VLLM_ROCM_VARIANT="${VLLM_ROCM_VARIANT:-rocm723}"
 VLLM_ROCM_INDEX="${VLLM_ROCM_INDEX:-https://wheels.vllm.ai/rocm/${VLLM_VERSION}/${VLLM_ROCM_VARIANT}}"
+VLLM_INSTALL_METHOD="${VLLM_INSTALL_METHOD:-auto}"
+VLLM_REPO="${VLLM_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_SOURCE_REF="${VLLM_SOURCE_REF:-98dff2a81d747d1dba01a47f939f48c3526d4206}"
+VLLM_ROOT="${VLLM_ROOT:-/opt/hyperloom/vllm}"
 # Index publishing the TheRock ROCm SDK wheels these images are built from;
 # rocm-sdk-devel is pulled from here to supply source-build headers.
 ROCM_SDK_INDEX_URL="${ROCM_SDK_INDEX_URL:-https://stable.repo.amd.com/rocm/whl-next}"
@@ -133,7 +137,8 @@ PYTHON, INFERENCE_OPTIMIZER_FORCE_PYTHON,
 SGLANG_REPO, SGLANG_REF, SGLANG_ROOT, SGLANG_ROCM_PYPI_VERSION,
 SGLANG_ROCM_EXTRA, SGLANG_BUILD_RUST_EXTS, AITER_REPO, AITER_REF, AITER_ROOT, ROCM_PATH, HIP_PATH,
 LD_LIBRARY_PATH, ROCM_SDK_INDEX_URL, VLLM_VERSION, VLLM_ROCM_VARIANT, VLLM_ROCM_INDEX,
-VLLM_VENV_ROOT, HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
+VLLM_INSTALL_METHOD, VLLM_REPO, VLLM_SOURCE_REF, VLLM_ROOT, VLLM_VENV_ROOT,
+HYPERLOOM_WHEEL_REPO, HYPERLOOM_WHEEL_TAG.
 EOF
 }
 
@@ -1030,9 +1035,246 @@ ensure_openmpi_runtime() {
   warn "could not install an OpenMPI runtime package (tried libopenmpi3t64, libopenmpi3); vLLM's torch import may fail on libmpi.so.40"
 }
 
+vllm_install_method_for_stack() {
+  local release="$1" hip="$2" detected=""
+  case "${release}:${hip}" in
+    10:7.15|10:7.15.*|10.*:7.15|10.*:7.15.*) detected=source ;;
+    7.2:7.2|7.2:7.2.*|7.2.*:7.2|7.2.*:7.2.*) detected=wheel ;;
+    :7.2|:7.2.*) detected=wheel ;;
+  esac
+  if [ -z "$detected" ]; then
+    echo "unsupported or conflicting ROCm stack (release=${release:-unknown}, torch HIP=${hip:-unknown})" >&2
+    return 1
+  fi
+  case "$VLLM_INSTALL_METHOD" in
+    auto) ;;
+    source|wheel)
+      if [ "$VLLM_INSTALL_METHOD" != "$detected" ]; then
+        echo "VLLM_INSTALL_METHOD=${VLLM_INSTALL_METHOD} conflicts with detected ${detected} route" >&2
+        return 1
+      fi
+      ;;
+    *) echo "VLLM_INSTALL_METHOD must be one of: auto, source, wheel" >&2; return 1 ;;
+  esac
+  printf '%s\n' "$detected"
+}
+
+detect_vllm_stack() {
+  local py="$1"
+  "$py" - <<'PY'
+import glob, os, re, sys
+from importlib import metadata
+
+releases = set()
+try:
+    value = metadata.version("rocm-sdk-core")
+    match = re.search(r"(\d+)(?:\.(\d+))?", value)
+    if match:
+        releases.add(match.group(1) + (f".{match.group(2)}" if match.group(2) else ""))
+except metadata.PackageNotFoundError:
+    pass
+for root in filter(None, (os.environ.get("ROCM_PATH"), os.environ.get("ROCM_HOME"))):
+    for path in glob.glob(os.path.join(root, ".info", "version*")):
+        try:
+            match = re.search(r"(\d+)(?:\.(\d+))?", open(path).read())
+            if match:
+                releases.add(match.group(1) + (f".{match.group(2)}" if match.group(2) else ""))
+        except OSError:
+            pass
+if len(releases) > 1:
+    print(f"conflicting ROCm release evidence: {sorted(releases)}", file=sys.stderr)
+    raise SystemExit(1)
+try:
+    import torch
+    hip = getattr(torch.version, "hip", None) or ""
+except Exception:
+    hip = ""
+print(f"{next(iter(releases), '')}|{hip}")
+PY
+}
+
+route_vllm_install_method() {
+  local stack release hip selected
+  stack="$(detect_vllm_stack "$1")" || die "failed to detect a consistent ROCm stack for vLLM"
+  release="${stack%%|*}"; hip="${stack#*|}"
+  selected="$(vllm_install_method_for_stack "$release" "$hip")" || die "cannot route vLLM install safely"
+  VLLM_INSTALL_METHOD="$selected"
+  export VLLM_INSTALL_METHOD
+  log "vLLM install route: ${selected} (release=${release:-none}, torch HIP=${hip:-unknown})"
+}
+
+check_vllm_source_python() {
+  "$1" - <<'PY' || die "vLLM source install requires Python >=3.10,<3.15"
+import sys
+raise SystemExit(0 if (3, 10) <= sys.version_info < (3, 15) else 1)
+PY
+}
+
+check_vllm_source_prereqs() {
+  local tool current required arch
+  for tool in git gcc g++ cmake ninja hipcc; do
+    command -v "$tool" >/dev/null 2>&1 || die "${tool} is required for vLLM source install"
+  done
+  for tool in gcc g++ cmake; do
+    required=11.3
+    [ "$tool" = cmake ] && required=3.26.1
+    current="$("$tool" --version | grep -oE '[0-9]+(\.[0-9]+)+' | head -1)"
+    _version_ge "$current" "$required" || die "${tool} >=${required} is required (found ${current:-unknown})"
+  done
+  arch="${PYTORCH_ROCM_ARCH:-$(detect_rocm_gfx_arch)}"
+  [ -n "$arch" ] || die "cannot detect a gfx architecture for vLLM source install"
+}
+
+vllm_overlay_is_valid() {
+  [ -x "$1/bin/python" ] &&
+    grep -Eqi '^[[:space:]]*include-system-site-packages[[:space:]]*=[[:space:]]*true' "$1/pyvenv.cfg"
+}
+
+inherit_vllm_base_site_packages() {
+  local base_py="$1" py="$2" base_site overlay_site amdsmi_site
+  base_site="$("$base_py" - <<'PY'
+from pathlib import Path
+import torch
+print(Path(torch.__file__).resolve().parent.parent)
+PY
+)" || die "cannot resolve the base ROCm torch site-packages"
+  overlay_site="$("$py" - <<'PY'
+import site
+print(site.getsitepackages()[0])
+PY
+)" || die "cannot resolve the vLLM overlay site-packages"
+  [ -d "$base_site" ] && [ -d "$overlay_site" ] ||
+    die "base or overlay site-packages directory is missing"
+  amdsmi_site="${base_site}/_rocm_sdk_core/share/amd_smi"
+  {
+    printf '%s\n' "$base_site"
+    [ ! -d "$amdsmi_site" ] || printf '%s\n' "$amdsmi_site"
+  } > "${overlay_site}/hyperloom-base-venv.pth"
+}
+
+vllm_checkout_state() {
+  local root="$1" origin head
+  [ -e "$root" ] || { echo new; return 0; }
+  [ -d "$root/.git" ] || die "vLLM source root is an existing non-git directory: ${root}"
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  [ "$origin" = "$VLLM_REPO" ] || die "vLLM checkout origin mismatch: ${origin:-missing}"
+  git -C "$root" diff --quiet && git -C "$root" diff --cached --quiet ||
+    die "vLLM checkout has dirty tracked or index changes: ${root}"
+  head="$(git -C "$root" rev-parse HEAD 2>/dev/null || true)"
+  [ "$head" = "$VLLM_SOURCE_REF" ] && echo exact || echo update
+}
+
+ensure_vllm_checkout() {
+  local root="$1" state
+  state="$(vllm_checkout_state "$root")" || return $?
+  [ "$state" = exact ] && { echo exact; return 0; }
+  check_vllm_source_prereqs
+  if [ "$state" = new ]; then
+    mkdir -p "$(dirname "$root")"
+    git init -q "$root"
+    git -C "$root" remote add origin "$VLLM_REPO"
+  fi
+  git -C "$root" fetch --quiet --depth 1 origin "$VLLM_SOURCE_REF" ||
+    die "failed to fetch vLLM source ref ${VLLM_SOURCE_REF}"
+  git -C "$root" checkout --quiet --detach FETCH_HEAD
+  [ "$(git -C "$root" rev-parse HEAD)" = "$VLLM_SOURCE_REF" ] ||
+    die "vLLM checkout did not reach ${VLLM_SOURCE_REF}"
+  echo updated
+}
+
+verify_vllm_source() {
+  local base_py="$1" py="$2" base_info
+  base_info="$("$base_py" - <<'PY'
+import os, torch
+print("|".join((os.path.realpath(torch.__file__), torch.__version__, torch.version.hip or "")))
+PY
+)" || return 1
+  "$py" - "$base_info" <<'PY' || return 1
+import os, sys, torch
+actual = "|".join((os.path.realpath(torch.__file__), torch.__version__, torch.version.hip or ""))
+if actual != sys.argv[1]:
+    raise SystemExit(f"overlay torch differs from host torch: {actual} != {sys.argv[1]}")
+import vllm._rocm_C  # noqa: F401
+from vllm.platforms import current_platform
+checker = getattr(current_platform, "is_rocm", None)
+if not ((callable(checker) and checker()) or "rocm" in repr(current_platform).lower()):
+    raise SystemExit("vLLM source overlay did not select ROCm")
+torch.empty(1, device="cuda")
+PY
+  "$py" -m pip check
+}
+
+install_vllm_from_source() {
+  local base_py="$1" py="${VLLM_VENV_ROOT}/bin/python" state arch constraint_file
+  export VLLM_TARGET_DEVICE=rocm
+  [[ "$VLLM_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]] || die "VLLM_SOURCE_REF must be a full 40-character commit SHA"
+  check_vllm_source_python "$base_py"
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    if [ -x "$py" ] && "$py" -c "import vllm" >/dev/null 2>&1; then
+      verify_vllm_source "$base_py" "$py" || die "installed vLLM source overlay failed runtime verification"
+    else
+      warn "vLLM source overlay is not installed (check-only)"
+    fi
+    return 0
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    rocm_devel_headers_present "$base_py" ||
+      log "would ensure ROCm devel headers before the vLLM source build"
+    log "would prepare ${VLLM_ROOT} at ${VLLM_SOURCE_REF} and build into ${VLLM_VENV_ROOT}"
+    return 0
+  fi
+  if [ -e "$VLLM_VENV_ROOT" ] && ! vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    die "existing VLLM_VENV_ROOT is not a system-site-packages venv: ${VLLM_VENV_ROOT}"
+  fi
+  state="$(ensure_vllm_checkout "$VLLM_ROOT")" || return $?
+  if vllm_overlay_is_valid "$VLLM_VENV_ROOT"; then
+    inherit_vllm_base_site_packages "$base_py" "$py"
+  fi
+  if [ "$state" = exact ] && vllm_overlay_is_valid "$VLLM_VENV_ROOT" &&
+     verify_vllm_source "$base_py" "$py"; then
+    export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+    link_vllm_into_shared_bin "$base_py" "$py"
+    log "reusing verified vLLM source overlay"
+    return 0
+  fi
+  [ "$state" != exact ] || check_vllm_source_prereqs
+  ensure_rocm_devel_headers "$base_py"
+  rocm_devel_headers_present "$base_py" || die "ROCm devel headers are required for vLLM source install"
+  arch="${PYTORCH_ROCM_ARCH:-$(detect_rocm_gfx_arch)}"
+  [ -n "$arch" ] || die "cannot detect a gfx architecture for vLLM source install"
+  if [ ! -e "$VLLM_VENV_ROOT" ]; then
+    "$base_py" -m venv --system-site-packages "$VLLM_VENV_ROOT"
+  fi
+  inherit_vllm_base_site_packages "$base_py" "$py"
+  [ -f "$VLLM_ROOT/requirements/rocm.txt" ] || die "vLLM requirements/rocm.txt is missing"
+  constraint_file="$(mktemp)"
+  write_rocm_torch_constraints "$base_py" "$constraint_file"
+  "$py" -m pip install --no-build-isolation --constraint "$constraint_file" \
+    --extra-index-url "$ROCM_SDK_INDEX_URL" \
+    -r "$VLLM_ROOT/requirements/rocm.txt" ||
+    { rm -f "$constraint_file"; die "failed to install vLLM ROCm source requirements"; }
+  (cd "$VLLM_ROOT" && VLLM_TARGET_DEVICE=rocm PYTORCH_ROCM_ARCH="$arch" \
+    PIP_CONSTRAINT="$constraint_file" "$py" setup.py develop --no-deps) ||
+    { rm -f "$constraint_file"; die "vLLM source build failed"; }
+  rm -f "$constraint_file"
+  verify_vllm_source "$base_py" "$py" || die "vLLM source install failed runtime verification"
+  export VLLM_ROOT FRAMEWORK_REPO_PATH="$VLLM_ROOT"
+  link_vllm_into_shared_bin "$base_py" "$py"
+  log "vLLM source install complete (${VLLM_ROOT})"
+}
+
 install_vllm_framework() {
   local py base_py py_mm constraint_file package_spec rocm_torch_ver
   base_py="$(resolve_python)" || die "no usable Python found for vLLM install"
+  route_vllm_install_method "$base_py" || return $?
+  if [ "$VLLM_INSTALL_METHOD" = source ]; then
+    if [ "$FRAMEWORK_ENV" != isolated ]; then
+      die "vLLM source install requires --framework-env isolated"
+      return 1
+    fi
+    install_vllm_from_source "$base_py"
+    return $?
+  fi
   if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
     ensure_openmpi_runtime
   fi
@@ -1131,7 +1373,7 @@ PY
       "$py" -m pip install --upgrade --extra-index-url "$VLLM_ROCM_INDEX" "torch==${rocm_torch_ver}" \
         || die "failed to install ROCm torch==${rocm_torch_ver} into ${VLLM_VENV_ROOT}"
     else
-      warn "could not resolve a ROCm torch version from ${VLLM_ROCM_INDEX}/torch/; vLLM install will rely on its own torch pin"
+      die "could not resolve a ROCm torch version from ${VLLM_ROCM_INDEX}/torch/"
     fi
     if ! "$py" -m pip install --upgrade \
       --extra-index-url "$VLLM_ROCM_INDEX" \
@@ -2246,6 +2488,11 @@ write_runtime_dotenv() {
   if [ "$FRAMEWORK_ENV" = "isolated" ] && [ "$INSTALL_FRAMEWORK" = "vllm" ]; then
     upsert_dotenv_var VLLM_VENV_ROOT "$VLLM_VENV_ROOT"
     upsert_dotenv_var VLLM_PYTHON "${VLLM_VENV_ROOT}/bin/python"
+    if [ "$VLLM_INSTALL_METHOD" = "source" ]; then
+      upsert_dotenv_var VLLM_ROOT "$VLLM_ROOT"
+      upsert_dotenv_var FRAMEWORK_REPO_PATH "$FRAMEWORK_REPO_PATH"
+      upsert_dotenv_var VLLM_TARGET_DEVICE "$VLLM_TARGET_DEVICE"
+    fi
   fi
   log "updated ${DOTENV} with bare-metal runtime env"
 }
