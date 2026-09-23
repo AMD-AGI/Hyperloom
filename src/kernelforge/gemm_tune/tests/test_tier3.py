@@ -733,24 +733,41 @@ class TestTheAuthoringSessionHasSomewhereItIsAllowedToWrite:
 
     def test_the_session_is_not_started_when_the_sandbox_cannot_be_made(self, tmp_path, monkeypatch):
         """A failure here is reported, not walked past into a doomed session."""
+        import subprocess
+        import sys
+        from unittest.mock import Mock
+
+        from kernelforge.agent_backends import claude, registry
         from kernelforge.gemm_tune.tier3 import generate
         from kernelforge.gemm_tune.tier3.mandate import TunerMandate
 
+        query = Mock(side_effect=AssertionError("the SDK session must not start without a sandbox"))
+        monkeypatch.setattr(claude, "_load_claude_sdk", lambda: (query, Mock()))
+        monkeypatch.setattr(
+            registry, "select_default_agent_provider", lambda _model: registry.get_agent_provider("claude")
+        )
+        monkeypatch.setattr(claude, "resolve_claude_cli", lambda _explicit: sys.executable)
+        version_check = Mock(
+            return_value=subprocess.CompletedProcess([sys.executable, "--version"], 0, b"Claude Code test", b"")
+        )
+        monkeypatch.setattr(claude.subprocess, "run", version_check)
         monkeypatch.setattr(
             generate,
             "_isolate",
             lambda _w: generate.GeneratedTuner(False, None, "could not prepare a sandbox worktree"),
         )
-
-        def must_not_run(*_a, **_k):
-            raise AssertionError("the authoring session was started without a sandbox")
-
-        monkeypatch.setattr(generate, "_run", must_not_run)
+        run = Mock(side_effect=AssertionError("the authoring session was started without a sandbox"))
+        monkeypatch.setattr(generate, "_run", run)
         out = generate.generate_tuner(
             TunerMandate(table="t.csv", key_schema=["M"], demand_shapes=[], why_existing_tiers_failed=""),
             tmp_path / "w",
         )
         assert not out.ok and "sandbox worktree" in out.reason
+        query.assert_not_called()
+        run.assert_not_called()
+        version_check.assert_called_once_with(
+            [sys.executable, "--version"], capture_output=True, timeout=10, check=False
+        )
 
 
 class TestTheAuthoringSessionIsAllowedToDoTheJob:
