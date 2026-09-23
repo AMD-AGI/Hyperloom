@@ -1015,10 +1015,47 @@ class WritebackCollaborator:
             return
         if is_fusion:
             self.shared_state.last_fusion_integrate = {**result, "decision": "KEEP"}
+        self._journal_integrate_keep(result, lift_kind=lift_kind, new_tput=float(new_tput))
         if self.shared_state.baseline_tput > 0 and self._update_cumulative_gain_validated(new_tput, measurement):
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
+
+    def _journal_integrate_keep(self, result: dict[str, Any], *, lift_kind: str, new_tput: float) -> None:
+        """Mirror an adopted kernel-recipe-lane (forge-loop/fusion) KEEP as an ``optimization_journal`` row.
+
+        ``_lift_to_current_best`` promotes this KEEP into ``optimization_stack`` directly; it never
+        goes through the generic ``_fact_write_hook`` -> ``_record_fact_per_task`` path every
+        dispatched ``Task`` uses to append its own journal row. Without this, ``final_throughput`` /
+        ``total_gain_pct`` in the journal's header name a KEEP the journal's own ``entries`` list
+        never records (see ``_journal_gemm_tuning_keep`` for the sibling gap on the gemm_tuning lane).
+        """
+        try:
+            journal = self._ensure_journal()
+            # optimization_journal.py has no dedicated fusion bucket; a fusion KEEP is a kernel
+            # integration by the same lever (see _LEVER_BY_TASK_KIND), so it uses the same kind. The
+            # raw lift_kind still reaches the row through provenance below.
+            kind = classify_change_kind("integrate")
+            change = str(result.get("kernel_id") or lift_kind)
+            backend_or_engine = str(result.get("backend") or result.get("engine") or "")
+            journal.append_entry(
+                JournalEntry(
+                    phase=self._journal_entry_phase(),
+                    lever_kind=_lever_kind_for_lift(lift_kind, result if isinstance(result, dict) else None),
+                    iter=int(self.shared_state.tick or 0),
+                    kind=kind,
+                    change=change,
+                    outcome=OUTCOME_KEEP,
+                    gain_pct=to_float(result.get("gain_pct")),
+                    throughput_after=new_tput,
+                    task_id=str(result.get("integration_id") or ""),
+                    variant_name=str(result.get("kernel_id") or lift_kind),
+                    provenance=f"{lift_kind}:{backend_or_engine}" if backend_or_engine else lift_kind,
+                    tick=int(self.shared_state.tick or 0),
+                )
+            )
+        except Exception:  # noqa: BLE001 — journaling is best-effort
+            log.exception("integrate journal append failed")
 
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
         """Decide whether a settled task result should be promoted.
