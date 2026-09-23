@@ -1150,14 +1150,14 @@ class KernelPhase(PhaseHandler):
             )
         # Reuse baseline server settings so GEAK measures the same engine config.
         try:
-            from ..kernel.roofline_ceiling import read_baseline_server_args
+            from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
         _current_best_server_args = str(spec_config.get("server_launch_flags") or "")
         if not _current_best_server_args:
-            from ..actions.executors._grid_server_args import compose_server_args
+            from hyperloom.inference_optimizer.grid_server_args import compose_server_args
 
             _current_best_server_args = compose_server_args(
                 inherited_args=_baseline_srv_args,
@@ -2085,8 +2085,8 @@ class KernelPhase(PhaseHandler):
             from hyperloom.common.coerce import to_str_list
             from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-            from ..actions.executors._canonical_fingerprint import canonical_fingerprint
-            from ..actions.executors._grid_server_args import compose_server_args, remove_server_args
+            from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+            from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
 
             accepted_controls = _accepted_config_controls(result.get("accepted_config"))
             prior_controls = _accepted_config_controls(cb_now)

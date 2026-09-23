@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AbstractSet, Any, Awaitable, Callable
 
-from hyperloom.orchestrator.actions.executors._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     tokenize_server_args_preserving_json,
 )
 from hyperloom.common.env import env_bool, env_flag

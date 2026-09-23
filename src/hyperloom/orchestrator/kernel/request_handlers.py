@@ -235,13 +235,13 @@ def _reusable_source_roots() -> tuple[str, ...]:
 
     Emits a lower-case variant per root because that classifier matches against
     a lower-cased source path. Path containment uses
-    :func:`~hyperloom.orchestrator.framework.paths.resolved_within` instead.
+    :func:`~hyperloom.inference_optimizer.framework_paths.resolved_within` instead.
 
     Returns:
         The de-duplicated framework install roots (each with a lower-case
         variant), including FlyDSL checkout roots.
     """
-    from ..framework.paths import resolve_known_source_prefixes
+    from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 
     roots = resolve_known_source_prefixes()
     out: list[str] = []
@@ -1940,7 +1940,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 
     Returns (precision, quant_type) tuple.
     """
-    from .roofline_ceiling import _parse_server_arg, resolve_runtime_workload
+    from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
     framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
 

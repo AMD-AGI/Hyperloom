@@ -1022,13 +1022,13 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
         },
     )
     monkeypatch.setattr(coord.conversation, "_target_gap_advisory_block", lambda: "GAP-NOTES")
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
     from hyperloom.orchestrator.state import shared_state as ss_mod
 
     monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
-    from hyperloom.orchestrator.framework import paths as fp
+    from hyperloom.inference_optimizer import framework_paths as fp
 
     monkeypatch.setattr(fp, "resolve_kernel_search_roots", lambda: ["/src/root"])
     monkeypatch.setattr(fp, "resolve_framework_tree", lambda framework: "/src/root/vllm/")

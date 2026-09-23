@@ -440,7 +440,7 @@ def test_priors_match_advisory_block_no_variants(coord: Coordinator) -> None:
 async def test_harvest_specialist_findings_does_not_persist_llm_competitor_target(coord: Coordinator) -> None:
     """LLM-authored competitor numbers must never be persisted as a consumable competitor target."""
     from hyperloom.inference_optimizer.session import session_paths
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     await coord._harvest_specialist_findings(
         {
@@ -821,7 +821,7 @@ def test_context_analysis_reader_fallback_path(coord: Coordinator, tmp_path) -> 
 
 # -- advisory blocks enabled paths -----------------------------------------
 def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: {"name": "comp"})
     monkeypatch.setattr(rh, "gap_analysis", lambda *a, **k: {"primary_gap": "throughput"})
@@ -835,7 +835,7 @@ def test_target_gap_advisory_enabled(coord: Coordinator, monkeypatch) -> None:
 
 
 def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     target = {
         "benchmark_mode": "agentx",
@@ -857,7 +857,7 @@ def test_agentx_advisory_and_primary_gap_share_accepted_state(coord: Coordinator
 
 
 def test_target_gap_advisory_no_target(coord: Coordinator, monkeypatch) -> None:
-    from hyperloom.orchestrator.knowledge import research_hints as rh
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "load_competitor_target", lambda _sd: None)
     coord.shared_state.target_advisory_enabled = True

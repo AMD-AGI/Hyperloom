@@ -57,7 +57,7 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
 
     def _plan_cycle_focus(self) -> dict[str, Any]:
         """Pick an advisory specialist-domain focus for the current macro-cycle."""
-        from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+        from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
         state = self.shared_state
         cycle = int(getattr(state, "macro_cycle", 0) or 0)

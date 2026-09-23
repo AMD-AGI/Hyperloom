@@ -79,7 +79,7 @@ def _merge_named_current_recipe_configs(
     owners: list[tuple[str, Mapping[str, Any]]],
 ) -> tuple[str, dict[str, str]]:
     """Merge named config snapshots with exact duplicate conflict checks."""
-    from ..actions.executors._grid_server_args import (
+    from hyperloom.inference_optimizer.grid_server_args import (
         tokenize_server_args_preserving_json,
     )
 
@@ -256,7 +256,7 @@ class PreludePhase(PhaseHandler):
             state.warm_history_injected = True
             return 0
 
-        from ..actions.executors._canonical_fingerprint import (
+        from hyperloom.inference_optimizer.canonical_fingerprint import (
             canonical_fingerprint,
         )
 
@@ -1428,7 +1428,7 @@ class PreludePhase(PhaseHandler):
             combined_envs = dict(bc_envs)
             combined_envs.update(kernel_envs)
         try:
-            from ..actions.executors._grid_server_args import (
+            from hyperloom.inference_optimizer.grid_server_args import (
                 validate_warm_replay_context_length,
             )
 
@@ -2688,7 +2688,7 @@ class PreludePhase(PhaseHandler):
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
             try:
-                from ..kernel.roofline_ceiling import read_baseline_server_args
+                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 
                 bl_args = read_baseline_server_args(state).strip()
             except Exception:  # noqa: BLE001 — best-effort; empty falls through

@@ -47,7 +47,7 @@ def _agentx_reference():
 
 @pytest.mark.parametrize("advisory_enabled", [True, False])
 def test_report_agentx_comparison_reads_persisted_target(report_performance_state, tmp_path, advisory_enabled):
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     state = report_performance_state
     state.benchmark_mode = "agentx"

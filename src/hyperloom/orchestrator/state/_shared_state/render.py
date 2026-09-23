@@ -858,7 +858,7 @@ class _RenderMixin:
 
     def _format_profiler_digest(self) -> str:
         """Compact bottleneck-focused profiler block; ``(none)`` until a snapshot lands."""
-        from ...kernel.roofline_snapshot import build_profiler_digest
+        from hyperloom.inference_optimizer.roofline_snapshot import build_profiler_digest
 
         digest = build_profiler_digest(
             self.roofline_snapshots,

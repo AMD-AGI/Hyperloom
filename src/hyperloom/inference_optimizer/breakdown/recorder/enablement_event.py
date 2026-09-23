@@ -34,7 +34,7 @@ from .event_fields import (
     now_iso_seconds as _now,
     text_or_none as _text_or_none,
 )
-from hyperloom.orchestrator.delivery.archive import ROLE_LAUNCH_CONFIG
+from ..round_archive import ROLE_LAUNCH_CONFIG
 
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows

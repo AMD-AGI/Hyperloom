@@ -598,7 +598,7 @@ class ConversationCollaborator:
 
     def _dominant_roofline_direction(self) -> tuple[str, float]:
         """Return ``(direction, pct)`` for the most-saturated roofline direction in the latest snapshot; ``("", 0.0)`` when no snapshot is available."""
-        from ..kernel.roofline_snapshot import dominant_direction
+        from hyperloom.inference_optimizer.roofline_snapshot import dominant_direction
 
         snaps = getattr(self.shared_state, "roofline_snapshots", None) or []
         if not snaps or not isinstance(snaps[-1], dict):
@@ -654,7 +654,7 @@ class ConversationCollaborator:
                 f"(within_delta={shift.get('within_delta')} gap_delta={shift.get('gap_delta')})"
             )
         if direction:
-            from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+            from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
 
             hint = BOTTLENECK_DOMAIN_HINTS.get(direction)
             if hint:
@@ -715,7 +715,7 @@ class ConversationCollaborator:
         state = self.shared_state
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return ""
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         target = _research_hints.load_competitor_target(self.session_dir)
         if not target:
@@ -729,7 +729,7 @@ class ConversationCollaborator:
         if not bool(getattr(state, "target_advisory_enabled", True)):
             return None
         try:
-            from ..knowledge import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             target = _research_hints.load_competitor_target(self.session_dir)
             if not target:
@@ -775,7 +775,7 @@ class ConversationCollaborator:
         ``confidence``: that field is an audit record of what the specialist
         claimed, never an input to a decision here.
         """
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = _research_hints.load_hints(self.session_dir)
         rounds = [
@@ -815,7 +815,7 @@ class ConversationCollaborator:
     def _priors_match_advisory_block(self) -> str:
         """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
         try:
-            from ..knowledge import research_hints as _research_hints
+            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             variants = self._recent_proposed_variants()
             if not variants:

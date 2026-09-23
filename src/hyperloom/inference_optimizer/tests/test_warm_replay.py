@@ -324,7 +324,7 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("old\n", encoding="utf-8")
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
         lambda: str(framework_root),
     )
     coord = _make_coord(
@@ -499,13 +499,13 @@ async def test_warm_replay_does_not_misclassify_preflight_code_bug(
     tmp_path,
     monkeypatch,
 ):
-    from hyperloom.orchestrator.actions.executors import _grid_server_args
+    from hyperloom.inference_optimizer import grid_server_args
 
     def _bug(*_args, **_kwargs):
         raise AttributeError("preflight implementation bug")
 
     monkeypatch.setattr(
-        _grid_server_args,
+        grid_server_args,
         "validate_warm_replay_context_length",
         _bug,
     )
@@ -1283,7 +1283,7 @@ def test_kernel_target_uses_the_recorded_root_not_the_session_one(tmp_path, monk
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
+        "hyperloom.inference_optimizer.framework_paths.resolve_session_framework_root",
         lambda: str(active_root),
     )
 
@@ -1698,7 +1698,7 @@ def test_inject_warm_recipe_history_is_idempotent(tmp_path):
 
 def test_inject_warm_recipe_history_dedupes_with_existing_ledger(tmp_path):
     """A ledger row with the same fingerprint is not duplicated."""
-    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+    from hyperloom.inference_optimizer.canonical_fingerprint import (
         canonical_fingerprint,
     )
 

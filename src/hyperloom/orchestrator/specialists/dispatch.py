@@ -91,7 +91,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         # Local-source navigation hint.
         if "framework_source_roots" not in params:
             try:
-                from ..framework.paths import resolve_framework_tree, resolve_kernel_search_roots
+                from hyperloom.inference_optimizer.framework_paths import (
+                    resolve_framework_tree,
+                    resolve_kernel_search_roots,
+                )
 
                 roots = resolve_kernel_search_roots()
                 if roots:
@@ -161,7 +164,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if "research_hints" not in params:
             try:
-                from ..knowledge import research_hints as _research_hints
+                from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
                 _hints_block = _research_hints.summarise_for_prompt(
                     self.session_dir,
@@ -227,7 +230,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             last_ta.get("analysis_md_text") or last_ta.get("hot_kernels_top15")
         )
         if has_evidence and "roofline_evidence" not in params:
-            from ..kernel.roofline_snapshot import extract_workload_summary
+            from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 
             analysis_path = str(last_ta.get("analysis_md_path") or "")
             executive_summary: dict[str, Any] = {}

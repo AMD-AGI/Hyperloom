@@ -272,7 +272,7 @@ async def test_report_executor_renders_external_baseline_section(tmp_path: Path,
 @pytest.mark.parametrize("mode_source", ["state", "environment"])
 async def test_agentx_executor_fetches_reference_and_maps_derived_id(session_dir, monkeypatch, mode_source):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     ctx = _ctx(session_dir, {"model_path": "/models/GLM-5.2-MXFP4", "precision": "mxfp4", "isl": 1024, "osl": 2048})
@@ -409,7 +409,7 @@ async def test_analyzer_exception_clears_target_without_replacing_summary(sessio
 async def test_agentx_state_to_external_reference_and_final_report(session_dir, monkeypatch, competitor_write_failure):
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client
     from hyperloom.orchestrator.actions.executors import ReportExecutor
-    from hyperloom.orchestrator.knowledge import research_hints
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -594,7 +594,7 @@ class TestExecutor:
         monkeypatch,
     ):
         from hyperloom.inference_optimizer.session import session_paths
-        from hyperloom.orchestrator.knowledge import research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints
 
         sd = tmp_path / "sess"
         sd.mkdir()

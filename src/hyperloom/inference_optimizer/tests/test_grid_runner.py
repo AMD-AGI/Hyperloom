@@ -2724,7 +2724,7 @@ class TestServerArgTokenizerOnTheSyntheticPath:
 
 def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
     """The window must cover ``remove_server_args``, which is what it is about."""
-    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+    from hyperloom.inference_optimizer import grid_server_args as gsa
 
     real = gsa.remove_server_args
 

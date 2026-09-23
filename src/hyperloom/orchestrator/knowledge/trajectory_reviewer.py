@@ -14,7 +14,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_REVERT,
     Journal,
 )
-from ..kernel.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
+from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
 
 log = logging.getLogger(__name__)
 

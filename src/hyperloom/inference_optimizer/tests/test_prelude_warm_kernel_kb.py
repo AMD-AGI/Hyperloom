@@ -36,7 +36,7 @@ class _StubPrelude:
 
     def _resolve_kernel_target_paths(self, entry: dict) -> list[str]:
         """Resolve fixture Patch headers under the fixture's framework root."""
-        from hyperloom.orchestrator.framework.paths import (
+        from hyperloom.inference_optimizer.framework_paths import (
             resolve_session_framework_root,
         )
         from hyperloom.orchestrator.specialists.patch_safety import (
@@ -161,7 +161,7 @@ def test_resolve_target_from_diff_header_against_roots(monkeypatch, tmp_path: Pa
         encoding="utf-8",
     )
 
-    import hyperloom.orchestrator.framework.paths as paths
+    import hyperloom.inference_optimizer.framework_paths as paths
 
     monkeypatch.setattr(paths, "resolve_session_framework_root", lambda: str(root))
     stub = _StubPrelude(tmp_path)

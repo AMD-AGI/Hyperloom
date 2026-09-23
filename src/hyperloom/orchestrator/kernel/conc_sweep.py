@@ -47,7 +47,7 @@ from ..actions.executors._workload_envs import (
     materialize_config_with_envs,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
-from .roofline_ceiling import (
+from hyperloom.inference_optimizer.roofline_ceiling import (
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
@@ -312,7 +312,7 @@ def _build_roofline_ceiling(
         )
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
         # Local import avoids a module-level import cycle.
-        from .roofline_snapshot import within_roofline_pct
+        from hyperloom.inference_optimizer.roofline_snapshot import within_roofline_pct
 
         def _mbu_pct(measured: Any) -> float | None:
             """Express a measured throughput as a percent of peak."""

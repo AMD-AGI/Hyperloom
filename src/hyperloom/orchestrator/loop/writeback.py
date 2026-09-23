@@ -47,7 +47,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_base import is_kept as _is_kept
-from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
+from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
@@ -3056,7 +3056,7 @@ class WritebackCollaborator:
         Args:
             done_payload: The completed specialist task payload.
         """
-        from ..knowledge import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
         hints = done_payload.get("new_findings") or []
         if not isinstance(hints, list):
@@ -3275,7 +3275,7 @@ class WritebackCollaborator:
                 if isinstance(bv, dict):
                     fp_val = str(bv.get("fingerprint") or "").strip()
                     if not fp_val:
-                        from ..actions.executors._canonical_fingerprint import (
+                        from hyperloom.inference_optimizer.canonical_fingerprint import (
                             canonical_fingerprint,
                         )
 

@@ -467,7 +467,7 @@ def check_server_argv(
         # a repair.
         return _invalid(REPAIR_SPENT, detail, dropped=flags)
 
-    from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    from hyperloom.inference_optimizer.grid_server_args import (
         remove_server_args,
         tokenize_server_args_preserving_json,
     )

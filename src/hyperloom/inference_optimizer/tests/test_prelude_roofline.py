@@ -130,7 +130,7 @@ def test_prelude_initial_roofline_uses_baseline_server_args(
     coord.shared_state.current_best = {
         "extra_server_args": "--enable-torch-compile --quantization fp8",
     }
-    import hyperloom.orchestrator.kernel.roofline_ceiling as rc
+    import hyperloom.inference_optimizer.roofline_ceiling as rc
 
     monkeypatch.setattr(
         rc,

@@ -83,7 +83,7 @@ from ._grid_base import (
     VariantResult as VariantResult,
     variant_fingerprint as variant_fingerprint,
 )
-from ._grid_server_args import (
+from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,

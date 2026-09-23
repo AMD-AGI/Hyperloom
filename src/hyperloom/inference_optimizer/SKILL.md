@@ -127,7 +127,7 @@ Artefact paths emitted by agents must resolve under the **session dir**;
 PolicyGate enforces that. `source_file` and `framework_source_root` are exempt —
 they name framework source, which lives outside the session dir by construction,
 and where a patch may land is decided when `integrate_patch` applies it.
-`hyperloom.orchestrator.framework.paths.resolve_framework_tree` names the tree a
+`hyperloom.inference_optimizer.framework_paths.resolve_framework_tree` names the tree a
 session optimises and `resolve_kernel_search_roots` the trees worth searching;
 `$INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS` (colon-separated) supplements the
 latter and is auto-probed by
@@ -1384,7 +1384,7 @@ The optimizer should:
   serialised by the lane / GPU lease rather than a policy deny, so
   explore / kernel dispatches keep flowing while analysis refreshes.
   Each analysis also stamps a decode roofline ceiling
-  (`src/hyperloom/orchestrator/kernel/roofline_ceiling.py`) for the report's
+  (`src/hyperloom/inference_optimizer/roofline_ceiling.py`) for the report's
   `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
   `last_trace_analyze`.

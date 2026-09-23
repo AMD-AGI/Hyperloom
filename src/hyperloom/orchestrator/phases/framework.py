@@ -27,7 +27,7 @@ from ..loop.coordinator import (
     _framework_config_levers_from_done,
 )
 from ..loop.coordinator_helpers import _dedupe_extra_server_args
-from ..actions.executors._grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import merge_server_args
 from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
@@ -2948,7 +2948,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
         """
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
         try:
             from hyperloom.agents.framework.kb import read_pr_ledger

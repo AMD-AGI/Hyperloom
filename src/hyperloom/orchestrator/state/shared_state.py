@@ -1235,7 +1235,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         existing: Any,
     ) -> dict[str, Any]:
         """Shape the unified ``explore_search`` ledger at load time."""
-        from ..actions.executors._canonical_fingerprint import canonical_fingerprint as _fp
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint as _fp
 
         existing = existing if isinstance(existing, dict) else {}
         out: dict[str, Any] = dict(existing)
@@ -2157,11 +2157,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it."""
         try:
-            from ..kernel.roofline_ceiling import (
+            from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
             )
-            from ..kernel.roofline_snapshot import (
+            from hyperloom.inference_optimizer.roofline_snapshot import (
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2442,13 +2442,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """
         # Append compact history for report-side Roofline Comparison; best-effort.
         try:
-            from ..kernel.roofline_snapshot import (
+            from hyperloom.inference_optimizer.roofline_snapshot import (
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
 
             # Stamp decode-roofline ceiling + measured tput.
-            from ..kernel.roofline_ceiling import (
+            from hyperloom.inference_optimizer.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
             )
@@ -2513,7 +2513,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
             try:
-                from ..kernel.roofline_snapshot import direction_saturation
+                from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
 
                 sat = direction_saturation(history_entry)
                 direction = str(sat.get("direction") or "")

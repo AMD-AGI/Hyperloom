@@ -33,20 +33,20 @@ from typing import Any
 from hyperloom.inference_optimizer import framework_registry
 
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
     )
 except ImportError:
     _resolve_flydsl_source_roots = None
 
 try:
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_kernel_search_roots as _resolve_kernel_search_roots,
     )
-    from hyperloom.orchestrator.framework.paths import (
+    from hyperloom.inference_optimizer.framework_paths import (
         resolve_known_source_prefixes as _resolve_known_source_prefixes,
     )
 except ImportError:

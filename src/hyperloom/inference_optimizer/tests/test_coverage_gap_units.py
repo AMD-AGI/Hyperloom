@@ -1046,7 +1046,7 @@ def test_server_lifecycle_remaining_resolution_branches(tmp_path: Path, monkeypa
 
 
 def test_canonical_fingerprint_remaining_normalization_branches() -> None:
-    from hyperloom.orchestrator.actions.executors import _canonical_fingerprint as fp
+    from hyperloom.inference_optimizer import canonical_fingerprint as fp
 
     with_controls = fp.canonical_fingerprint(
         '--flag "unterminated',

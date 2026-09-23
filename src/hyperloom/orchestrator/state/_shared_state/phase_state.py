@@ -321,7 +321,7 @@ class _PhaseStateMixin:
         """Append one promoted variant to ``explore_search.accepted``; dedupes by ``fingerprint`` and removes any matching ``rejected`` entry."""
         if not isinstance(variant, dict) or not variant:
             return
-        from ...actions.executors._canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 
         args = str(variant.get("candidate_extra_server_args") or variant.get("extra_server_args") or "")
         envs = dict(variant.get("extra_envs") or {})
