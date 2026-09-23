@@ -95,6 +95,7 @@ VERIFY_HOTFIX_ONLY=0
 ASSUME_YES=0
 USER_DATA_PATH_ARG=""
 DEPS_ROOT_ARG=""
+_SETUP_PYTHON=""
 
 usage() {
   cat <<'EOF'
@@ -200,13 +201,24 @@ is_interactive() { [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ] && [ -t 1 ]; }
 # Resolve a Python interpreter, mirroring install.sh: prefer the canonical ROCm
 # venv (/opt/venv) unless INFERENCE_OPTIMIZER_FORCE_PYTHON=1 pins $PYTHON.
 resolve_python() {
-  if [ -x "/opt/venv/bin/python" ] && [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" != "1" ]; then
-    echo "/opt/venv/bin/python"; return 0
+  if [ -n "${_SETUP_PYTHON:-}" ]; then printf '%s\n' "$_SETUP_PYTHON"; return 0; fi
+  local py
+  if [ "${INFERENCE_OPTIMIZER_FORCE_PYTHON:-0}" = "1" ]; then
+    [ -n "${PYTHON:-}" ] && command -v "$PYTHON" >/dev/null 2>&1 \
+      || { warn "forced PYTHON is missing or not executable; refusing to select another interpreter"; return 1; }
+    py="$PYTHON"
+  elif [ -x "/opt/venv/bin/python" ]; then
+    py="/opt/venv/bin/python"
+  elif [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
+    py="$PYTHON"
+  elif [ -x "/venv/bin/python" ]; then
+    py="/venv/bin/python"
+  else
+    py="$(command -v python3)" || return 1
   fi
-  if [ -n "${PYTHON:-}" ] && [ -x "${PYTHON}" ]; then echo "$PYTHON"; return 0; fi
-  if [ -x "/venv/bin/python" ]; then echo "/venv/bin/python"; return 0; fi
-  command -v python3 2>/dev/null && return 0
-  return 1
+  py="$("$py" -c 'import sys; print(sys.executable)')" && [ -n "$py" ] && [ -x "$py" ] \
+    || { warn "selected PYTHON is not usable; refusing to select another interpreter"; return 1; }
+  printf '%s\n' "$py"
 }
 
 # Import-probe a module. `import importlib.util` (not `import importlib`): a bare
@@ -248,23 +260,26 @@ resolve_installed_framework() {
 }
 
 python_venv_root() {
-  local py="$1" bin_dir venv_dir
-  bin_dir="$(cd "$(dirname "$py")" 2>/dev/null && pwd)" || return 1
-  venv_dir="$(cd "${bin_dir}/.." 2>/dev/null && pwd)" || return 1
-  [ -f "${venv_dir}/pyvenv.cfg" ] || return 1
-  printf '%s\n' "$venv_dir"
+  "$1" - <<'PY'
+import os
+import sys
+
+venv = sys.prefix if sys.prefix != sys.base_prefix else ""
+active = os.environ.get("VIRTUAL_ENV", "")
+if active and (not venv or os.path.realpath(active) != os.path.realpath(venv)):
+    raise SystemExit("VIRTUAL_ENV conflicts with the selected Python prefix; reconcile the environment before setup")
+print(venv)
+PY
 }
 
 export_virtualenv_for_python() {
   local py="$1" venv_dir
-  if venv_dir="$(python_venv_root "$py")"; then
+  venv_dir="$(python_venv_root "$py")" || die "cannot align VIRTUAL_ENV with the selected Python"
+  if [ -n "$venv_dir" ]; then
     export VIRTUAL_ENV="$venv_dir"
-    case ":$PATH:" in
-      *":${venv_dir}/bin:"*) ;;
-      *) export PATH="${venv_dir}/bin:$PATH" ;;
-    esac
     log "VIRTUAL_ENV=${VIRTUAL_ENV}"
   fi
+  export PATH="$(dirname "$py"):$PATH"
 }
 
 # TheRock's pip-packaged ROCm splits libraries across up to three namespace
@@ -495,7 +510,7 @@ base_preflight() {
 
   local py
   if ! py="$(resolve_python)"; then die "no usable Python found (set PYTHON or provide /opt/venv). ${IMAGE_HINT}"; fi
-  log "Python: ${py} ($(${py} --version 2>&1))"
+  log "Python: ${py} ($("${py}" --version 2>&1))"
 
   local torch_report tv thip
   torch_report="$("${py}" - <<'PY' 2>/dev/null || true
@@ -531,6 +546,14 @@ PY
     fw="$(echo "$fw" | tr -d '[:space:]')"; [ -z "$fw" ] && continue
     local probe_py; probe_py="$(framework_probe_python "$fw" "$py")"
     if _py_has "$probe_py" "$fw"; then
+      if [ "$fw" = "atom" ] && [ "$REQUIRE_FRAMEWORKS" -eq 1 ]; then
+        if ! "$probe_py" -B -c 'import atom'; then
+          warn "framework atom: import failed (required)"; rc=1; continue
+        fi
+        if ! "$probe_py" -B -m atom.entrypoints.openai_server --help >/dev/null; then
+          warn "framework atom: server --help failed (required)"; rc=1; continue
+        fi
+      fi
       if [ "$probe_py" != "$py" ]; then
         log "framework ${fw}: OK (isolated: ${probe_py})"
       else
@@ -2583,6 +2606,7 @@ EOF
 }
 
 main() {
+  [ "$CHECK_ONLY" -eq 0 ] || export PYTHONDONTWRITEBYTECODE=1
   restore_persisted_framework_env
   case "$FRAMEWORK_ENV" in
     shared|isolated) ;;
@@ -2592,10 +2616,18 @@ main() {
     die "--framework-env isolated is currently supported for vLLM only"
   fi
 
-  local user_data
-  # Precedence: --user-data-path > process env > .env > default. The .env value
-  # is honored so the setup skill's written USER_DATA_PATH is not silently lost.
-  user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$(read_dotenv_var USER_DATA_PATH)}}"
+  local user_data dotenv_user_data root_declaration readonly_root=0
+  # Precedence: --user-data-path > process env > .env > default. A readonly
+  # platform root must also agree with the selected CLI/dotenv workspace.
+  dotenv_user_data="$(read_dotenv_var USER_DATA_PATH)"
+  root_declaration="$(declare -p USER_DATA_PATH 2>/dev/null || true)"
+  if [[ "$root_declaration" =~ ^declare\ -[^[:space:]]*r[^[:space:]]*\  ]]; then
+    readonly_root=1
+    user_data="${USER_DATA_PATH_ARG:-${dotenv_user_data:-${USER_DATA_PATH:-}}}"
+    [ "${USER_DATA_PATH:-}" = "$user_data" ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+  else
+    user_data="${USER_DATA_PATH_ARG:-${USER_DATA_PATH:-$dotenv_user_data}}"
+  fi
 # Container images ship a writable /workspace; a bare-metal host off root has
 # neither it nor permission to create it, so the mkdir below would abort.
 _default_workspace_root() {
@@ -2606,7 +2638,11 @@ _default_workspace_root() {
   if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
 }
   user_data="${user_data:-$(_default_workspace_root)}"
-  export USER_DATA_PATH="$user_data"
+  if [ "${USER_DATA_PATH:-}" != "$user_data" ]; then
+    [ "$readonly_root" -eq 0 ] || die "readonly USER_DATA_PATH conflicts with the selected workspace root"
+    USER_DATA_PATH="$user_data"
+  fi
+  export USER_DATA_PATH
   # Preserve explicit choices with env > .env precedence; leave an omitted backend
   # empty so the CLI can apply its framework-specific default at launch.
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"
@@ -2621,11 +2657,10 @@ _default_workspace_root() {
   [ "$DRY_RUN" -eq 1 ] && log "mode: dry-run"
   [ "$CHECK_ONLY" -eq 1 ] && log "mode: check-only"
 
-  local py_for_env
-  if py_for_env="$(resolve_python 2>/dev/null)"; then
-    export_virtualenv_for_python "$py_for_env"
-    export_rocm_sdk_toolchain_root "$py_for_env"
-  fi
+  _SETUP_PYTHON="$(resolve_python)" || die "no usable PYTHON found for setup"
+  export PYTHON="$_SETUP_PYTHON"
+  export_virtualenv_for_python "$PYTHON"
+  export_rocm_sdk_toolchain_root "$PYTHON"
 
   if [ "$VERIFY_HOTFIX_ONLY" -eq 1 ]; then
     verify_rocm_profiler_hotfix_only
