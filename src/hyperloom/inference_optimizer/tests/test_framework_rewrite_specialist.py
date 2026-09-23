@@ -326,6 +326,7 @@ class _DispatchStub:
             "_rewrite_evidence_absence_note",
             "_enqueue_framework_agent_local_explore_specialist",
             "_next_local_explore_candidate_id",
+            "_map_authoring_specialist",
         ):
             setattr(self, name, getattr(FrameworkPhase, name).__get__(self))
         # A staticmethod on the real class; binding it would pass ``self`` as the candidate row.

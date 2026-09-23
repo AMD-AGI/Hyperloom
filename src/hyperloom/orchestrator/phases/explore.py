@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from . import machine_state as _phase_state
 from hyperloom.common.coerce import to_float
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
 )
@@ -67,6 +68,27 @@ def _forward_enablement_carriers(src: dict[str, Any], dst: dict[str, Any]) -> No
         # Bench the candidate against the original workload/eval contract rather
         # than the shipped default config.
         dst.setdefault("config_path", cfg)
+
+
+def _forward_framework_provenance(src: dict[str, Any], dst: dict[str, Any]) -> None:
+    """Carry FRAMEWORK authoring ids and the enablement marker onto the integrate task.
+
+    The authored-outcome bridge keys its progress row on the real candidate id,
+    and integrate_patch applies the runnable_decision gate only when it sees the
+    enablement marker and the pre-patch boot observation.
+    """
+    if bool(src.get("framework_agent_authoring")):
+        dst["framework_agent_authoring"] = True
+        for key in ("framework_agent_candidate_id", "framework_batch_id"):
+            value = str(src.get(key) or "")
+            if value:
+                dst[key] = value
+    if bool(src.get("enablement")):
+        dst["enablement"] = True
+        _forward_enablement_carriers(src, dst)
+        before_path = str(src.get("enablement_before_observation_path") or "")
+        if before_path:
+            dst["enablement_before_observation_path"] = before_path
 
 
 def _forward_integrate_source(
@@ -786,15 +808,7 @@ class ExplorePhase(CoordinatorCollaborator):
             ``True`` when a retry was scheduled (caller must skip this
             attempt's bookkeeping); ``False`` otherwise.
         """
-        flag = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY",
-                "1",
-            )
-            .strip()
-            .lower()
-        )
-        if flag in ("0", "false", "no", "off"):
+        if not env_flag("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", default=True):
             return False
         try:
             cap = int(
@@ -842,12 +856,7 @@ class ExplorePhase(CoordinatorCollaborator):
 
         if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu_raw = retry_params.get("needs_gpu", False)
-        needs_gpu = (
-            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-            if isinstance(needs_gpu_raw, str)
-            else bool(needs_gpu_raw)
-        )
+        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
         if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
             # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
             needs_gpu = True
@@ -1567,22 +1576,8 @@ class ExplorePhase(CoordinatorCollaborator):
                     },
                 )
             return
-        # Already ruled on by the Critic (e.g. after resume) — nothing to do.
-        try:
-            if self.shared_state.get_specialist_patch_verdict(sid):
-                return
-        except Exception:  # noqa: BLE001 — defensive
-            pass
-        # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
-            try:
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                pl = getattr(p, "payload", {}) or {}
-                if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                    return
-            except Exception:  # noqa: BLE001 — defensive
-                continue
+        if self._integrate_review_open(sid):
+            return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals:
@@ -1629,37 +1624,61 @@ class ExplorePhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
-        # FRAMEWORK authoring provenance passthrough: propagate the PR
-        # candidate/batch id onto the synthetic integrate_patch task so the
-        # authored-outcome bridge keys the progress row on the real candidate id.
         try:
-            if bool(spec_params.get("framework_agent_authoring")):
-                integrate_params["framework_agent_authoring"] = True
-                fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
-                fa_batch = str(spec_params.get("framework_batch_id") or "")
-                if fa_cand:
-                    integrate_params["framework_agent_candidate_id"] = fa_cand
-                if fa_batch:
-                    integrate_params["framework_batch_id"] = fa_batch
-            # Propagate the enablement marker so integrate_patch applies the
-            # runnable_decision gate.
-            if bool(spec_params.get("enablement")):
-                integrate_params["enablement"] = True
-                _forward_enablement_carriers(spec_params, integrate_params)
-                # Forward the pre-patch boot observation for the runnable gate.
-                before_path = str(spec_params.get("enablement_before_observation_path") or "")
-                if before_path:
-                    integrate_params["enablement_before_observation_path"] = before_path
-                # Forward stacked base setup commands to replay before boot.
-                base_setup = spec_params.get("enablement_setup_commands")
-                if isinstance(base_setup, list) and base_setup:
-                    integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
+            _forward_framework_provenance(spec_params, integrate_params)
+            # Forward stacked base setup commands to replay before boot.
+            base_setup = spec_params.get("enablement_setup_commands")
+            if bool(spec_params.get("enablement")) and isinstance(base_setup, list) and base_setup:
+                integrate_params["enablement_setup_commands"] = [str(c) for c in base_setup]
         except Exception:  # noqa: BLE001 — provenance passthrough is best-effort
             log.debug(
                 "FRAMEWORK: authoring provenance passthrough failed for task=%s",
                 sid,
                 exc_info=True,
             )
+        await self._submit_integrate_for_review(
+            sid,
+            integrate_params,
+            kind="specialist_patch_autosubmitted_for_review",
+            details={
+                "patch_name": patch_name,
+                "patches": [str(x) for x in patches][:8],
+                # Artifact-only deliverables: record their install targets.
+                "artifacts_written": [
+                    str((a or {}).get("target") or "")
+                    for a in (done_payload.get("artifacts_written") or [])
+                    if isinstance(a, dict)
+                ][:8],
+            },
+        )
+
+    def _integrate_review_open(self, sid: str) -> bool:
+        """Whether this specialist's integrate_patch was already ruled on (e.g. after resume) or is in flight."""
+        try:
+            if self.shared_state.get_specialist_patch_verdict(sid):
+                return True
+        except Exception:  # noqa: BLE001 — defensive
+            pass
+        for p in self.state.pending_proposals.values():
+            try:
+                if getattr(p, "action_name", "") != "integrate_patch":
+                    continue
+                pl = getattr(p, "payload", {}) or {}
+                if (pl.get("params") or {}).get("specialist_task_id") == sid:
+                    return True
+            except Exception:  # noqa: BLE001 — defensive
+                continue
+        return False
+
+    async def _submit_integrate_for_review(
+        self,
+        sid: str,
+        integrate_params: dict[str, Any],
+        *,
+        kind: str,
+        details: dict[str, Any],
+    ) -> None:
+        """Propose a synthetic integrate_patch for Critic review, record ``kind``, and persist."""
         propose_payload = {
             "action_name": "integrate_patch",
             "provenance": "specialist",
@@ -1683,27 +1702,12 @@ class ExplorePhase(CoordinatorCollaborator):
         await self._record_observation(
             "coordinator",
             "observation",
-            {
-                "kind": "specialist_patch_autosubmitted_for_review",
-                "specialist_task_id": sid,
-                "proposal_msg_id": msg.msg_id,
-                "patch_name": patch_name,
-                "patches": [str(x) for x in patches][:8],
-                # Artifact-only deliverables: record their install targets.
-                "artifacts_written": [
-                    str((a or {}).get("target") or "")
-                    for a in (done_payload.get("artifacts_written") or [])
-                    if isinstance(a, dict)
-                ][:8],
-            },
+            {"kind": kind, "specialist_task_id": sid, "proposal_msg_id": msg.msg_id, **details},
         )
         try:
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "save after specialist patch autosubmit failed for task=%s",
-                sid,
-            )
+            log.exception("save after %s failed for task=%s", kind, sid)
 
     async def _maybe_autosubmit_framework_config(
         self,
@@ -1753,22 +1757,8 @@ class ExplorePhase(CoordinatorCollaborator):
             return
         if config_levers and self._config_lever_known_bad(config_levers):
             return
-        # Already ruled on (e.g. after resume) — nothing to do.
-        try:
-            if self.shared_state.get_specialist_patch_verdict(sid):
-                return
-        except Exception:  # noqa: BLE001 — defensive
-            pass
-        # A synthetic review for this specialist is already in flight.
-        for p in self.state.pending_proposals.values():
-            try:
-                if getattr(p, "action_name", "") != "integrate_patch":
-                    continue
-                pl = getattr(p, "payload", {}) or {}
-                if (pl.get("params") or {}).get("specialist_task_id") == sid:
-                    return
-            except Exception:  # noqa: BLE001 — defensive
-                continue
+        if self._integrate_review_open(sid):
+            return
         proposals = done_payload.get("proposal_set") or []
         patch_name = ""
         if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):
@@ -1784,25 +1774,13 @@ class ExplorePhase(CoordinatorCollaborator):
             spec_params,
             integrate_params,
         )
-        # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
-        fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
-        fa_batch = str(spec_params.get("framework_batch_id") or "")
-        integrate_params["framework_agent_authoring"] = True
-        if fa_cand:
-            integrate_params["framework_agent_candidate_id"] = fa_cand
-        if fa_batch:
-            integrate_params["framework_batch_id"] = fa_batch
-        # Enablement passthrough (mirrors _maybe_autosubmit_specialist_patches): a
-        # config-lever-only enablement deliverable MUST still flow the enablement
+        # A config-lever-only enablement deliverable MUST still flow the enablement
         # marker + setup_commands into integrate_patch, or the result never
         # carries ``enablement=True``, ``_maybe_rearm_enablement`` no-ops, and
         # the round is never settled or charged.
+        _forward_framework_provenance(spec_params, integrate_params)
+        fa_cand = str(integrate_params.get("framework_agent_candidate_id") or "")
         if bool(spec_params.get("enablement")):
-            integrate_params["enablement"] = True
-            _forward_enablement_carriers(spec_params, integrate_params)
-            before_path = str(spec_params.get("enablement_before_observation_path") or "")
-            if before_path:
-                integrate_params["enablement_before_observation_path"] = before_path
             # Merge the stacked base setup commands with any NEW setup_commands the
             # specialist just proposed in this deliverable (e.g. a stack upgrade),
             # so a config-lever-only enablement round actually replays the install
@@ -1818,51 +1796,22 @@ class ExplorePhase(CoordinatorCollaborator):
                     merged_setup.append(sc)
             if merged_setup:
                 integrate_params["enablement_setup_commands"] = merged_setup
-        propose_payload = {
-            "action_name": "integrate_patch",
-            "provenance": "specialist",
-            "predicted_gain_pct": 0.0,
-            "params": integrate_params,
-        }
-        msg = Message.new(
-            "coordinator",
-            "*",
-            "proposal",
-            {**propose_payload, "needs_review": True},
-        )
-        await self.bus.append_and_seq(msg)
-        self.state.pending_proposals[msg.msg_id] = PendingProposal(
-            proposal_msg_id=msg.msg_id,
-            from_agent="coordinator",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload=dict(propose_payload),
-        )
-        await self._record_observation(
-            "coordinator",
-            "observation",
-            {
-                "kind": "framework_config_autosubmitted_for_review",
-                "specialist_task_id": sid,
-                "proposal_msg_id": msg.msg_id,
-                "candidate_id": fa_cand,
-                "extra_server_args": integrate_params["extra_server_args"],
-                "extra_envs": dict(integrate_params["extra_envs"]),
-            },
-        )
         log.info(
             "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
             fa_cand or sid,
             integrate_params["extra_server_args"],
             sorted(integrate_params["extra_envs"]),
         )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — defensive
-            log.exception(
-                "FRAMEWORK: save after config autosubmit failed for task=%s",
-                sid,
-            )
+        await self._submit_integrate_for_review(
+            sid,
+            integrate_params,
+            kind="framework_config_autosubmitted_for_review",
+            details={
+                "candidate_id": fa_cand,
+                "extra_server_args": integrate_params["extra_server_args"],
+                "extra_envs": dict(integrate_params["extra_envs"]),
+            },
+        )
 
     def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
         """True when this exact config already lost an accuracy gate.

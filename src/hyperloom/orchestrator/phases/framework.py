@@ -614,6 +614,56 @@ class FrameworkPhase(CoordinatorCollaborator):
             lines.append(f"- recommended next step: {next_step}")
         return lines
 
+    async def _settle_finished_authoring_specialist(
+        self, spec_task: Any, *, cand_id: str, batch_id: str, label: str
+    ) -> bool:
+        """Whether the reused specialist already finished; recovers its outcome once when no row carries it yet."""
+        from ..state.task_registry import TERMINAL_STATES
+
+        if str(getattr(spec_task, "state", "") or "") not in TERMINAL_STATES:
+            return False
+        already_rows = self._framework_processed_candidate_keys()
+        authoring_inflight = await self._framework_agent_authoring_inflight()
+        if not cand_id or cand_id in already_rows or authoring_inflight:
+            return True
+        try:
+            recovered = await self._recover_framework_agent_authoring_outcome(specialist_task=spec_task)
+        except Exception:  # noqa: BLE001 — never wedge the pump
+            log.exception("FRAMEWORK %s: terminal outcome recovery failed candidate=%s", label, cand_id)
+            recovered = False
+        if not recovered:
+            log.warning(
+                "FRAMEWORK %s: terminal outcome unavailable candidate=%s state=%s",
+                label,
+                cand_id,
+                getattr(spec_task, "state", ""),
+            )
+            # Stamp a terminal row so an unrecoverable outcome cannot make the pump re-select the same
+            # finished specialist forever.
+            self._stamp_framework_progress(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="recovery_failed",
+                rationale=f"{label} outcome unrecoverable from persisted results",
+                provenance="pump",
+            )
+        return True
+
+    def _map_authoring_specialist(self, spec_task: Any, *, cand_id: str, label: str) -> str:
+        """Record specialist task -> candidate so the authored-outcome bridge can resolve the candidate id from the
+        downstream integrate_patch; returns the specialist task id."""
+        state = self.shared_state
+        spec_tid = str(getattr(spec_task, "task_id", "") or "")
+        try:
+            if spec_tid and cand_id:
+                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
+                    state.framework_agent_specialist_candidate_map = {}
+                state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
+                state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 — best-effort provenance
+            log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
+        return spec_tid
+
     async def _enqueue_framework_agent_authoring_specialist(
         self,
         candidate: dict[str, Any],
@@ -688,52 +738,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             side_effects=["writes_results", "writes_patches"],
             lease_ttl_sec=ttl,
         )
-        from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
-
-        if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
-            already_rows = self._framework_processed_candidate_keys()
-            authoring_inflight = await self._framework_agent_authoring_inflight()
-            if cand_id and cand_id not in already_rows and not authoring_inflight:
-                try:
-                    recovered = await self._recover_framework_agent_authoring_outcome(
-                        specialist_task=spec_task,
-                    )
-                except Exception:  # noqa: BLE001 — never wedge the pump
-                    log.exception(
-                        "FRAMEWORK: terminal authoring outcome recovery failed candidate=%s",
-                        cand_id,
-                    )
-                    recovered = False
-                if not recovered:
-                    log.warning(
-                        "FRAMEWORK: terminal authoring outcome unavailable candidate=%s state=%s",
-                        cand_id,
-                        getattr(spec_task, "state", ""),
-                    )
-                    # Stamp a terminal row so an unrecoverable outcome cannot make the pump re-select the same
-                    # finished specialist forever.
-                    self._stamp_framework_progress(
-                        candidate_id=cand_id,
-                        batch_id=batch_id,
-                        status="recovery_failed",
-                        rationale="authoring outcome unrecoverable from persisted results",
-                        provenance="pump",
-                    )
-                return ""
-        # Map specialist task -> candidate so the authored-outcome bridge can resolve the PR-URL candidate id from the
-        # downstream integrate_patch.
-        spec_tid = str(getattr(spec_task, "task_id", "") or "")
-        try:
-            if spec_tid and cand_id:
-                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
-                    state.framework_agent_specialist_candidate_map = {}
-                state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
-                state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort provenance
-            log.debug(
-                "FRAMEWORK authoring: specialist->candidate map write failed",
-                exc_info=True,
-            )
+        if _spec_existing and await self._settle_finished_authoring_specialist(
+            spec_task, cand_id=cand_id, batch_id=batch_id, label="authoring"
+        ):
+            return ""
+        spec_tid = self._map_authoring_specialist(spec_task, cand_id=cand_id, label="authoring")
         _record_run(
             self,
             spec_tid,
@@ -1331,47 +1340,11 @@ class FrameworkPhase(CoordinatorCollaborator):
                 _LOCAL_EXPLORE_MAX_ATTEMPTS,
             )
             return ""
-        from ..state.task_registry import TERMINAL_STATES as _TERMINAL_STATES
-
-        if _spec_existing and str(getattr(spec_task, "state", "") or "") in _TERMINAL_STATES:
-            already_rows = self._framework_processed_candidate_keys()
-            authoring_inflight = await self._framework_agent_authoring_inflight()
-            if cand_id and cand_id not in already_rows and not authoring_inflight:
-                try:
-                    recovered = await self._recover_framework_agent_authoring_outcome(
-                        specialist_task=spec_task,
-                    )
-                except Exception:  # noqa: BLE001 — never wedge the pump
-                    log.exception(
-                        "FRAMEWORK local-explore: terminal outcome recovery failed candidate=%s",
-                        cand_id,
-                    )
-                    recovered = False
-                if not recovered:
-                    log.warning(
-                        "FRAMEWORK local-explore: terminal outcome unavailable candidate=%s state=%s",
-                        cand_id,
-                        getattr(spec_task, "state", ""),
-                    )
-                    # Stamp a terminal row so an unrecoverable outcome cannot make the pump re-select the same
-                    # finished specialist forever.
-                    self._stamp_framework_progress(
-                        candidate_id=cand_id,
-                        batch_id=str(candidate.get("batch_id") or ""),
-                        status="recovery_failed",
-                        rationale="local-explore outcome unrecoverable from persisted results",
-                        provenance="pump",
-                    )
-                return ""
-        spec_tid = str(getattr(spec_task, "task_id", "") or "")
-        try:
-            if spec_tid and cand_id:
-                if not isinstance(getattr(state, "framework_agent_specialist_candidate_map", None), dict):
-                    state.framework_agent_specialist_candidate_map = {}
-                state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
-                state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — best-effort provenance
-            log.debug("FRAMEWORK local-explore: specialist->candidate map write failed", exc_info=True)
+        if _spec_existing and await self._settle_finished_authoring_specialist(
+            spec_task, cand_id=cand_id, batch_id=str(candidate.get("batch_id") or ""), label="local-explore"
+        ):
+            return ""
+        spec_tid = self._map_authoring_specialist(spec_task, cand_id=cand_id, label="local-explore")
         log.info(
             "FRAMEWORK: dispatched local-exploration specialist candidate=%s gap=%s reason=%s",
             cand_id,
