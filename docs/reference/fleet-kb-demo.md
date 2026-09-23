@@ -47,10 +47,20 @@ export HYPERLOOM_FLEET_KB_THREAD_ID="$SLACK_THREAD_ID"
 export HYPERLOOM_FLEET_KB_SPOOL="$SESSION_DIR/fleet-kb-spool"
 ```
 
-During FRAMEWORK_AGENT, the orchestration prompt performs one Fleet read per
-tick. A successful evidence block is inserted before the orchestration model
-proposes work. Its rendered Experience references are recorded on the proposal
-and preserved in the measured Experience.
+During FRAMEWORK_AGENT, the orchestration prompt performs one Fleet read for
+each distinct decision context. Identical context is reused across ticks. A
+successful evidence block is inserted before the orchestration model proposes
+work. Its rendered Experience references are recorded on the proposal and
+preserved in the measured Experience. Historical evidence may seed a proposal
+or current-best candidate, but the original Recipe measurement remains the
+immutable gain-accounting baseline.
+
+Hyperloom captures runtime `identity`, `workload`, `objective`,
+`benchmark_baseline`, `current_best`, `observations`, `recent_results`, and
+`already_tried`. The workflow does not construct search fields, weights, or a
+QueryPlan; the central Planner derives them from this decision context.
+Use the project `fleet-kb-integrate` Skill when adapting this boundary to
+another optimization workflow.
 
 At CLOSE, the existing Experience publisher uses the same SDK. When the Fleet
 URL is configured, completed Experiences publish to the central service.
@@ -68,8 +78,10 @@ X-Hyperloom-Fleet-ID: customer-demo
 
 Render `kb.read.completed` and `kb.experience.published` in the Hyperloom job
 thread. Read events include signals, top Repeat Groups, actual rendered
-Experience IDs, latency, and warnings. Write events include the change,
-keep/revert outcome, measurements, content hash, and corpus sequence.
+Experience IDs, latency, and warnings. The accepted decision context is
+retained as a future Test Case seed, but the Slack message renders only bounded
+signal summaries. Write events include the change, keep/revert outcome,
+measurements, content hash, and corpus sequence.
 
 Persist the returned cursor only after Slack accepts the corresponding message.
 Re-reading a cursor is safe because each event has a stable `event_id`.
