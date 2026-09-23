@@ -78,9 +78,6 @@ EVAL_PROBE_FILENAME = "hyperloom_eval_probe.json"
 # expected to run.
 BASELINE_ACCURACY_STOP_REASON = "baseline_accuracy_failed"
 
-# Truthy-false spellings that disable the accuracy gate.
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 
 def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     """Report whether lm-eval is disabled in the materialized benchmark config."""

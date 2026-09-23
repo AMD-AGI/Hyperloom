@@ -82,7 +82,6 @@ from ._subprocess_kill import (
     session_deadline_to_remaining_sec,
 )
 from ._accuracy_gate import (
-    _RUN_EVAL_FALSE_VALUES,
     materialized_run_eval_disabled,
 )
 from ._agentx_timeouts import (
@@ -878,55 +877,40 @@ def _revert_patches(
     snapshot_manifest: Any = None,
 ) -> dict[str, Any]:
     """Restore exact patch-touched state without broad reset/clean."""
+    manifest, error = _validated_restore_manifest(repo_path, pre_sha, snapshot_manifest)
+    result = {"ok": False, "errors": [error]} if error else _restore_patch_snapshot(manifest)
+    if not result["ok"]:
+        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
+    return result
+
+
+def _validated_restore_manifest(
+    repo_path: str,
+    pre_sha: str,
+    snapshot_manifest: Any,
+) -> tuple[dict[str, Any], str]:
+    """Load the snapshot manifest and check it was taken of ``repo_path`` at ``pre_sha``.
+
+    Returns ``(manifest, "")`` when the restore may proceed, else ``({}, error)``.
+    """
     manifest = snapshot_manifest
     if isinstance(manifest, (str, Path)):
         try:
             manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError) as exc:
-            result = {"ok": False, "errors": [f"manifest_read:{exc}"]}
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"manifest_read:{exc}"
     if not isinstance(manifest, dict):
-        result = {"ok": False, "errors": ["missing_manifest"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest"
     manifest_repo_value = str(manifest.get("repo_path") or "").strip()
     if not manifest_repo_value:
-        result = {"ok": False, "errors": ["missing_manifest_repo"]}
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, "missing_manifest_repo"
     try:
         caller_repo = Path(repo_path).resolve(strict=True)
         manifest_repo = Path(manifest_repo_value).resolve(strict=True)
     except (OSError, ValueError) as exc:
-        result = {
-            "ok": False,
-            "errors": [f"repo_validation:{type(exc).__name__}:{exc}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_validation:{type(exc).__name__}:{exc}"
     if caller_repo != manifest_repo:
-        result = {
-            "ok": False,
-            "errors": [f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"],
-        }
-        log.warning(
-            "baseline_executor: exact patch restore failed: %s",
-            result["errors"],
-        )
-        return result
+        return {}, f"repo_mismatch:caller={caller_repo}:manifest={manifest_repo}"
     if pre_sha:
         try:
             head = subprocess.run(
@@ -948,29 +932,10 @@ def _revert_patches(
             subprocess.CalledProcessError,
             subprocess.TimeoutExpired,
         ) as exc:
-            result = {
-                "ok": False,
-                "errors": [f"head_validation:{type(exc).__name__}:{exc}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
+            return {}, f"head_validation:{type(exc).__name__}:{exc}"
         if head != pre_sha:
-            result = {
-                "ok": False,
-                "errors": [f"head_mismatch:expected={pre_sha}:actual={head}"],
-            }
-            log.warning(
-                "baseline_executor: exact patch restore failed: %s",
-                result["errors"],
-            )
-            return result
-    result = _restore_patch_snapshot(manifest)
-    if not result["ok"]:
-        log.warning("baseline_executor: exact patch restore failed: %s", result["errors"])
-    return result
+            return {}, f"head_mismatch:expected={pre_sha}:actual={head}"
+    return manifest, ""
 
 
 def _three_way_residue_snapshot(
@@ -2174,9 +2139,7 @@ class BaselineExecutor:
         params = ctx.task.params or {}
         # A failed required patch timeline means the donor is incompatible with the current tree.
         _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = (
-            "RUN_EVAL" in _extra_envs and str(_extra_envs["RUN_EVAL"]).strip().lower() in _RUN_EVAL_FALSE_VALUES
-        )
+        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
         eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
         eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
