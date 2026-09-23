@@ -15,10 +15,10 @@ from kernelforge.gemm_tune.tier3.dispatch import (
     GRAPH_INNER,
     MAX_RELATIVE_ERROR,
     _Bf16DenseAdapter,
-    _CaptureFailed,
     parse_config,
     relative_error,
 )
+from kernelforge.gemm_tune.tier3.referee import CaptureFailed
 
 
 # ── fakes ────────────────────────────────────────────────────────────────────
@@ -290,7 +290,7 @@ class TestGraphCapture:
         assert uncapturable_adapter.as_graph_or_skip(lambda: "raw") is None
 
     def test_a_baseline_that_cannot_be_captured_fails_the_attempt(self, uncapturable_adapter):
-        with pytest.raises(_CaptureFailed):
+        with pytest.raises(CaptureFailed):
             uncapturable_adapter.make_baseline("2x3x4")
 
     def test_the_baseline_is_the_unmodified_matmul_under_the_same_capture(self, adapter):

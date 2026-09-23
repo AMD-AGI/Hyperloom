@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evidence import MOE_KEY_FIELDS, MOE_TABLE
+from .referee import CaptureFailed
 
 log = logging.getLogger(__name__)
 
@@ -88,10 +89,6 @@ FUSED_MOE_BACKENDS: dict[str, str] = {
         "would otherwise be timed as the default path and scored as a tie."
     ),
 }
-
-
-class _CaptureFailed(RuntimeError):
-    """The work could not be captured into a CUDA/HIP graph, so replay cannot time it."""
 
 
 def describe_correctness_rule(table: str) -> dict[str, Any] | None:
@@ -659,10 +656,10 @@ class _Bf16DenseAdapter:
                 for _ in range(GRAPH_INNER):
                     fn()
             return graph.replay
-        except Exception as exc:  # noqa: BLE001 - narrowed into _CaptureFailed for the caller to route
+        except Exception as exc:  # noqa: BLE001 - narrowed into CaptureFailed for the caller to route
             # ``graph.replay`` runs GRAPH_INNER invocations per call where ``fn`` runs one, so an
             # uncaptured callable cannot be timed against a captured baseline.
-            raise _CaptureFailed(f"graph capture failed: {exc!r}") from exc
+            raise CaptureFailed(f"graph capture failed: {exc!r}") from exc
 
     def as_graph_or_skip(self, fn: Callable[[], Any] | None) -> Callable[[], Any] | None:
         """Wrap a candidate for replay timing, or drop it when it cannot be captured."""
@@ -670,7 +667,7 @@ class _Bf16DenseAdapter:
             return None
         try:
             return self.as_graph(fn)
-        except _CaptureFailed as exc:
+        except CaptureFailed as exc:
             log.warning("tier3: candidate dropped, %s", exc)
             return None
 
