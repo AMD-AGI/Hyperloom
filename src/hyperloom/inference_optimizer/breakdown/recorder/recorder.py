@@ -99,6 +99,10 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "warm_start_read": "item",
     "warm_replay_event": "item",
     "warm_replay_gate": "item",
+    # Rows rather than a tally on the event: the plan's counts already say how
+    # many landed, and what a reader needs from a replay that lost is which
+    # item it was that did not.
+    "warm_replay_apply": "item",
     "framework_event": "item",
     "framework_plateau": "item",
     "framework_run": "item",
@@ -302,6 +306,9 @@ class Recorder:
         prefix = f"{_slug(section)}__{self._producer}__{slug}"
         digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:8]
         filename = f"{prefix}-{digest}.json"
+        if len(filename.encode("utf-8")) > 180:
+            short_digest = hashlib.sha256(key.encode("utf-8", errors="replace")).hexdigest()[:16]
+            return f"{_slug(section)}__{self._producer}__id-{short_digest}.json"
         legacy = self._dir / f"{prefix}.json"
         if slug != key:
             if legacy.exists():

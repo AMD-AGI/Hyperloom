@@ -595,7 +595,7 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     best: tuple[str, int, float | None] | None = None
     best_sequence = -1
     for row in recorded_section(SECTION_SEGMENT):
-        if not isinstance(row, Mapping) or row.get("exited_at"):
+        if row.get("exited_at"):
             continue
         event = str(row.get("event_id") or "")
         if not event or str(event.split(":")[0]).upper() != wanted:
@@ -616,7 +616,7 @@ def _event_holding(section: str, field: str, value: str) -> str | None:
     from .assembler import recorded_section
 
     for row in recorded_section(section):
-        if isinstance(row, Mapping) and str(row.get(field) or "") == str(value):
+        if str(row.get(field) or "") == str(value):
             event = str(row.get("event_id") or "")
             if event:
                 return event

@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import writeback as wb
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
@@ -2032,6 +2033,8 @@ class TestWritebackRequiredAxes:
             "tp_size": 2,
         }
         assert self._validation_state(state) == prior_validation
+        assert state.working_recipe_generation == state.validated_recipe_generation + 1
+        assert state.optimization_stack_has_unvalidated_keeps()
         record.assert_not_called()
         watermark.assert_not_called()
 
@@ -2064,6 +2067,31 @@ class TestWritebackRequiredAxes:
         assert state.optimization_stack == prior_stack
         record.assert_not_called()
 
+    def test_keeps_whose_throughput_losses_sum_past_the_band_still_validate(self, coord, monkeypatch):
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+
+        monkeypatch.setattr(stack_event, "record_validation", Mock())
+        state = coord.shared_state
+        state.current_best["total_throughput"] = state.baseline_perf["total_throughput"]
+        total, intvty = state.current_best["total_throughput"], state.current_best["e2e_norm_intvty_p90"]
+        # Each lift trades 4% throughput (inside the 5% band) for interactivity; by the third the
+        # stack sits past the band against baseline, which must not stop the gain from following it.
+        for step in range(3):
+            total *= 0.96
+            intvty *= 1.10
+            candidate = {
+                **self._candidate(),
+                "name": f"step{step}",
+                "extra_server_args": f"--page-size {64 << step}",
+                "total_throughput": total,
+                "e2e_norm_intvty_p90": intvty,
+            }
+            assert coord.writeback._lift_to_current_best("explore", 150.0, candidate)
+            assert coord.writeback._update_cumulative_gain_validated(150.0, candidate)
+            assert state.cumulative_gain_validated == pytest.approx(intvty - 100.0)
+            assert not state.optimization_stack_has_unvalidated_keeps()
+        assert total < state.baseline_perf["total_throughput"] * 0.95
+
     def test_explicit_output_without_intvty_axes_still_lifts_and_validates(self, coord, monkeypatch):
         from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
@@ -2085,6 +2113,8 @@ class TestWritebackRequiredAxes:
         assert state.current_best["extra_envs"] == {"NEXT_ENV": "1"}
         assert len(state.optimization_stack) == 2
         assert self._validation_state(state) == (50.0, "2026-01-02T00:00:00+00:00", 2)
+        assert state.validated_recipe_generation == state.working_recipe_generation == 1
+        assert not state.optimization_stack_has_unvalidated_keeps()
         record.assert_called_once()
         assert record.call_args.kwargs["baseline_tput"] == 100.0
         assert record.call_args.kwargs["validated_tput"] == 150.0
@@ -2555,3 +2585,45 @@ async def test_promote_leaves_a_clean_result_out_of_the_failure_log(session_dir)
     )
 
     assert coord.shared_state.last_action_failures == []
+
+
+@pytest.mark.asyncio
+async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
+    """The row is what the dryness judgment reads, so no recorder may gate it.
+
+    The recorder lives for one FRAMEWORK_AGENT entry; a round settling in SWEEP
+    finds it closed, which is how every row outside that window went missing.
+    """
+    coord = _coord(session_dir)
+    assert coord._framework_timeline() is None
+
+    await coord._fact_write_hook(
+        task=_task("explore", task_id="ex-1"),
+        result=SubAgentResult(
+            task_id="ex-1",
+            state="succeeded",
+            result={
+                "round_id": "explore-004",
+                "per_variant_outcomes": [
+                    {
+                        "outcome": "REVERT",
+                        "fingerprint": "fp-1",
+                        "variant_name": "v-1",
+                        "provenance": "llm_direct",
+                        "metrics": {"gain_pct": -1.5, "base_tput": 1000.0, "tput": 985.0},
+                    },
+                    {"outcome": "SKIPPED_DEDUP", "fingerprint": "fp-2", "variant_name": "v-2"},
+                ],
+            },
+        ),
+        kept=False,
+    )
+
+    # The deduped variant was never measured, so it is not an attempt.
+    (row,) = coord.shared_state.attempts
+    assert row["lever_kind"] == LEVER_CONFIG
+    assert row["outcome"] == "REVERT"
+    assert row["adopted"] is False
+    assert row["round_id"] == "explore-004"
+    assert row["fingerprint"] == "fp-1"
+    assert row["gain_pct"] == -1.5

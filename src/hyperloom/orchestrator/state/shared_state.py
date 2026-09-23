@@ -299,6 +299,8 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "rebaseline_exception",
         "cpp_itfs_rebuild_not_verified",
         "framework_script_mismatch",
+        # The recipe cannot carry the lever, so the patch was never benchmarked.
+        "recipe_lever_unavailable",
         "bench_exception",
         "subtask_exception",
         "handler_exception",
@@ -430,11 +432,12 @@ def _stamp_cycle_on_rejected(
 from ._shared_state.render import _RenderMixin
 
 
-from ._shared_state.explore_state import _ExploreStateMixin
+from ._shared_state.phase_state import _PhaseStateMixin
+from .gaps import GapsStateMixin
 
 
 @dataclass
-class SharedState(_RenderMixin, _ExploreStateMixin):
+class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # versioned state.json schema; bumped by from_dict migration. Fresh sessions born at latest.
     schema_version: int = LATEST_STATE_SCHEMA_VERSION
     session_id: str = ""
@@ -611,6 +614,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
+    # Bumped by every lift into ``current_best``; stamped onto ``validated_recipe_generation`` by every validation.
+    # Unequal => ``current_best`` is not the Recipe the validated gain was measured on, even at the same stack depth.
+    working_recipe_generation: int = 0
+    validated_recipe_generation: int = 0
     # Resume sentinels.
     pending_integrate: dict[str, Any] = field(default_factory=dict)
     resume_pending_revalidation: bool = False
@@ -688,6 +695,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_snapshots: list[dict[str, Any]] = field(default_factory=list)
     # Outer roofline failure counter; bumped on fail, reset on success.
     roofline_failure_streak: int = 0
+    # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
+    # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
+    gpu_trace_unsupported_reason: str = ""
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
@@ -695,6 +705,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
+    # One row per measured attempt on any lever; the per-lever dryness judgment
+    # reads it. One writer per lever: writeback for config, the dispatcher for
+    # patches, both through ``attempt_ledger``.
+    attempts: list[dict[str, Any]] = field(default_factory=list)
     # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(
         default_factory=list,
@@ -2813,8 +2827,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``)."""
-        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len)
+        """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""
+        return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
+            self.working_recipe_generation
+        ) != int(self.validated_recipe_generation)
 
 
 __all__ = ["SharedState", "render_model_arch_compact", "timed_teardown_step"]

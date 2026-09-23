@@ -288,18 +288,10 @@ SAFE_ENV_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "OPENAI_CUSTOM_HEADERS",
-    "AMD_API_KEY",
-    "AMD_LLM_API_KEY",
-    "LLM_GATEWAY_KEY",
-    "LLM_API_KEY",
     "LLM_API_BASE",
-    "LLM_PROXY_API_KEY",
-    "LLM_PROXY_BASE_URL",
-    # GEAK LLM connection (e2e runner reads these).
+    # Operator overrides that point GEAK at an endpoint other than the one preflight resolved; never derived here.
     "GEAK_API_KEY",
     "GEAK_BASE_URL",
-    # GEAK/Forge harness contract: patched candidate dir the generated harness prepends to sys.path.
-    "GEAK_WORK_DIR",
     # e2e optimizer runner path + repo root so a Ray worker can locate interface/run_e2e.py and the e2e_workflow/
     # checkout.
     "GEAK_ROOT",
@@ -318,12 +310,6 @@ SAFE_ENV_KEYS = (
 def safe_runtime_env() -> dict:
     """Build a Ray ``runtime_env`` from the allowlisted environment keys."""
     env = {k: os.environ[k] for k in SAFE_ENV_KEYS if k in os.environ}
-    # Each side's aliases come from that side's own credentials.
-    openai_key = env.get("OPENAI_API_KEY")
-    if openai_key:
-        env.setdefault("LLM_API_KEY", openai_key)
-        env.setdefault("AMD_LLM_API_KEY", openai_key)
-        env.setdefault("LLM_GATEWAY_KEY", openai_key)
     # CLAUDE_CODE_OAUTH_TOKEN is forwarded verbatim, never mirrored into these: either key var switches the Claude CLI
     # out of subscription mode.
     anthropic_key = env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")
@@ -333,8 +319,6 @@ def safe_runtime_env() -> dict:
     openai_url = env.get("OPENAI_BASE_URL")
     if openai_url:
         env.setdefault("LLM_API_BASE", openai_url)
-    if "AMD_LLM_API_KEY" not in env and "AMD_API_KEY" in env:
-        env["AMD_LLM_API_KEY"] = env["AMD_API_KEY"]
     return {"env_vars": env}
 
 

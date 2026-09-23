@@ -53,6 +53,22 @@ def _make_fake_ray(init_side_effects):
     return fake
 
 
+def _settle_ray_init_state(timeout: float = 30.0) -> None:
+    """Wait out any abandoned ``ray-init`` runner, then clear the process-wide flag.
+
+    Clearing alone is not isolation: a runner abandoned by an earlier test sets
+    the flag whenever it finally returns, which under load is after the next
+    test has already cleared it. The runner releases ``_INIT_GATE`` as its last
+    action, so holding the gate proves no connect can still set the flag.
+    """
+    held = ray_runtime._INIT_GATE.acquire(timeout=timeout)
+    try:
+        ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+    finally:
+        if held:
+            ray_runtime._INIT_GATE.release()
+
+
 @pytest.fixture(autouse=True)
 def _clear_stale_connect_flag():
     """``_STALE_CONNECT_POSSIBLE`` is process-wide by design, so tests must isolate it.
@@ -61,9 +77,9 @@ def _clear_stale_connect_flag():
     clear a session it never left behind -- the coupling is real in production
     too, where it is exactly the intended behaviour across legs.
     """
-    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+    _settle_ray_init_state()
     yield
-    ray_runtime._STALE_CONNECT_POSSIBLE.clear()
+    _settle_ray_init_state()
 
 
 def test_is_version_mismatch_detects_banner():

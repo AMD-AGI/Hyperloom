@@ -474,10 +474,74 @@ def test_close_overwrites_best_when_validated_win(tmp_path: Path) -> None:
         }
     ]
     ss.cumulative_gain_validated = 10.0
+    ss.cumulative_gain_validated_stack_len = 1
     coord.finalize_recipe_and_journal()
     row = coord.recipe_kb.get_recipe(canonical_id=cid)
     assert row["best_throughput"] == 2200.0
     assert "--page-size 32" in row["best_config"].get("extra_server_args", "")
+
+
+def _stack_one_keep(state) -> None:
+    state.current_best = {"name": "page32", "extra_server_args": "--page-size 32", "tput": 2200.0}
+    state.optimization_stack = [{"action": "explore", "variant_name": "page32", "extra_server_args": "--page-size 32"}]
+    state.cumulative_gain_validated = 10.0
+
+
+def test_close_skips_a_stack_that_grew_after_validation(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _stack_one_keep(coord.shared_state)
+
+    def _must_not_finalize_journal():
+        raise AssertionError("an unvalidated working recipe reached journal finalization")
+
+    coord._ensure_journal = _must_not_finalize_journal
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "skipped",
+        "reason": "unvalidated_recipe_stack",
+        "backend": "none",
+        "result_type": "unvalidated_recipe",
+    }
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_close_skips_a_same_length_lift_the_watermark_cannot_see(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    _stack_one_keep(state)
+    state.cumulative_gain_validated_stack_len = 1
+    state.working_recipe_generation = 2
+    state.validated_recipe_generation = 1
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome["reason"] == "unvalidated_recipe_stack"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) is None
+
+
+def test_lift_then_validation_leaves_the_recipe_publishable(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    state = coord.shared_state
+    state.baseline_tput = 1000.0
+    state.current_best = {"action": "baseline", "tput": 1000.0, "extra_server_args": "", "extra_envs": {}}
+
+    assert coord._lift_to_current_best(
+        "explore",
+        1100.0,
+        {"name": "page16", "extra_server_args": "--page-size 16", "candidate_extra_server_args": "--page-size 16"},
+    )
+    assert (state.working_recipe_generation, state.validated_recipe_generation) == (1, 0)
+    assert state.optimization_stack_has_unvalidated_keeps()
+
+    assert coord._update_cumulative_gain_validated(1100.0, {"output_throughput": 1100.0})
+    assert state.validated_recipe_generation == state.working_recipe_generation == 1
+
+    outcome = coord.finalize_recipe_and_journal()
+
+    assert outcome["result_type"] == "written"
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid())["best_throughput"] == 1100.0
 
 
 # kernel_optimizations[].e2e_decision must carry the integrate verdict, not only the micro-layer decision.

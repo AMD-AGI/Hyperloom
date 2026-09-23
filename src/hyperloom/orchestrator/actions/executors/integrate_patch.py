@@ -103,6 +103,13 @@ from ._grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
+from ._grid_variant_filter import (
+    apply_aiter_moe_pin_filter,
+    apply_multi_node_invalid_variants,
+    apply_user_skip_list,
+    resolve_skip_spec,
+)
+from ._recipe_script import RecipeLeverUnavailableError
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -1114,6 +1121,28 @@ def _accuracy_delta_pct(measured: Any, baseline: Any) -> float | None:
     if b <= 0.0:
         return None
     return (m - b) / b * 100.0
+
+
+def _measured_against(params: Mapping[str, Any], *, base_tput: float) -> dict[str, Any]:
+    """The configuration this patch was measured on top of.
+
+    Only the executor can answer this. The task's own params hold the stack as
+    of dispatch, and a task queued before another KEEP landed is rebound onto
+    the live stack top before it runs; ``base_tput`` is the drift-resolved
+    anchor it was actually graded against. Carried on the result for the reason
+    the configuration arm carries it -- what the session serves once this
+    returns is no longer what the patch was judged against, so a reader that
+    reconstructs the stack from the current config gets the wrong one.
+    """
+    return {
+        "throughput": base_tput or None,
+        "accuracy": float(params.get("accuracy_baseline") or 0.0) or None,
+        "extra_server_args": str(params.get("base_extra_args") or "").strip(),
+        "extra_envs": dict(params.get("base_extra_envs") or {}),
+        "remove_args": to_str_list(params.get("base_remove_args")),
+        "unset_envs": to_str_list(params.get("base_unset_envs")),
+        "args_mode": str(params.get("base_args_mode") or "append"),
+    }
 
 
 def _preflight_missing_targets(
@@ -3192,7 +3221,7 @@ class IntegratePatchExecutor:
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
             )
-        except FrameworkScriptMismatchError as exc:
+        except (FrameworkScriptMismatchError, RecipeLeverUnavailableError) as exc:
             artifacts_reverted = self._revert_artifacts(applied_artifacts)
             reverted = self._revert_patches(framework_root, applied)
             return _with_stash_restore(
@@ -3201,7 +3230,11 @@ class IntegratePatchExecutor:
                 stash_note,
                 {
                     "status": "reverted",
-                    "error_class": "framework_script_mismatch",
+                    "error_class": (
+                        "framework_script_mismatch"
+                        if isinstance(exc, FrameworkScriptMismatchError)
+                        else "recipe_lever_unavailable"
+                    ),
                     "error": str(exc),
                     "specialist_task_id": specialist_task_id,
                     "patches_applied": [],
@@ -4301,6 +4334,7 @@ class IntegratePatchExecutor:
             )
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
+        measured_against = _measured_against(params, base_tput=base_tput)
 
         stopped = stopped_by_the_run_class(bench_result.get("error_class"))
         if stopped is not None:
@@ -4456,6 +4490,7 @@ class IntegratePatchExecutor:
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
                         "base_tput": base_tput,
+                        "measured_against": measured_against,
                         "keep_threshold_pct": keep_threshold_pct,
                         "reason": str(parity.get("reason") or "switch-off parity failed"),
                         "switch_off_parity": parity,
@@ -4547,6 +4582,7 @@ class IntegratePatchExecutor:
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
                     "base_tput": base_tput,
+                    "measured_against": measured_against,
                     "keep_threshold_pct": keep_threshold_pct,
                     "reason": "; ".join(reasons) or "gate failed",
                     "bench_result": bench_result,
@@ -4591,6 +4627,7 @@ class IntegratePatchExecutor:
                     "artifacts_reverted": artifacts_reverted,
                     "output_throughput": new_tput,
                     "delta_pct": delta_pct,
+                    "measured_against": measured_against,
                     "bench_result": bench_result,
                     "reason": f"KEEP could not be committed: {commit_failure}",
                     "workspace": str(output_root),
@@ -4707,6 +4744,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": measured_against,
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
                 "bench_result": bench_result,
@@ -4985,6 +5023,7 @@ class IntegratePatchExecutor:
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
+                "measured_against": _measured_against(params, base_tput=base_tput),
                 "keep_threshold_pct": keep_threshold_pct,
                 "reason": "; ".join(reason_bits),
                 "bench_result": bench_result,
@@ -5490,6 +5529,27 @@ class IntegratePatchExecutor:
             # Preserve list/dict values; apply_runtime_override expects them.
             variant.runtime_override = dict(_rt)
 
+        # The explore grid's origin-independent guards: an authored variant is no
+        # more exempt from a known-bad multi-node lever, an operator's env pin or
+        # the operator's skip list than a proposed one. The compatibility filter
+        # is deliberately absent -- it shells out to build the framework's arg
+        # parser, and a single authored variant must not pay for that probe.
+        grid, mn_dropped = apply_multi_node_invalid_variants([variant])
+        grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
+        grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
+        if not grid:
+            rejected = (mn_dropped + pin_dropped + skip_dropped)[0]
+            return (
+                {
+                    "status": "skipped",
+                    "error_class": "filtered_before_bench",
+                    "error": str(rejected.get("reason") or rejected.get("source") or ""),
+                    "workspace": "",
+                    "materialized_config": str(config_path),
+                },
+                {"accuracy_pass": None, "eval_probe": None},
+            )
+
         # Ray-managed GPU execution: hold a serving lease
         # (num_gpus=TP + serving_slot) for the whole run_grid so
         # the patch benchmark serializes against other serving on the
@@ -5504,7 +5564,7 @@ class IntegratePatchExecutor:
             results: list[VariantResult] = await run_grid(
                 base_yaml_path=config_path,
                 base_extra_args=str(params.get("base_extra_args") or "").strip(),
-                grid=[variant],
+                grid=grid,
                 output_root=output_root,
                 magpie_python=params.get("magpie_python") or None,
                 keep_going_on_failure=False,

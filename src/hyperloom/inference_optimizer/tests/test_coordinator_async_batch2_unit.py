@@ -758,25 +758,6 @@ async def test_resume_revalidate_failed_rebench_keeps_flag_set(coord: Coordinato
 
 
 @pytest.mark.asyncio
-async def test_resume_reverify_best_promote_clears_flag(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 100.0
-    coord.shared_state.resume_pending_revalidation = True
-    coord.shared_state.optimization_stack = [
-        {"action": "explore", "variant_name": "v1", "candidate_extra_server_args": "--a 1", "tput": 110.0}
-    ]
-    coord.shared_state.cumulative_gain_validated_stack_len = 0
-    task = SimpleNamespace(task_id="rb-1", params={"source": "resume_reverify_best"})
-    await coord._promote_to_shared_state(
-        "explore",
-        {"winners": [], "best_variant": None, "output_throughput": 118.0},
-        task=task,
-    )
-
-    assert coord.shared_state.resume_pending_revalidation is False
-    assert coord.shared_state.cumulative_gain_validated_stack_len == 1
-
-
-@pytest.mark.asyncio
 async def test_integrate_patch_keep_promotes_stack_and_clears_pending(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 100.0
     coord.shared_state.pending_integrate = {"task_id": "ti-1"}
@@ -1118,9 +1099,25 @@ async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(co
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 0,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": False,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (False, {}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "Only one arm is dry" in out
@@ -1131,11 +1128,25 @@ async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(co
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
-    monkeypatch.setattr(ps, "compute_plateau_explore", lambda *a, **k: (False, {}))
     monkeypatch.setattr(
         ps,
-        "source_arm_plateaued",
-        lambda *a, **k: (True, {"source_consecutive_no_keep": 3, "source_candidates_exhausted": True}),
+        "per_lever_dryness",
+        lambda *a, **k: (
+            False,
+            {
+                "recent_keep_gain_pct": 5.0,
+                "empty_streak": 0,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": True,
+                "config_arm_plateaued": False,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE source arm plateaued" in out
@@ -1149,9 +1160,25 @@ async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordina
 
     coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
-        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+        ps,
+        "per_lever_dryness",
+        lambda *a, **k: (
+            True,
+            {
+                "recent_keep_gain_pct": 0.1,
+                "empty_streak": 3,
+                "empty_streak_threshold": 5,
+                "keep_gain_threshold_pct": 0.5,
+                "lookback": 5,
+                "source_consecutive_no_keep": 3,
+                "source_threshold": 5,
+                "source_candidates_exhausted": False,
+                "config_arm_plateaued": True,
+                "source_arm_plateaued": True,
+                "switch_bottleneck": True,
+            },
+        ),
     )
-    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (True, {"source_consecutive_no_keep": 3}))
     out = coord._plateau_advisory_block()
     assert "OPTIMIZE config arm plateaued" in out
     assert "OPTIMIZE source arm plateaued" in out
@@ -1418,7 +1445,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
         lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1436,7 +1463,7 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
         ps, "compute_next_phase", lambda *a, **k: (ps.PHASE_CLOSE, "target_reached", {"terminal": True})
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1453,7 +1480,7 @@ async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordi
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1471,7 +1498,7 @@ async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coor
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("SWEEP", "some_other_reason", {}))
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1498,7 +1525,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
         lambda *a, **k: ("KERNEL_AGENT", "skip_to_kernel", {"hint": "skip_to_kernel"}),
     )
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
@@ -1580,7 +1607,7 @@ def test_specialist_owner_is_frozen_at_creation_outside_agent_phases(
 
 
 def test_forward_integrate_source_has_no_current_phase_fallback() -> None:
-    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+    from hyperloom.orchestrator.phases.framework import _forward_integrate_source
 
     forwarded: dict = {}
     _forward_integrate_source({}, forwarded)

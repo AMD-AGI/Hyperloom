@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from ...session.sbd_v6 import read_timeline_events
+from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ._common import (
     _dict_rows,
@@ -372,13 +373,15 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
 def _baseline_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
-    Three different dispatches reach the baseline executor and each lands an
-    action on a ``baseline`` event: the genuine baseline, ``replay_warm_recipe``,
-    and the kernel lane's throughput-only probes (integrate re-baseline, stack
-    validation) which carry ``kind="baseline"`` literally. Only the first
-    anchors the session, so the selection reads the action's own
-    ``establishes_quality_ref`` -- the flag the executor set from the dispatch
-    kind and ``quality_ref_exempt`` -- rather than re-deciding from the kind.
+    Two dispatches reach the baseline executor and land an action on a
+    ``baseline`` event: the genuine baseline and ``replay_warm_recipe``. The
+    kernel lane's throughput-only probes -- integrate re-baseline, stack
+    validation, shape capture -- go through the same executor but record into
+    the kernel event that asked for them, so they are not here at all. Only
+    the genuine baseline anchors the session, so the selection reads the
+    action's own ``establishes_quality_ref`` -- the flag the executor set from
+    the dispatch kind and ``quality_ref_exempt`` -- rather than re-deciding
+    from the kind.
 
     Args:
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
@@ -603,7 +606,7 @@ def collect_v6_outcome(
         dict[str, Any]: The ``outcome`` block.
     """
     stop_reason = str(session.get("stop_reason") or "").strip()
-    outcome_status = _outcome_status(stop_reason)
+    outcome_status = _outcome_status(stop_reason, _optional_float(state.get("baseline_tput")) or 0.0)
     for event in reversed(timeline):
         if not isinstance(event, dict) or str(event.get("type") or "") not in {"install", "model_gate"}:
             continue
@@ -617,6 +620,7 @@ def collect_v6_outcome(
         "status": outcome_status,
         "stage_reached": _stage_reached(state, stop_reason, timeline),
         "baseline": _baseline_from_timeline(timeline),
+        "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
             "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
             # The ledger's own settled figure rather than a second tally of it:

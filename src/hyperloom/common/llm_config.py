@@ -65,6 +65,14 @@ ANTHROPIC_SYNTHESIZABLE_KEY_ENVS: tuple[str, ...] = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
+# What may authenticate an OpenAI-protocol client, highest precedence first. The Anthropic-side keys come last
+# because an Anthropic-only deployment fronts both protocols behind one gateway token.
+_OPENAI_CLIENT_KEY_ENV_ORDER: tuple[str, ...] = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+)
+
 
 def _first_set_value(names: Iterable[str], source: Mapping[str, str]) -> str:
     """First non-blank value among ``names``, in the order given."""
@@ -102,7 +110,6 @@ CLAUDE_GATEWAY_SIGNAL_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
 )
 
 # Retired provider-specific variables.
@@ -172,9 +179,11 @@ def anthropic_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
 def openai_agent_credentialed(env: Mapping[str, str] | None = None) -> bool:
     """True when the OpenAI side can authenticate an agent CLI run.
 
-    A bare ``OPENAI_BASE_URL`` without ``OPENAI_API_KEY`` is an endpoint hint,
-    not a credential, and treating the URL alone as configured is what sends an
-    unauthenticated Codex run.
+    ``OPENAI_API_KEY`` is the only name that authenticates one, which is the
+    same name :mod:`hyperloom.common.codex_session` resolves and the same one
+    ``_validate_credentials`` admits a run on. A bare ``OPENAI_BASE_URL`` with
+    it unset is an endpoint hint, not a credential, and treating the URL alone
+    as configured is what sends an unauthenticated Codex run.
     """
     source = env if env is not None else os.environ
     return bool((source.get("OPENAI_API_KEY") or "").strip())
@@ -190,28 +199,46 @@ def is_openai_only(env: Mapping[str, str] | None = None) -> bool:
     return has_openai_side(env) and not has_anthropic_side(env)
 
 
-def _claude_agent_sdk_installed() -> bool:
+def claude_agent_sdk_installed() -> bool:
     """Return whether the optional Claude Agent SDK is installed."""
     from importlib.util import find_spec
 
     return find_spec("claude_agent_sdk") is not None
 
 
-def _codex_agent_sdk_installed() -> bool:
+def codex_agent_sdk_installed() -> bool:
     """Return whether the optional Codex Agent SDK is installed."""
     from importlib.util import find_spec
 
     return find_spec("openai_codex") is not None
 
 
+def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int, int]:
+    """Sort key for one agent backend candidate: credential first, then SDK.
+
+    The one ordering the whole repository shares, read by
+    :func:`preferred_agent_backend` and by
+    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`.
+    Lower sorts first and candidates that tie keep the order they were offered
+    in, which is what puts Claude ahead of Codex on both sides.
+
+    Credentials lead because ranking on the installed SDK alone is what let an
+    OpenAI-only box resolve to Claude whenever both extras happened to be
+    installed, and then fail to authenticate.
+    """
+    return (0 if credentialed else 1, 0 if sdk_installed else 1)
+
+
+# The rank of a candidate that can neither authenticate nor import: no reason to prefer it over any other.
+UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
+
+
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
     """Return the agent backend this environment should run.
 
-    Two ranked keys, shared with
-    :func:`kernelforge.agent_backends.registry.select_default_agent_provider`:
-    a configured credential, then an installed SDK. Claude wins whenever both
-    providers tie, so an OpenAI-only credential is the only shape that selects
-    Codex outright; a dual-configured deployment keeps Claude.
+    Ranked by :func:`agent_backend_rank`. Claude wins whenever both backends
+    tie, so an OpenAI-only credential is the only shape that selects Codex
+    outright; a dual-configured deployment keeps Claude.
 
     With no credential on either side -- a runtime logged in by other means
     carries none this can see -- the installed SDK decides, and when neither
@@ -219,17 +246,17 @@ def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
     missing rather than silently picking the other CLI.
     """
     source = env if env is not None else os.environ
-    claude_rank = (
-        0 if anthropic_agent_credentialed(source) else 1,
-        0 if _claude_agent_sdk_installed() else 1,
-    )
-    codex_rank = (
-        0 if openai_agent_credentialed(source) else 1,
-        0 if _codex_agent_sdk_installed() else 1,
-    )
-    if codex_rank < claude_rank:
-        return AGENT_BACKEND_CODEX
-    return AGENT_BACKEND_CLAUDE
+    ranks = {
+        AGENT_BACKEND_CLAUDE: agent_backend_rank(
+            credentialed=anthropic_agent_credentialed(source),
+            sdk_installed=claude_agent_sdk_installed(),
+        ),
+        AGENT_BACKEND_CODEX: agent_backend_rank(
+            credentialed=openai_agent_credentialed(source),
+            sdk_installed=codex_agent_sdk_installed(),
+        ),
+    }
+    return min(ranks, key=lambda backend: ranks[backend])
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
@@ -406,27 +433,10 @@ def resolve_openai_client_config(
 ) -> OpenAIClientConfig:
     """Resolve OpenAI-compatible client config from one or more LLM env sets."""
     source = env if env is not None else os.environ
-    api_key = (
-        (source.get(api_key_env) or "").strip()
-        or (source.get("OPENAI_API_KEY") or "").strip()
-        or (source.get("LLM_GATEWAY_KEY") or "").strip()
-        # Anthropic-only deployments: one gateway token authenticates both protocols.
-        or (source.get("ANTHROPIC_AUTH_TOKEN") or "").strip()
-        or (source.get("ANTHROPIC_API_KEY") or "").strip()
-    )
+    candidates = tuple(dict.fromkeys((api_key_env, *_OPENAI_CLIENT_KEY_ENV_ORDER)))
+    api_key = _first_set_value(candidates, source)
     if not api_key:
-        key_names = " / ".join(
-            dict.fromkeys(
-                [
-                    api_key_env,
-                    "OPENAI_API_KEY",
-                    "LLM_GATEWAY_KEY",
-                    "ANTHROPIC_AUTH_TOKEN",
-                    "ANTHROPIC_API_KEY",
-                ]
-            )
-        )
-        raise LLMConfigError(f"{key_names} not set in env (OpenAI-compatible client cannot auth)")
+        raise LLMConfigError(f"{' / '.join(candidates)} not set in env (OpenAI-compatible client cannot auth)")
 
     explicit_base_url = (source.get(base_url_env) or "").strip() or (source.get("OPENAI_BASE_URL") or "").strip()
     derived_base_url = (derive_openai_base_url(source.get("ANTHROPIC_BASE_URL")) or "").strip()
@@ -1099,9 +1109,11 @@ __all__ = [
     "LLMConfigError",
     "OpenAIClientConfig",
     "ResponsesResult",
+    "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
     "achat_completion",
+    "agent_backend_rank",
     "anthropic_completion",
     "anthropic_messages",
     "anthropic_agent_credentialed",
@@ -1113,7 +1125,9 @@ __all__ = [
     "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
+    "claude_agent_sdk_installed",
     "claude_sdk_env_options",
+    "codex_agent_sdk_installed",
     "deepseek_compat_env",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",

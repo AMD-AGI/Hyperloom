@@ -85,6 +85,12 @@ specialist.info.md
 *.claude
 .agents
 skills-lock.json
+# ``*.claude`` matches the ``.claude`` directory itself, so the shared review
+# skill below is unreachable without re-including the directory first: git will
+# not look inside an excluded directory to apply a negation to its contents.
+!.claude/
+.claude/*
+!.claude/skills/
 
 # temp file
 code_functions_guidance_v2

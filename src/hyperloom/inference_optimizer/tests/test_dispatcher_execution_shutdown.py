@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import sqlite3
+import sys
 import threading
 from contextlib import closing
 from concurrent.futures import CancelledError as FuturesCancelledError
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.orchestrator.actions.cancel_channel import current_cancel_scope
+from hyperloom.orchestrator.actions.executors import _ray_serving as ray_serving
 from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
@@ -269,6 +271,51 @@ def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypa
         await _close(dispatcher)
         assert await dispatcher.locks.lane_holders()
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.db.close()
+
+
+def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monkeypatch):
+    class RayError(Exception):
+        pass
+
+    killed = []
+    fake_ray = SimpleNamespace(
+        get=lambda ref, **_kwargs: ref,
+        kill=killed.append,
+        exceptions=SimpleNamespace(RayError=RayError),
+    )
+    monkeypatch.setitem(sys.modules, "ray", fake_ray)
+    dispatcher = _dispatcher(tmp_path)
+    dispatcher.gpu_specialist_pool = SimpleNamespace(release=AsyncMock())
+    actor = SimpleNamespace(stop=SimpleNamespace(remote=lambda: False))
+    specialist_lease = ray_serving.GpuSpecialistLease(num_gpus=1)
+    specialist_lease._actor = actor
+    specialist_lease._start_ref = object()
+    gpu_lease = object()
+
+    async def run():
+        dispatcher.sub.register_executor("shutdown_test", AsyncMock(return_value={"status": "ok"}))
+        task = await dispatcher.tasks.create(
+            kind="shutdown_test", params={}, idempotency_key="forced-actor-kill", requires_lanes=["research_lane"]
+        )
+        result = await dispatcher.run_task_registered(
+            task,
+            gpu_specialist_lease=specialist_lease,
+            gpu_lease=gpu_lease,
+        )
+        assert result.state == "succeeded"
+        assert killed == [actor]
+        assert specialist_lease._actor is None
+        assert specialist_lease._start_ref is None
+        dispatcher.gpu_specialist_pool.release.assert_awaited_once_with(gpu_lease)
+        assert await dispatcher.locks.lane_holders() == {}
+        assert (await dispatcher.tasks.get(task.task_id)).state == "succeeded"
+        assert dispatcher._executions == set()
+        assert dispatcher._inflight_actions == {}
 
     try:
         asyncio.run(run())

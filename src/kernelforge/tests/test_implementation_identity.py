@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kernelforge.knowledge.implementation_identity import (
     canonical_editable_source_paths,
+    canonical_framework_version,
     canonical_owner_framework,
     implementation_signature,
     normalize_operator_name,
@@ -12,6 +13,113 @@ from kernelforge.knowledge.implementation_identity import (
 
 def test_operator_name_is_logical_and_backend_prefix_independent():
     assert normalize_operator_name("backend::Fused.MoE-Kernel") == "fused_moe"
+
+
+def test_the_same_kernel_spelled_either_way_is_one_operator():
+    # The reported split: a header declares KdaPackedDecodeKernel, the module binding it
+    # defines kda_packed_decode_kernel, and each spelling addressed a page the other never
+    # wrote to -- so the second campaign re-derived a port the first had already validated.
+    assert normalize_operator_name("KdaPackedDecodeKernel") == "kda_packed_decode"
+    assert normalize_operator_name("kda_packed_decode_kernel") == "kda_packed_decode"
+    assert normalize_operator_name("kda_packed_decode") == "kda_packed_decode"
+
+
+def test_namespaced_camel_case_matches_its_snake_case_spelling():
+    # The task contract asks for this spelling, so upstream pull-request search has term
+    # boundaries to split on. It may not cost the operator its page to supply one.
+    assert normalize_operator_name("aiter::fusedAddRmsNorm") == normalize_operator_name("fused_add_rms_norm")
+    assert normalize_operator_name("SiluAndMul") == normalize_operator_name("silu_and_mul")
+
+
+def test_an_acronym_run_is_one_word():
+    # Splitting on every case change would cut MoE into mo_e and QKV into q_k_v, inventing
+    # a difference between spellings of one kernel instead of removing one.
+    assert normalize_operator_name("FusedMoE") == "fused_moe"
+    assert normalize_operator_name("KVCache") == "kv_cache"
+    assert normalize_operator_name("paged_attention_ll4mi_QKV_mfma16_kernel") == "paged_attention_ll4mi_qkv_mfma16"
+    assert normalize_operator_name("HGEMV_WFPerRow") == "hgemv_wf_per_row"
+
+
+def test_a_capital_after_a_whole_word_is_its_own_word():
+    # The counterpart to the acronym rule. Absorbing every trailing capital to keep MoE
+    # whole also welded the dimension letters these kernels end in onto the word before
+    # them, which disagreed with the snake spelling the same source declares: measured
+    # across the store's symbols and this tree, 82 of 769 kernel names.
+    assert normalize_operator_name("ChunkFwdKernelO") == normalize_operator_name("chunk_fwd_kernel_o")
+    assert normalize_operator_name("IndexerKQuantAndCache") == normalize_operator_name("indexer_k_quant_and_cache")
+    assert normalize_operator_name("AllreduceMhcPostLargeMKernel") == "allreduce_mhc_post_large_m"
+
+
+def test_a_digit_run_keeps_whatever_boundary_the_spelling_gave_it():
+    """Known gap, pinned so a change in it cannot pass unnoticed.
+
+    Whether ``2stage`` is one word or two is not recoverable from the spelling:
+    ``mxfp4_moe_2stage`` says one, ``Mxfp4Moe2Stage`` says two, and a rule that
+    picked either would re-address the pages the other spelling wrote. The store
+    holds 8 such names, all spelled as words already, so the ambiguity costs a
+    page only if some later campaign supplies the camel spelling of one.
+    """
+    assert normalize_operator_name("mxfp4_moe_2stage") == "mxfp4_moe_2stage"
+    assert normalize_operator_name("Mxfp4Moe2stage") == "mxfp4_moe2stage"
+    assert normalize_operator_name("gemm_a8w8_blockscale") == "gemm_a8w8_blockscale"
+
+
+def test_names_already_written_as_words_are_left_alone():
+    # Every page in the store is addressed by one of these; re-spelling them would strand
+    # the histories they hold.
+    for name in (
+        "unified_attention_with_output",
+        "gemm_a8w8_blockscale_bpreshuffle",
+        "mxfp4_moe_2stage_t16",
+        "custom_all_reduce_tp8",
+        "rocm_unquantized_gemm",
+    ):
+        assert normalize_operator_name(name) == name
+
+
+def test_distinct_operators_sharing_a_prefix_stay_distinct():
+    assert normalize_operator_name("MoeFlydslStage1") != normalize_operator_name("MoeFlydslStage2")
+    assert normalize_operator_name("rmsNorm") != normalize_operator_name("addRmsNorm")
+
+
+def test_the_build_a_release_was_compiled_as_is_not_part_of_the_release():
+    # The store holds unified_attention_with_output under 0.24.0 and 0.24.0+rocm723
+    # with one implementation_signature between them: one kernel, two pages, and the
+    # faster port (11.58x) on the page the other spelling never reads.
+    assert canonical_framework_version("0.24.0+rocm723") == "0.24.0"
+    assert canonical_framework_version("0.1.dev19253+g5f76ae224.d20260727.rocm723") == "0.1"
+
+
+def test_a_release_reads_the_same_however_it_was_written_down():
+    # importlib.metadata reports the distribution version; a campaign reads the tag
+    # or the image it arrived in. Both are naming the source a port was written
+    # against, so both have to address one page.
+    assert canonical_framework_version("v0.24.0") == canonical_framework_version("0.24.0")
+    assert canonical_framework_version("v0.5.15.post1-rocm720-mi35x-20260724") == "0.5.15.post1"
+    assert canonical_framework_version("0.5.15.post1.dev20260724+g3d91a569ce") == "0.5.15.post1"
+
+
+def test_every_word_for_not_knowing_the_version_is_the_same_word():
+    # Three code paths answer "which version?" in three different words, and the
+    # store holds rmsnorm under two of them -- a 1.49x port and a 1.15x port of one
+    # kernel, neither page reachable from the other.
+    words = {"", "none", "unknown", "unspecified", "unknown_version"}
+    assert {canonical_framework_version(word) for word in words} == {"unknown"}
+
+
+def test_distinct_releases_stay_distinct():
+    assert canonical_framework_version("0.11.3") != canonical_framework_version("0.11.4")
+    assert canonical_framework_version("0.5.15") != canonical_framework_version("0.5.15.post1")
+    assert canonical_framework_version("1.0.0rc1") != canonical_framework_version("1.0.0")
+
+
+def test_a_version_naming_no_release_is_left_exactly_as_written():
+    # Read side and write side canonicalize independently, so a string this cannot
+    # read has to survive unchanged rather than become some other page's name.
+    for raw in ("not-a-version", "0.24.0+rocm723", "unspecified"):
+        once = canonical_framework_version(raw)
+        assert canonical_framework_version(once) == once
+    assert canonical_framework_version("not-a-version") == "not-a-version"
 
 
 def test_operator_name_strips_balanced_nested_template_arguments():

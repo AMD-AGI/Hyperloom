@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _revert_patches,
     _revert_warm_patch_state,
     _revert_warm_patch_trees,
+    _stamp_warm_patch_outcome,
 )
 
 
@@ -437,6 +438,41 @@ def test_multiple_patches_partial_success(fake_repo, output_dir):
     result = _apply_warm_patches(params, str(fake_repo), output_dir)
     assert len(result) == 1
     assert result[0]["patch_file"] == "vllm/fp8.py"
+
+
+def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo, output_dir):
+    """The bare list carries only what landed. Without the per-patch statuses
+    behind it, a patch that was silently skipped leaves nothing behind, and the
+    round is measured on a tree no reader downstream can describe."""
+    params = {
+        "patches": [
+            {
+                "patch_file": "bad.py",
+                "patch_content": "this is not a valid diff at all\n",
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            },
+            {
+                "patch_file": "vllm/fp8.py",
+                "patch_content": VALID_PATCH,
+                "patch_ref": "",
+                "repo": "ROCm/vllm",
+            },
+        ],
+    }
+    applied = _apply_warm_patches(params, str(fake_repo), output_dir)
+
+    round_result: dict = {}
+    _stamp_warm_patch_outcome(round_result, applied, params, "")
+    reported = round_result["warm_patch_result"]["patches"]
+
+    assert round_result["warm_patch_result"]["required"] is False
+    assert [row["patch_ref"] for row in reported] == ["bad.py", "vllm/fp8.py"]
+    assert reported[0]["status"] == "failed"
+    assert reported[0]["reason"] == "unsafe_or_non_text_diff"
+    assert reported[1]["status"] != "failed"
+    # Only the structured path names trees, which is what prelude promotes from.
+    assert "warm_patch_trees" not in round_result
 
 
 def test_non_diff_patch_content_is_skipped(fake_repo, output_dir):

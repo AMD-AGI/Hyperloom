@@ -46,11 +46,13 @@ from ..state.optimization_journal import (
     summarize_change,
 )
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
+from ..actions.executors._grid_base import is_kept as _is_kept
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
+from ..state.attempt_ledger import record_config_attempt
 from ..state.shared_state import _AUDIT_ACTIONS, SharedState, resolve_graded_comparison, stack_base_params
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
@@ -317,6 +319,45 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
 _NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
 
 
+def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
+    """Record the configuration arm's grid dispatch on the framework event.
+
+    The arm's dispatch is one ``explore`` task, and it earns a run row for the
+    same reason a specialist dispatch does: the event reduces its status over
+    what it dispatched, so an arm whose grid came back with nothing must not
+    read as an arm that was never tried. Recorded at completion, where the
+    outcome is known, with the dispatch time taken off the task row; a grid
+    that measured nothing still lands, which is the case
+    :func:`_record_config_attempts` never sees.
+    """
+    getter = getattr(coord, "_framework_timeline", None)
+    recorder = getter() if callable(getter) else None
+    if recorder is None:
+        return
+    from hyperloom.common.timeutil import now_iso
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ROLE_CONFIG
+
+    task_id = str(getattr(task, "task_id", "") or "")
+    if not task_id:
+        return
+    variants = result_dict.get("per_variant_outcomes")
+    measured = [row for row in variants if isinstance(row, dict)] if isinstance(variants, list) else []
+    status = str(result_dict.get("status") or "") or "succeeded"
+    recorder.record_run(
+        task_id,
+        role=ROLE_CONFIG,
+        arm=ARM_CONFIG,
+        status=status,
+        dispatched_at=str(getattr(task, "created_at", "") or ""),
+        completed_at=now_iso("seconds"),
+        reason=str(result_dict.get("error") or "")[:200],
+        # A grid the run stopped before it measured anything is not a grid
+        # whose variants were measured and lost.
+        empty=not measured,
+        workspace=str(result_dict.get("workspace") or ""),
+    )
+
+
 def _record_config_attempts(
     coord: Any,
     *,
@@ -326,10 +367,10 @@ def _record_config_attempts(
 ) -> None:
     """Record the configuration arm's measured attempts on the framework event.
 
-    The executor has no recorder to reach; this is the first coordinator-side
-    seam that sees the full per-variant outcome. The outcome is recorded
-    verbatim, unlike the journal beside it, which collapses ``KEEP_UNSTABLE``
-    and ``KILLED_OVERTIME`` into a plain revert.
+    Timeline only: the ledger row is written by ``_fact_write_hook``, which does
+    not depend on a recorder being open. The outcome is recorded verbatim here,
+    unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
+    ``KILLED_OVERTIME`` into a plain revert.
     """
     getter = getattr(coord, "_framework_timeline", None)
     recorder = getter() if callable(getter) else None
@@ -355,6 +396,11 @@ def _record_config_attempts(
         attempt_id = ":".join(part for part in (task_id, round_id, fingerprint) if part) or task_id
         if not attempt_id:
             continue
+        gates = [gate for gate in (row.get("gates") or []) if isinstance(gate, dict)]
+        # This arm gates accuracy rather than reporting it, so the block both
+        # arms carry is projected from the gate that ruled. No gate row means
+        # nothing gated the variant, which is not a gate that refused it.
+        accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
         try:
             recorder.record_attempt(
                 attempt_id,
@@ -383,6 +429,12 @@ def _record_config_attempts(
                     "extra_server_args": variant.get("extra_server_args"),
                     "extra_envs": variant.get("extra_envs"),
                 },
+                accuracy={
+                    "required": True if accuracy_gate else None,
+                    "value": accuracy_gate.get("observed"),
+                    "reference": accuracy_gate.get("threshold"),
+                    "passed": accuracy_gate.get("passed"),
+                },
                 failure={
                     "error_class": str(row.get("error_class") or ""),
                     "error_excerpt": str(row.get("error_excerpt") or ""),
@@ -393,7 +445,7 @@ def _record_config_attempts(
                     "raw_result_path": str(row.get("raw_result_path") or ""),
                 },
                 decision=outcome,
-                adopted=outcome == "KEEP",
+                adopted=_is_kept(outcome),
                 # Recorded rather than referenced: every KEEP advances the
                 # stack, so the session's current config is not what this
                 # variant was measured on top of.
@@ -403,11 +455,11 @@ def _record_config_attempts(
                 # A pair is what makes a gain addable, so eligibility follows
                 # the pair being present rather than the outcome being a KEEP.
                 attribution_eligible=(
-                    outcome == "KEEP" and metrics.get("base_tput") is not None and metrics.get("tput") is not None
+                    _is_kept(outcome) and metrics.get("base_tput") is not None and metrics.get("tput") is not None
                 ),
             )
-            for gate in row.get("gates") or []:
-                if not isinstance(gate, dict) or not str(gate.get("gate") or ""):
+            for gate in gates:
+                if not str(gate.get("gate") or ""):
                     continue
                 recorder.record_attempt_gate(
                     attempt_id,
@@ -864,6 +916,9 @@ class WritebackCollaborator:
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts
         self.shared_state.cumulative_gain_validated_stack_len = len(self.shared_state.optimization_stack)
+        self.shared_state.validated_recipe_generation = int(
+            getattr(self.shared_state, "working_recipe_generation", 0) or 0
+        )
         # The breakdown's own total is the sum of its ledger, so without this
         # record there is nothing for it to disagree with.
         try:
@@ -1548,9 +1603,28 @@ class WritebackCollaborator:
             result_dict = {}
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
+        if task.kind == "explore":
+            _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             _record_config_attempts(self, task=task, per_variant=per_variant, result_dict=result_dict)
+            round_id = str(result_dict.get("round_id") or "")
             for vo in per_variant:
+                outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
+                if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
+                    metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
+                    record_config_attempt(
+                        self.shared_state,
+                        task_id=str(task.task_id or ""),
+                        round_id=round_id,
+                        fingerprint=str(vo.get("fingerprint") or ""),
+                        variant_name=str(vo.get("variant_name") or ""),
+                        outcome=outcome,
+                        gain_pct=metrics.get("gain_pct"),
+                        before_tput=metrics.get("base_tput"),
+                        after_tput=metrics.get("tput"),
+                        error_class=str(vo.get("error_class") or ""),
+                        provenance=str(vo.get("provenance") or ""),
+                    )
                 try:
                     self._record_fact_per_variant(
                         task=task,
@@ -2433,12 +2507,17 @@ class WritebackCollaborator:
         state = self.shared_state
         current_best = getattr(state, "current_best", {}) or {}
         tput = current_best.get("tput") if isinstance(current_best, dict) else None
+        validated_gain = getattr(state, "cumulative_gain_validated", None)
+        result_type = str(outcome.get("result_type") or "")
+        if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
+            # The throughput and the gain belong to different Recipes here.
+            tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
             attempt=attempt,
             source=source,
             status=str(outcome.get("status") or ""),
-            result_type=str(outcome.get("result_type") or ""),
+            result_type=result_type,
             raw_reason=str(outcome.get("reason") or ""),
             error_class=str(outcome.get("error_class") or ""),
             backend=str(outcome.get("backend") or ""),
@@ -2446,7 +2525,7 @@ class WritebackCollaborator:
             session_id=str(outcome.get("session_id") or ""),
             scope=self._write_back_scope(),
             optimized_throughput=to_float(tput, None),
-            validated_gain_pct=to_float(getattr(state, "cumulative_gain_validated", None), None),
+            validated_gain_pct=to_float(validated_gain, None),
             ts=str(outcome.get("updated_at") or ""),
         )
 
@@ -2470,6 +2549,26 @@ class WritebackCollaborator:
         source: str = "close",
     ) -> dict[str, Any]:
         """Finalize Recipe state and return a secret-free observable outcome."""
+        # ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
+        # figures when nothing was lifted since the last validation. Otherwise
+        # every sink below -- journal, local KB, remote KB -- would pair the
+        # newer config with the older gain, so none of them runs.
+        has_unvalidated_keeps = getattr(self.shared_state, "optimization_stack_has_unvalidated_keeps", None)
+        if callable(has_unvalidated_keeps) and has_unvalidated_keeps():
+            ss = self.shared_state
+            log.warning(
+                "Recipe finalize skipped: working recipe is not validated (stack=%s/%s generation=%s/%s)",
+                len(getattr(ss, "optimization_stack", None) or []),
+                getattr(ss, "cumulative_gain_validated_stack_len", 0),
+                getattr(ss, "working_recipe_generation", 0),
+                getattr(ss, "validated_recipe_generation", 0),
+            )
+            return {
+                "status": "skipped",
+                "reason": "unvalidated_recipe_stack",
+                "backend": "none",
+                "result_type": _close_out.RESULT_UNVALIDATED_RECIPE,
+            }
         try:
             journal = self._ensure_journal()
             ss = self.shared_state
@@ -3416,6 +3515,9 @@ class WritebackCollaborator:
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
+        self.shared_state.working_recipe_generation = (
+            int(getattr(self.shared_state, "working_recipe_generation", 0) or 0) + 1
+        )
         self._stamp_current_best_measurement(bv)
         return True
 
@@ -4198,7 +4300,6 @@ class WritebackCollaborator:
         # failed/empty rebench leaves the flag set and reports keep warning.
         is_revalidation_task = task is not None and str((task.params or {}).get("source") or "") in {
             "resume_stack_revalidate",
-            "resume_reverify_best",
         }
         if is_revalidation_task:
             measured = result.get("output_throughput")
@@ -4893,7 +4994,7 @@ class WritebackCollaborator:
         summary instead.
         """
         outcome.early_return = True
-        # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.
+        # Write last_conc_sweep so exit_normal_sweep can distinguish an honest sweep_done from a no-pair sweep_failed.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
 
@@ -5437,13 +5538,15 @@ class WritebackCollaborator:
         # measured tput when that rebench promotes (see _promote_to_shared_state).
         stack = [e for e in (getattr(state, "optimization_stack", []) or []) if isinstance(e, dict)]
         vlen = int(getattr(state, "cumulative_gain_validated_stack_len", 0) or 0)
-        if vlen < len(stack):
+        if state.optimization_stack_has_unvalidated_keeps():
             state.resume_pending_revalidation = True
             report["warnings"].append(
                 {
                     "kind": "resume_unvalidated_keeps",
                     "validated_stack_len": vlen,
                     "stack_len": len(stack),
+                    "working_recipe_generation": state.working_recipe_generation,
+                    "validated_recipe_generation": state.validated_recipe_generation,
                 }
             )
             try:
@@ -5969,7 +6072,13 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
-    async def _enqueue_internal_stack_rebench(self, *, reason: str) -> dict[str, Any]:
+    async def _enqueue_internal_stack_rebench(
+        self,
+        *,
+        reason: str,
+        idempotency_key: str = "resume-stack-revalidate",
+        include_geak: bool = True,
+    ) -> dict[str, Any]:
         """Enqueue one full-stack end-to-end rebench of the cumulative config.
 
         Builds a single-variant ``explore`` task from ``current_best``'s launch
@@ -5983,6 +6092,10 @@ class WritebackCollaborator:
 
         Args:
             reason: Human-readable reason stamped on the task params.
+            idempotency_key: Key for the native stack rebench; GEAK 2b keeps
+                its per-macro-cycle key.
+            include_geak: Whether a pending GEAK result is folded into the
+                rebench. ``False`` measures ``current_best`` exactly as stacked.
 
         Returns:
             A summary ``{"task_id", "existing"}`` or ``{"skipped", "reason"}``.
@@ -5990,7 +6103,11 @@ class WritebackCollaborator:
         benchmark_script = baseline_benchmark_script(self.shared_state)
         # GEAK's explicit launch controls distinguish complete flags from legacy
         # deltas. Both retain the current stack's environment removal controls.
-        ps = self.shared_state.geak_result if isinstance(getattr(self.shared_state, "geak_result", None), dict) else {}
+        ps = (
+            self.shared_state.geak_result
+            if include_geak and isinstance(getattr(self.shared_state, "geak_result", None), dict)
+            else {}
+        )
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels;
@@ -6166,7 +6283,7 @@ class WritebackCollaborator:
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key="resume-stack-revalidate",
+            idempotency_key=idempotency_key,
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
         )

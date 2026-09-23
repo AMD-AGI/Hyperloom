@@ -30,8 +30,6 @@ from .kb import (
 from .backends import (
     _build_backends,
     _build_proposal_scorer,
-    _official_anthropic_only,
-    _official_openai_only,
 )
 from .model_gate import (
     _autodetect_gpu_type,
@@ -576,14 +574,14 @@ def _same_gateway(anthropic_url: str, openai_url: str) -> bool:
 
 def _codex_model_should_follow_claude() -> bool:
     """True when the operator supplied only Anthropic config."""
-    return _official_anthropic_only()
+    return llm_config.is_anthropic_only()
 
 
 def _claude_model_should_follow_codex() -> bool:
     """True when the operator supplied only OpenAI-compatible config."""
     if os.environ.get("INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX") == "1":
         return True
-    return _official_openai_only()
+    return llm_config.is_openai_only()
 
 
 def _catalog_probe_has_no_credential() -> bool:
@@ -1347,16 +1345,16 @@ def _restore_budget_and_objective(args: Any, state: SharedState, manifest: Mappi
     return lines
 
 
-def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
+def _exit_code_for_stop_reason(stop_reason: str | None, baseline_tput: float) -> int:
     """Map a terminal ``stop_reason`` to a process exit code (0 success, 1 failure).
 
-    Reads the same set the breakdown grades outcomes against. A second copy here
-    would decide CI's verdict on a vocabulary that had drifted from the one the
-    report was written from.
+    Reads the same classifier the breakdown grades outcomes against. A second
+    copy here would decide CI's verdict on a vocabulary that had drifted from
+    the one the report was written from.
     """
-    from hyperloom.inference_optimizer.breakdown.stop_reasons import SUCCESS_STOP_REASONS
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 
-    return 0 if (stop_reason or "") in SUCCESS_STOP_REASONS else 1
+    return 0 if outcome_status(str(stop_reason or ""), baseline_tput) == "completed" else 1
 
 
 def _write_cli_terminal_artifacts(session_dir: Path, state: SharedState, stop_reason: str | None) -> None:
@@ -2426,7 +2424,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # NOTE: conc_sweep is now a SWEEP-phase action auto-enqueued by the Coordinator, not a post-hook here.
 
     _print_final_summary(coordinator.shared_state, stop_reason, session_dir)
-    return _exit_code_for_stop_reason(stop_reason)
+    return _exit_code_for_stop_reason(stop_reason, coordinator.shared_state.baseline_tput)
 
 
 def main(argv: list[str] | None = None) -> int:

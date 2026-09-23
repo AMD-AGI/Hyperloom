@@ -360,6 +360,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "cumulative_gain_validated",
         "cumulative_gain_validated_ts",
         "cumulative_gain_validated_stack_len",
+        "working_recipe_generation",
+        "validated_recipe_generation",
         "pending_integrate",
         "resume_pending_revalidation",
         "baseline_tput",
@@ -406,6 +408,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",
+        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
+        # that can.
+        "gpu_trace_unsupported_reason",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -466,6 +471,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
+        # per-lever attempt ledger; one Coordinator-side writer per lever.
+        "attempts",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
         # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
         # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.

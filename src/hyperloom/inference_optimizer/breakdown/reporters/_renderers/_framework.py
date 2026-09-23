@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
+
 from ..base import as_dict, dict_rows, events_of
 
 __all__ = ["FrameworkTally", "config_attempts", "config_tally", "specialist_tally"]
@@ -91,7 +93,7 @@ def config_attempts(breakdown: dict[str, Any]) -> list[tuple[dict[str, Any], dic
             str(row.get("proposal_id") or ""): row for row in dict_rows(ext.get("proposals")) if row.get("proposal_id")
         }
         for attempt in dict_rows(ext.get("attempts")):
-            if str(attempt.get("arm") or "") != "config":
+            if str(attempt.get("arm") or "") != ARM_CONFIG:
                 continue
             pairs.append((attempt, as_dict(proposals.get(str(attempt.get("proposal_ref") or "")))))
     return pairs

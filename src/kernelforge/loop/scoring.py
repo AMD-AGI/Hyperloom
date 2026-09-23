@@ -39,18 +39,43 @@ SIGMA_REMEASURE_MAX_ROUNDS = 2
 # signal-to-noise rather than allclose.
 DEFAULT_SNR_THRESHOLD_DB = 30.0
 
-# The one description of the gate every kernel backend prompt renders, so an agent's self-check and forge's acceptance
-# decision cannot drift apart.
-CANONICAL_GATE_PROMPT = f"""\
+# The gate for a backend the loop judges with the task's declared acceptance suite.
+_TASK_SUITE_GATE_PROMPT = f"""\
 SNR >= {DEFAULT_SNR_THRESHOLD_DB:g} dB is a fast pre-filter, NOT the gate. A KEEP is decided by the
 task's own `compile_command` and then its `correctness_command`, both from its
 `config.yaml`, which forge runs on every candidate it would otherwise accept,
-whether the loop kept it or a warm start adopted it from the knowledge base, and
-whose tolerances are the task's, not forge's. Run both yourself before you
+and whose tolerances are the task's, not forge's. Run both yourself before you
 propose a change: a candidate that clears SNR and fails either is reverted, and
 the error it raised is the only thing that tells you what to fix. The
 `compile_command` may build a different, smaller shape than the one you measure,
 so a guard you add for the shape you tested can still reject it there."""
+
+# The gate for a backend whose candidate is judged by the driver alone. Saying only what decides, because an agent
+# told how acceptance is mechanized optimizes against the mechanism.
+_DRIVER_GATE_PROMPT = f"""\
+A KEEP needs two things and nothing else: the driver's own correctness suite must
+clear the SNR gate ({DEFAULT_SNR_THRESHOLD_DB:g} dB unless the campaign set another), and the mean
+measured speedup must beat the incumbent by more than this candidate's own
+measurement spread. Verify through the driver before you propose a change.
+Whoever consumes the result may apply checks forge does not run -- an evaluator
+that builds a smaller shape than the one you measure, for instance -- so
+clearing this gate is not the same as being accepted downstream."""
+
+
+def runs_task_suite_acceptance(kernel_backend: str) -> bool:
+    """Whether the loop judges this backend's candidate with the task's declared acceptance suite.
+
+    The loop's gate and the description every agent is given both read this, so an agent's self-check and forge's
+    acceptance decision cannot drift apart when the gate moves.
+    """
+    return kernel_backend == "assembly"
+
+
+def canonical_gate_prompt(kernel_backend: str) -> str:
+    """The gate description for one backend, as the loop will actually apply it."""
+    if runs_task_suite_acceptance(kernel_backend):
+        return _TASK_SUITE_GATE_PROMPT
+    return _DRIVER_GATE_PROMPT
 
 
 def measurement_sigma(measurement_scores: Sequence[float]) -> float | None:

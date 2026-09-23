@@ -24,13 +24,16 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
     record_action_decision,
 )
+from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import baseline_event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
 
 @pytest.fixture(autouse=True)
@@ -208,6 +211,7 @@ def test_a_measured_baseline_closes_succeeded_with_its_numbers(tmp_path: Path) -
     assert action["timing"]["subprocess_runtime_sec"] == pytest.approx(241.0)
     assert action["request"]["establishes_quality_ref"] is True
     assert action["failure"] is None
+    assert action["eval_failure"] is None
 
 
 def test_the_discarded_warmup_is_recorded_beside_the_pass_that_counted(tmp_path: Path) -> None:
@@ -383,6 +387,36 @@ def test_two_baselines_in_one_cycle_are_one_event_with_two_actions(tmp_path: Pat
     assert events[0]["status"] == "failed"
 
 
+def test_a_late_action_does_not_re_date_the_event_it_joined(tmp_path: Path, monkeypatch) -> None:
+    """The timeline orders events by ``start_time``, and an event holds a whole phase and cycle.
+
+    A PRELUDE baseline fails, the enablement lane works for half an hour, and its revalidation
+    lands in the same event. Dating the event from that last action would file the whole thing
+    after the lane that was triggered by its first.
+    """
+    stamps = iter(
+        [
+            "2026-09-02T15:00:00+00:00",
+            "2026-09-02T15:01:00+00:00",
+            "2026-09-02T15:40:00+00:00",
+            "2026-09-02T15:41:00+00:00",
+        ]
+    )
+    monkeypatch.setattr(baseline_event, "_now_iso", lambda: next(stamps))
+
+    _recorder(task_id="t-1").finish(_failed())
+    _recorder(task_id="t-2").finish(_measured())
+
+    event = _events(tmp_path)[0]
+    assert event["start_time"] == "2026-09-02T15:00:00+00:00"
+    assert event["end_time"] == "2026-09-02T15:41:00+00:00"
+    # And the republish path, which a write-back decision takes, agrees with the close path.
+    record_action_decision(phase="prelude", macro_cycle=0, task_id="t-2", decision="promoted")
+    republished = _events(tmp_path)[0]
+    assert republished["start_time"] == event["start_time"]
+    assert republished["end_time"] == event["end_time"]
+
+
 def test_a_success_is_not_erased_by_a_sibling_that_was_skipped(tmp_path: Path) -> None:
     measured = _recorder(task_id="t-1")
     measured.finish(_measured())
@@ -510,12 +544,15 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_an_inner_step_measurement_leaves_no_event_of_its_own(tmp_path: Path) -> None:
+async def test_an_inner_step_measurement_records_into_the_event_that_asked_for_it(tmp_path: Path) -> None:
+    """A sub-step leaves no event of its own, and its facts land in its host instead of nowhere."""
+    host = kernel_event_id(0)
     executor = object.__new__(BaselineExecutor)
     executor.shared_state = None
 
     async def _run_once(_ctx, *, recorder=None, run_index=0, **_kwargs):
-        assert recorder is None
+        assert recorder is not None
+        assert recorder.event_id == host
         return _measured()
 
     executor._run_once = _run_once  # type: ignore[method-assign]
@@ -523,9 +560,14 @@ async def test_an_inner_step_measurement_leaves_no_event_of_its_own(tmp_path: Pa
     executor._is_moe_runner_rooted_failure = lambda _r: False  # type: ignore[method-assign]
     executor._resolve_shared_state = lambda state=None: state  # type: ignore[method-assign]
 
-    await executor(_executor_ctx(tmp_path, **{SBD_INNER_STEP_PARAM: True}))
+    await executor(_executor_ctx(tmp_path, **{INLINE_EVENT_PARAM: host}))
 
-    assert _events(tmp_path) == []
+    # The guest opens and closes nothing: the host owns the shell, and here there is no host to open one.
+    assert read_timeline_events(tmp_path) == []
+    action = assemble_baseline_action(baseline_event_parts(host), event=host, task_id="t-exec")
+    assert action is not None
+    assert action["status"] == "succeeded"
+    assert action["measurement"]["throughput_tok_s_per_gpu"] == pytest.approx(15630.28)
 
 
 @pytest.mark.asyncio
@@ -778,3 +820,99 @@ def test_a_profile_run_opens_no_baseline_event(tmp_path: Path) -> None:
     assert executor._resolve_sink(ctx) is None
     assert make_baseline_recorder(executor._resolve_sink(ctx), task_id="rf-1-profile") is None
     assert _events(tmp_path) == []
+
+
+def _eval_failed(**overrides: Any) -> dict[str, Any]:
+    result = _measured(
+        baseline_eval_failed=True,
+        baseline_eval_failure_kind="accuracy_below_floor",
+        baseline_eval_observed_accuracy=0.12,
+        baseline_eval_accuracy_floor=0.5,
+        baseline_eval_evidence="lm-eval scored 0.12 on gsm8k",
+        baseline_eval_contract_fingerprint="abc123def456",
+        accuracy=0.12,
+        accuracy_task="gsm8k",
+        accuracy_metric="exact_match,strict-match",
+        accuracy_source="eval_results",
+    )
+    result.update(overrides)
+    return result
+
+
+def test_an_eval_rooted_failure_projects_a_rich_eval_failure_block(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_eval_failed())
+
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "failed"
+    assert _events(tmp_path)[0]["status"] == "failed"
+    assert action["failure"]["error_class"] == "accuracy_below_floor"
+    assert "0.12" in action["failure"]["message"]
+    eval_failure = action["eval_failure"]
+    assert eval_failure["kind"] == "accuracy_below_floor"
+    assert eval_failure["observed_accuracy"] == pytest.approx(0.12)
+    assert eval_failure["accuracy_floor"] == pytest.approx(0.5)
+    assert eval_failure["contract_fingerprint"] == "abc123def456"
+    assert eval_failure["accuracy_task"] == "gsm8k"
+    assert eval_failure["accuracy_metric"] == "exact_match,strict-match"
+    anchoring = _events(tmp_path)[0]["ext"]["anchoring_eval"]
+    assert anchoring["status"] == "failed"
+    assert anchoring["kind"] == "accuracy_below_floor"
+    assert anchoring["task_id"] == "t-1"
+
+
+def test_a_missing_accuracy_stop_without_enablement_stamps_is_still_recorded(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(
+        _measured(
+            accuracy=None,
+            accuracy_source="eval_unavailable",
+            nonfatal_warnings=["eval_failed_no_fallback_baseline_requires_accuracy"],
+        )
+    )
+
+    action = _actions(tmp_path)[0]
+    assert action["status"] == "failed"
+    assert action["eval_failure"]["kind"] == "accuracy_unavailable"
+    assert action["eval_failure"]["observed_accuracy"] is None
+    assert action["failure"]["error_class"] == "accuracy_unavailable"
+    assert _events(tmp_path)[0]["ext"]["anchoring_eval"]["status"] == "failed"
+
+
+def test_an_eval_failure_carries_accuracy_stage_when_present(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(
+        _eval_failed(
+            accuracy_stage={
+                "status": "failed",
+                "error_class": "subprocess_nonzero",
+                "workspace": "/w/accuracy_round",
+            }
+        )
+    )
+
+    stage = _actions(tmp_path)[0]["eval_failure"]["accuracy_stage"]
+    assert stage["status"] == "failed"
+    assert stage["error_class"] == "subprocess_nonzero"
+    assert stage["workspace"] == "/w/accuracy_round"
+
+
+def test_a_succeeded_baseline_projects_anchoring_eval_on_the_event(tmp_path: Path) -> None:
+    recorder = _recorder()
+    recorder.finish(_measured(accuracy=0.88, accuracy_task="gsm8k", accuracy_metric="exact_match,strict-match"))
+
+    anchoring = _events(tmp_path)[0]["ext"]["anchoring_eval"]
+    assert anchoring["status"] == "succeeded"
+    assert anchoring["accuracy"] == pytest.approx(0.88)
+    assert anchoring["task"] == "gsm8k"
+    assert anchoring["task_id"] == "t-1"
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(tmp_path: Path, monkeypatch) -> None:
+    """The executor calls ``finish`` with no catch; a spool OSError must not escape."""
+    recorder = _recorder()
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    recorder.finish(_measured())

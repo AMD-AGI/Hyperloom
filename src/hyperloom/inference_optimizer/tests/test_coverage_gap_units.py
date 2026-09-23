@@ -88,9 +88,18 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
 def test_credentials_endpoint_resolution_and_geak_sync(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import credentials
 
+    # An inherited key on either side resolves that side's official URL, so both must be absent for "unconfigured".
+    for name in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     # Each side resolves on its own; an unconfigured side stays empty.
     monkeypatch.setenv("OPENAI_BASE_URL", "https://open.example/v1")
-    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
     assert credentials._resolve_llm_endpoints() == ("", "https://open.example/v1")
 
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://anthropic.example")

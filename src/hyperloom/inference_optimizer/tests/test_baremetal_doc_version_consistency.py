@@ -45,29 +45,25 @@ def test_baremetal_defaults_match_compat_doc():
         "docs/compatibility.rst pip spec must be 'vllm==%s+%s'" % (vllm_version, vllm_variant)
     )
 
-    # SGLANG_REF is a commit, not a tag: upstream dropped a field the TraceLens
-    # annotation patches need between this commit and v0.5.18. The doc must name
-    # the exact ref so moving the pin cannot leave the matrix behind.
-    assert not sglang_ref.startswith("v"), (
-        "SGLANG_REF is expected to pin a commit; a tag reintroduces the patch "
-        "mismatch this pin exists to avoid (see docs/compatibility.rst)"
+    vllm_source_ref = _default("VLLM_SOURCE_REF", sh)
+    assert vllm_source_ref[:12] in doc, (
+        "docs/compatibility.rst must name the pinned vLLM source commit %s" % vllm_source_ref[:12]
     )
+
+    assert not sglang_ref.startswith("v"), "SGLANG_REF is expected to pin a commit SHA (see docs/compatibility.rst)"
     assert sglang_ref[:12] in doc, "docs/compatibility.rst must name the pinned SGLang commit %s" % sglang_ref[:12]
 
-    # An untagged commit gives setuptools_scm nothing to derive from, so the build
-    # falls back to 0.0.0.* and the patch sets are refused on the version gate.
-    # The declared version travels with the pin and must name the patch set.
     sglang_pretend = _default("SGLANG_PRETEND_VERSION", sh)
-    assert sglang_pretend == "0.5.19", (
-        "SGLANG_PRETEND_VERSION must name the patch set the pinned commit fits; got %s" % sglang_pretend
+    assert sglang_pretend == "0.5.20", (
+        "SGLANG_PRETEND_VERSION must name the release the pinned commit fits; got %s" % sglang_pretend
     )
     assert 'SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG="$SGLANG_PRETEND_VERSION"' in sh, (
         "install_baremetal.sh must export SETUPTOOLS_SCM_PRETEND_VERSION_FOR_SGLANG from SGLANG_PRETEND_VERSION"
     )
-    assert "%s (%s)" % (sglang_pretend, sglang_rocm_extra) in doc, (
-        "docs/compatibility.rst must document SGLang '%s (%s)' to match "
-        "install_baremetal.sh defaults" % (sglang_pretend, sglang_rocm_extra)
+    assert "%s (rocm10)" % sglang_pretend in doc, (
+        "docs/compatibility.rst must document SGLang '%s (rocm10)' for the validated docker stack" % sglang_pretend
     )
     assert "SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra in doc, (
-        "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=%s" % sglang_rocm_extra
+        "docs/compatibility.rst must document SGLANG_ROCM_EXTRA=%s for ROCm 7.2.x bare-metal overrides"
+        % sglang_rocm_extra
     )

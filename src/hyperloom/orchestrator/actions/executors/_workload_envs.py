@@ -69,6 +69,7 @@ from ._grid_server_args import (
 from ._grid_server_args import merge_server_args
 from ._grid_server_args import remove_server_args
 from ._grid_server_args import validate_server_args_shell_safe
+from ._recipe_script import recipe_launch_contract
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
 from ._server_patcher import (
     ensure_sglang_patched_for_ck_blockscale,
@@ -665,6 +666,23 @@ def _resolve_framework_repo_path(
         if value:
             return value
     return ""
+
+
+def _apply_vllm_source_runtime(bench: dict[str, Any], envs: dict[str, Any]) -> None:
+    """Route a prepared image checkout into the vLLM server launch."""
+    if str(bench.get("framework") or "").strip().lower() != "vllm":
+        return
+    if os.environ.get("HYPERLOOM_VLLM_IMAGE_SOURCE", "").strip() != "1":
+        return
+    repo_path = _resolve_framework_repo_path(envs, framework="vllm")
+    if not repo_path:
+        return
+    for name in ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR"):
+        envs[name] = repo_path
+        os.environ[name] = repo_path
+    existing = str(envs.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")
+    entries = [repo_path, *(part for part in existing.split(os.pathsep) if part)]
+    envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(entries))
 
 
 def _custom_script_path(runner_type: str) -> str:
@@ -1607,25 +1625,25 @@ def materialize_config_with_envs(
             ]
             # ``profiler`` and ``torch_profiler_dir`` are normally set by
             # Magpie's launcher script, not by this layer -- but that script
-            # appends its own flags *after* EXTRA_VLLM_ARGS in the real
+            # appends its own flags *before* EXTRA_VLLM_ARGS in the real
             # ``vllm serve`` invocation, so the argv preflight probe (which
             # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
             # delay_iterations/max_iterations against a ProfilerConfig that
             # never saw ``profiler=torch`` or a trace dir. vLLM's validator
             # requires both whenever those bounds are present, so the probe
-            # fails an argv that will be valid once Magpie's flags are
             # appended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Asserting placeholders
-            # here keeps the probed fragment self-consistent; the actual
-            # ``torch_profiler_dir`` Magpie computes from ``$WORKSPACE_DIR``
-            # overrides this one at real launch time via vLLM's dotted-flag
-            # last-wins merge, so the value here only has to be a valid
-            # absolute path, not the directory the trace ends up under. An
-            # operator-set flag is left untouched either way.
+            # invalid and dropped instead of launched. Assert ``profiler=torch``
+            # here so the probed fragment is self-consistent; do not append a
+            # ``torch_profiler_dir`` here. On the real ``vllm serve`` line Magpie's
+            # launcher emits ``<workspace>/torch_trace`` *before* ``EXTRA_VLLM_ARGS``;
+            # vLLM's last-wins merge would let a second ``torch_profiler_dir`` in
+            # ``EXTRA_VLLM_ARGS`` override Magpie and send traces to the task root.
+            # With no dir in ``EXTRA_VLLM_ARGS``, steady-state traces stay under
+            # ``<workspace>/torch_trace``. ``baseline.py`` / ``bypass_engine`` use
+            # probe-only dirs on other paths; an operator-set flag in the YAML is
+            # left untouched.
             if _profiler_flag_value(existing_vllm_args, "profiler") is None:
                 profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
-            if _profiler_flag_value(existing_vllm_args, "torch_profiler_dir") is None:
-                profiler_flags.append(("torch_profiler_dir", f"--profiler-config.torch_profiler_dir {output_dir}"))
             if tracelens_patch_ok:
                 profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
@@ -1787,6 +1805,7 @@ def materialize_config_with_envs(
 
         overlay = validate_overlay_pythonpath(reference_controls["overlay_pythonpath"])
         envs["PYTHONPATH"] = overlay + (f":{envs['PYTHONPATH']}" if envs.get("PYTHONPATH") else "")
+    _, recipe_overwritten = recipe_launch_contract(bench)
     if server_args:
         # Merge into (not overwrite) the framework env so the profile path's
         # graph-capture flags aren't dropped.
@@ -1808,10 +1827,12 @@ def materialize_config_with_envs(
         combined_extra.update(extra_envs)
     safe_extra_envs, dropped_extra_envs = filter_untrusted_env_mapping(
         combined_extra,
-        allow_predicate=is_allowed_variant_env_key,
+        # A name the recipe re-exports unconditionally cannot be overridden
+        # here; carrying it into the YAML publishes a value the run never used.
+        allow_predicate=lambda key: is_allowed_variant_env_key(key) and key not in recipe_overwritten,
     )
     for _dk in dropped_extra_envs:
-        log.warning("Dropping unsafe extra_envs key %s before benchmark materialization", _dk)
+        log.warning("Dropping extra_envs key %s before benchmark materialization", _dk)
     for key, value in safe_extra_envs.items():
         envs[str(key)] = str(value)
     # ── aiter tuned-config lookup logging ────────────────────────────────────
@@ -2159,6 +2180,7 @@ def materialize_config_with_envs(
             extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
             if "--mark-trace" not in extra:
                 envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+    _apply_vllm_source_runtime(bench, envs)
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
@@ -2171,7 +2193,7 @@ def materialize_config_with_envs(
         )
         envs.clear()
         envs.update(filtered_envs)
-    seal_server_argv(envs, bench.get("framework"))
+    seal_server_argv(envs, bench.get("framework"), bench=bench)
     output_dir.mkdir(parents=True, exist_ok=True)
     materialized = output_dir / out_name
     with materialized.open("w", encoding="utf-8") as f:

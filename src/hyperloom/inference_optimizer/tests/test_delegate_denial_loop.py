@@ -89,6 +89,28 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
 
 
 @pytest.mark.asyncio
+async def test_delegate_source_patch_without_git_root_prunes_without_retry(session_dir):
+    c = _silent_coordinator(session_dir)
+    try:
+        c.shared_state.framework_repo_path = ""
+        await c._handle_delegate(
+            "orchestration",
+            _delegate(
+                action="specialist",
+                key="patch-no-root",
+                params={"domain": "serving_specialist"},
+            ),
+        )
+
+        assert await c.tasks.by_state("queued") == []
+        assert c.shared_state.pruned_families == ["source_patch"]
+        failures = [(row["action"], row["task_id"], row["error_class"]) for row in c.shared_state.last_action_failures]
+        assert failures == [("specialist", "patch-no-root", "no_git_framework_source_root")]
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_dir):
     c = _silent_coordinator(session_dir)
     try:

@@ -13,6 +13,8 @@ import subprocess
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.phases import machine_state
+from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 
 
 @dataclass
@@ -50,6 +52,8 @@ class _StubSharedState:
     current_best: dict = field(default_factory=dict)
     tick: int = 0
     phase: str = "PRELUDE"
+    phase_history: list = field(default_factory=list)
+    macro_cycle: int = 0
     conc: int = 64
     isl: int = 0
     osl: int = 0
@@ -76,6 +80,12 @@ class _StubSharedState:
             ),
             encoding="utf-8",
         )
+
+    def append_phase_history_event(self, **kwargs):
+        """Forward to the production helper, as SharedState does."""
+        from hyperloom.orchestrator.phases import machine_state as _ms
+
+        return _ms.append_phase_history_event(self, **kwargs)
 
     def record_action_failure(self, *, action, task_id, result, **kwargs):
         self.last_action_failures.append(
@@ -1534,16 +1544,19 @@ async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimizat
     state.max_minutes = 180
     state.baseline_runtime_sec = 2705.7
     state.phase_elapsed_totals = {"PRELUDE": 3090.0}
-    state.phase_history = [{"to_phase": "PRELUDE", "evidence": {}}]
     state.session_budget_usable_sec = lambda: 7700.0
 
     await coord._maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     assert coord.tasks.calls == []
     assert not coord.shared_state.auto_roofline_pending_task_id
-    dropped = state.phase_history[-1]["evidence"]["budget_dropped_arms"]
-    assert dropped[0]["arm"] == "initial_analysis"
-    assert dropped[0]["expected_cost_sec"] == pytest.approx(2705.7)
+    # A marker row, which the phase event exports; evidence appended to the
+    # entry row after entry would never leave ``state``.
+    dropped = state.phase_history[-1]
+    assert dropped["reason"] == PRELUDE_ARM_DROPPED
+    assert not machine_state.is_phase_transition_row(dropped)
+    assert dropped["evidence"]["arm"] == "initial_analysis"
+    assert dropped["evidence"]["expected_cost_sec"] == pytest.approx(2705.7)
 
 
 @pytest.mark.asyncio
@@ -2890,6 +2903,77 @@ def test_a_replay_that_lost_still_records_the_config_that_lost(tmp_path):
 
     assert applied["extra_server_args"] == "--attention-backend AITER"
     assert applied["extra_envs"] == {"VLLM_ROCM_USE_AITER": "1"}
+
+
+def test_a_replay_that_lost_states_which_of_its_patches_landed(tmp_path):
+    """One measurement covers every apply the replay made, so a replay that
+    lost has to say whether what lost was the recipe or a patch that never
+    went into the server that was measured."""
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    task = _replay_task()
+    task.params["combined_current_contract"] = True
+    task.params["combined_keep_threshold_pct"] = 5.0
+    result = {
+        "status": "succeeded",
+        "output_throughput": 606.0,
+        "warm_patch_result": {
+            "patches": [
+                {
+                    "patch_ref": "fix-attn.patch",
+                    "timeline_index": 0,
+                    "status": "git_apply",
+                    "target_repo": "/opt/sglang",
+                },
+                {"patch_ref": "fix-moe.patch", "timeline_index": 1, "status": "failed", "reason": "git_apply_failed"},
+            ]
+        },
+    }
+    with session_scope(tmp_path):
+        coord._promote_warm_replay(result, task=task)
+        items = _replay_ext(tmp_path)["applied"]["items"]
+
+    assert [(row["ref"], row["applied"]) for row in items] == [
+        ("fix-attn.patch", True),
+        ("fix-moe.patch", False),
+    ]
+    assert items[1]["reason"] == "git_apply_failed"
+
+
+def test_the_kernel_plan_is_on_the_event_before_the_ruling_prunes_it(tmp_path):
+    """The keep ruling replaces the plan with the subset it kept, so an item
+    that never applied is recoverable only if the dispatch recorded it. Read
+    back through the recovery a killed replay gets, which is the case that
+    cannot be reconstructed from state afterwards."""
+    from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
+    from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = _in_flight_outcome()
+    coord.shared_state.warm_kernel_kb_plan = [
+        {"column": "fusion", "patch_path": "/kb/fusion.patch", "apply_root": "/opt/sglang", "decision": "PENDING"},
+        {
+            "column": "rewrite",
+            "patch_path": "/kb/rewrite.patch",
+            "decision": "DEFERRED",
+            "apply_result": {"status": "skipped", "reason": "no patch target under the active root"},
+        },
+        # Behind the one that stopped the sequence: never attempted, so it
+        # holds no decision and must leave no row.
+        {"column": "rewrite", "patch_path": "/kb/never-reached.patch"},
+    ]
+    with session_scope(tmp_path):
+        coord.phase_prelude._open_warm_replay_timeline(task=_replay_task(), session_baseline_tput=600.0)
+        finalize_events(tmp_path)
+        items = _replay_ext(tmp_path)["applied"]["items"]
+
+    assert [(row["ref"], row["applied"]) for row in items] == [
+        ("/kb/fusion.patch", True),
+        ("/kb/rewrite.patch", False),
+    ]
+    assert items[1]["reason"] == "no patch target under the active root"
 
 
 def test_a_replay_the_session_declined_is_on_the_timeline_with_a_stable_code(tmp_path):

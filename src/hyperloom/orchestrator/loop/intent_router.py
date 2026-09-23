@@ -881,6 +881,24 @@ class IntentRouter:
         # Specialist pre-dispatch warmup via KnowledgePlane.
         if action_name == "specialist":
             await self._warm_specialist_params(params)
+            from ..specialists.runner import specialist_patch_preflight_error
+
+            preflight_error = specialist_patch_preflight_error(
+                params,
+                framework_repo_path=str(getattr(self.shared_state, "framework_repo_path", "") or ""),
+            )
+            if preflight_error:
+                if self.shared_state.add_pruned_family("source_patch"):
+                    self.shared_state.record_action_failure(
+                        action="specialist",
+                        task_id=str(intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
+                        result={"error_class": preflight_error, "error": preflight_error},
+                    )
+                    try:
+                        self.shared_state.save(self.session_dir)
+                    except Exception:  # noqa: BLE001
+                        log.exception("delegate specialist: source-patch prune save failed")
+                return
         # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:

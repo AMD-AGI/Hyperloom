@@ -46,6 +46,7 @@ RESULT_TRANSPORT_FAILED = "transport_failed"
 RESULT_NO_NEW_KEEP = "no_new_keep_or_pure_warm_replay"
 RESULT_INVALID_THROUGHPUT = "invalid_throughput"
 RESULT_MISSING_THROUGHPUT = "missing_throughput"
+RESULT_UNVALIDATED_RECIPE = "unvalidated_recipe"
 RESULT_EMPTY_REPLAY_MATERIAL = "empty_replay_material"
 RESULT_NOT_BETTER = "not_better_than_champion"
 RESULT_CHAMPION_NOT_PROMOTED = "champion_not_promoted"
@@ -621,6 +622,7 @@ __all__ = [
     "RESULT_NO_NEW_KEEP",
     "RESULT_SKIPPED_OTHER",
     "RESULT_TRANSPORT_FAILED",
+    "RESULT_UNVALIDATED_RECIPE",
     "RESULT_WRITTEN",
     "ROOFLINE_TARGET_RATIO",
     "SESSION_BREAKDOWN_PATH",

@@ -24,6 +24,7 @@ handlers and integrating external components.
 | Workflow & PR process | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
 | PR checklist / AI review prompt | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
+| Reviewing a PR: the shared procedure and the rules it checks | [`.claude/skills/review-pr/`](.claude/skills/review-pr/) |
 
 Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
 kernel backend). Both are exercised in CI.
