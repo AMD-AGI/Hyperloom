@@ -1474,6 +1474,67 @@ def test_gemm_and_fusion_handlers_record_their_forge_lanes(tmp_path):
     assert rows["fusion"]["detail"]["applied"] is True
 
 
+def test_gemm_tuning_records_one_row_per_tuner_not_a_merged_row(tmp_path):
+    """Reproduces a real session: one gemm_tuning cycle ran two tuners -- fmoe_ck (kept, 14/14
+    shapes improved) and a4w4_blockscale (failed, no input). The campaign-level result carries
+    a4w4_blockscale's error at the top level even though the cycle as a whole reported
+    status="complete", and no per-tuner gain_pct -- only a session-level best_speedup (a micro
+    ratio, not the e2e-validated gain). Recording this as one row previously joined both tuner
+    names with a comma, put a4w4_blockscale's failure_reason on the row that actually carried
+    fmoe_ck's success metrics, and fabricated gain_pct from best_speedup."""
+    recorder = _forge_recorder()
+    phase = _phase_with_recorder(tmp_path, recorder)
+    phase._record_gemm_tuning_timeline(
+        {
+            "task_id": "gemm-1",
+            "status": "complete",
+            "backend": "forge",
+            "decision": "KEEP",
+            "gain_pct": 6.9575,
+            "graded_objective": "output_throughput",
+            "best_speedup": 1.5797,
+            "tuned_file": "/w/tuners/fmoe_ck/merged_candidate_fmoe.csv",
+            "error": "No input CSV or shapes JSON available",
+            "error_class": "input_missing",
+            "tuners_run": [
+                {
+                    "tuner": "fmoe_ck",
+                    "status": "ok",
+                    "artifact": "/w/tuners/fmoe_ck/merged_candidate_fmoe.csv",
+                    "total_shapes": 14,
+                    "improved_shapes": 14,
+                    "best_micro_speedup": 1.5797,
+                },
+                {
+                    "tuner": "a4w4_blockscale",
+                    "status": "failed",
+                    "error": "No input CSV or shapes JSON available",
+                    "error_class": "input_missing",
+                },
+            ],
+        }
+    )
+    recorder.finish(tput_after=1000.0)
+
+    rows = {row["detail"]["tuner"]: row for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]}
+    assert set(rows) == {"fmoe_ck", "a4w4_blockscale"}
+
+    kept = rows["fmoe_ck"]
+    assert kept["detail"]["shapes_tuned"] == 14
+    # The e2e-validated gain belongs on the tuner whose artifact was actually applied.
+    assert kept["gain_pct"] == 6.9575
+    # A micro speedup ratio must never be substituted for the e2e-graded gain.
+    assert kept["gain_pct"] != pytest.approx((1.5797 - 1.0) * 100.0)
+    assert not kept["failure_reason"]
+
+    failed = rows["a4w4_blockscale"]
+    assert failed["gain_pct"] is None
+    assert failed["failure_reason"] == "No input CSV or shapes JSON available"
+    assert failed["error_class"] == "input_missing"
+    # The failed tuner's error must not land on the row that succeeded.
+    assert kept["error_class"] != "input_missing"
+
+
 def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
     recorder = _geak_recorder()
     phase = _phase_with_recorder(tmp_path, recorder)
