@@ -1413,9 +1413,16 @@ and caches `.so` on disk. First launch of a fresh (model, dtype, TP,
 
 | Cache | Path | Clear |
 |---|---|---|
-| aiter JIT (primary cold-start cost) | `<aiter pkg root>/jit/` (resolved via `import aiter`; wheel installs hold ~80 pre-built `.so` here, plus runtime-JIT staging under `jit/build/<module>/build/`) | `rm -rf <aiter pkg root>/jit/build/` (clears JIT staging only; do NOT delete `jit/*.so` — those are wheel-bundled) |
+| aiter JIT (primary cold-start cost) | The runtime-selected JIT directory (`AITER_JIT_DIR`, otherwise the package `jit/` or initialized user cache), containing serving `.so` modules and `build/` staging | Manual staging cleanup is limited to `build/`. Serving modules are invalidated through the shared JIT transaction, with the scope chosen by the caller. |
 | Triton | `~/.triton/cache/` (resolves via `$HOME`) | `rm -rf ~/.triton/cache` |
 | torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
+
+An AITER runtime-JIT source patch invalidates the full serving-module set together
+with `build/`; revert restores its baseline and removes candidate artifacts in that scope.
+CSV/GEMM registry preparation invalidates only its selected modules, preserving
+unrelated serving modules. Full invalidation can require substantial first-use
+compilation; its cost depends on the installed cache and workload. Do not delete
+serving modules manually or infer patch success from a warm, stale module.
 
 `sgl_kernel` (`site-packages/sgl_kernel/common_ops.*.so`) is build-time only;
 only `kernel_opt` / `integrate` may rebuild it.

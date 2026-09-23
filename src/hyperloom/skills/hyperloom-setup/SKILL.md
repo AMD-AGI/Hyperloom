@@ -33,16 +33,16 @@ Whether to generate or run a Docker container is decided later by the example
 
 ## Run Mode Resolution
 
-Resolve the run mode in this order and skip the interactive question when a value
-is already present:
+Resolve the run mode in this order and skip the interactive question when a valid
+selection is already present:
 
 1. `HYPERLOOM_RUN_MODE` in the shell environment (`baremetal` or `docker`).
-2. Otherwise, ask the user (Step 2 question 5).
+2. The selected mode recorded in the workspace `.env`, if the shell value is unset or empty.
+3. Otherwise, ask the user (Step 2 question 5); do not infer a mode from the framework.
 
-`HYPERLOOM_RUN_MODE` is a value resolved for this session from the shell
-environment. Keep it for the current run; the example (workload) skill uses it to
-decide whether to generate a container (and which image to use). This skill does
-not start a container itself.
+Keep the resolved `HYPERLOOM_RUN_MODE` for the current run; the example (workload)
+skill uses it to decide whether to generate a container (and which image to use).
+This skill does not start a container itself.
 
 ## Workflow
 
@@ -114,9 +114,8 @@ value.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
 5. Ask where to run Hyperloom (sets `HYPERLOOM_RUN_MODE` for this session). Skip
-   this question if `HYPERLOOM_RUN_MODE` is already set in the shell environment
-   (see [Run Mode Resolution](#run-mode-resolution)); just confirm it and use it
-   for this run.
+   this question when [Run Mode Resolution](#run-mode-resolution) already found a
+   valid choice in the shell or workspace `.env`; confirm and use that choice.
 
    Present exactly these two option labels in this order:
 
