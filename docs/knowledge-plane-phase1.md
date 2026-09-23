@@ -94,9 +94,8 @@ Hyperloom's `KernelExperienceBridge` only:
 3. forwards the KB Service URL for PR Monitor in either mode, using the global
    default when local mode has no explicit URL and IR-3 can reach it;
 4. keeps optional GBrain credentials in the Hyperloom parent for Framework PR
-   clients, but never forwards them to KernelForge children;
-5. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
-6. collects bounded capability/result provenance returned by KernelForge.
+   clients, but never forwards them to KernelForge children; and
+5. collects bounded capability/result provenance returned by KernelForge.
 
 KernelForge continues to own local knowledge. Hyperloom does not implement
 kernel-experience CRUD or ranking.
