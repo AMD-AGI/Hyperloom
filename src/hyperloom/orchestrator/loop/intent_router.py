@@ -165,6 +165,21 @@ class IntentRouter:
             len(mandate),
         )
 
+    def _mark_first_pass_mandate_consumed(self, params: dict[str, Any], task_id: str) -> None:
+        """Stop offering a mandate once a specialist task exists for it.
+
+        Args:
+            params: The specialist dispatch params, as resolved.
+            task_id: The task just created from them.
+        """
+        mandate_id = str(params.get("primatune_mandate_id") or "").strip()
+        if not mandate_id:
+            return
+        from ..predictor.pump import mark_mandate_consumed
+
+        if mark_mandate_consumed(self.shared_state, mandate_id, task_id):
+            log.info("primatune mandate %s consumed by specialist task %s", mandate_id, task_id)
+
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created.
 
@@ -822,6 +837,10 @@ class IntentRouter:
             )
             return
         self.shared_state.reset_policy_denial_streak(action_name)
+        if action_name == "specialist":
+            # Only here, once a new row exists: marking at resolve time would
+            # swallow the mandate whenever the create above bails out.
+            self._mark_first_pass_mandate_consumed(params, task.task_id)
         await self.bus.append_and_seq(
             Message.new(
                 "coordinator",

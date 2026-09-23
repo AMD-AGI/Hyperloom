@@ -57,6 +57,7 @@ import time
 from typing import Any
 
 from hyperloom.common.prompt_safety import flatten_for_prompt
+from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
     canonical_fingerprint,
 )
@@ -95,6 +96,7 @@ __all__ = [
     "already_asked",
     "decision_point_key",
     "find_mandate",
+    "mark_mandate_consumed",
     "note_asked",
     "pump",
 ]
@@ -835,6 +837,45 @@ def find_mandate(state: Any, mandate_id: str) -> str:
             continue
         return str(entry.get("mandate") or "")
     return ""
+
+
+def mark_mandate_consumed(state: Any, mandate_id: str, task_id: str) -> bool:
+    """Record that a specialist task was created to act on a mandate.
+
+    Without this a mandate orchestration dispatched correctly would be offered
+    again on the next render, because nothing distinguished it from one never
+    acted on. The mark lives on the round itself so :func:`find_mandate` keeps
+    resolving the id -- an idempotent re-dispatch of the same task still needs
+    the text -- while the queue render skips it.
+
+    The first consumer is kept. A wave that carries one mandate id at its top
+    level fans the same id into every sub-task, and the task that took it first
+    is the one the attribution belongs to.
+
+    A task that later fails keeps the mark. Infra failures are already retried
+    by the dispatcher under the same params up to its cap; offering the mandate
+    again after that would let orchestration restart the count indefinitely.
+
+    Args:
+        state (Any): The ``SharedState``.
+        mandate_id (str): The id the dispatch carried.
+        task_id (str): The specialist task created for it.
+
+    Returns:
+        bool: Whether a round with that id exists, marked now or before.
+    """
+    wanted = str(mandate_id or "").strip()
+    if not wanted:
+        return False
+    found = False
+    for entry in getattr(state, "specialist_rounds", None) or []:
+        if not isinstance(entry, dict) or str(entry.get("mandate_id") or "") != wanted:
+            continue
+        found = True
+        if not entry.get("mandate_consumed_by"):
+            entry["mandate_consumed_by"] = str(task_id)
+            entry["mandate_consumed_utc"] = now_iso()
+    return found
 
 
 def _round_bottleneck(request: dict[str, Any]) -> str:

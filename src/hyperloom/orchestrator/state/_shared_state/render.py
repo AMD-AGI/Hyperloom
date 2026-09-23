@@ -649,13 +649,14 @@ class _RenderMixin:
         return list(reversed(out))
 
     def _untested_patch_mandate(self) -> dict[str, str]:
-        """The newest un-benched first-pass source-change mandate this cycle.
+        """The newest first-pass source-change mandate this cycle not yet acted on.
 
         A mandate is prose, not a variant, so it never survives
         :func:`is_executable` and cannot ride the row queue. Only the newest one
         in the cycle is offered: an older mandate answered a stack this session
         has already moved past, and offering every one of them would grow the
-        block without bound.
+        block without bound. One a specialist was already dispatched for is
+        passed over, so the next unconsumed one in the cycle can take the slot.
 
         Returns:
             dict[str, str]: ``{mandate_id, mandate}``, or ``{}`` when none.
@@ -665,6 +666,8 @@ class _RenderMixin:
         cycle = to_int(self.macro_cycle, default=0)
         for entry in reversed(self.specialist_rounds or []):
             if not isinstance(entry, dict) or to_int(entry.get("cycle"), default=0) != cycle:
+                continue
+            if entry.get("mandate_consumed_by"):
                 continue
             mandate_id = str(entry.get("mandate_id") or "").strip()
             mandate = str(entry.get("mandate") or "").strip()
