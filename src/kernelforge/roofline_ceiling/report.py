@@ -4,8 +4,9 @@
 """Where a ceiling lands, how it is read back, and how a campaign shows it.
 
 Both files are written by the analyst, not by this module. It names them, reads
-one of them, and renders the attainment block a campaign injects into its
-planning prompt.
+one of them, and renders the attainment block a campaign hands its
+implementer. The planner gets the same standing as structured case evidence,
+attached by the loop rather than rendered here.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ def render_for_prompt(
     target: float = 0.0,
     unscored_cases: Sequence[str] | None = None,
 ) -> str:
-    """Render the roofline block a campaign injects into its planning prompt.
+    """Render the roofline block a campaign injects into its implementer's prompt.
 
     Names the target, the standing, and which shapes are short of it. The table
     is ordered worst-first, which is the point of showing it: the score is the

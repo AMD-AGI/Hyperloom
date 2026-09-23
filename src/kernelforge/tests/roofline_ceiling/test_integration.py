@@ -128,9 +128,66 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
     assert source.count("from kernelforge.roofline_ceiling.report import read_report") == 1
     assert "read_report" in inspect.getsource(IterationLoop._ceiling)
     # Every other user goes through that loader rather than the filesystem.
-    for method in (IterationLoop._roofline_attainment, IterationLoop._render_ceiling_advisory):
+    for method in (
+        IterationLoop._roofline_attainment,
+        IterationLoop._render_ceiling_advisory,
+        IterationLoop._with_ceiling_standing,
+    ):
         assert "self._ceiling()" in inspect.getsource(method)
         assert "read_report" not in inspect.getsource(method)
+
+
+def _planning_context(*case_ids):
+    from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
+
+    return OrchestrationContext(
+        analysis_commit="abc123",
+        workspace="/w",
+        gpu_target="gfx950",
+        objective="minimize latency",
+        program_context="one GEMM",
+        source_map_path="/w/map.json",
+        cases=tuple(CaseEvidence(case_id=case_id, latency_ms=40.0) for case_id in case_ids),
+    )
+
+
+def test_the_planner_sees_how_far_each_case_sits_from_its_ceiling(tmp_path):
+    """The planner picks the round's cases, so it is the one the headroom has to reach."""
+    path = _publish(_report((("a", 9.0), ("b", 4.0))), tmp_path)
+    loop = _loop(str(path), case_times={"a": 10.0, "b": 8.0})
+
+    context = loop._with_ceiling_standing(_planning_context("a", "b"))
+    cases = {case["case_id"]: case for case in context.to_prompt_dict()["cases"]}
+
+    assert cases["a"]["roofline"] == {"ceiling_ms": 9.0, "incumbent_ms": 10.0, "attainment": 0.9, "excluded": ""}
+    assert cases["b"]["roofline"]["attainment"] == pytest.approx(0.5)
+
+
+def test_a_contradicted_ceiling_reaches_the_planner_as_one_with_its_reason(tmp_path):
+    """A ceiling above the measured latency is shown as untrustworthy, not as a finished case."""
+    path = _publish(_report((("a", 9.0),)), tmp_path)
+    loop = _loop(str(path), case_times={"a": 6.0})
+
+    (case,) = loop._with_ceiling_standing(_planning_context("a")).cases
+
+    assert case.roofline.attainment is None
+    assert case.roofline.incumbent_ms == 6.0
+    assert case.roofline.excluded
+
+
+def test_without_a_ceiling_the_planner_plans_from_exactly_the_evidence_it_always_did():
+    context = _planning_context("a")
+
+    assert _loop()._with_ceiling_standing(context) is context
+    assert all("roofline" not in case for case in context.to_prompt_dict()["cases"])
+
+
+def test_the_standing_is_attached_where_the_round_is_planned():
+    """Pinned at the call site: attaching it anywhere after planning reaches only the implementer."""
+    source = inspect.getsource(IterationLoop._run_orchestration)
+    planned_at = source.index("orchestration_service.run(")
+
+    assert -1 < source.index("self._with_ceiling_standing(") < planned_at
 
 
 def test_the_ceiling_is_off_unless_an_operator_turns_it_on():
