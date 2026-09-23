@@ -11,24 +11,23 @@ What lives here: the Coordinator's state snapshots, the backend build
 provenance carried by a kernel-agent result (which reaches the optimizer
 through nothing else).
 
-Every helper is best-effort: all failures are swallowed (logged at debug).
+Every helper is best-effort: spool failures degrade the section and never
+propagate into the run they are describing.
 Payloads are shaped to the matching ``schema.py`` TypedDict.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
 
-from .session_metadata import snapshot_metadata
 from . import tool_versions
+from .recorder_warnings import ignore_recording_errors
+from .session_metadata import snapshot_metadata
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 PRODUCER_COORDINATOR = "coordinator"
 PRODUCER_KERNEL_AGENT = "kernel-agent"
@@ -57,11 +56,8 @@ def snapshot_state_sections(
         ("session", _snapshot_session),
         ("metadata", snapshot_metadata),
     ):
-        try:
+        with ignore_recording_errors(section=name, detail=f"snapshot {name}"):
             fn(rec, state)
-        except Exception as exc:  # noqa: BLE001
-            log.debug("snapshot section %s failed", name, exc_info=True)
-            trace_skip(reason="writer raised", section=name, error=exc)
 
 
 def _unset_or_int(st: Any, attr: str) -> int | None:
@@ -250,7 +246,7 @@ def record_backend_versions_and_timeline(
             section="versions",
         )
         return
-    try:
+    with ignore_recording_errors(section="versions", detail="record_backend_versions_and_timeline"):
         result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
         attempts = result.get("attempts")
         attempts = attempts if isinstance(attempts, list) else []
@@ -285,9 +281,6 @@ def record_backend_versions_and_timeline(
                     producer=producer,
                 )
         _mirror_backend_attempts_to_kernel_timeline(result)
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_backend_versions_and_timeline failed", exc_info=True)
-        trace_skip(reason="writer raised", section="versions", error=exc)
 
 
 __all__ = [

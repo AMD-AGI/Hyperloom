@@ -183,41 +183,27 @@ def _event_header(parts: Mapping[str, list[dict[str, Any]]], *, event: str) -> d
 
 
 def _republish_closed_event(event: str) -> None:
-    """Re-assemble a closed event so a fragment written after it is published.
-
-    The export reads the durable timeline rather than re-assembling it, so a
-    row landing after the close is in the spool but not in the event; updating
-    the same storage sequence puts it there. An event with an action still
-    running is left alone, since publishing here would show a running
-    measurement as finished.
-
-    Never raises: the row this re-publishes is already in the spool, so a
-    re-assembly that cannot read it costs the caller nothing it can act on.
-    """
-    from ...session.sbd_v6 import timeline_sequence
+    """Re-assemble a closed event so a fragment written after it is published."""
     from .assembler import baseline_event_parts
-    from .recorder_warnings import RECORDING_ERRORS, note_failure
+    from .construct import republish_closed_event
+    from .event_rows import rows_for_event
 
-    try:
-        parts = baseline_event_parts(event)
-        header = _event_header(parts, event=event)
+    def _end_time(parts: Mapping[str, list[dict[str, Any]]], header: dict[str, Any]) -> str:
         action_rows = rows_for_event(parts.get(SECTION_ACTION) or [], event)
         ends = [str(row.get("end_time") or "") for row in action_rows]
         if not ends or not all(ends):
-            return
-        ext, derived = assemble_baseline_ext(parts, event=event)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
-            sequence=timeline_sequence(header),
-            status=derived,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=str(header.get("start_time") or ""),
-            end_time=max(ends),
-        )
-    except RECORDING_ERRORS as exc:
-        note_failure(section=SECTION_EVENT, error=exc, detail=f"re-publishing closed event {event}")
+            return ""
+        return max(ends)
+
+    republish_closed_event(
+        event,
+        section=SECTION_EVENT,
+        event_type=EVENT_TYPE,
+        kind=EVENT_KIND,
+        load_parts=lambda: baseline_event_parts(event),
+        assemble=assemble_baseline_ext,
+        end_time=_end_time,
+    )
 
 
 def _warnings(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -918,10 +904,12 @@ def make_baseline_recorder(
     failures degrade to "no event" rather than propagating -- as does an absent
     sink, which is what a caller with no session bound has.
     """
+    from .construct import try_make_recorder
+
     if sink is None:
         return None
-    try:
-        recorder = BaselineEventRecorder(
+    return try_make_recorder(
+        lambda: BaselineEventRecorder(
             sink,
             task_id=task_id,
             task_kind=task_kind,
@@ -932,12 +920,7 @@ def make_baseline_recorder(
             failure_streak_before=failure_streak_before,
             total_failures_before=total_failures_before,
             owns_event=owns_event,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change baseline behavior
-        log.warning(
-            "baseline timeline: recorder construction failed; this measurement's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
-    recorder.begin()
-    return recorder
+        ),
+        label="baseline",
+        begin=True,
+    )

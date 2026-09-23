@@ -236,19 +236,13 @@ def _collect_recipe(
     ):
         if value:
             out[key] = value
+    # Tri-state observations: ``None`` (could not be read) and ``[]`` (clean)
+    # mean opposite things, so they are copied through a sentinel rather than
+    # dropped when falsy. A session that predates the field stays absent.
     for _tri in ("build_extensions_not_carried", "levers_without_readers"):
         _val = _eg(state, _tri, _ABSENT)
         if _val is not _ABSENT:
             out[_tri] = _val
-    _carry = _eg(state, "build_extensions_not_carried", _ABSENT)
-    if _carry is not _ABSENT:
-        # Assigned outside the loop above, which drops anything falsy: this
-        # observation is a tri-state where ``None`` (the build's outputs could
-        # not be read) and ``[]`` (they were all carried) mean opposite things,
-        # and dropping either would read as the safe one. Read through a
-        # sentinel default so a session that predates the observation stays
-        # absent instead of arriving as an unreadable build.
-        out["build_extensions_not_carried"] = _carry
     decision = evaluate_replay_sufficiency(
         enablement,
         steps=steps,
@@ -524,6 +518,24 @@ def _collect_runtimes_and_builds(out: dict[str, Any], state: dict[str, Any]) -> 
             "failure_class": str(last_build_failure_raw.get("failure_class") or ""),
             "failure_summary": str(last_build_failure_raw.get("failure_summary") or ""),
         }
+
+
+def project_replay_contract(
+    session_dir: Path,
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """The stack-level recipe the enablement event records at close.
+
+    Lane identity, eval-trigger, and runtime rows are written during the round.
+    Close only needs the contract no author-time site can state: ordered steps
+    and the sufficiency verdict over them.
+    """
+    if _enablement_lane_status(state) is None:
+        return {}
+    out: dict[str, Any] = {}
+    _collect_landed_stack(out, state, session_dir=session_dir)
+    _collect_recipe(out, state, session_dir=session_dir)
+    return out
 
 
 def collect_enablement(

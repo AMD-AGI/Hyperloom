@@ -131,16 +131,19 @@ def _summary_line(breakdown: dict) -> str:
     geak_n = int((((by_source.get("kernel") or {}).get("by_backend") or {}).get("geak") or {}).get("keep_count") or 0)
     timeline = breakdown.get("timeline") or []
     close = breakdown.get("close") or {}
+    warnings = (breakdown.get("metadata") or {}).get("warnings") or []
+    gain = final.get("gain_pct")
+    gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and gain == gain else "n/a"
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "
         f"stop_reason={outcome.get('stop_reason') or '?'}  "
-        f"gain_validated={final.get('gain_pct') or 0.0:.2f}%  "
+        f"gain_validated={gain_text}  "
         f"geak={geak_n}  "
         f"adopted={int(validation.get('adoption_count') or 0)}  "
         f"events={len(timeline)}  "
         f"close={close.get('status') or '?'}  "
-        f"warnings={len(breakdown.get('warnings') or [])}"
+        f"warnings={len(warnings)}"
     )
 
 
@@ -173,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    breakdown = build(sd)
+    breakdown = json.loads(out_path.read_text(encoding="utf-8"))
     print(f"Wrote {out_path}")
     print(_summary_line(breakdown))
     if args.print_json:

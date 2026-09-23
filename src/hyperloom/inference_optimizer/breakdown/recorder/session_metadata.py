@@ -15,49 +15,20 @@ propagates to the caller.
 
 from __future__ import annotations
 
-import logging
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z
 
+from ..session_facts import architecture_block, recovery_block
 from .recorder import Recorder, recorder_for
+from .recorder_warnings import RECORDING_ERRORS, ignore_recording_errors
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 SECTION = "metadata"
 PRODUCER_COORDINATOR = "coordinator"
-
-# Structural model fields carried verbatim from ``summarize_model_config``.
-# ``model_class`` is derived (see :func:`_architecture`) and is not on this
-# list; everything else is a straight lift so the exported architecture block
-# is the parsed config rather than a five-field digest of it.
-_ARCHITECTURE_FIELDS = (
-    "model_family",
-    "model_type",
-    "architectures",
-    "attention_type",
-    "num_hidden_layers",
-    "num_attention_heads",
-    "num_key_value_heads",
-    "head_dim",
-    "hidden_size",
-    "intermediate_size",
-    "max_position_embeddings",
-    "vocab_size",
-    "torch_dtype",
-    "kv_cache_dtype",
-    "quantization",
-    "is_moe",
-    "num_experts",
-    "num_experts_per_tok",
-    "has_shared_expert",
-    "num_shared_experts",
-)
 
 _LANGFUSE_FIELDS = ("enabled", "disabled_reason", "trace_id", "session_id", "trace_url")
 
@@ -79,11 +50,8 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
     if not payload:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    try:
+    with ignore_recording_errors(section=SECTION, detail="record metadata"):
         recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record metadata failed", exc_info=True)
-        trace_skip(reason="writer raised", section=SECTION, error=exc)
 
 
 def record_metadata_identity(
@@ -180,14 +148,14 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
         "elapsed_minutes": round(leg_seconds / 60.0, 2),
         "total_elapsed_minutes": round(total_seconds / 60.0, 2),
         "tick_count": int(getattr(state, "tick", 0) or 0),
-        "recovery": _recovery(state),
+        "recovery": recovery_block(state),
     }
     payload: dict[str, Any] = {
         "session": session,
         "task_config": _launch_config(state),
         "grading": _grading(state),
     }
-    architecture = _architecture(
+    architecture = architecture_block(
         getattr(state, "model_info", None) or {},
         model_class=_text(getattr(state, "model_class", "")),
     )
@@ -229,21 +197,6 @@ def _grading(state: Any) -> dict[str, Any]:
     }
 
 
-def _architecture(model_info: Any, *, model_class: str = "") -> dict[str, Any]:
-    """The structural model block, or ``{}`` when nothing is known."""
-    info = dict(model_info or {}) if isinstance(model_info, Mapping) else {}
-    resolved_class = _text(model_class)
-    if not resolved_class and info:
-        resolved_class = "moe" if bool(info.get("is_moe")) else "dense"
-    if not info and not resolved_class:
-        return {}
-    architecture: dict[str, Any] = {"model_class": resolved_class}
-    for field in _ARCHITECTURE_FIELDS:
-        if field in info:
-            architecture[field] = info[field]
-    return architecture
-
-
 def _workload_signature(config: Mapping[str, Any]) -> str:
     """The workload contract digest for ``config``, empty when it is unknown.
 
@@ -260,7 +213,7 @@ def _workload_signature(config: Mapping[str, Any]) -> str:
         from hyperloom.orchestrator.actions.executors._canonical_fingerprint import workload_signature
 
         return workload_signature(**{name: value for name, value in fields.items() if value is not None})
-    except Exception:  # noqa: BLE001 — metadata must not cost the session
+    except RECORDING_ERRORS:
         return ""
 
 
@@ -320,42 +273,6 @@ def _elapsed_seconds(state: Any) -> tuple[float, float]:
     live = max(0.0, time.time() - anchor) if anchor > 0.0 else 0.0
     total = charged + live
     return leg, total or leg
-
-
-def _recovery(state: Any) -> dict[str, Any]:
-    """Crash / interruption / resume history from live state.
-
-    Crash timestamps are stored as epoch seconds and exported as ISO, so the
-    conversion happens here rather than being repeated by every reader.
-    """
-    crash_count = int(getattr(state, "crash_count", 0) or 0)
-    crash_timestamps: list[str] = []
-    for raw in getattr(state, "crash_timestamps", None) or []:
-        try:
-            crash_timestamps.append(datetime.fromtimestamp(float(raw), tz=timezone.utc).isoformat())
-        except (TypeError, ValueError, OSError, OverflowError):
-            continue
-    last_exception: dict[str, Any] | None = None
-    raw_exception = getattr(state, "last_tick_exception", None)
-    if isinstance(raw_exception, Mapping) and raw_exception:
-        # Drop the large traceback; keep the compact postmortem header.
-        last_exception = {
-            "tick": raw_exception.get("tick"),
-            "ts": raw_exception.get("ts"),
-            "stage": raw_exception.get("stage"),
-            "agent": raw_exception.get("agent"),
-            "type": raw_exception.get("type"),
-            "message": (str(raw_exception.get("message") or "")[:500] or None),
-        }
-    resume_pending = bool(getattr(state, "resume_pending_revalidation", False))
-    return {
-        "recovered": bool(crash_count > 0 or crash_timestamps or resume_pending or last_exception),
-        "crash_count": crash_count,
-        "crash_timestamps": crash_timestamps,
-        "degraded_mode": bool(getattr(state, "degraded_mode", False)),
-        "resume_pending_revalidation": resume_pending,
-        "last_tick_exception": last_exception,
-    }
 
 
 def _langfuse(receipt: Mapping[str, Any]) -> dict[str, Any]:

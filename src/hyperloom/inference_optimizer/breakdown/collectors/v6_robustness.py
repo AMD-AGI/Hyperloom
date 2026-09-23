@@ -10,13 +10,11 @@ not sources for rebuilding the retired agent's account.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any
+
+from ._common import _dict_rows
 
 __all__ = ["collect_v6_robustness"]
-
-
-def _rows(value: Any) -> list[dict[str, Any]]:
-    return [dict(r) for r in value if isinstance(r, Mapping)] if isinstance(value, list) else []
 
 
 def collect_v6_robustness(recorded: Any = None) -> dict[str, Any]:
@@ -30,5 +28,5 @@ def collect_v6_robustness(recorded: Any = None) -> dict[str, Any]:
         ``turns`` says the agent never completed a turn, which is itself the
         answer a reader is after.
     """
-    view = recorded if isinstance(recorded, Mapping) else {}
-    return {"turns": _rows(view.get("turns"))}
+    view = recorded if isinstance(recorded, dict) else {}
+    return {"turns": _dict_rows(view.get("turns"))}

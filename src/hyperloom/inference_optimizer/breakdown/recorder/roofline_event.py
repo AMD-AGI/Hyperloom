@@ -961,10 +961,12 @@ def make_roofline_recorder(
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
     """Build a recorder, or ``None`` when one cannot be constructed."""
+    from .construct import try_make_recorder
+
     if sink is None:
         return None
-    try:
-        return RooflineEventRecorder(
+    return try_make_recorder(
+        lambda: RooflineEventRecorder(
             sink,
             task_id=task_id,
             task_kind=task_kind,
@@ -972,10 +974,6 @@ def make_roofline_recorder(
             framework=framework,
             params=params,
             owns_event=owns_event,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
-        log.warning(
-            "roofline timeline: recorder construction failed; this action's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
+        ),
+        label="roofline",
+    )

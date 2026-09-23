@@ -40,7 +40,7 @@ from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
 from .event_timeline import finish_event, open_event
-from .recorder_warnings import note_failure
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 # Every section an enablement event assembles from. Named from the leaf module
 # the assembler shares, so this writer reads its parts without an import cycle.
@@ -179,21 +179,21 @@ def _recipe_for(enablement: Any, *, session_dir: str, mode: str = "") -> dict[st
     from dataclasses import asdict, is_dataclass
     from pathlib import Path
 
-    from .enablement_section import collect_enablement
+    from .enablement_section import project_replay_contract
     from hyperloom.orchestrator.enablement.recipe.sufficiency import read_status
 
     section: dict[str, Any] = {}
     try:
         state = asdict(enablement) if is_dataclass(enablement) else dict(_as_dict(enablement))
-        collected = collect_enablement(
-            Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}, []
+        collected = project_replay_contract(
+            Path(str(session_dir or ".")), {"enablement": state, "enablement_mode": mode}
         )
         section = {key: collected[key] for key in _RECIPE_KEYS if key in collected}
         # The collector emits this unconditionally beside the steps; carrying its
         # own absence forward would hand a consumer a recipe with no verdict.
         if "kept_artifacts" in collected:
             section["kept_artifacts"] = collected["kept_artifacts"]
-    except Exception as exc:  # noqa: BLE001 — the lane outranks its own record
+    except RECORDING_ERRORS + (TypeError, KeyError) as exc:
         note_failure(section="enablement_event", error=exc, detail="enablement event: recipe projection failed")
     if not isinstance(section.get("replay_sufficiency"), Mapping):
         section["replay_sufficiency"] = read_status({})

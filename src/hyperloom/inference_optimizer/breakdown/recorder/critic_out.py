@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +36,8 @@ from hyperloom.common.jsonio import read_json
 
 from ..critic_reviews import normalize_framework_reviews
 from .recorder import recorder_for
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 from .trace import trace_skip
-
-log = logging.getLogger(__name__)
 
 SECTION = "critic"
 ITERATION_SECTION = "critic_iteration"
@@ -207,9 +205,8 @@ def record_critic_iteration(
             row,
             key=row["iteration_id"],
         )
-    except Exception as exc:  # noqa: BLE001
-        log.debug("record_critic_iteration failed", exc_info=True)
-        trace_skip(reason="writer raised", section=ITERATION_SECTION, error=exc)
+    except RECORDING_ERRORS + (TypeError, KeyError) as exc:
+        note_failure(section=ITERATION_SECTION, error=exc, detail="record_critic_iteration failed")
 
 
 __all__ = ["ITERATION_SECTION", "SECTION", "record_critic_iteration"]

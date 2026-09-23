@@ -78,3 +78,23 @@ def test_noting_a_failure_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(sbd_v6, "record_write_warning", _boom)
     with session_scope(tmp_path):
         rw.note_failure(section="phase_event", error=OSError("disk full"))
+
+
+def test_recording_errors_are_the_spool_and_binding_failures_only():
+    """A TypeError projecting a row is a recorder defect, not a lost write."""
+    assert Exception not in rw.RECORDING_ERRORS
+    assert BaseException not in rw.RECORDING_ERRORS
+    assert OSError in rw.RECORDING_ERRORS
+
+
+def test_ignore_recording_errors_parks_a_spool_failure_and_lets_a_bug_raise(tmp_path, caplog):
+    with session_scope(tmp_path), caplog.at_level(logging.WARNING):
+        with rw.ignore_recording_errors(section="versions", detail="probe"):
+            raise OSError("disk full")
+        with pytest.raises(RuntimeError, match="shape changed"):
+            with rw.ignore_recording_errors(section="versions", detail="probe"):
+                raise RuntimeError("shape changed")
+
+    parked = sbd_v6.read_write_warnings(tmp_path)
+    assert any("recorder.versions" in w for w in parked)
+    assert any("disk full" in w for w in parked)

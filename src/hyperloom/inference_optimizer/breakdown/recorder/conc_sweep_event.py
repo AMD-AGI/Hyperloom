@@ -993,21 +993,18 @@ def make_conc_sweep_recorder(
     behavior must not depend on the recorder existing, so construction failures
     degrade to "no event", as does the absent sink a caller with no session
     bound has."""
+    from .construct import try_make_recorder
+
     if sink is None:
         return None
-    try:
-        recorder = ConcSweepEventRecorder(
+    return try_make_recorder(
+        lambda: ConcSweepEventRecorder(
             sink,
             task_id=task_id,
             task_kind=task_kind,
             reason=reason,
             params=params,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change sweep behavior
-        log.warning(
-            "conc_sweep timeline: recorder construction failed; this sweep's facts will be missing from the event",
-            exc_info=True,
-        )
-        return None
-    recorder.begin()
-    return recorder
+        ),
+        label="conc_sweep",
+        begin=True,
+    )

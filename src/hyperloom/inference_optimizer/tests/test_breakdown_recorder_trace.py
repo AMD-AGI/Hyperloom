@@ -242,16 +242,15 @@ def test_a_swallowed_writer_failure_is_traced_and_still_swallowed(tmp_path, trac
 
     _record(tmp_path)
 
-    line = list(traced.records)[-1].getMessage()
+    skipped = [record.getMessage() for record in traced.records if "outcome=skipped" in record.getMessage()]
 
-    assert "outcome=skipped" in line
-    assert "reason=writer raised" in line
-    assert "error=OSError:no space left on device" in line
+    assert skipped
+    assert any("error=OSError:no space left on device" in line for line in skipped)
 
 
 def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatch):
     def explode(*_args, **_kwargs):
-        raise RuntimeError("Authorization: Bearer tok-aaaaaaaaaaaa")
+        raise OSError("Authorization: Bearer tok-aaaaaaaaaaaa")
 
     monkeypatch.setattr(
         "hyperloom.inference_optimizer.breakdown.recorder.recorder.atomic_write_text",
@@ -260,10 +259,12 @@ def test_a_credential_in_a_skipped_record_is_masked(tmp_path, traced, monkeypatc
 
     _record(tmp_path)
 
-    line = list(traced.records)[-1].getMessage()
+    lines = [record.getMessage() for record in traced.records]
+    skipped = [line for line in lines if "outcome=skipped" in line]
 
-    assert "tok-aaaaaaaaaaaa" not in line
-    assert "[REDACTED]" in line
+    assert skipped
+    assert all("tok-aaaaaaaaaaaa" not in line for line in skipped)
+    assert any("[REDACTED]" in line for line in skipped)
 
 
 def test_a_call_that_never_reached_the_recorder_says_so(traced):

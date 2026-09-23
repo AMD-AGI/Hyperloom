@@ -605,17 +605,10 @@ def make_warm_replay_recorder(
     false ``open_event_on_timeline`` rebinds to an event a previous tick
     opened, which is how the promote seam records onto the enqueue seam's arc.
     """
-    from ...session.session_binding import session_is_bound
+    from .construct import try_make_recorder
 
-    try:
-        if not session_is_bound():
-            log.warning(
-                "warm replay timeline: no session bound; this replay's whole event will be "
-                "missing from the breakdown. The coordinator binds at startup, so this means "
-                "either that never happened or the replay ran outside the session's context"
-            )
-            return None
-        recorder = WarmReplayEventRecorder(
+    return try_make_recorder(
+        lambda: WarmReplayEventRecorder(
             make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
             task_id=task_id,
             tier=tier,
@@ -628,14 +621,8 @@ def make_warm_replay_recorder(
             session_baseline_tput=session_baseline_tput,
             kernel_count=kernel_count,
             recipe_suppressed=recipe_suppressed,
-        )
-    except Exception:  # noqa: BLE001 — observability cannot change replay behavior
-        log.warning(
-            "warm replay timeline: recorder construction failed; this replay's whole event "
-            "will be missing from the breakdown",
-            exc_info=True,
-        )
-        return None
-    if open_event_on_timeline:
-        recorder.begin()
-    return recorder
+        ),
+        label="warm replay",
+        require_bound=True,
+        begin=open_event_on_timeline,
+    )
