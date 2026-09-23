@@ -329,6 +329,21 @@ CEILING_ON = "on"
 CEILING_OFF = "off"
 
 
+def _roofline_ceiling_option(help_text: str):
+    """The ``--roofline-ceiling`` switch, spelled once for every command that offers it.
+
+    Off by default everywhere: an estimate costs a profiler pass and an analyst
+    session, so nobody pays for one without asking.
+    """
+    return click.option(
+        "--roofline-ceiling",
+        "roofline_ceiling",
+        type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
+        default=CEILING_OFF,
+        help=help_text,
+    )
+
+
 def _make_ceiling_estimator(
     *,
     enabled: bool,
@@ -910,17 +925,13 @@ def _make_lane_agent_factory(
     "campaign: it is snapshotted into campaign_config.json and "
     "read back on --resume.",
 )
-@click.option(
-    "--roofline-ceiling",
-    "roofline_ceiling",
-    type=click.Choice([CEILING_ON, CEILING_OFF], case_sensitive=False),
-    default=CEILING_OFF,
-    help="Estimate the per-shape theoretical achievable latency the campaign "
+@_roofline_ceiling_option(
+    "Estimate the per-shape theoretical achievable latency the campaign "
     "measures its attainment against. 'off' (default) skips it. 'on' estimates "
     "it on a fresh campaign once the baseline is measured, which costs a "
     "profiler pass and an analyst session, and on --resume reuses the ceiling "
     "the campaign already estimated, estimating again only when that report "
-    "can no longer be read. Pass it on every --resume that should keep it.",
+    "can no longer be read. Pass it on every --resume that should keep it."
 )
 @click.option(
     "--roofline-target",
@@ -2480,6 +2491,13 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 @click.option(
     "--profile-timeout-sec", default=3600, type=int, help="OPTIMIZE: ceiling for the complete Analysis Agent workflow"
 )
+@_roofline_ceiling_option(
+    "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
+    "skips the roofline ceiling. 'on' has the loop estimate the kernel's "
+    "per-shape theoretical achievable latency once its baseline is measured, "
+    "and steer its planner by the attainment against it; the estimate costs a "
+    "profiler pass and an analyst session, paid out of the OPTIMIZE budget."
+)
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
 def forge_rewrite(
     source_kernel,
@@ -2510,6 +2528,7 @@ def forge_rewrite(
     git_branch,
     supervisor_backend,
     profile_timeout_sec,
+    roofline_ceiling,
     result_json,
 ):
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop."""
@@ -2576,6 +2595,7 @@ def forge_rewrite(
         permission_mode=permission_mode,
         supervisor_backend=supervisor_backend,
         profile_timeout_sec=profile_timeout_sec,
+        roofline_ceiling=roofline_ceiling == CEILING_ON,
         result_json=result_json,
         deadline_unix=deadline_unix,
         framework=framework,

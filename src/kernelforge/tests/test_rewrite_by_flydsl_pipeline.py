@@ -216,6 +216,30 @@ def test_optimize_leaves_the_loop_on_its_own_baseline_when_not_given_one(tmp_pat
     assert not (tmp_path / "forge_loop_baseline.json").exists()
 
 
+@pytest.mark.parametrize(("requested", "passed"), [({}, "off"), ({"roofline_ceiling": True}, "on")])
+def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, monkeypatch, requested, passed):
+    """Spelled out even when off, so the loop never falls back on a default this caller did not choose."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-ROOFLINE\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        experiments_dir=str(tmp_path),
+        **requested,
+    )
+
+    command = captured["command"]
+    assert command.count("--roofline-ceiling") == 1
+    assert command[command.index("--roofline-ceiling") + 1] == passed
+
+
 def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):
     """Without them every score the loop reports would divide by the port instead of the source."""
     src = tmp_path / "softmax.py"
@@ -244,6 +268,35 @@ def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch)
     assert seen["source_case_ms"] == {"case0": 1.0}
     # Anchored on the source, the loop's own score is what the run publishes.
     assert out["speedup"] == pytest.approx(2.5)
+    # Nobody asked for a ceiling, so the loop is not handed one to estimate.
+    assert seen["roofline_ceiling"] is False
+
+
+def test_run_rewrite_hands_the_roofline_switch_to_optimize(tmp_path, monkeypatch):
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    driver = tmp_path / "driver.py"
+    driver.write_text("print('drive')\n")
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    seen = {}
+
+    def capture_optimize(*_args, **kwargs):
+        seen.update(kwargs)
+        return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
+
+    monkeypatch.setattr(runner, "run_optimize", capture_optimize)
+    runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        config=Config.from_env(workspace=str(tmp_path)),
+        roofline_ceiling=True,
+    )
+
+    assert seen["roofline_ceiling"] is True
 
 
 def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
