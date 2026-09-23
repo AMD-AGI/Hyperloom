@@ -13,7 +13,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from agentx_mapping import map_aiperf  # noqa: E402
+from agentx_mapping import map_aiperf
 
 
 def _noncanonical_reasons():

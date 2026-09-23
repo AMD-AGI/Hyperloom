@@ -19,7 +19,7 @@ from typing import Any
 
 # Sibling import: kernel-agent tools cannot rely on the ``hyperloom`` import root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _io_utils import truthy  # noqa: E402
+from _io_utils import truthy
 
 sys.path.pop(0)
 
@@ -50,7 +50,7 @@ def _validated_agent_sandbox_mode(value: Any) -> str:
     if not stated:
         raise ValueError("agent_sandbox_mode is required")
 
-    from hyperloom.common.codex_session import (  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common.codex_session import (
         resolve_codex_sandbox_mode,
     )
 
@@ -62,7 +62,7 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
     if _validated_agent_backend(agent_backend) == "codex":
         return
 
-    from hyperloom.common import llm_config  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common import llm_config
 
     options = llm_config.claude_sdk_env_options(
         env=os.environ,
@@ -79,8 +79,8 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
                 os.environ.setdefault(name, value)
     # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
     # merged in here or the run arrives at the gateway anonymous.
-    from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
-    from hyperloom.common.llm_stability_env import apply_llm_stability_env  # noqa: PLC0415 - standalone import-light
+    from hyperloom.common.llm_attribution import inject_env
+    from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
     inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.

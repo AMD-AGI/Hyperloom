@@ -632,7 +632,7 @@ class _FakeActor:
 class _LeaseFakeRay:
     """Minimal fake ``ray`` for ServingLease: get() unwraps refs, kill() records."""
 
-    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -982,7 +982,7 @@ class _FakeGpuActor:
 
 
 class _FakeRayP2:
-    class exceptions:  # noqa: N801 — mirror ray.exceptions namespace
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -1327,7 +1327,7 @@ class _RaisingActor:
 
 
 class _RaisingRay:
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayError(RuntimeError):
             pass
 
@@ -1719,7 +1719,7 @@ def test_managed_process_start_with_log_path(tmp_path: Path):
 class _InfeasibleFakeRay:
     """Fake ray for infeasibility tests: cluster_resources returns no serving_slot."""
 
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayTaskError(Exception):
             pass
 
@@ -1791,7 +1791,7 @@ def test_gpu_specialist_lease_infeasible_raises(monkeypatch: pytest.MonkeyPatch)
 class _PendingAcquireFakeRay:
     """Leave the actor pending once, then expose the benchmark result."""
 
-    class exceptions:  # noqa: N801
+    class exceptions:
         class RayTaskError(Exception):
             pass
 

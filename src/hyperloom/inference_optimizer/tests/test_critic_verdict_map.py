@@ -252,7 +252,7 @@ class _StubBus:
     def __init__(self) -> None:
         self.messages: list[_BusMessage] = []
 
-    async def append_and_seq(self, msg: Any) -> Any:  # noqa: ANN401
+    async def append_and_seq(self, msg: Any) -> Any:
         self.messages.append(
             _BusMessage(
                 from_agent=getattr(msg, "from_agent", ""),
@@ -1658,7 +1658,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1710,7 +1710,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             raise AssertionError("empty filtered grid must not create a task")
 
@@ -1743,7 +1743,7 @@ async def test_materialize_without_filter_keeps_full_grid(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _StubTaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1821,7 +1821,7 @@ async def test_delegate_explore_with_grid_creates_task_directly(tmp_path: Path):
     create_calls: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             create_calls.append(dict(kwargs))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1869,7 +1869,7 @@ async def test_delegate_explore_seeds_the_stack_with_the_anchor(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 
@@ -1914,7 +1914,7 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
-        async def create_or_return_existing(self, **kwargs: Any):  # noqa: ANN401
+        async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task
 

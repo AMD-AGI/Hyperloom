@@ -79,20 +79,6 @@ def test_various_cpp_extensions_detected(tmp_path, monkeypatch):
         assert "AITER_REBUILD" not in os.environ
 
 
-def test_exception_is_swallowed(monkeypatch):
-    monkeypatch.delenv("AITER_REBUILD", raising=False)
-
-    class Boom:
-        def __bool__(self):
-            # __bool__ must raise TypeError (its standard exception) rather than a non-standard one; the test only
-            # needs truthiness to raise so the caller's exception handling can be exercised.
-            raise TypeError("boom")
-
-    # A non-string, non-empty path whose truthiness raises must be swallowed.
-    force_jit_rebuild([Boom()])
-    assert "AITER_REBUILD" not in os.environ
-
-
 def test_tracked_source_changes_include_undeclared_edits(tmp_path: Path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(

@@ -856,7 +856,7 @@ def run_with_session_kill(
     try:
         with cancel_scope_listener() as cancel_scope:
             started_at = time.monotonic()
-            proc = subprocess.Popen(  # noqa: S603 — cmd is caller's responsibility
+            proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

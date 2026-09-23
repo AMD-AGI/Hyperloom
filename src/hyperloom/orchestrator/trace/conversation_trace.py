@@ -98,7 +98,7 @@ def append_conversation(
             from .langfuse_emitter import get_emitter
 
             get_emitter(session_dir).record_conversation(row)
-        except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+        except Exception:
             log.debug("conversation_trace: langfuse mirror failed", exc_info=True)
 
 

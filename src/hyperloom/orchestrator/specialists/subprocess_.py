@@ -774,7 +774,7 @@ class _RayLeaseProcess:
         latches :data:`_RAY_ACTOR_DIED_RC` so the reap loop treats it as a
         real failure immediately rather than looping until the wall-clock cap.
         """
-        from hyperloom.orchestrator.actions.executors._ray_serving import (  # noqa: PLC0415
+        from hyperloom.orchestrator.actions.executors._ray_serving import (
             _RAY_ACTOR_DIED_RC,
         )
 
@@ -1434,7 +1434,7 @@ class SpecialistSubprocessDispatcher:
             newest = max(newest, mtime)
             try:
                 await progress_cb(payload, elapsed)
-            except Exception:  # noqa: BLE001 — never let telemetry kill a run
+            except Exception:
                 log.exception("specialist progress callback raised")
             break
         return newest

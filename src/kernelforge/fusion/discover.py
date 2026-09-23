@@ -1154,7 +1154,7 @@ def registered_agent_llm_fn(
                 last_kind = API_ERROR
             except DiscoverySafetyError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - classified below
+            except Exception as exc:
                 if is_agent_safety_error(exc):
                     raise DiscoverySafetyError("discovery Agent safety violation: " + str(exc)) from exc
                 last_kind = classify_llm_error(exc)

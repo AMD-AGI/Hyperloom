@@ -275,7 +275,7 @@ def derive_implementation_symbols(
             except OSError:
                 continue
             source_symbols.update(stable(derive_kernel_names(source)))
-    except Exception:
+    except OSError:
         # Identity extraction is best-effort; callers safely fall back to path identity.
         pass
     return sorted(source_symbols)

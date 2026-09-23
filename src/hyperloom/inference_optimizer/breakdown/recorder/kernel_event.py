@@ -2367,7 +2367,7 @@ def make_kernel_recorder(
     """Build a recorder, or ``None`` when one cannot be constructed.
 
     KERNEL behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
+    failures that are not recorder bugs degrade to "no event". An unbound session
     declines too: writing the timeline into whatever the working directory
     happens to be is worse than not recording.
 
@@ -2376,6 +2376,8 @@ def make_kernel_recorder(
             be built.
     """
     from ...session.session_binding import session_is_bound
+
+    from .recorder_warnings import RECORDING_ERRORS
 
     try:
         if not session_is_bound():
@@ -2392,7 +2394,7 @@ def make_kernel_recorder(
             resumed=resumed,
             code_revision=code_revision,
         )
-    except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+    except RECORDING_ERRORS:
         log.warning(
             "kernel timeline: recorder construction failed; this phase entry's whole event "
             "will be missing from the breakdown",

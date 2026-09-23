@@ -207,7 +207,7 @@ def record_critic_iteration(
             row,
             key=row["iteration_id"],
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record_critic_iteration failed", exc_info=True)
         trace_skip(reason="writer raised", section=ITERATION_SECTION, error=exc)
 

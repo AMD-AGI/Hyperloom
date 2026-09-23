@@ -944,7 +944,7 @@ def _visible_gpu_count() -> int:
         count = int(torch.cuda.device_count() or 0)
         if count > 0:
             return count
-    except Exception:
+    except (ImportError, RuntimeError):
         pass
     if shutil.which("rocm-smi"):
         try:

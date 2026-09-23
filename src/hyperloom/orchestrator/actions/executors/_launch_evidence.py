@@ -120,7 +120,7 @@ def build_launch_evidence(
                 observed_server_identity = observed_vllm_server_identity_from_log(actual_server_log)
                 if not observed_model_binding:
                     observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
-        except Exception:  # noqa: BLE001 - evidence collection must not alter a measurement
+        except Exception:
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 
     warmup_root = slot / "warmup_round"

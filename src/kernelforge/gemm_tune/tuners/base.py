@@ -172,7 +172,7 @@ class BaseTuner(ABC):
             result = self.run()
             result.elapsed_s = time.time() - started
             return result
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - tuner body is subclass-supplied
             return TuneResult(
                 tuner_name=self.name,
                 status="failed",

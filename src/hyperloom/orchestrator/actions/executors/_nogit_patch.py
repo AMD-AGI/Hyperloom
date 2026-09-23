@@ -232,10 +232,7 @@ def _apply_patch_no_git(
             return True, "", [], None
         combined_stderr = "\n".join(dry_run_stderrs)
         err_msg = f"patch --dry-run failed at all strip levels for {patch_path.name}"
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            source_ctx = ""
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -450,11 +447,7 @@ def _apply_patch_no_git(
         # Collect any .rej files left next to the target files.
         rejected_hunks = _collect_rej_files(framework_root, patch_path)
         apply_stderr = cp2.stderr.strip() or cp2.stdout.strip()
-        source_ctx = ""
-        try:
-            source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
-        except Exception:  # noqa: BLE001
-            pass
+        source_ctx = read_patch_source_context(patch_text, framework_root, radius=50)
         feedback = ApplyFeedback(
             patch=str(patch_path),
             channel="nogit",
@@ -484,7 +477,7 @@ def _collect_rej_files(framework_root: Path, patch_path: Path) -> str:
             except OSError:
                 # Best-effort scan: skip unreadable/racing .rej files.
                 continue
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("_collect_rej_files: scan failed for %s", patch_path, exc_info=True)
     return "\n\n".join(parts)
 

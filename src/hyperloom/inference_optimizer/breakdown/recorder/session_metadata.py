@@ -81,7 +81,7 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, produc
         return
     try:
         recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record metadata failed", exc_info=True)
         trace_skip(reason="writer raised", section=SECTION, error=exc)
 

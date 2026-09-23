@@ -42,12 +42,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
         # If we already have a tracked revalidation task that is still alive, do not create another one.
         tracked_tid = str(state.enablement.revalidation_task_id or "").strip()
         if tracked_tid:
-            try:
-                for t in (*await self.tasks.queued(), *await self.tasks.running()):
-                    if str(getattr(t, "task_id", "") or "") == tracked_tid:
-                        return tracked_tid
-            except Exception:  # noqa: BLE001 — defensive
-                pass
+            for t in (*await self.tasks.queued(), *await self.tasks.running()):
+                if str(getattr(t, "task_id", "") or "") == tracked_tid:
+                    return tracked_tid
         # Do not open a row the dispatcher would cancel on sight.
         denied = self._time_budget_denial_for_action("baseline")
         if denied is not None:
@@ -94,7 +91,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
-            except Exception:  # noqa: BLE001 — defensive
+            except Exception:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
 

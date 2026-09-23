@@ -91,7 +91,7 @@ def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
         return
     try:
         recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
-    except Exception as exc:  # noqa: BLE001 — the wind-down outranks its own record
+    except Exception as exc:
         log.debug("record close failed", exc_info=True)
         trace_skip(reason="writer raised", section=SECTION, error=exc)
 
@@ -143,7 +143,7 @@ def record_close_step(
         row["detail"] = str(detail)
     try:
         recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record close step failed", exc_info=True)
         trace_skip(reason="writer raised", section=STEP_SECTION, error=exc)
 
@@ -519,7 +519,7 @@ def _write_arc(session_dir: Path | str, payload: Mapping[str, Any]) -> None:
             WRITE_BACK_SECTION,
             dict(payload),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record write-back failed", exc_info=True)
         trace_skip(reason="writer raised", section=WRITE_BACK_SECTION, error=exc)
 
@@ -535,7 +535,7 @@ def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping
             dict(row),
             key=str(int(attempt)),
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("record write-back attempt failed", exc_info=True)
         trace_skip(reason="writer raised", section=WRITE_BACK_ATTEMPT_SECTION, error=exc)
 

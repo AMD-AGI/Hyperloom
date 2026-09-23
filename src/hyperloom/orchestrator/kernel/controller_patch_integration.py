@@ -128,7 +128,7 @@ def _revert_patch(repo: Path, patch_path: Path) -> tuple[bool, str]:
     if touched:
         # A commit attempt that failed after ``git add`` leaves the patched content staged, and reversing the working
         # tree does not unstage it -- which would make the next patch see a dirty index and skip.
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
             _git_output(repo, "reset", "--quiet", "HEAD", "--", *touched)
     reversed_ok, reverse_error = _git_apply_reverse(repo, patch_path)
     if reversed_ok:
@@ -283,7 +283,7 @@ async def integrate_controller_patches(
             pinned_bases[repo] = publication.base_commit
             try:
                 pinned_heads[repo] = _git_output(repo, "rev-parse", "HEAD").lower()
-            except Exception as error:
+            except (OSError, subprocess.SubprocessError) as error:
                 pinned_heads[repo] = ""
                 pin_errors[repo] = f"could not read integration Git HEAD: {error}"
             else:
@@ -331,7 +331,7 @@ async def integrate_controller_patches(
             # whole tree.
             scope = ["--", *sorted(touched)] if touched else []
             clean = _git_output(repo, "status", "--porcelain", "--untracked-files=no", *scope)
-        except Exception as error:
+        except (OSError, subprocess.SubprocessError) as error:
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="skipped_invalid",
@@ -384,7 +384,7 @@ async def integrate_controller_patches(
 
         try:
             validation = await validate(publication)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
             result = PatchIntegrationResult(
                 operator_id=publication.operator_id,
                 status="reverted_e2e_failed",
@@ -447,7 +447,7 @@ async def integrate_controller_patches(
         try:
             await record_keep(_keep_result(publication, validation, keep_commit))
             shared_state.save(Path(session_dir))
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git
             record_reason = f"Git KEEP committed; SharedState recording failed: {error}"
         else:
             record_reason = ""

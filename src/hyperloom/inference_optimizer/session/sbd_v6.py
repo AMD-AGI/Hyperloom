@@ -109,7 +109,7 @@ def _read_event_file(
 ) -> dict[str, Any] | None:
     try:
         event = read_json(path, require_dict=True, strict=True)
-    except Exception as exc:
+    except ValueError as exc:
         if warnings is not None:
             warnings.append(f"timeline.{event_type}: failed to parse {path}: {exc!r}")
         return None

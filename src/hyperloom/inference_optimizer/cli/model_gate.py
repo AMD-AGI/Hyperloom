@@ -21,7 +21,7 @@ from typing import Any
 from .. import framework_registry
 from .. import gpu_types as _gpu_types
 from ...common.timeutil import now_iso
-from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
+from ..model_config_utils import (
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _MAXPOS_CONFIG_KEYS,
     _MX_FP4_GROUP_SIZE,
@@ -1292,7 +1292,7 @@ def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
 
     try:
         write_timeline_event_at(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — observability must never change gate behavior
+    except Exception as exc:
         log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
         if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
             log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
@@ -1374,7 +1374,7 @@ def _record_model_gate_check(
             skip_reason=str(ext.get("skip_reason") or "") or None,
         )
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change gate behavior
+    except Exception as exc:
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
@@ -1385,7 +1385,7 @@ def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         event = _new_model_gate_event(args)
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
@@ -1401,7 +1401,7 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         )
         event["end_time"] = now_iso(timespec="seconds")
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
@@ -1435,7 +1435,7 @@ def _record_resumed_model_gate(
         ]
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — V6 observability must never change resume behavior
+    except Exception as exc:
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
         _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 

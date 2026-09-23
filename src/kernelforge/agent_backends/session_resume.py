@@ -232,7 +232,7 @@ async def _start(
         attempt += 1
         try:
             return await backend.run(spec, usage=usage)
-        except Exception as exc:  # noqa: BLE001 — classified below
+        except Exception as exc:
             if not is_retryable_api_error(exc):
                 raise
             session_id = resumable_session_id(exc)
@@ -338,7 +338,7 @@ async def run_session_with_api_resume(
         )
         try:
             resumed = await backend.resume(spec, session_id, RESUME_PROMPT, usage=usage)
-        except Exception as exc:  # noqa: BLE001 — classified below
+        except Exception as exc:
             if not is_retryable_api_error(exc):
                 raise
             log.warning(

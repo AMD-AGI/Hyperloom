@@ -212,7 +212,7 @@ def _load_assembled(
             return {}
         out = assemble_parts(session_dir, warnings=warnings)
         return out if isinstance(out, dict) else {}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("recorder: assemble_parts failed")
         warnings.append(f"recorder: assemble_parts failed: {type(exc).__name__}: {exc}")
         return {}
@@ -228,7 +228,7 @@ def _safe_collect(
     """Run a collector with broad exception catching; failure → warning + ``default``."""
     try:
         return fn()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.exception("collector %s failed", name)
         warnings.append(f"collector:{name} failed: {type(exc).__name__}: {exc}")
         if default is not None:
@@ -273,7 +273,7 @@ def write_breakdown_json(
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # The trace is a side artifact; losing it must not fail the breakdown
         # write, but it is scored downstream so a silent loss has to be visible.
         log.warning("decision_trace write failed for %s; trace artifacts will be missing", sd, exc_info=True)
@@ -304,7 +304,7 @@ def _patch_breakdown(
         atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
         log.info("session_breakdown: refreshed %s section in %s", section, target)
         return True
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.debug("session_breakdown: %s patch failed (non-fatal)", section, exc_info=True)
         return False
 

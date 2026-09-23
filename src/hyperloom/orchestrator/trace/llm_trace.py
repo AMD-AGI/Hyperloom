@@ -237,7 +237,7 @@ def append_llm_call(
         from .langfuse_emitter import get_emitter
 
         get_emitter(session_dir).record_llm_call(row)
-    except Exception:  # noqa: BLE001 — Langfuse must never break the ledger
+    except Exception:
         log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
