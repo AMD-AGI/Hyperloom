@@ -57,6 +57,7 @@ EVENT_PROPOSAL = "proposal"
 # span_id is the task_id: queued / started / terminal follow the TaskRegistry state machine.
 EVENT_TASK = "task"
 EVENT_TASK_RETRY = "task.retry"
+EVENT_TOOL = "tool"
 VALID_EVENT_TYPES: frozenset[str] = frozenset(
     {
         EVENT_SESSION,
@@ -67,6 +68,7 @@ VALID_EVENT_TYPES: frozenset[str] = frozenset(
         EVENT_PROPOSAL,
         EVENT_TASK,
         EVENT_TASK_RETRY,
+        EVENT_TOOL,
     }
 )
 
@@ -402,6 +404,7 @@ __all__ = [
     "EVENT_SESSION",
     "EVENT_TASK",
     "EVENT_TASK_RETRY",
+    "EVENT_TOOL",
     "OPEN_STATUSES",
     "SCHEMA_VERSION",
     "STATUS_CANCELLED",

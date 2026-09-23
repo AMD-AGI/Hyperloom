@@ -75,6 +75,7 @@ from ..trace.parse_usage import (
     parse_codex_jsonl_turn_usages,
     parse_codex_jsonl_usage,
 )
+from ..trace.tool_events import record_stream_json_tools
 
 
 log = logging.getLogger(__name__)
@@ -1175,6 +1176,7 @@ class SpecialistSubprocessDispatcher:
             response = parse_claude_stream_json_response(process_log)
             tool_calls = parse_claude_stream_json_tool_calls(process_log)
             turn_usages = parse_claude_stream_json_turn_usages(process_log)
+            record_stream_json_tools(process_log)
 
         return SpecialistSubprocessResult(
             done_payload=done_payload,
