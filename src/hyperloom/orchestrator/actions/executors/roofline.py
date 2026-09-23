@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, Sequence
 from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
-from ...trace.task_progress import report_progress
+from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (

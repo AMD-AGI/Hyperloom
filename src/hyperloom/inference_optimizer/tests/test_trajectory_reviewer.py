@@ -9,7 +9,7 @@ from hyperloom.orchestrator.knowledge.trajectory_reviewer import (
     _stalled_cycle_count,
     build_trajectory_digest,
 )
-from hyperloom.orchestrator.state.optimization_journal import OUTCOME_SKIP
+from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_SKIP
 
 
 @dataclass
@@ -154,7 +154,7 @@ def test_build_trajectory_digest_stall_without_validated(tmp_path):
 
 def test_build_trajectory_digest_with_dead_clusters(tmp_path):
     """Cover exhausted_directions formatting."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         Journal,
         JournalEntry,
     )

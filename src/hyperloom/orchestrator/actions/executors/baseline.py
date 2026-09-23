@@ -43,7 +43,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EV
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
-from ...trace.task_progress import heartbeat_while_output_flows, report_progress
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,

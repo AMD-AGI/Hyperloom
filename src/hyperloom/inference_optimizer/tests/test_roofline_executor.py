@@ -19,7 +19,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     _gpu_trace_unsupported_reason,
     make_roofline_executor,
 )
-from hyperloom.orchestrator.trace.task_progress import progress_scope
+from hyperloom.inference_optimizer.trace.task_progress import progress_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task

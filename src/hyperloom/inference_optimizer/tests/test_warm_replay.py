@@ -12,8 +12,8 @@ import subprocess
 
 import pytest
 
+from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.prelude import PRELUDE_ARM_DROPPED
 
 
@@ -1554,7 +1554,7 @@ async def test_prelude_initial_analysis_dropped_when_it_would_cost_the_optimizat
     # entry row after entry would never leave ``state``.
     dropped = state.phase_history[-1]
     assert dropped["reason"] == PRELUDE_ARM_DROPPED
-    assert not machine_state.is_phase_transition_row(dropped)
+    assert not is_phase_transition_row(dropped)
     assert dropped["evidence"]["arm"] == "initial_analysis"
     assert dropped["evidence"]["expected_cost_sec"] == pytest.approx(2705.7)
 

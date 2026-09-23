@@ -39,7 +39,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     reject_geak_attempts,
 )
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
     OUTCOME_KEEP,
     JournalEntry,

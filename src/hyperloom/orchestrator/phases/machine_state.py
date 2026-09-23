@@ -16,6 +16,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
@@ -701,15 +702,6 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
-
-
-def is_phase_transition_row(row: Any) -> bool:
-    """True when ``row`` records an actual phase change, not an in-phase marker."""
-    if not isinstance(row, dict):
-        return False
-    to_phase = str(row.get("to_phase") or "").strip().upper()
-    from_phase = str(row.get("from_phase") or "").strip().upper()
-    return bool(to_phase) and to_phase != from_phase
 
 
 def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
@@ -2264,7 +2256,6 @@ __all__ = [
     "exit_time_exhausted_prelude",
     "append_phase_evidence_row",
     "append_phase_history_event",
-    "is_phase_transition_row",
     "baseline_round_cost_sec",
     "benchmark_cost_sec",
     "boot_cost_sec",

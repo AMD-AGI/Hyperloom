@@ -313,7 +313,7 @@ class ProgressCadence:
 @pytest.fixture
 def progress_cadence(monkeypatch) -> "ProgressCadence":
     """A :class:`ProgressCadence` with the heartbeat tick on the same timescale."""
-    from hyperloom.orchestrator.trace import task_progress
+    from hyperloom.inference_optimizer.trace import task_progress
 
     monkeypatch.setattr(
         task_progress,

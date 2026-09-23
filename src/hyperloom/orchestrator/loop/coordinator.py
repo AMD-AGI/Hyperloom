@@ -48,7 +48,7 @@ _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
 from ..phases import machine_state as _phase_state
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
-from ..state.optimization_journal import Journal
+from hyperloom.inference_optimizer.session.optimization_journal import Journal
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from hyperloom.inference_optimizer.session.session_binding import bind_session
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
@@ -78,11 +78,11 @@ from .signals import SignalDrain
 from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
-from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
-from ..trace.orchestration_trace import (
+from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
 from .coordinator_helpers import (

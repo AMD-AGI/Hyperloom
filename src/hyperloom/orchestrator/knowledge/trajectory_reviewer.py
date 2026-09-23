@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
     Journal,

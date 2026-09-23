@@ -1483,7 +1483,7 @@ def _emit_breakdown_to_langfuse(session_dir: Path) -> None:
     """Best-effort: push the just-written ``session_breakdown.json`` to Langfuse."""
     try:
         from ..breakdown import patch_breakdown_langfuse
-        from hyperloom.orchestrator.trace.langfuse_emitter import (
+        from hyperloom.inference_optimizer.trace.langfuse_emitter import (
             flush_session,
             record_session_breakdown,
         )

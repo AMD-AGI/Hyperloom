@@ -719,7 +719,7 @@ def test_record_fact_per_task_keep_and_revert(coord: Coordinator) -> None:
 
 def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator) -> None:
     """A reverted integrate_patch reaches the fact hook with kept=True (``status != failed`` is promotable), yet the journal must record REVERT with the REAL measured delta (from delta_pct)."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_REVERT,
     )
     from hyperloom.orchestrator.state.task_registry import Task
@@ -750,7 +750,7 @@ def test_record_fact_reverted_integrate_patch_journals_revert(coord: Coordinator
 
 
 def test_record_fact_kept_integrate_patch_journals_keep(coord: Coordinator) -> None:
-    from hyperloom.orchestrator.state.optimization_journal import OUTCOME_KEEP
+    from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_KEEP
     from hyperloom.orchestrator.state.task_registry import Task
 
     task = Task(

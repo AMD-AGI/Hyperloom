@@ -10,7 +10,7 @@ from typing import Any
 from ..phases import machine_state as _phase_state
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
-from ..trace.conversation_trace import ConversationRecord, append_conversation
+from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 
 from .coordinator import (
     _format_inbox_event,

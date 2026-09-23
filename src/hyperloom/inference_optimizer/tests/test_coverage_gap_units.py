@@ -143,12 +143,13 @@ def test_credentials_validate_and_reset_claude_config(tmp_path: Path, monkeypatc
 def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
+    from hyperloom.inference_optimizer.session.session_paths import BREAKDOWN_FILENAME
 
     session = tmp_path / "session"
     session.mkdir()
     (session / "state.json").write_text('{"close_sequence_done": true}', encoding="utf-8")
-    (session / breakdown_mod.BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
+    (session / BREAKDOWN_FILENAME).write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
         emitter,
         "read_receipt",
@@ -176,7 +177,7 @@ def test_recover_session_status_and_run_paths(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(
         breakdown_mod,
         "write_breakdown_json",
-        lambda s: calls.append("write") or s / breakdown_mod.BREAKDOWN_FILENAME,
+        lambda s: calls.append("write") or s / BREAKDOWN_FILENAME,
     )
     monkeypatch.setattr(breakdown_mod, "patch_breakdown_langfuse", lambda s: calls.append("patch"))
     monkeypatch.setattr(
@@ -1104,7 +1105,7 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
 def test_recover_session_nonfatal_backfill_and_package_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import recover
     import hyperloom.inference_optimizer.breakdown as breakdown_mod
-    import hyperloom.orchestrator.trace.langfuse_emitter as emitter
+    import hyperloom.inference_optimizer.trace.langfuse_emitter as emitter
 
     session = tmp_path / "session"
     session.mkdir()

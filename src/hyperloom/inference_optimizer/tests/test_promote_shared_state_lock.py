@@ -607,7 +607,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
 @pytest.mark.asyncio
 async def test_promote_integrate_patch_marks_a_refused_keep(session_dir):
     """A KEEP measured below the live anchor is not adopted, and must not journal as one."""
-    from hyperloom.orchestrator.state.optimization_journal import (
+    from hyperloom.inference_optimizer.session.optimization_journal import (
         OUTCOME_NO_PROMOTE,
         derive_journal_outcome,
     )

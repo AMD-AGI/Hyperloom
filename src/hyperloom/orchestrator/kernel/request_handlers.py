@@ -47,7 +47,7 @@ from .lane_budget import (
 )
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
-from ..trace.task_progress import heartbeat_while_output_flows
+from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 
 
 from ._recorder_trace import trace_recording_skipped

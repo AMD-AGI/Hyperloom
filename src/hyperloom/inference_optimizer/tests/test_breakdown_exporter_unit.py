@@ -270,7 +270,7 @@ def test_write_minimal_final_json_fields(tmp_path):
 
 
 def test_patch_breakdown_langfuse_success(tmp_path):
-    from hyperloom.orchestrator.trace.langfuse_emitter import _receipt_path
+    from hyperloom.inference_optimizer.trace.langfuse_emitter import _receipt_path
 
     ex.write_breakdown_json(tmp_path)
     receipt_path = _receipt_path(tmp_path)

@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 )
 
 from . import machine_state as _phase_state
-from ..state.optimization_journal import (
+from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
 )
 from ..state.shared_state import inject_stack_base_params
@@ -2546,7 +2546,7 @@ class PreludePhase(PhaseHandler):
             # Journal warm-replay as a synthetic KEEP; no KB lesson.
             try:
                 journal = self._ensure_journal()
-                from ..state.optimization_journal import KIND_OTHER, OUTCOME_KEEP
+                from hyperloom.inference_optimizer.session.optimization_journal import KIND_OTHER, OUTCOME_KEEP
 
                 journal.append_entry(
                     JournalEntry(

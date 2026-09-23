@@ -19,12 +19,11 @@ from . import collectors
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
 from .schema import SCHEMA_VERSION_V6
-from ..session.session_paths import manifest_path, state_path
+from ..session.session_paths import BREAKDOWN_FILENAME, manifest_path, state_path
 
 log = logging.getLogger(__name__)
 
 EXPORTER_VERSION = "session-breakdown-1.0.0"
-BREAKDOWN_FILENAME = "session_breakdown.json"
 
 
 def _recorded_session_value(value: Any) -> bool:
@@ -261,7 +260,7 @@ def write_breakdown_json(
 
     Also triggers ``reports/trace/decision_trace.jsonl``, which is not part of
     the breakdown (see
-    :func:`hyperloom.orchestrator.trace.decision_trace.write_session_decision_trace`)
+    :func:`hyperloom.inference_optimizer.trace.decision_trace.write_session_decision_trace`)
     but is produced from here because every caller that flushes Langfuse goes
     through this function.
 
@@ -285,7 +284,7 @@ def write_breakdown_json(
     # a session's artifacts goes through this function and the file has to land
     # before any flush reads it.
     try:
-        from hyperloom.orchestrator.trace.decision_trace import write_session_decision_trace
+        from ..trace.decision_trace import write_session_decision_trace
 
         for warning in write_session_decision_trace(sd):
             log.debug("decision_trace: %s", warning)
@@ -345,7 +344,7 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     Returns:
         ``True`` when the langfuse block was refreshed, ``False`` otherwise.
     """
-    from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
+    from ..trace.langfuse_emitter import read_receipt
 
     def _revise(sd: Path, breakdown: dict[str, Any]) -> bool:
         receipt = read_receipt(sd)

@@ -1356,7 +1356,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             log.warning("current_setting.sh render failed", exc_info=True)
         # Live status mirror: reflect the persisted snapshot into Langfuse for real-time status.
         try:
-            from ..trace.langfuse_emitter import record_status as _lf_record_status
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import record_status as _lf_record_status
 
             _lf_record_status(session_dir, self._langfuse_status_summary())
         except Exception:

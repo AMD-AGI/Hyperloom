@@ -549,7 +549,7 @@ class ClosePhase(PhaseHandler):
         # flush_session flips the receipt to final counts and patch_breakdown_langfuse splices it back into
         # session_breakdown.json, so the bundled SBD carries final counts.
         try:
-            from ..trace.langfuse_emitter import (
+            from hyperloom.inference_optimizer.trace.langfuse_emitter import (
                 flush_session,
                 record_session_breakdown,
             )
