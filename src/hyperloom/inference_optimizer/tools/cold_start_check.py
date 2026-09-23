@@ -168,9 +168,19 @@ def _check_experience_kb(require_experience_kb: bool) -> CheckResult:
         configured = experience_kb_from_env()
         if not configured.enabled:
             raise RuntimeError("configured Experience KB is disabled")
+        fleet_client = getattr(configured, "client", None)
+        if fleet_client is not None:
+            health = fleet_client.health()
+            if str(health.get("status") or "") != "ok":
+                raise RuntimeError("Fleet KB health check did not return ok")
     except Exception as exc:
         return _result("experience_kb", started, status="failed", detail=f"{type(exc).__name__}: {exc}")
-    return _result("experience_kb", started, status="passed", detail="collector bootstrap succeeded")
+    detail = (
+        "Fleet KB bootstrap and health check succeeded"
+        if getattr(configured, "client", None) is not None
+        else "collector bootstrap succeeded"
+    )
+    return _result("experience_kb", started, status="passed", detail=detail)
 
 
 async def _check_llm_round_trip(

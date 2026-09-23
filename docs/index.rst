@@ -45,6 +45,7 @@ The Hyperloom source code is hosted on GitHub at `https://github.com/AMD-AGI/Hyp
     * :doc:`Operator scripts </reference/operator-scripts>`
     * :doc:`Multi-node inference optimization </reference/multi-node>`
     * :doc:`Cold-start validation </reference/cold-start-validation>`
+    * :doc:`Fleet KB customer demo </reference/fleet-kb-demo>`
     * :doc:`Troubleshooting </reference/troubleshooting>`
 
 To contribute to the documentation, see `Contributing to Hyperloom <https://github.com/AMD-AGI/Hyperloom/blob/main/CONTRIBUTING.md>`_.

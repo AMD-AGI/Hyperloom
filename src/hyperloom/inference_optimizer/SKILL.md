@@ -557,6 +557,19 @@ failure exits 2. A PID plus `manifest.json` and `state.json` is not a substitute
 the environment is ready only after this check succeeds and a short canary
 produces a measured baseline.
 
+### Fleet Experience KB demo
+
+When `HYPERLOOM_FLEET_KB_URL` is configured, FRAMEWORK_AGENT orchestration
+performs one shared Experience read per tick before proposing work. The result
+is advisory historical evidence, not instructions. A read failure soft
+degrades to the original prompt; it must not block optimization.
+
+The Slack launcher also injects `HYPERLOOM_FLEET_KB_TOKEN`,
+`HYPERLOOM_FLEET_KB_ID`, worker/job/thread identities, and a durable
+`HYPERLOOM_FLEET_KB_SPOOL`. Rendered Experience refs are stamped on proposals,
+carried into SBD V6, and written into the measured Experience. Complete writes
+are idempotent; a network failure spools the Experience for retry.
+
 ### Tool source fields (prompt → env, sandbox-only)
 
 Prompt fields naming read-only source trees consumed by sandbox-side

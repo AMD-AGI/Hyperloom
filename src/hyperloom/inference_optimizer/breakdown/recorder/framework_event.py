@@ -401,6 +401,7 @@ class FrameworkEventRecorder:
             "repo",
             "title",
             "reasoning",
+            "fleet_kb_read_id",
             "verdict",
             "route",
         ):
@@ -408,6 +409,21 @@ class FrameworkEventRecorder:
                 row[name] = str(fields.get(name) or "")
         if "changed_files" in fields:
             row["changed_files"] = [str(path) for path in (fields.get("changed_files") or []) if str(path or "")]
+        if "rendered_refs" in fields:
+            rendered_refs: list[dict[str, str]] = []
+            for item in fields.get("rendered_refs") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                experience_id = str(item.get("id") or "").strip()
+                if not experience_id:
+                    continue
+                rendered_refs.append(
+                    {
+                        "id": experience_id,
+                        "purpose": str(item.get("purpose") or "").strip(),
+                    }
+                )
+            row["rendered_refs"] = rendered_refs
         if "confidence" in fields:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))

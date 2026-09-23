@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 from hyperloom.inference_optimizer import experience_v1
 from hyperloom.inference_optimizer.tools import cold_start_check as check
@@ -42,6 +44,30 @@ def test_required_experience_kb_fails_when_collection_is_disabled(monkeypatch) -
 
     assert result.status == "failed"
     assert result.detail == "HYPERLOOM_KB_ENABLE is false"
+
+
+def test_fleet_experience_kb_cold_start_checks_remote_health(monkeypatch) -> None:
+    seen = {"health": 0}
+
+    class Client:
+        def health(self):
+            seen["health"] += 1
+            return {"status": "ok"}
+
+    module = ModuleType("hyperloom_kb")
+    module.experience_kb_from_env = lambda: SimpleNamespace(
+        enabled=True,
+        client=Client(),
+    )
+    monkeypatch.setitem(sys.modules, "hyperloom_kb", module)
+    monkeypatch.setattr(experience_v1, "enabled", lambda: True)
+    monkeypatch.setattr(experience_v1, "validate_experience_config", lambda: None)
+
+    result = check._check_experience_kb(require_experience_kb=True)
+
+    assert result.status == "passed"
+    assert "health check succeeded" in result.detail
+    assert seen["health"] == 1
 
 
 def test_llm_round_trip_uses_production_claude_backend(monkeypatch) -> None:

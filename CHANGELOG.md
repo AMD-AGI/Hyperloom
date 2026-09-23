@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Fleet-scoped shared Experience KB integration for customer demos.**
+  FRAMEWORK_AGENT orchestration can retrieve prompt-ready historical evidence
+  from a Slack-central Fleet KB before proposing work. The selected Experience
+  references follow proposals into SBD V6 and the measured Experience write,
+  while remote reads fail open and completed writes use the SDK's durable
+  worker spool.
+
 - **A bounded cold-start gate for long inference campaigns.**
   `cold_start_check.py` validates the installed runtime, model/GPU state,
   serving framework, optional Experience KB, trusted gateway TLS, and one real

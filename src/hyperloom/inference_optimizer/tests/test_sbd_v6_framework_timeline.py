@@ -74,6 +74,13 @@ def test_orchestration_proposal_needs_no_run(_bound_session):
         producer=PRODUCER_ORCHESTRATION,
         lever_kind="llm_direct",
         reasoning="Test a scheduler configuration suggested by the orchestration agent.",
+        fleet_kb_read_id="read-1",
+        rendered_refs=[
+            {
+                "id": "exp-00000000000000000000000000000001",
+                "purpose": "representative",
+            }
+        ],
     )
     recorder.settle_proposal("p-llm-1", disposition=DISPOSITION_ATTEMPTED)
     recorder.finish(exit_reason="both_arms_plateaued")
@@ -83,6 +90,13 @@ def test_orchestration_proposal_needs_no_run(_bound_session):
     proposal = ext["proposals"][0]
     assert proposal["producer"] == PRODUCER_ORCHESTRATION
     assert proposal["reasoning"].startswith("Test a scheduler configuration")
+    assert proposal["fleet_kb_read_id"] == "read-1"
+    assert proposal["rendered_refs"] == [
+        {
+            "id": "exp-00000000000000000000000000000001",
+            "purpose": "representative",
+        }
+    ]
     # Absent rather than empty: there is no run to point at.
     assert "run_ref" not in proposal
 
