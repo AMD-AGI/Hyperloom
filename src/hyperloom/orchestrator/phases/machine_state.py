@@ -17,6 +17,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
@@ -165,84 +166,6 @@ def render_phase_action_bullets(
         else:
             out.append(f"- **{phase}**: {', '.join(actions)}")
     return out
-
-
-#: Named rather than inlined below because the writeback gate that sets it lives
-#: in another module, and the vocabulary is closed -- PolicyGate rejects any
-#: stop_reason outside it, so a typo on either side would silently degrade into
-#: "the run did not stop" rather than into an error anyone sees.
-AGENTX_PREFLIGHT_STOP_REASON: str = "agentx_client_unavailable"
-
-
-# stop_reason vocab
-STOP_REASON_VOCAB: frozenset[str] = frozenset(
-    {
-        "target_reached",
-        "time_exhausted",
-        "max_ticks",
-        "baseline_failed",
-        "emergency",
-        "coordinator_exception",
-        "signal",
-        "unknown",
-        "custom",
-        "robustness_escalated",
-        "prelude_baseline_failed",
-        "prelude_cold_anchor_low_budget",
-        "time_exhausted_during_prelude",
-        "warm_replay_rollback_failed",
-        "active_inferencex_checkout_missing",
-        "no_kernel_skipped",
-        "sweep_done",
-        "sweep_failed",
-        "framework_agent_phase_done",
-        # R7: cyclic phase machine exhausted leverage across macro-cycles.
-        "global_converged",
-        # Context-window preflight: max_position_embeddings can't hold ISL+OSL.
-        "model_context_window_too_small",
-        # Model-arch preflight: multimodal/vision model unsupported.
-        "unsupported_model_arch",
-        # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
-        # max-position field (both crash at load).
-        "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
-        "baseline_arg_error",
-        # Enablement attempt cap: too many consecutive rounds bought no ground.
-        # A bring-up that is still advancing is bounded by the run's wall clock.
-        "enablement_attempts_exhausted",
-        # The baseline could not produce an accuracy result even though the
-        # accuracy test was expected to run (broken eval / missing quality
-        # gate). Optimizing against an unvalidated baseline is unsafe, so the
-        # run halts. Post-baseline accuracy failures REVERT the offending
-        # change instead of stopping.
-        "baseline_accuracy_failed",
-        # Bring-up terminals: the host cannot run the combo, or the harness
-        # composed an argument the installed parser does not have. Classified as
-        # infrastructure by ``INFRASTRUCTURE_STOP_REASONS``.
-        "environment_fault",
-        "server_argv_invalid",
-        # A bring-up round expired with nothing confirming its holder dead, so
-        # it keeps excluding the machine.
-        # The out-of-band supervisor found the coordinator's process gone; it
-        # reaches a report through the terminal artifact the supervisor writes.
-        "supervisor_coordinator_died",
-        # The out-of-band supervisor found the tick not advancing and the
-        # coordinator did not answer the stop it was sent; it reaches a report
-        # through the terminal artifact the supervisor writes.
-        "supervisor_tick_stalled",
-        # AgentX is on but its benchmark client (aiperf) is missing or is not
-        # the pinned build, and the runtime install could not supply it. An
-        # environment/supply gap, not a code gap: nothing downstream can author
-        # its way out of it, so the run halts on the FIRST occurrence instead of
-        # spending the budget in the enablement lane.
-        AGENTX_PREFLIGHT_STOP_REASON,
-    }
-)
-
-
-def is_valid_stop_reason(value: str) -> bool:
-    """Return True when ``value`` is a member of :data:`STOP_REASON_VOCAB`."""
-    return (value or "").strip() in STOP_REASON_VOCAB
 
 
 # Default phase budgets (% of wall-clock). ENABLEMENT is absent on purpose: a
@@ -2229,7 +2152,6 @@ __all__ = [
     "PHASE_NAMES",
     "PHASE_PRELUDE",
     "PHASE_SWEEP",
-    "STOP_REASON_VOCAB",
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_MAX_MACRO_CYCLES",
@@ -2267,7 +2189,6 @@ __all__ = [
     "session_usable_seconds",
     "render_phase_action_bullets",
     "is_valid_escalate_hint",
-    "is_valid_stop_reason",
     "compute_kernel_progress_fingerprint",
     "kernel_work_pending",
     "make_history_row",

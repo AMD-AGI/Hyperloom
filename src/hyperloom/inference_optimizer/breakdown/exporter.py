@@ -435,7 +435,6 @@ def write_minimal_final_report(
     output_path: Path | str | None = None,
 ) -> Path:
     """cli.finally safety-net for ``reports/final.md`` when the CLOSE sequencer never reached step 1."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
@@ -444,7 +443,7 @@ def write_minimal_final_report(
     if target.exists() and target.stat().st_size > 0:
         return target
 
-    state = SharedState.load_or_init(sd)
+    state = read_json(state_path(sd), default={}, require_dict=True)
     breakdown_link = sd / BREAKDOWN_FILENAME
 
     def _fmt_attempt(d: dict[str, Any] | None, label: str) -> str:
@@ -461,14 +460,16 @@ def write_minimal_final_report(
 
     from .. import framework_registry
 
-    current_best = state.current_best or {}
+    framework = str(state.get("framework") or "")
+    baseline_tput = state.get("baseline_tput") or 0.0
+    current_best = state.get("current_best") or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
     # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT shows per-image latency e2el_mean_ms
     # (ms).
-    baseline_metric_s = framework_registry.format_primary_metric(state.framework, state.baseline_tput, precision=2)
+    baseline_metric_s = framework_registry.format_primary_metric(framework, baseline_tput, precision=2)
     cb_metric_s = (
-        framework_registry.format_primary_metric(state.framework, cb_tput, precision=2)
+        framework_registry.format_primary_metric(framework, cb_tput, precision=2)
         if isinstance(cb_tput, (int, float))
         else "-"
     )
@@ -481,22 +482,22 @@ def write_minimal_final_report(
         + "full audit trail open `session_breakdown.json` next to this "
         + "file.",
         "",
-        f"- session_id     : `{state.session_id or '-'}`",
-        f"- model_path     : `{state.model_path or '-'}`",
-        f"- framework      : `{state.framework or '-'}`",
-        f"- gpu_type       : `{state.gpu_type or '-'}`",
-        f"- phase (last)   : `{state.phase or '-'}`",
-        f"- stop_reason    : `{state.stop_reason or '-'}`",
+        f"- session_id     : `{state.get('session_id') or '-'}`",
+        f"- model_path     : `{state.get('model_path') or '-'}`",
+        f"- framework      : `{framework or '-'}`",
+        f"- gpu_type       : `{state.get('gpu_type') or '-'}`",
+        f"- phase (last)   : `{state.get('phase') or '-'}`",
+        f"- stop_reason    : `{state.get('stop_reason') or '-'}`",
         f"- baseline       : `{baseline_metric_s}`",
         f"- current_best   : `{cb_action}` @ `{cb_metric_s}`",
-        f"- cumul_gain     : `{state.cumulative_gain_validated:.2f}%` (validated)",
-        f"- stack_entries  : `{len(state.optimization_stack or [])}`",
+        f"- cumul_gain     : `{state.get('cumulative_gain_validated') or 0.0:.2f}%` (validated)",
+        f"- stack_entries  : `{len(state.get('optimization_stack') or [])}`",
         "",
         "## Last action attempts",
         "",
-        _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
-        _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
-        _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
+        _fmt_attempt(state.get("last_baseline"), "last_baseline"),
+        _fmt_attempt(state.get("last_profile"), "last_profile"),
+        _fmt_attempt(state.get("last_explore"), "last_explore"),
         "",
         "## Structured detail",
         "",
@@ -539,7 +540,6 @@ def write_minimal_final_json(
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
 
-    from hyperloom.orchestrator.state.shared_state import SharedState
     from ..session.session_paths import reports_dir
 
     sd = Path(session_dir).resolve()
@@ -565,31 +565,32 @@ def write_minimal_final_json(
         if not overwrite:
             return target
 
-    state = SharedState.load_or_init(sd)
+    state = read_json(state_path(sd), default={}, require_dict=True)
+    gpu_type = state.get("gpu_type") or ""
     summary: dict[str, Any] = {
         # Crash-safe markers: a consumer can distinguish this from the full ReportExecutor output and know the run did
         # not finish gracefully.
         "safety_net": True,
         "report_complete": False,
         "producer": producer,
-        "session_id": state.session_id,
-        "model_name": state.model_name,
-        "model_path": state.model_path,
-        "model_class": state.model_class,
-        "framework": state.framework,
-        "gpu_type": state.gpu_type,
-        "phase": state.phase,
-        "stop_reason": state.stop_reason,
-        "baseline_tput": state.baseline_tput,
-        "baseline_accuracy": state.baseline_accuracy,
-        "current_best": state.current_best,
-        "cumulative_gain_validated": state.cumulative_gain_validated,
-        "optimization_stack_len": len(state.optimization_stack or []),
-        "crash_count": state.crash_count,
-        "max_minutes": state.max_minutes,
+        "session_id": state.get("session_id") or "",
+        "model_name": state.get("model_name") or "",
+        "model_path": state.get("model_path") or "",
+        "model_class": state.get("model_class") or "",
+        "framework": state.get("framework") or "",
+        "gpu_type": gpu_type,
+        "phase": state.get("phase") or "",
+        "stop_reason": state.get("stop_reason") or "",
+        "baseline_tput": state.get("baseline_tput") or 0.0,
+        "baseline_accuracy": state.get("baseline_accuracy") or 0.0,
+        "current_best": state.get("current_best") or {},
+        "cumulative_gain_validated": state.get("cumulative_gain_validated") or 0.0,
+        "optimization_stack_len": len(state.get("optimization_stack") or []),
+        "crash_count": state.get("crash_count") or 0,
+        "max_minutes": state.get("max_minutes") or 0,
         "report_generated_at": datetime.now(timezone.utc).isoformat(),
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
-        "platform": _crash_safe_platform(state.gpu_type),
+        "platform": _crash_safe_platform(gpu_type),
     }
     if extra:
         summary.update(extra)

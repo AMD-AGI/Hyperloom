@@ -597,7 +597,7 @@ def test_format_md_renders_stop_explanation():
 
 # ---- stop_reason explanation vocabulary coverage ----
 def test_every_stop_reason_vocab_member_has_explanation():
-    from hyperloom.orchestrator.phases.machine_state import STOP_REASON_VOCAB
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB
 
     missing = sorted(r for r in STOP_REASON_VOCAB if not rp._explain_stop_reason(r))
     assert missing == [], f"stop reasons without an explanation: {missing}"

@@ -15,7 +15,6 @@ second gate, not the first one.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
@@ -25,7 +24,7 @@ from hyperloom.inference_optimizer.framework_paths import (
     resolved_within,
 )
 from hyperloom.common.env import env_bool, is_truthy
-from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
+from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -107,54 +106,6 @@ BASELINE_ACTION_NAME: str = "baseline"
 # Specialist / Explore parallelism caps — single source of truth across layers.
 # Research-lane ceiling fallback used when the GPU count cannot be probed.
 RESEARCH_LANE_CEILING_FALLBACK: int = 2
-
-
-def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
-
-    ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
-    pinning mask per the repo's GPU runner convention (and the CLI preflight
-    drops ``HIP_VISIBLE_DEVICES`` when ROCR is set). Honouring it here keeps the
-    GPU-specialist capacity scoped to the operator's mask instead of the whole
-    machine.
-
-    Returns:
-        int: the number of visible GPUs derived from the
-            ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
-            ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
-            count parsed from ``rocm-smi``; 0 when nothing can be probed.
-    """
-    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
-        raw = os.environ.get(env_name)
-        if raw is None:
-            continue
-        raw = raw.strip()
-        if raw == "":
-            return 0
-        ids = [tok for tok in raw.split(",") if tok.strip() != ""]
-        if ids:
-            return len(ids)
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
 
 
 def research_lane_ceiling() -> int:

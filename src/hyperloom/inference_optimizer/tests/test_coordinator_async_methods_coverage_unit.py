@@ -251,7 +251,7 @@ async def test_unpromotable_baseline_agentx_preflight_stops_immediately(
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         AGENTX_PREFLIGHT_ERROR_CLASS,
     )
-    from hyperloom.orchestrator.phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 
     task = Task(
         task_id="baseline-agentx-preflight",

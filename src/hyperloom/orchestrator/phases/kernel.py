@@ -3376,7 +3376,7 @@ class KernelPhase(PhaseHandler):
 
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
         # non-128-aligned intermediate_size_per_partition.
-        from hyperloom.inference_optimizer.cli.model_gate import (
+        from hyperloom.inference_optimizer.model_config_utils import (
             model_supports_aiter_ck_fused_moe,
         )
 

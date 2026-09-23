@@ -1028,7 +1028,7 @@ def test_preflight_blocks_amd_unsupported_arch_from_args_gpu_type(
 
 
 def test_stop_reason_is_canonical_vocab():
-    from hyperloom.orchestrator.phases.machine_state import (
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import (
         STOP_REASON_VOCAB,
         is_valid_stop_reason,
     )

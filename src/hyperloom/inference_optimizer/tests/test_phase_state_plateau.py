@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
+from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
@@ -22,7 +23,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
-    STOP_REASON_VOCAB,
     _config_lever_dry,
     apply_escalate_budget_bump,
     compute_next_phase,
@@ -30,7 +30,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     exit_normal_optimize,
     exit_normal_kernel,
     is_valid_escalate_hint,
-    is_valid_stop_reason,
     kernel_work_pending,
 )
 from hyperloom.orchestrator.state import shared_state

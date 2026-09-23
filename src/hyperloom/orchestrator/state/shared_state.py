@@ -63,16 +63,6 @@ def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, 
     return snapshot_tput, False
 
 
-def framework_is_scriptable(framework: str | None) -> bool:
-    """Whether *framework* reports an image-quality gate instead of token throughput."""
-    name = str(framework or "").strip()
-    if not name:
-        return False
-    from hyperloom.inference_optimizer import framework_registry
-
-    return bool(framework_registry.is_scriptable(name))
-
-
 def resolve_grading_anchor_tput(state: Any) -> float:
     """Output throughput a new candidate is composed on top of."""
     if state is None:
@@ -82,31 +72,6 @@ def resolve_grading_anchor_tput(state: Any) -> float:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
-
-
-def resolved_grading(state: Any) -> tuple[bool, float | None]:
-    """Whether the interactivity objective applies to *state*, and the noise band it grades under.
-
-    Prefers what the session recorded at seed over re-deriving it. The derivation reads the environment, and every
-    later reader of it is somewhere the environment is not evidence: a resumed process, a re-baseline subprocess, an
-    export driven from CLOSE. Sessions seeded before ``SharedState.grading`` existed carry nothing and only those
-    derive, reporting a null band because the band they actually applied was never recorded.
-    """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, intvty_serving_grading_enabled
-
-    recorded = getattr(state, "grading", None)
-    recorded = recorded if isinstance(recorded, dict) else {}
-    objective = str(recorded.get("objective") or "").strip()
-    if objective:
-        noise_pct = recorded.get("noise_pct")
-        return objective == GRADED_INTVTY, (float(noise_pct) if isinstance(noise_pct, (int, float)) else None)
-    return (
-        intvty_serving_grading_enabled(
-            scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-        ),
-        None,
-    )
 
 
 def resolve_graded_comparison(
@@ -147,6 +112,7 @@ def resolve_graded_comparison(
         resolve_grading_anchor_perf,
         total_tput_of,
     )
+    from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
     degrade_reason = ""
@@ -1480,7 +1446,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         strict: bool | None = None,
     ) -> str:
         """Validated writer for :attr:`stop_reason` (Inv-8.3 closed vocab): values outside ``STOP_REASON_VOCAB`` map to ``\"unknown\"`` (lenient) or raise (``strict=True``, default env ``INFERENCE_OPTIMIZER_STRICT_STOP_REASON``). Returns value written."""
-        from ..phases.machine_state import STOP_REASON_VOCAB, is_valid_stop_reason
+        from hyperloom.inference_optimizer.breakdown.stop_reasons import STOP_REASON_VOCAB, is_valid_stop_reason
 
         text = str(value or "").strip()
         if not text:

@@ -22,9 +22,9 @@ from hyperloom.common.platform_probe import platform_fingerprint
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
-from ...phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON
-from ...state.shared_state import SharedState
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)

@@ -29,6 +29,7 @@ from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
 from ..state.task_registry import create_in_cursor
+from .recipe.section import recipe_for
 from .recipe.setup_ledger import mark_round_disposition
 
 if TYPE_CHECKING:
@@ -877,7 +878,9 @@ def _record_enablement_round(
         stall_streak=int(stall_streak or 0),
         # The replay contract is judged at the terminal, which is here: the
         # accepted stack is complete only once the lane has closed on one.
-        enablement=lane,
-        session_dir=str(session_dir or ""),
-        mode=str(getattr(state, "enablement_mode", "") or ""),
+        recipe=recipe_for(
+            lane,
+            session_dir=str(session_dir or ""),
+            mode=str(getattr(state, "enablement_mode", "") or ""),
+        ),
     )

@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import logging as _logging
 from typing import Any
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
+
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -237,7 +239,7 @@ class MachinePhase(PhaseHandler):
             and isinstance(evidence, dict)
             and evidence.get("terminal")
             and reason
-            and _phase_state.is_valid_stop_reason(reason)
+            and is_valid_stop_reason(reason)
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)

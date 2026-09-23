@@ -28,6 +28,7 @@ from hyperloom.common.perf_metric import (
     resolve_grading_anchor_perf,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
     FAILURE_STAGE_DECISION,
@@ -39,7 +40,6 @@ from ...state.shared_state import (
     first_positive_tput,
     resolve_anchor_with_drift,
     resolve_graded_comparison,
-    resolved_grading,
     stack_base_params,
 )
 from ..stop_attribution import (

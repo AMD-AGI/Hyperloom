@@ -3264,7 +3264,7 @@ def _resolve_vllm_aiter_routing(
     if "fused_moe" in evidence and is_moe and _aiter_ck_moe_tuner_supports(server_log):
         # Only route MoE when aiter's CK fused-MoE can actually serve this
         # checkpoint at this TP -- otherwise the tuner has no reachable target.
-        from hyperloom.inference_optimizer.cli.model_gate import (
+        from hyperloom.inference_optimizer.model_config_utils import (
             model_supports_aiter_ck_fused_moe,
         )
 
@@ -3961,7 +3961,7 @@ async def _run_forge_gemm_tuning(
     gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
     tokens = _normalize_tokens(payload.get("tokens"))
     # Default mp = all visible GPUs.
-    from ..policy.gate import detect_gpu_count
+    from hyperloom.common.visible_devices import detect_gpu_count
 
     detected_gpus = detect_gpu_count() or tp
     mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)

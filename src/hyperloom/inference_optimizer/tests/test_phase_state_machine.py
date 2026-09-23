@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as phase_state
+from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
@@ -90,8 +91,8 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "sweep_failed",
         "baseline_arg_error",
     ):
-        assert phase_state.is_valid_stop_reason(reason), reason
-    assert not phase_state.is_valid_stop_reason("totally_invented")
+        assert is_valid_stop_reason(reason), reason
+    assert not is_valid_stop_reason("totally_invented")
 
 
 def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
@@ -207,7 +208,7 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
     next_phase, reason, evidence = out
     assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
     assert evidence["terminal"] is True
-    assert phase_state.is_valid_stop_reason(reason)
+    assert is_valid_stop_reason(reason)
 
 
 def test_a_landed_baseline_outranks_the_exhausted_clock():
@@ -275,7 +276,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
         assert evidence["terminal"] is True
         assert evidence["baseline_anchor"] == "cold"
         assert evidence["retry_round_sec"] == pytest.approx(1300.0)
-        assert phase_state.is_valid_stop_reason(reason)
+        assert is_valid_stop_reason(reason)
 
     def test_a_session_resumed_with_a_fresh_clock_measures_another_baseline(self):
         """The marker outlives the shortfall, so it must not decide on its own."""

@@ -30,6 +30,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
 )
+from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
     GridVariant,
@@ -53,7 +54,7 @@ from hyperloom.inference_optimizer.roofline_ceiling import (
     load_model_meta,
     select_peak_and_bound,
 )
-from ..state.shared_state import SharedState, resolved_grading
+from ..state.shared_state import SharedState
 from ..loop.coordinator_helpers import baseline_benchmark_script
 
 

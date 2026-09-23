@@ -22,6 +22,7 @@ from hyperloom.common.launch_log_evidence import (
     observed_sglang_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out, enablement_event
+from ..enablement.recipe.section import recipe_for
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_ENABLEMENT,
@@ -49,7 +50,8 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_base import is_kept as _is_kept
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
-from ..phases.machine_state import AGENTX_PREFLIGHT_STOP_REASON, PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
+from hyperloom.inference_optimizer.breakdown.stop_reasons import AGENTX_PREFLIGHT_STOP_REASON
+from ..phases.machine_state import PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..state.attempt_ledger import record_config_attempt
@@ -1256,9 +1258,11 @@ class WritebackCollaborator:
         enablement_event.finish(
             outcome=outcome,
             reason=reason,
-            enablement=lane,
-            session_dir=str(self.session_dir or ""),
-            mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
+            recipe=recipe_for(
+                lane,
+                session_dir=str(self.session_dir or ""),
+                mode=str(getattr(self.shared_state, "enablement_mode", "") or ""),
+            ),
             kept_patches=lane.kept_patches,
             kept_artifacts=lane.kept_artifacts,
             setup_commands=lane.setup_commands,
