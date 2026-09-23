@@ -265,7 +265,7 @@ async def _resume_for_refused_staging_drafts(
             break
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # provider families differ; record and stop
+        except Exception as exc:  # noqa: BLE001 — provider families differ; record and stop
             log.exception("opportunity analysis resume failed")
             resume_error = f"opportunity analysis resume failed: {type(exc).__name__}: {exc}"
             run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
