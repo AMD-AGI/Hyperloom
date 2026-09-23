@@ -263,9 +263,15 @@ jobs:
 
       - name: Dispatch + monitor single-GPU Forge smoke
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
-          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE || 'kubernetes' }}
+          # Dispatron's compat facade. No ingress and unauthenticated because it is
+          # only reachable inside the cluster -- which the runner carrying dispatron-ci
+          # is. E2E_INFRA_TYPE is gone with the endpoint that honoured it: Dispatron
+          # places a run from its platform row.
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          # Read by dispatron-ci-cancel in the cleanup step below, so a hard-killed job
+          # still releases its GPU.
+          DISPATCH_UID_FILE: ${{ runner.temp }}/forge_e2e_session_uid
           GPUS: ${{ vars.FORGE_E2E_GPUS || '1' }}
           MAX_HOURS: ${{ vars.FORGE_E2E_MAX_HOURS || '1.0' }}
           GPU_TARGET: ${{ vars.FORGE_E2E_GPU_TARGET || 'gfx950' }}
@@ -278,7 +284,6 @@ jobs:
           CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
           CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
           CI_E2E_CACERT: ${{ secrets.CI_E2E_CACERT }}
-          CI_E2E_API_PREFIX: ${{ vars.FORGE_E2E_API_PREFIX || '/api/v1' }}
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
           HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
@@ -327,20 +332,16 @@ jobs:
       - name: Cancel workload on job cancel
         if: cancelled()
         env:
-          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
-          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
-          CI_E2E_API_PREFIX: ${{ vars.FORGE_E2E_API_PREFIX || '/api/v1' }}
+          DISPATRON_BASE_URL: ${{ vars.CI_E2E_DISPATRON_BASE_URL || 'http://dispatron-api.dispatron.svc.cluster.local:8080' }}
+          DISPATCH_TOKEN: ${{ secrets.CI_E2E_API_KEY }}
+          DISPATCH_UID_FILE: ${{ runner.temp }}/forge_e2e_session_uid
           CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
-          CI_E2E_CACERT: ${{ secrets.CI_E2E_CACERT }}
         run: |
-          uid="$(cat "${RUNNER_TEMP}/forge_e2e_session_uid" 2>/dev/null || true)"
-          if [ -z "$uid" ] || [ -z "${E2E_API_BASE:-}" ]; then exit 0; fi
-          tls=()
-          if [ -n "${CI_E2E_CACERT:-}" ]; then
-            tls=(--cacert "$CI_E2E_CACERT")
-          elif [ "$CI_E2E_INSECURE" = "1" ]; then
-            tls=(-k)
-          fi
-          curl -sS "${tls[@]}" -X DELETE \
-            -H "Authorization: Bearer ${E2E_API_KEY}" \
-            "${E2E_API_BASE%/}${CI_E2E_API_PREFIX}/orchestration/workloads/${uid}"
+          command -v dispatron-ci-cancel >/dev/null 2>&1 || {
+            echo "dispatron-ci-cancel is not on PATH; cannot cancel"; exit 0
+          }
+          insecure=""
+          if [ "${CI_E2E_INSECURE:-0}" = "1" ]; then insecure="--insecure"; fi
+          # Tells a recorded cancel (202) apart from a confirmed one, so a cancel that
+          # did not stop the workload cannot read as "the GPU is back".
+          dispatron-ci-cancel --base-url "$DISPATRON_BASE_URL" $insecure
