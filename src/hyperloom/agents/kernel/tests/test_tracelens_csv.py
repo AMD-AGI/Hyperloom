@@ -1330,6 +1330,50 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     assert str(tmp_path / "skill.md") in call["prompt"]
 
 
+def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
+    """Graph-capture analysis writes into the capture folder, so it must be writable.
+
+    ``TraceLens_generate_perf_report_pytorch_inference`` classifies the capture
+    folder before it can merge it, and that classification writes
+    ``execution_details.json`` into the folder itself. With only ``output_dir``
+    writable the step dies with ``OSError: [Errno 30] Read-only file system``
+    and the turn ends without ``analysis.md``.
+    """
+    import asyncio
+
+    from hyperloom.common.codex_session import CodexSessionResult
+
+    output_dir = tmp_path / "out"
+    capture_folder = tmp_path / "capture_traces"
+    capture_folder.mkdir()
+    calls: list[dict] = []
+
+    async def _fake_codex_turn(**kwargs):
+        calls.append(kwargs)
+        (output_dir / "analysis.md").write_text("# report\n", encoding="utf-8")
+        return CodexSessionResult(text="ok")
+
+    _use_openai_only_env(monkeypatch)
+
+    asyncio.run(
+        tlr.run_tracelens_skill(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=None,
+            platform="MI355X",
+            framework="vllm",
+            analysis_mode="inference",
+            capture_folder=capture_folder,
+            budget_minutes=30,
+            codex_turn_runner=_fake_codex_turn,
+        )
+    )
+
+    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+
+
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
     """A sub-minute budget must not translate into an instant Codex timeout."""
     import asyncio
