@@ -3040,6 +3040,48 @@ class IterationLoop(AnalysisRuntimeMixin):
             ),
         )
 
+    def _with_ceiling_standing(self, context):
+        """Attach each case's roofline standing to a planning context, when a ceiling is published.
+
+        This is where the ceiling steers the campaign: the planner decides which
+        cases the round's effort goes to, so it is the one that has to see which
+        still have headroom. The implementer's copy, from
+        ``_render_ceiling_advisory``, arrives after that choice is made. Like the
+        rest of the planning evidence it is guidance for the next round and
+        never enters a KEEP.
+        """
+        report = self._ceiling()
+        standing = self._roofline_attainment()
+        if report is None or standing is None:
+            return context
+        from kernelforge.orchestrator.contracts import CaseRoofline
+
+        ceilings = report.ideal_ms()
+        scored = {entry.case_id: entry for entry in standing.cases}
+        incumbent = self._best_case_times or self._baseline_case_times
+
+        def roofline(case_id: str) -> CaseRoofline | None:
+            if case_id not in ceilings:
+                return None
+            entry = scored.get(case_id)
+            if entry is not None:
+                return CaseRoofline(
+                    ceiling_ms=entry.t_ideal_ms,
+                    incumbent_ms=entry.t_current_ms,
+                    attainment=entry.attainment,
+                )
+            measured = incumbent.get(case_id)
+            return CaseRoofline(
+                ceiling_ms=ceilings[case_id],
+                incumbent_ms=measured if measured and measured > 0 else None,
+                excluded=standing.excluded.get(case_id, ""),
+            )
+
+        return replace(
+            context,
+            cases=tuple(replace(case, roofline=roofline(case.case_id)) for case in context.cases),
+        )
+
     def _ceiling(self) -> Any | None:
         """The published ceiling report for this kernel, or ``None``.
 
@@ -3111,12 +3153,15 @@ class IterationLoop(AnalysisRuntimeMixin):
         return standing.mean >= target
 
     def _render_ceiling_advisory(self) -> str:
-        """Render the roofline standing for the planner, when a ceiling is published.
+        """Render the roofline standing for the implementer, when a ceiling is published.
 
-        Guidance, not a verdict: it names where the remaining headroom is by
-        case. Because the ceiling is fixed for the campaign, pointing the agent
-        at attainment and pointing it at latency ask for the same thing, so this
-        block adds a direction without adding an incentive.
+        The planner has already chosen the round's cases from the same standing,
+        carried as case evidence by ``_with_ceiling_standing``; this is the
+        implementer's view of it, so the session working a case knows how far
+        that case sits from its ceiling. Guidance, not a verdict: because the
+        ceiling is fixed for the campaign, pointing the agent at attainment and
+        pointing it at latency ask for the same thing, so this block adds a
+        direction without adding an incentive.
         """
         report = self._ceiling()
         if report is None:
@@ -4122,10 +4167,12 @@ class IterationLoop(AnalysisRuntimeMixin):
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_case_config_coverage(
-            self._active_analysis_context
-            if self._active_analysis_context is not None
-            else self._build_orchestration_context()
+        context = self._with_ceiling_standing(
+            self._with_case_config_coverage(
+                self._active_analysis_context
+                if self._active_analysis_context is not None
+                else self._build_orchestration_context()
+            )
         )
         try:
             result = await orchestration_service.run(
