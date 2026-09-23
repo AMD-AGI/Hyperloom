@@ -55,7 +55,7 @@ def _state(tick: int = 7):
     )
 
 
-def test_fleet_read_context_is_runtime_shaped_and_cached_by_context(tmp_path) -> None:
+def test_fleet_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> None:
     (tmp_path / "manifest.json").write_text(
         json.dumps(
             {
@@ -103,10 +103,11 @@ def test_fleet_read_context_is_runtime_shaped_and_cached_by_context(tmp_path) ->
     )
 
     assert first == second
-    assert third.read_id == first.read_id
+    assert third.read_id != first.read_id
     assert third.tick == 8
     assert changed.read_id != first.read_id
-    assert len(client.calls) == 2
+    assert changed.read_id != third.read_id
+    assert len(client.calls) == 3
     _, context, kwargs = client.calls[0]
     assert context["identity"]["model"] == "Qwen3-8B"
     assert context["identity"]["gpu"] == "mi355x"

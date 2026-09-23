@@ -85,8 +85,8 @@ Test:
 
 - context is captured from realistic runtime state;
 - no `candidate_change`, `question`, weights, or search strategy is supplied;
-- repeated identical decision-context reads are reused;
-- changed context causes a new read;
+- retries inside one decision reuse its read;
+- a changed context or later decision reads the current shared corpus;
 - completed evidence appears before proposal generation;
 - failures continue without evidence;
 - only consumed refs reach the measured Experience;

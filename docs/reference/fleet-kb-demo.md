@@ -48,12 +48,13 @@ export HYPERLOOM_FLEET_KB_SPOOL="$SESSION_DIR/fleet-kb-spool"
 ```
 
 During FRAMEWORK_AGENT, the orchestration prompt performs one Fleet read for
-each distinct decision context. Identical context is reused across ticks. A
-successful evidence block is inserted before the orchestration model proposes
-work. Its rendered Experience references are recorded on the proposal and
-preserved in the measured Experience. Historical evidence may seed a proposal
-or current-best candidate, but the original Recipe measurement remains the
-immutable gain-accounting baseline.
+each proposal-generation decision. Retries inside that decision reuse the same
+read; a later decision re-reads the current shared corpus so writes from other
+workers can become visible. A successful evidence block is inserted before the
+orchestration model proposes work. Its rendered Experience references are
+recorded on the proposal and preserved in the measured Experience. Historical
+evidence may seed a proposal or current-best candidate, but the original Recipe
+measurement remains the immutable gain-accounting baseline.
 
 Hyperloom captures runtime `identity`, `workload`, `objective`,
 `benchmark_baseline`, `current_best`, `observations`, `recent_results`, and

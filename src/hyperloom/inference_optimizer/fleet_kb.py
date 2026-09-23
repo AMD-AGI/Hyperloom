@@ -9,7 +9,7 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ class FleetKBIntegration:
     def __init__(self, client: Any, session_dir: Path) -> None:
         self.client = client
         self.session_dir = Path(session_dir)
+        self._cache_tick: int | None = None
         self._by_context: dict[str, FleetKBEvidence] = {}
 
     @classmethod
@@ -210,11 +211,14 @@ class FleetKBIntegration:
                 default=str,
             ).encode()
         ).hexdigest()
+        if tick != self._cache_tick:
+            self._by_context.clear()
+            self._cache_tick = tick
         cached = self._by_context.get(context_hash)
         if cached is not None:
-            return replace(cached, tick=tick)
+            return cached
         session_id = str(getattr(state, "session_id", "") or self.session_dir.name)
-        operation_id = f"fleet-read-{session_id}-{context_hash[:16]}"
+        operation_id = f"fleet-read-{session_id}-{tick}-{context_hash[:16]}"
         result = self.client.read(
             _DECISION,
             context,
