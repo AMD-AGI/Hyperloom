@@ -42,10 +42,10 @@ from kernelforge.kernel_rewrite_controller.task_publisher import (
     pending_rejections,
     publish_complete_staged_tasks,
 )
-
-_ResumePublications = tuple[TaskPublicationResult, ...]
 from kernelforge.llm.git import git
 from kernelforge.tracker.usage import UsageAccumulator
+
+_ResumePublications = tuple[TaskPublicationResult, ...]
 
 log = logging.getLogger(__name__)
 
