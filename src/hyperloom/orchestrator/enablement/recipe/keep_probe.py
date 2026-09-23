@@ -40,7 +40,7 @@ _PROBE_SCRIPT = (
     "for dist in m.distributions():\n"
     "    name=(dist.metadata['Name'] if dist.metadata else '') or ''\n"
     "    if name:\n"
-    "        d[name]=dist.version or ''\n"
+    "        d[name]=m.version(name) or ''\n"
     "print(json.dumps({'interpreter_tag': sys.version.split()[0], 'distributions': d}))\n"
 )
 

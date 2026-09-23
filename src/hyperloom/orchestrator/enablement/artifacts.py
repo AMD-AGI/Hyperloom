@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -363,6 +364,7 @@ def write_setting_script(
         framework_root_vcs=tree_kind(effective_framework_root) if effective_framework_root else "",
         runtime=runtime_path or None,
         rounds=script_rounds or None,
+        deployment_dir=os.path.relpath(root / "deployment", enablement_dir(root)),
     )
 
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

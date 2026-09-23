@@ -257,6 +257,110 @@ shows it immediately, instead of after hours of search against the wrong
 denominator. For the full artifact schema, see
 [`session_breakdown.json` integration in Hyperloom](../reference/session-breakdown.md).
 
+## Use the optimized model without Hyperloom
+
+Custom workloads can ship a standalone `deployment/` directory. On CLOSE,
+Hyperloom captures the inference source, the accepted kernel overlay, declared
+runtime assets, accepted environment settings, and dependency versions observed
+under the declared interpreter. It includes the directory in the session package.
+Weights remain external. Export does not install packages or run GPU inference.
+
+Declare `hyperloom_inference.json` at the root of `--framework-path`:
+
+```json
+{
+  "schema_version": 1,
+  "adapter": "inference_adapter",
+  "source_files": ["inference_adapter.py", "my_model/**/*.py"],
+  "python_paths": ["."],
+  "input_contract": "A float32 tensor of shape [1, 3, 224, 224]",
+  "output_contract": "A float32 tensor of shape [1, 1000]",
+  "interpreter": "/opt/model/bin/python",
+  "runtime": "Use the same pinned image and GPU architecture as the benchmark",
+  "assets": [],
+  "cache_env": ["TORCHINDUCTOR_CACHE_DIR"],
+  "exclude_env": ["RESULT_DIR", "RESULT_FILENAME"]
+}
+```
+
+Use the interpreter that runs the model, not an orchestration interpreter.
+Replace `runtime` with the actual pinned image reference or environment setup
+instructions. `environment_closure` in `deployment.json` records Python and
+installed distribution versions; it is an observation, not a universal wheel
+installation recipe. Custom builds and GPU libraries still require that runtime.
+Existing enablement recipe steps and their replay-sufficiency verdict are also
+carried as provenance when present; exporting does not upgrade that verdict.
+
+The adapter exposes these functions without importing Hyperloom or the benchmark
+harness:
+
+| Function | Contract |
+|----------|----------|
+| `load_model(weights)` | Return a callable using the optimized model, including the measured precision, preprocessing and graph/compile setup |
+| `read_input(path)` | Read an application input file into the callable's input type |
+| `write_output(output, path)` | Store the inference result |
+| `validate(model)` | Exercise representative inputs using the benchmark's correctness criterion; return a JSON-compatible object with `passed: true` only on success |
+
+The callable accepts one input object; use a tuple or dictionary for multiple
+tensors. Its output is the model's result, not a benchmark throughput record.
+Validation must check actual outputs; loading successfully is insufficient.
+Keep the adapter and its contract updated when optimizing the source.
+
+`source_files` are explicit globs relative to the checkout, including required
+non-Python resources. `python_paths` are import roots relative to that source.
+`assets` lists files or directories such as tuned kernel configurations, tuning
+databases and correctness references. They are captured with the existing source
+snapshot mechanism. File families containing `%d`, such as TunableOp's per-device
+CSV paths, capture the existing numbered files. Symlinked paths are resolved before
+relocation. Their prefixes in runtime environment values are relocated
+to the export. Exclude only benchmark bookkeeping variables in `exclude_env`;
+never exclude a setting that changes inference. Unmapped absolute runtime paths,
+credential variables, missing files, and mismatches against accepted source
+snapshots make the export incomplete. Source code and the adapter must themselves
+avoid references to the original session, external checkouts or benchmark caches.
+
+Runtime assets are copied into a temporary directory for each process, so tuning
+database writes cannot change the captured seeds. `cache_env` names scratch
+directory variables to redirect there as well, including variables that were unset
+in the original runtime. These temporary files are removed
+when the process exits; compilation may run again in a new process. Keep the
+loaded callable alive to amortize model loading, compilation and graph capture.
+
+Copy `deployment/` to the target runtime, then validate and run it:
+
+```bash
+uv run --no-project --no-sync python deployment/inference.py \
+  --weights /models/checkpoint --validate --report validation.json
+uv run --no-project --no-sync python deployment/inference.py \
+  --weights /models/checkpoint --input input.bin --output output.bin
+```
+
+Use the target environment's Python with uv's `--python` option when necessary.
+The generated `current_setting.sh` forwards the same arguments to this entry point.
+Neither invocation requires Hyperloom. An application can import the exported
+`inference.py`, call `model = inference.load_model(weights)`, then call
+`output = model(inputs)` repeatedly. Load it before importing torch or the workload
+so runtime environment settings and kernel bindings take effect.
+
+`deployment.json` distinguishes `exported` from `incomplete` and initially marks
+validation `not_run`. `--validate` produces a separate report bound to the export's
+SHA-256, compares dependency versions and runs the adapter's quality gate in the
+new process. Missing or changed captured files prevent execution. A campaign's
+latency result does not establish exported-model correctness or performance;
+validate on the target runtime and measure the application's inference separately.
+
+To regenerate an export after adding the contract to an existing workload,
+without resuming the campaign, run this in its model runtime:
+
+```bash
+uv run python -m hyperloom.inference_optimizer.deployment.export /path/to/session
+```
+
+This replaces `session/deployment/` and clears previous export validation. It
+does not rewrite an already distributed session zip. When no contract is
+available, CLOSE records the reason in `deployment/deployment.json` and the
+custom launch script fails explicitly instead of launching a serving framework.
+
 ## Troubleshooting
 
 | Symptom | Cause |

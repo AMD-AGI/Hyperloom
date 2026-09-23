@@ -38,6 +38,7 @@ from hyperloom.orchestrator.state.shared_state import effective_closing_grace_se
 class _BareState:
     """SharedState stand-in covering every attribute the CLOSE sequencer reads/writes."""
 
+    framework: str = "sglang"
     closing_report_task_id: str = ""
     recipe_kb_session_id: str = ""
     recipe_kb_session_summary: dict[str, Any] = field(default_factory=dict)
@@ -592,6 +593,24 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     assert coord.shared_state.close_sequence_done is True
     # A normal SWEEP completion's sweep_done reason must be preserved.
     assert coord.shared_state.stop_reason == "sweep_done"
+
+
+@pytest.mark.asyncio
+async def test_custom_close_packages_explicit_export_refusal(coord, tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "packages"))
+    coord.shared_state.framework = "custom"
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.to_dict = lambda: {"framework": "custom", "framework_repo_path": str(tmp_path / "missing")}
+    await coord._on_enter_close(from_phase="SWEEP")
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    export_step = next(row for row in rows if row["step"] == "inference_export")
+    assert export_step["status"] == "failed"
+    assert coord.shared_state.close_sequence_done is True
+    packages = list((tmp_path / "packages").rglob("*.zip"))
+    assert packages
+    with zipfile.ZipFile(packages[0]) as archive:
+        manifest = json.loads(archive.read("deployment/deployment.json"))
+        assert manifest["status"] == "incomplete"
 
 
 @pytest.mark.asyncio

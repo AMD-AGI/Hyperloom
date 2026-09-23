@@ -59,6 +59,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
+    "deployment/**",
     # ── terminal verdicts ─────────────────────────────────────────────
     "reports/final.json",
     "reports/session_terminal.json",

@@ -426,9 +426,21 @@ def render_reference_script(
     framework_root_vcs: str = "",
     runtime: str | None = None,
     rounds: list[dict[str, Any]] | None = None,
+    deployment_dir: str = "deployment",
 ) -> str:
     """Render a runnable ``*.sh`` artifact from a launch recipe."""
     fw = str(framework or "sglang").strip().lower()
+    if fw == "custom":
+        return (
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
+            f'DEPLOYMENT_DIR="$SCRIPT_DIR"/{shlex.quote(deployment_dir)}\n'
+            'if [[ ! -f "$DEPLOYMENT_DIR/inference.py" ]]; then\n'
+            '  echo "Standalone inference export is unavailable; see $DEPLOYMENT_DIR/deployment.json" >&2\n'
+            "  exit 1\n"
+            "fi\n"
+            'exec uv run --no-project --no-sync python "$DEPLOYMENT_DIR/inference.py" "$@"\n'
+        )
     has_enablement = bool(setup_commands or framework_root or rounds)
 
     lines: list[str] = ["#!/usr/bin/env bash"]

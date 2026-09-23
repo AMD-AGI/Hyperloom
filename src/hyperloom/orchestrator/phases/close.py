@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import asyncio
+import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -404,6 +405,16 @@ class ClosePhase(PhaseHandler):
                 "langfuse_flush",
                 status="failed",
                 detail=repr(exc)[:240],
+            )
+
+        if self.shared_state.framework == "custom":
+            from hyperloom.inference_optimizer.deployment.export import export_custom_inference
+
+            deployment = await asyncio.to_thread(export_custom_inference, self.session_dir, self.shared_state.to_dict())
+            await self._record_close_step(
+                "inference_export",
+                status="done" if deployment["status"] == "exported" else "failed",
+                detail=json.dumps({"status": deployment["status"], "reasons": deployment["reasons"]}),
             )
 
         # ---------------- Artifact package -> /workspace ------------------ Bundle the curated result/report/analysis
