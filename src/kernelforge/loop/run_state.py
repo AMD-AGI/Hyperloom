@@ -26,7 +26,7 @@ from kernelforge.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # How many trailing events the store keeps in memory to serve ``recent_events`` without re-reading ``events.jsonl``
 # each iteration (see LoopStateStore).
@@ -220,6 +220,10 @@ class RunState:
     round_costs: RoundCostState = field(default_factory=RoundCostState)
     # Iterations worth re-reading in full (best + notable near-misses).
     pinned_iterations: list[int] = field(default_factory=list)
+    # The roofline ceiling this campaign estimated. A resume reads it back rather than estimating again: the stop
+    # rule divides by it, so a second estimate would move the target between segments of one campaign. Recorded here
+    # rather than inferred from the workspace, where a report may be left over from a run that was not this one.
+    ceiling_report_path: str = ""
     termination_reason: str = ""
 
     def to_dict(self) -> dict:
@@ -283,6 +287,10 @@ class RunState:
             # recorded the score did not measure one, and the KEEP bar does not read this field -- it is derived from
             # the incumbent's own per-case times -- so only incremental reporting sees the difference.
             payload.setdefault("search_start_mean_case_speedup", None)
+            version = 20
+        if version == 20:
+            # v20 recorded no roofline ceiling, so a campaign resumed from one estimates its ceiling afresh.
+            payload.setdefault("ceiling_report_path", "")
             version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
             raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")

@@ -8,11 +8,11 @@ best achievable latency the current kernel is delivering. One at the ceiling,
 one half at twice the ceiling's latency.
 
 It is derived here rather than stored on the report because the divisor is not
-the ceiling module's to choose. The ceiling run times the driver under a
-profiler, and that figure is inflated by the profiler; dividing by it would
-report a kernel as closer to its limit than it is. The campaign's own per-case
-medians are the only divisor that makes the ratio mean anything, so attainment
-is computed where those live and cached nowhere.
+the ceiling module's to choose. The ceiling run has at most one timing of the
+kernel it was handed, and the kernel it was handed is not the one a campaign
+ends with: attainment has to follow the incumbent, measured over repeated runs.
+The campaign's own per-case medians are the only divisor that makes the ratio
+mean anything, so attainment is computed where those live and cached nowhere.
 
 Aggregation is the equal-weight mean over cases, matching
 ``calculate_mean_case_speedup`` -- the objective a KEEP is already judged by. A

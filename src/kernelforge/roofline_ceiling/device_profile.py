@@ -1,19 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Which machine this is, so the right roofs get measured and checked.
+"""Which machine this is, so the analyst measures and names the right one.
 
 Only identity lives here. The roofs themselves are measured by the analyst
 during its session and never stored: a committed figure ages out of date
 silently, and a measured one is not ours to publish.
 
-Identity still matters for two things. The analyst is told which card it is
-estimating for, so a session that cannot reach a profiler at least names the
-right machine when it falls back. And the architecture selects which published
-peaks :func:`~kernelforge.roofline_ceiling.contract.build_hardware` checks the
-reported roofs against -- a roof above the vendor's own number cannot be a
-measurement, and that check is the only one standing between a mistyped column
-and the denominator of every ceiling.
+Identity is what the analyst is told about the card it is estimating for, so a
+session that cannot reach a profiler still names the right machine when it
+falls back. It checks nothing: no code compares a reported roof against this
+card's published peaks, so a misread profiler column reaches the ceiling unless
+a reader of the derivation catches it.
 
 Partition mode is part of the identity rather than metadata on it: splitting an
 MI355X into CPX changes the bandwidth one slice can reach, so the same card

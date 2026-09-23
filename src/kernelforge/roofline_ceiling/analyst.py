@@ -141,7 +141,8 @@ def build_request(
             (
                 "latency measured by the campaign over repeated runs, with no profiler attached"
                 if evidence.observed_origin == OBSERVED_CAMPAIGN
-                else "latency seen while profiling, so inflated by the profiler's own overhead"
+                else "latency from one run of the performance command, with no profiler attached; "
+                "a single sample per case, so noisier than a median but not inflated"
             )
             + ". A sanity reference only: no ceiling may be back-solved from it, and none may "
             "exceed it."
