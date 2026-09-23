@@ -40,9 +40,25 @@ def _coordinator(session_dir: Path):
     )
 
 
+def _no_controller_run(**kwargs: Any) -> dict[str, Any]:
+    return {"status": "no_opportunity", "patch_count": 0, "task_count": 0, "output_dir": str(kwargs["output_dir"])}
+
+
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from hyperloom.orchestrator.kernel import controller_submit, request_handlers
+
+    real_tool_path = request_handlers._kernel_agent_tool_path
+
+    def _tool_path_without_geak_runner(tool_name: str) -> Path:
+        if tool_name == "backends/geak_runner.py":
+            raise FileNotFoundError(tool_name)
+        return real_tool_path(tool_name)
+
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # KERNEL entry would otherwise launch a real GEAK runner or Controller process on its route.
+    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _tool_path_without_geak_runner)
+    monkeypatch.setattr(controller_submit, "run_controller_subprocess", _no_controller_run)
     return make_session_dir()
 
 
@@ -77,16 +93,26 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 
 
 @pytest.mark.asyncio
-async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
-    """With nothing left to try, the run reaches CLOSE through every phase."""
-    from hyperloom.orchestrator.kernel import request_handlers
+@pytest.mark.parametrize(
+    ("backend_order", "result_field", "result_key", "expected"),
+    [
+        ("", "geak_result", "error_class", "runner_not_found"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
+    ],
+    ids=["geak", "forge"],
+)
+async def test_both_arms_dry_walks_the_rest_of_the_chain(
+    session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_order: str,
+    result_field: str,
+    result_key: str,
+    expected: str,
+):
+    """With nothing left to try, the run reaches CLOSE through every phase, on either kernel route."""
     from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
 
-    def _no_geak_runner(tool_name: str) -> Path:
-        raise FileNotFoundError(tool_name)
-
-    # KERNEL entry runs out of band; a real GEAK subprocess would decide how long the phase is held.
-    monkeypatch.setattr(request_handlers, "_kernel_agent_tool_path", _no_geak_runner)
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
 
     coord = _coordinator(session_dir)
     try:
@@ -115,9 +141,11 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path, monk
 
         for tick in range(1, 12):
             await coord.tick(tick)
+            # KERNEL entry runs out of band and holds the phase until it returns.
+            await coord._await_kernel_entry_task()
 
         assert state.phase == ps.PHASE_CLOSE
-        assert state.geak_result["error_class"] == "runner_not_found"
+        assert getattr(state, result_field)[result_key] == expected
         visited = [to_phase for _, to_phase, _ in _chain(state)]
         assert visited[:2] == [ps.PHASE_PRELUDE, ps.PHASE_FRAMEWORK_AGENT]
         assert visited[-3:] == [ps.PHASE_KERNEL_AGENT, ps.PHASE_SWEEP, ps.PHASE_CLOSE]
