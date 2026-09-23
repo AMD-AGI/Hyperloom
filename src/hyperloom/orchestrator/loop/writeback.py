@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coordinator main loop and runtime protocol manager."""
+"""Coordinator result writeback: settle finished tasks into SharedState, the optimization journal and the recipe KB."""
 
 from __future__ import annotations
 import argparse
@@ -96,18 +96,37 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
-
-from .coordinator import (
-    _BASELINE_MAX_TOTAL_FAILURES,
-    _DEFAULT_RESUME_DRIFT_FLOOR_PCT,
-    _SEVERITY_CRASH,
-    _SEVERITY_REGRESS,
-    PendingProposal,
-    _extract_enablement_launch_log,
-)
+from .proposals import PendingProposal
 import logging as _logging
 
 log = _logging.getLogger(__name__)
+
+# Recipe snapshot severity tags (schema has no fixed enum).
+_SEVERITY_CRASH: str = "crash"
+_SEVERITY_REGRESS: str = "regress"
+
+# Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
+_BASELINE_MAX_TOTAL_FAILURES: int = 3
+# Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
+# drift.
+_DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
+
+
+def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
+    """Extract launch/traceback text from a failed baseline result payload."""
+    if not isinstance(result_payload, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
+        val = result_payload.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            joined = "\n".join(str(x) for x in val if str(x).strip())
+            if joined.strip():
+                parts.append(joined.strip())
+    return "\n".join(parts).strip()
+
 
 # Stable ``result_type`` codes for the reasons the remote KB Store returns.
 # Use an exact lookup so a reason token cannot collide with the same text inside

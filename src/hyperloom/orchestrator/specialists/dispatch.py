@@ -14,11 +14,6 @@ from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
-from ..loop.coordinator import (
-    FORCE_STALLED_KEEP_ROUNDS,
-    FORCE_STALLED_SPECIALIST_ROUNDS,
-    SPECIALIST_AUTO_RETRY_MAX,
-)
 from ..phases import machine_state as _phase_state
 from ..policy.gate import (
     SPECIALIST_FROM_AGENT_PREFIX,
@@ -36,6 +31,14 @@ log = _logging.getLogger(__name__)
 __all__ = ["SpecialistDispatchCollaborator"]
 
 _SOURCE_PATCH_FAMILY = "source_patch"
+
+# Bounded transient-failure auto-retry for specialist dispatches (infra-only).
+SPECIALIST_AUTO_RETRY_MAX: int = 2
+
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist dispatch / a KEEP before the
+# Coordinator force-dispatches one.
+FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
+FORCE_STALLED_KEEP_ROUNDS: int = 12
 
 
 class SpecialistDispatchCollaborator(CoordinatorCollaborator):

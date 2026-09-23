@@ -14,10 +14,8 @@ from hyperloom.orchestrator.actions.executors.roofline import (
     RooflineExecutor,
 )
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
-from hyperloom.orchestrator.loop.coordinator import (
-    Coordinator,
-    _lifecycle_paths,
-)
+from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task

@@ -1535,7 +1535,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
 
 # -- _materialize_approved_proposal -----------------------------------------
 def _pending(action_name: str, payload: dict, msg_id: str = "prop-1"):
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     return PendingProposal(
         proposal_msg_id=msg_id,
@@ -1788,7 +1788,7 @@ async def test_autosubmit_returns_when_verdict_exists(coord: Coordinator, monkey
 @pytest.mark.asyncio
 async def test_autosubmit_returns_when_review_in_flight(coord: Coordinator) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     sid = "spec-inflight"
     _make_real_patch(coord, sid)
@@ -1977,7 +1977,7 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
 @pytest.mark.asyncio
 async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) -> None:
     """A reject verdict on a framework_agent candidate proposal writes a critic_denied progress row."""
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     pending = PendingProposal(
         proposal_msg_id="m1",
@@ -2000,7 +2000,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
 @pytest.mark.asyncio
 async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, monkeypatch) -> None:
     """An approve verdict routes a ``direct_framework`` candidate to the raw-diff enqueue helper."""
-    from hyperloom.orchestrator.loop.coordinator import PendingProposal
+    from hyperloom.orchestrator.loop.proposals import PendingProposal
 
     enq: list = []
 

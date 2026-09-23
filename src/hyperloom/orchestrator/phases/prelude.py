@@ -37,15 +37,15 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import Task
-from ..loop.coordinator import (
-    _DEFAULT_WARM_REPLAY_MIN_CONFIDENCE,
-)
 from ..loop.coordinator_helpers import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
 from .base import PhaseHandler
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
+
+# Default min TRANSFER confidence a warm-replay champion must clear to be enqueued.
+_DEFAULT_WARM_REPLAY_MIN_CONFIDENCE: float = 0.7
 
 log = _logging.getLogger(__name__)
 
