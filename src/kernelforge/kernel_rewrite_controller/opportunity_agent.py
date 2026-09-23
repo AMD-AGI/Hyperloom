@@ -236,9 +236,7 @@ async def _resume_for_refused_staging_drafts(
         return run_result, None, ()
     resume_error: str | None = None
     while True:
-        resume_publications.extend(
-            publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused)
-        )
+        resume_publications.extend(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused))
         decision = await guard._on_stop({}, None, None)
         if decision.get("decision") != "block":
             break
