@@ -43,6 +43,13 @@ def _coordinator(session_dir: Path):
 @pytest.fixture
 def session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    # KERNEL otherwise launches a real ``kernelforge kernel-rewrite-controller`` process, and a walkthrough that
+    # ticks a fixed number of times then passes or fails on how fast that process exits. A dry kernel arm has
+    # nothing to rewrite, which is what the stand-in reports, at once.
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.controller_submit.run_controller_subprocess",
+        lambda **_kwargs: {"status": "no_opportunity", "patch_count": 0, "task_count": 0},
+    )
     return make_session_dir()
 
 
