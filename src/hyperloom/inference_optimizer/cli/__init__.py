@@ -19,7 +19,8 @@ from typing import Any
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import is_truthy
-from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV, parse_custom_headers
+from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
+from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
     _build_specialist_executor,
     _register_executors,
