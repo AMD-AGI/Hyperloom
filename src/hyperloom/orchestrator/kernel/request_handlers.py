@@ -4675,32 +4675,19 @@ def _resolve_fusion_decode_trace(state, payload: dict) -> str:
     forge-fusion's discover stage needs a CUDA-graph-disabled decode kineto trace,
     already captured in PRELUDE (``state.last_profile_trace``); reuse it instead of
     re-profiling. Explicit ``payload['trace_path']`` wins.
-    """
 
-    def _trace_file(path_str: str) -> str:
-        path = Path(path_str)
-        if path.is_file():
-            return str(path)
-        if not path.is_dir():
-            return ""
-        candidates = sorted(
-            list(path.glob("*.trace.json.gz")) + list(path.glob("*.trace.json")) + list(path.glob("*.json.gz")),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-        return str(candidates[0]) if candidates else ""
+    Raises ``FileNotFoundError`` when an explicit path names no trace file. The fusion
+    opportunities discovered below are attributed to the run that produced the trace, so
+    quietly reading a different one files this run's decisions under another workload.
+    """
 
     explicit = str(payload.get("trace_path") or "").strip()
     if explicit:
-        resolved = _trace_file(explicit)
-        if resolved:
-            return resolved
+        if not Path(explicit).is_file():
+            raise FileNotFoundError(f"trace_path is not a trace file: {explicit}")
+        return explicit
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
-    if trace:
-        resolved = _trace_file(trace)
-        if resolved:
-            return resolved
-    return ""
+    return trace if trace and Path(trace).is_file() else ""
 
 
 def _active_forge_fusion_env_flags(state: Any) -> dict[str, str]:
@@ -4857,7 +4844,18 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    trace_path = _resolve_fusion_decode_trace(state, payload)
+    try:
+        trace_path = _resolve_fusion_decode_trace(state, payload)
+    except FileNotFoundError as exc:
+        return {
+            "status": "failed",
+            "backend": "forge",
+            "engine": "forge_fusion",
+            "error_class": "decode_trace_invalid",
+            "error": str(exc),
+            "decision": "REVERT",
+            "kept": False,
+        }
     if not trace_path:
         return {
             "status": "skipped",
