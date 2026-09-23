@@ -11,17 +11,11 @@ from hashlib import sha1
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
+from ._shared_state.phase_state import _shared_state_module
 
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from . import shared_state
-
-    return shared_state
 
 
 class GapsStateMixin:
