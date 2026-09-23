@@ -26,11 +26,8 @@ import _bypass_report as _report  # noqa: E402
 import _bypass_trace_reader as _reader  # noqa: E402
 import _trace_shape_manifest as _tsm  # noqa: E402
 
-# Shared provenance builder (WP-0).
-try:
-    from hyperloom.common.provenance import build_provenance as _shared_build_provenance
-except Exception:  # noqa: BLE001 — standalone invocation without the package installed.
-    _shared_build_provenance = None
+from hyperloom.common.provenance import build_provenance as _shared_build_provenance  # noqa: E402
+from hyperloom.inference_optimizer import framework_registry  # noqa: E402
 from _idle_gate import (  # noqa: E402
     build_graph_under_recorded_warning,
     build_high_idle_warning,
@@ -271,11 +268,10 @@ def _shard_order_key(shard: tuple[Path, str, str | None]) -> tuple[int, str, str
 
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance block for the TraceShapeManifest."""
-    if _shared_build_provenance is not None:
-        try:
-            return _shared_build_provenance(args, env=os.environ, probe=True)
-        except Exception:  # noqa: BLE001 — provenance must never break the manifest.
-            pass
+    try:
+        return _shared_build_provenance(args, env=os.environ, probe=True)
+    except Exception:  # noqa: BLE001 — provenance must never break the manifest.
+        pass
 
     def _env(*names: str) -> Any:
         for n in names:
@@ -431,33 +427,6 @@ def _should_enable_steady(*, steady_state_mode: str, framework: str, env_steady:
     """Whether to run steady-state windowing for this trace analysis."""
     mode = (steady_state_mode or "").strip().lower()
     return bool(env_steady) or (framework or "").lower() == "xdit" or mode not in _STEADY_OFF_VALUES
-
-
-#: Mirrors of the ``framework_registry``, used only when that package is not
-#: importable (standalone invocation). Keep in sync when a framework is added;
-#: tests assert both against the registry so a divergence cannot land.
-_STANDALONE_UNITS = {"xdit": "img/s", "custom": "unit/s"}
-_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
-
-
-def _is_scriptable_framework(framework: str | None) -> bool:
-    """Return whether ``framework`` is a server-less scriptable workload."""
-    try:
-        from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-        return is_scriptable(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
-
-
-def _throughput_unit(framework: str | None) -> str:
-    """Return the throughput unit ``framework`` reports, per the registry."""
-    try:
-        from hyperloom.inference_optimizer.framework_registry import throughput_unit
-
-        return throughput_unit(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return _STANDALONE_UNITS.get(str(framework or "").strip().lower(), "tok/s")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -764,7 +733,7 @@ def main(argv: list[str] | None = None) -> int:
     for cand in candidates.get("hot_kernels", []):
         cand["trace_report_path"] = str(analysis_md_path)
 
-    throughput_unit = _throughput_unit(args.framework)
+    throughput_unit = framework_registry.throughput_unit(args.framework)
     write_text(
         analysis_md_path,
         _report.render_analysis_md(
@@ -840,7 +809,7 @@ def main(argv: list[str] | None = None) -> int:
     # Diffusion / scriptable workload-level roofline: aggregate the per-kernel analytical roofline into an end-to-end
     # workload roofline + per-denoise-step split.
     diffusion_roofline_path: str | None = None
-    if _is_scriptable_framework(args.framework):
+    if framework_registry.is_scriptable(args.framework):
         try:
             from diffusion_roofline import build_report_from_bypass  # noqa: E402
 

@@ -62,7 +62,6 @@ def coord(build_coord):
         ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
         3600,
     )
-    build_coord._coerce_needs_gpu = bool
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord
 

@@ -111,6 +111,7 @@ async def test_serving_lane_capacity_1_raises_LaneBusy(locks):
         action="bench",
         ttl_sec=60,
     )
+    assert isinstance(a.acquired_at, str)
     with pytest.raises(LaneBusy) as exc:
         await locks.acquire_many(
             ["benchmark_lane"],

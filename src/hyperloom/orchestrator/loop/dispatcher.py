@@ -17,6 +17,7 @@ from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -53,7 +54,6 @@ from ..state.task_registry import Task
 from .coordinator_helpers import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     action_fits_time_budget,
-    coerce_needs_gpu,
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
@@ -656,7 +656,7 @@ class DispatcherCollaborator:
             extra_context: dict[str, Any] = {}
             if task.kind == "specialist":
                 params = task.params or {}
-                needs_gpu = coerce_needs_gpu(params.get("needs_gpu", False))
+                needs_gpu = is_truthy(params.get("needs_gpu"))
                 # Absolute stop instant, tightened by the session bound.
                 specialist_deadline = self._specialist_deadline(
                     needs_gpu=needs_gpu,
@@ -714,12 +714,7 @@ class DispatcherCollaborator:
                         gpu_count = default_gpu_count
                     # A bench-capable specialist floors gpu_count up to the
                     # serving TP; others keep their explicit count.
-                    bench_raw = params.get("bench", False)
-                    bench = (
-                        bench_raw.strip().lower() in ("1", "true", "yes", "on")
-                        if isinstance(bench_raw, str)
-                        else bool(bench_raw)
-                    )
+                    bench = is_truthy(params.get("bench"))
                     serving_tp = self._resolve_serving_tp() or 0
                     if bench and serving_tp > 0 and gpu_count < serving_tp:
                         log.info(
@@ -1749,10 +1744,7 @@ class DispatcherCollaborator:
         Returns:
             bool: ``True`` when ``INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING`` is set.
         """
-        return os.environ.get(
-            "INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING",
-            "",
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        return env_bool("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING")
 
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.

@@ -34,6 +34,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     agentx_enabled as agentx_enabled,
@@ -56,7 +57,6 @@ from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.orchestrator.framework.paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.orchestrator.framework.paths import GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.orchestrator.framework.paths import flydsl_extra_source_dirs
-from ._accuracy_gate import _RUN_EVAL_FALSE_VALUES
 from ._benchmark_interpreter import _resolve_probe_python
 from ._grid_server_args import (
     compact_json_server_args,
@@ -1048,7 +1048,6 @@ def default_baseline_config() -> Path:
 
 
 _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
-_TRUTHY_FLAG_VALUES = frozenset({"1", "on", "true", "yes"})
 
 
 def _profiler_flag_value(server_args: str, name: str) -> str | None:
@@ -1089,7 +1088,7 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
             return False
         return 0 < iterations <= cap
     if name == "ignore_frontend":
-        return value.strip().lower() in _TRUTHY_FLAG_VALUES
+        return is_truthy(value)
     return True
 
 
@@ -1684,19 +1683,13 @@ def materialize_config_with_envs(
             extra_body["num_steps"] = max_iters
             # shape_discovery balloons an eager+with_stack trace; allow disabling
             # it via env for eager profiles.
-            _shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY",
-                "1",
-            ).strip().lower() not in {"0", "false", "no", "off"}
+            _shape_disc = env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True)
             # Gemma2 + shape-discovery crashes CUDA-graph capture, so disable
             # shape-discovery for Gemma2. Escape hatch
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips the Gemma2
             # gate; it does NOT override a global
             # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0.
-            _force_shape_disc = os.environ.get(
-                "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE",
-                "0",
-            ).strip().lower() in {"1", "true", "yes", "on"}
+            _force_shape_disc = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
             if _shape_disc and not _force_shape_disc:
                 _model = str(bench.get("model") or "")
                 if _model_is_gemma2(_model):
@@ -2078,7 +2071,7 @@ def materialize_config_with_envs(
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
-    if str(envs.get("RUN_EVAL", "")).strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(envs.get("RUN_EVAL", ""), default=True):
         global _RUN_EVAL_DISABLED_WARN_EMITTED
         if not _RUN_EVAL_DISABLED_WARN_EMITTED:
             log.warning(

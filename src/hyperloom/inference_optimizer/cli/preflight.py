@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common import provenance
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
@@ -1111,9 +1112,6 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     raise SystemExit(2)
 
 
-# RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
-_RUN_EVAL_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
-
 # Probed one subprocess each: the base package and the [api] extra can arrive from different places (image vs pip),
 # and only the truly absent one is installed.
 _LM_EVAL_DEPS = ("lm_eval", "tenacity")
@@ -1231,7 +1229,7 @@ def _ensure_lm_eval_dep(
             "message": "accuracy evaluation is disabled",
         }
     run_eval = os.environ.get("RUN_EVAL")
-    if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
+    if not is_truthy(run_eval, default=True):
         return {
             "status": "skipped",
             "skip_reason": "eval_disabled",

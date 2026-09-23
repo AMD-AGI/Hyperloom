@@ -39,10 +39,6 @@ TERMINAL_STATES = frozenset(state for state, outgoing in _TRANSITIONS.items() if
 _MAX_PROGRESS_NOTES = 120
 
 
-# microseconds + ``+00:00`` (canonical helper; kept importable for callers).
-_now_iso = now_iso
-
-
 @dataclass
 class Task:
     """A delegated task row persisted in the ``tasks`` table."""
@@ -56,8 +52,8 @@ class Task:
     side_effects: list[str] = field(default_factory=list)
     lease_ttl_sec: int = 0
     history: list[dict] = field(default_factory=list)
-    created_at: str = field(default_factory=_now_iso)
-    updated_at: str = field(default_factory=_now_iso)
+    created_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
 
     @classmethod
     def from_row(cls, row) -> "Task":
@@ -110,7 +106,7 @@ def _insert_queued_task(
     an in-memory task never describes a row that was written differently.
     ``cur`` belongs to the caller's write transaction.
     """
-    now = _now_iso()
+    now = now_iso()
     task = Task(
         task_id=task_id or uuid.uuid4().hex,
         kind=kind,
@@ -305,7 +301,7 @@ class TaskRegistry:
             allowed = _TRANSITIONS.get(current_state, frozenset())
             if new_state not in allowed:
                 raise IllegalTransition(f"cannot transition {task_id!r} from {current_state!r} to {new_state!r}")
-            now = _now_iso()
+            now = now_iso()
             history = json.loads(row["history"])
             history.append(
                 {
@@ -333,7 +329,7 @@ class TaskRegistry:
             if row is None:
                 return
             history = json.loads(row["history"])
-            history.append({"progress": note or {}, "ts": _now_iso()})
+            history.append({"progress": note or {}, "ts": now_iso()})
             history = _drop_oldest_progress_notes(history, _MAX_PROGRESS_NOTES)
             cur.execute(
                 "UPDATE tasks SET history=? WHERE task_id=?",
@@ -397,7 +393,7 @@ class TaskRegistry:
             holders: dict[str, list] = {}
             for row in cur.fetchall():
                 holders.setdefault(row["task_id"], []).append(row)
-            now_iso = _now_iso()
+            ts_now = now_iso()
             for task_id, rows in holders.items():
                 if not all(SqliteLeaseBackend.holder_is_dead(row) for row in rows):
                     continue
@@ -408,13 +404,13 @@ class TaskRegistry:
                     {
                         "from": "running",
                         "to": "failed",
-                        "ts": now_iso,
+                        "ts": ts_now,
                         "evidence": {"reason": reason, "dead_pid": pid},
                     }
                 )
                 cur.execute(
                     "UPDATE tasks SET state='failed', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now_iso, task_id),
+                    (json.dumps(history), ts_now, task_id),
                 )
                 reclaimed.append(task_id)
         return reclaimed
@@ -438,7 +434,7 @@ class TaskRegistry:
                 family_kinds,
             )
             rows = [(r["task_id"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
+            now = now_iso()
             for task_id, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
@@ -471,7 +467,7 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             cur.execute("SELECT task_id, kind, params, history FROM tasks WHERE state='queued'")
             rows = [(r["task_id"], r["kind"], r["params"], r["history"]) for r in cur.fetchall()]
-            now = _now_iso()
+            now = now_iso()
             for task_id, kind, params_json, history_json in rows:
                 if str(kind or "").strip() in allowed:
                     continue

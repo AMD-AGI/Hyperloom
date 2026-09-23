@@ -640,7 +640,7 @@ def test_infera_node_ops_apply_revert_and_bench(tmp_path: Path, monkeypatch: pyt
         "ssh_port": 2222,
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
-    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name: f"script:{name}")
+    monkeypatch.setattr(inf._mn_cli, "_read_bundled_pod_python_script", lambda name, deps: f"script:{name}")
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
@@ -1649,10 +1649,9 @@ def test_llm_prompt_parse_response_edges() -> None:
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False
-    assert sp._coerce_bool("yes", default=False) is True
-    assert sp._coerce_bool(None, default=True) is True
-    assert sp._coerce_bool("???", default=True) is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "yes"}).bench is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "off"}).bench is False
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "???"}).bench is sp.DEFAULT_BENCH
 
     profile = sp.resolve_specialist_profile({})
     assert profile.scope == sp.SCOPE_FREEFORM
@@ -1684,16 +1683,16 @@ def test_parse_quality_gate_paths(tmp_path: Path) -> None:
 
 
 def test_env_flag_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.orchestrator.trace import trace_env
+    from hyperloom.common import env as common_env
 
     monkeypatch.setenv("HL_TEST_FLAG", "on")
-    assert trace_env.env_flag("HL_TEST_FLAG") is True
+    assert common_env.env_flag("HL_TEST_FLAG") is True
     monkeypatch.setenv("HL_TEST_FLAG", "off")
-    assert trace_env.env_flag("HL_TEST_FLAG") is False
+    assert common_env.env_flag("HL_TEST_FLAG") is False
     monkeypatch.setenv("HL_TEST_FLAG", "maybe")
-    assert trace_env.env_flag("HL_TEST_FLAG", default=True) is True
+    assert common_env.env_flag("HL_TEST_FLAG", default=True) is True
     monkeypatch.delenv("HL_TEST_FLAG", raising=False)
-    assert trace_env.env_flag("HL_TEST_FLAG", default=False) is False
+    assert common_env.env_flag("HL_TEST_FLAG", default=False) is False
 
 
 # orchestrator.bus.gpu_pool._parse_gpu_list

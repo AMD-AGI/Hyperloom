@@ -33,27 +33,10 @@ def test_reexport_from_patch_snapshot():
     from hyperloom.orchestrator.actions.executors import _patch_snapshot as ps
 
     assert ps._PATCH_DEV_NULL is ng._PATCH_DEV_NULL
-    assert ps._strip_path_prefix is ng._strip_path_prefix
     assert ps._P_LEVELS is ng._P_LEVELS
 
 
-# _strip_path_prefix
-
-
-def test_strip_path_prefix_zero():
-    assert ng._strip_path_prefix("a/b/c.py", 0) == "a/b/c.py"
-
-
-def test_strip_path_prefix_one():
-    assert ng._strip_path_prefix("a/b/c.py", 1) == "b/c.py"
-
-
-def test_strip_path_prefix_beyond():
-    # More levels than parts -> basename
-    assert ng._strip_path_prefix("a/b.py", 5) == "b.py"
-
-
-def test_strip_path_prefix_p_levels_sane():
+def test_p_levels_sane():
     # _P_LEVELS starts at 1.
     assert ng._P_LEVELS[0] == 1
 

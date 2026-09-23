@@ -21,6 +21,7 @@ from typing import Any, Optional
 
 import click
 
+from hyperloom.common.io import atomic_write_json
 from kernelforge.config import resolve_agent_model, resolve_agent_reasoning_effort
 from kernelforge.agent_backends.registry import (
     create_registered_backend,
@@ -1758,11 +1759,8 @@ def _write_kernel_keep_checkpoint(out: Path, recipe, vr, *, repo_root: str = "")
         "repo_root": repo_root,
         "note": getattr(vr, "note", ""),
     }
-    path = out / KERNEL_KEEP_CHECKPOINT
-    tmp = path.with_suffix(".json.tmp")
     with contextlib.suppress(OSError):
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(out / KERNEL_KEEP_CHECKPOINT, payload, make_parents=False)
 
 
 def _clear_kernel_keep_checkpoint(out: Path) -> None:

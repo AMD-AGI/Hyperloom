@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
 from ..collaborator import CoordinatorCollaborator
@@ -275,15 +276,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             ``True`` when a retry was scheduled (caller must skip this
             attempt's bookkeeping); ``False`` otherwise.
         """
-        flag = (
-            os.environ.get(
-                "INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY",
-                "1",
-            )
-            .strip()
-            .lower()
-        )
-        if flag in ("0", "false", "no", "off"):
+        if not env_flag("INFERENCE_OPTIMIZER_SPECIALIST_AUTO_RETRY", default=True):
             return False
         try:
             cap = int(
@@ -331,12 +324,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if resolve_specialist_profile(retry_params).reserves_benchmark_lane:
             lanes = list(dict.fromkeys((*lanes, "benchmark_lane")))
-        needs_gpu_raw = retry_params.get("needs_gpu", False)
-        needs_gpu = (
-            needs_gpu_raw.strip().lower() in ("1", "true", "yes", "on")
-            if isinstance(needs_gpu_raw, str)
-            else bool(needs_gpu_raw)
-        )
+        needs_gpu = is_truthy(retry_params.get("needs_gpu"))
         if not needs_gpu and uses_whole_machine_gpu_lane(retry_params):
             # bench specialist: ensure needs_gpu is set so gpu_research_lane is acquired.
             needs_gpu = True

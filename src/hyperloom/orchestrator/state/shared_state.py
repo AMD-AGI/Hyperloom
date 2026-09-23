@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.timeutil import now_iso
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
@@ -39,7 +41,6 @@ _CRASH_TIMESTAMP_CAP: int = 200
 _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
-_now_iso = _kernel_decision_settings._now_iso
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
@@ -650,7 +651,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Last Coordinator-side exception caught by the tick-loop guard (gives postmortems a traceback).
     last_tick_exception: dict[str, Any] = field(default_factory=dict)
     pruned_families: list[str] = field(default_factory=list)
-    start_ts: str = field(default_factory=_now_iso)
+    start_ts: str = field(default_factory=now_iso)
     max_minutes: int = 0
     # Absolute unix deadline for a bounded session. Stamped once from
     # ``start_ts + max_minutes`` so a resume cannot reissue a full budget.
@@ -1492,15 +1493,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if is_valid_stop_reason(text):
             return self._commit_stop_reason(text)
         if strict is None:
-            strict_env = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_STRICT_STOP_REASON",
-                    "",
-                )
-                .strip()
-                .lower()
-            )
-            strict = strict_env in ("1", "true", "yes")
+            strict = env_bool("INFERENCE_OPTIMIZER_STRICT_STOP_REASON")
         if strict:
             raise ValueError(f"stop_reason={text!r} not in STOP_REASON_VOCAB ({sorted(STOP_REASON_VOCAB)!r})")
         # Lenient: map to "unknown" and warn.
@@ -1518,7 +1511,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Write a validated stop reason, stamping the end time on the first one."""
         self.stop_reason = reason
         if not self.stop_ts:
-            self.stop_ts = _now_iso()
+            self.stop_ts = now_iso()
         return reason
 
     # escalate hint plumbing
@@ -1539,7 +1532,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_consumed_escalate_hint = hint
-        self.last_consumed_escalate_hint_ts = _now_iso()
+        self.last_consumed_escalate_hint_ts = now_iso()
         return hint
 
     def discard_pending_escalate_hint(self) -> str:
@@ -1549,7 +1542,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         self.last_discarded_escalate_hint = hint
-        self.last_discarded_escalate_hint_ts = _now_iso()
+        self.last_discarded_escalate_hint_ts = now_iso()
         return hint
 
     # phase machine writer (Coordinator-only, single writer)
@@ -1714,7 +1707,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Persist a compact Coordinator exception summary for postmortems."""
         entry = {
             "tick": int(tick or 0),
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "stage": str(stage or ""),
             "agent": str(agent or ""),
             "type": str(exc_type or ""),
@@ -2017,7 +2010,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         except (TypeError, ValueError):
             key_metric = None
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "task_id": str(task_id or ""),
             "status": str(status or ""),
             "decision": str(decision or ""),
@@ -2057,7 +2050,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Append one rich failure record to :attr:`last_action_failures` for self-correction; invoked for EVERY unpromotable task kind, unlike :meth:`record_action_attempt`."""
         result = result or {}
         entry: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             **self._common_result_fields(result),
@@ -2197,7 +2190,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if peak_tput <= 0:
             return {}
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         ceiling = build_roofline_snapshot(
             snapshot_id=None,
             ts=ts_iso,
@@ -2307,7 +2300,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(task_groups, list):
             task_groups = []
 
-        ts_iso = _now_iso()
+        ts_iso = now_iso()
         self.last_trace_analyze = {
             "trace_input": str(trace_input),
             "steady_state_trace": str(steady_state_trace),
@@ -2613,7 +2606,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not isinstance(result, dict):
             return
         self.last_conc_sweep = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "status": str(result.get("status") or "succeeded"),
             "skip_reason": str(result.get("skip_reason") or ""),
             "was_skipped": bool(result.get("was_skipped", False)),

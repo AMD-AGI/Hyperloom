@@ -490,30 +490,6 @@ def registry_mismatch_modules(*texts: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(modules))
 
 
-def csv_kernel_names(
-    csv_path: Path,
-    *,
-    skip_libtypes: frozenset[str] | None = None,
-) -> set[str]:
-    """Return non-empty ``kernelName`` values from a tuned GEMM CSV."""
-    names: set[str] = set()
-    try:
-        with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
-                name = str(row.get("kernelName") or "").strip()
-                if not name:
-                    continue
-                libtype = str(row.get("libtype") or "").strip().lower()
-                if skip_libtypes and libtype in skip_libtypes:
-                    continue
-                if skip_libtypes and not libtype and name.startswith("_ZN"):
-                    continue
-                names.add(name)
-    except OSError:
-        return set()
-    return names
-
-
 def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
     """Serving ``module_*.so`` that should contain this JIT kernel name."""
     lib = str(libtype or "").strip().lower() or "ck"
@@ -791,7 +767,6 @@ __all__ = [
     "NON_JIT_SO_LIBTYPES",
     "clean_stale_aiter_locks",
     "csv_jit_kernel_rows",
-    "csv_kernel_names",
     "csvs_aiter_will_load",
     "drop_serving_so_for_envs",
     "find_aiter_baton_wait",

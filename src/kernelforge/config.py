@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
 
+from hyperloom.common.env import env_bool, env_flag
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -30,14 +31,6 @@ def _warn_removed_max_turns_env() -> None:
         "KERNEL_AGENTS_MAX_TURNS is no longer supported and will be "
         "ignored; forge-loop derives its turn cap from --max-hours"
     )
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    """Parse one conventional boolean environment variable."""
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -260,15 +253,11 @@ class Config:
         # direct construction or `from_env(include_mori_kb=...)`) always
         # wins over the environment.
         if self.include_mori_kb is None:
-            self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
+            self.include_mori_kb = env_bool("KERNELFORGE_INCLUDE_MORI_KB")
         if self.defer_knowledge_maps is None:
             # Defaults on, so the env var reads as an opt-*out*: anything that
             # is not an explicit "off" leaves the pointers in place.
-            self.defer_knowledge_maps = os.getenv("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", "").strip().lower() not in (
-                "0",
-                "false",
-                "no",
-            )
+            self.defer_knowledge_maps = env_flag("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", default=True)
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
@@ -336,7 +325,7 @@ class Config:
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),
             ),
-            agent_precheck=overrides.get("agent_precheck", _env_bool("FORGE_AGENT_PRECHECK", True)),
+            agent_precheck=overrides.get("agent_precheck", env_flag("FORGE_AGENT_PRECHECK", default=True)),
             agent_fallback_provider=overrides.get(
                 "agent_fallback_provider",
                 os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", "claude"),
@@ -345,7 +334,7 @@ class Config:
             if "agent_options" in overrides
             else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
             max_turns=int(overrides.get("max_turns", 500)),
-            specialist_probe=overrides.get("specialist_probe", _env_bool("FORGE_SPECIALIST_PROBE", True)),
+            specialist_probe=overrides.get("specialist_probe", env_flag("FORGE_SPECIALIST_PROBE", default=True)),
             specialist_probe_max=int(
                 overrides.get(
                     "specialist_probe_max",

@@ -11,6 +11,7 @@ import shutil
 import subprocess
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import strip_path_components
 from pathlib import Path
 from typing import Any
 
@@ -58,14 +59,6 @@ def _sanitize_git_index_lines(patch_text: str) -> tuple[str, int]:
     if not dropped:
         return patch_text, 0
     return "".join(kept), dropped
-
-
-def _strip_path_prefix(path: str, level: int) -> str:
-    """Drop ``level`` leading path components (mimics ``git apply -p<level>``)."""
-    if level <= 0:
-        return path
-    parts = path.split("/")
-    return "/".join(parts[level:]) if len(parts) > level else parts[-1]
 
 
 def _is_within(child: Path, root: Path) -> bool:
@@ -273,7 +266,7 @@ def _apply_patch_no_git(
 
     def _resolve_target(raw: str) -> tuple[Path | None, Path | None, str]:
         """Resolve a raw diff-header path to (rel, abs, error)."""
-        rel = Path(_strip_path_prefix(raw, detected_level))  # type: ignore[arg-type]
+        rel = Path(strip_path_components(raw, detected_level))  # type: ignore[arg-type]
         if rel.is_absolute() or ".." in rel.parts:
             return None, None, f"patch target escapes framework root: {raw}"
         abs_path = (framework_root_resolved / rel).resolve()
@@ -559,5 +552,4 @@ __all__ = [
     "_is_within",
     "_revert_patches_no_git",
     "_sanitize_git_index_lines",
-    "_strip_path_prefix",
 ]

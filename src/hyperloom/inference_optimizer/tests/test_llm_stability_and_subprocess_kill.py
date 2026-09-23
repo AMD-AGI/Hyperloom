@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.roles._llm_stability_env import (
+from hyperloom.common.llm_stability_env import (
     DEFAULT_API_TIMEOUT_MS,
     apply_llm_stability_env,
 )

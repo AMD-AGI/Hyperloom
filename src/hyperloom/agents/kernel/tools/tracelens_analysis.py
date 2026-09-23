@@ -29,6 +29,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from hyperloom.inference_optimizer import framework_registry
+
 try:
     from hyperloom.orchestrator.framework.paths import (
         resolve_flydsl_source_roots as _resolve_flydsl_source_roots,
@@ -5522,60 +5524,6 @@ def build_notes(candidate: dict[str, Any]) -> str:
     return f"resolved source: {candidate['source_file']}"
 
 
-#: Mirrors of the registry, used only when that package is not importable
-#: (standalone invocation). Kept identical to the bypass route's copies; tests
-#: assert every one of them against the registry.
-_STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
-_STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
-
-
-def _is_scriptable_framework(framework: str | None) -> bool:
-    """Return whether ``framework`` is a server-less scriptable image framework.
-
-    Scriptable frameworks (e.g. xDiT diffusion) have no LLM decode steady-state
-    phase, so trace analysis uses the plain pytorch perf report + skips the
-    steady-state splitter. Prefers the canonical ``framework_registry``; falls
-    back to a name check so the tool stays usable when run standalone (outside
-    an importable ``inference_optimizer`` package).
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for scriptable image frameworks.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import is_scriptable
-
-        return is_scriptable(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_SCRIPTABLE
-
-
-def _has_diffusion_ceiling(framework: str | None) -> bool:
-    """Return whether an analytic diffusion ceiling is meaningful for ``framework``.
-
-    Scriptable does not imply diffusion: ``custom`` runs an operator-supplied
-    entrypoint whose model Hyperloom never inspects, so the config-derived
-    geometry the ceiling needs cannot be resolved, and a guessed one is worse
-    than none. Read from the registry rather than matched against a name, so the
-    next framework is classified when it is added rather than when someone
-    remembers this call site.
-
-    Args:
-        framework: Framework name (matched case-insensitively).
-
-    Returns:
-        bool: ``True`` for frameworks shipping a readable denoiser config.
-    """
-    try:
-        from hyperloom.inference_optimizer.framework_registry import has_denoiser_config
-
-        return has_denoiser_config(framework)
-    except ImportError:  # standalone invocation without the package installed.
-        return str(framework or "").strip().lower() in _STANDALONE_DENOISER_CONFIG
-
-
 def _load_gpu_timeline_rows(output_dir: Path) -> list[dict[str, str]]:
     """Read all rows from ``perf_report_csvs/gpu_timeline.csv``, empty if absent."""
     csv_path = output_dir / "perf_report_csvs" / "gpu_timeline.csv"
@@ -6668,7 +6616,7 @@ def write_reports(
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
     # blocks the per-kernel report.
     diffusion_roofline_path = ""
-    if _is_scriptable_framework(getattr(args, "framework", "")):
+    if framework_registry.is_scriptable(getattr(args, "framework", "")):
         try:
             tools_dir = str(Path(__file__).resolve().parent)
             if tools_dir not in sys.path:
@@ -6691,7 +6639,7 @@ def write_reports(
             # giving the workload roofline an absolute ideal-ms floor. Best-effort,
             # and only for frameworks whose denoiser config Hyperloom can read --
             # the trace-derived totals above need no such config and always ship.
-            if _has_diffusion_ceiling(getattr(args, "framework", "")):
+            if framework_registry.has_denoiser_config(getattr(args, "framework", "")):
                 try:
                     _model_dir = str(getattr(args, "model_path", "") or "").strip()
                     if not _model_dir:

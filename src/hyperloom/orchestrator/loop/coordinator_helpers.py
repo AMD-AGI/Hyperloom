@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_external_env_key,
@@ -48,7 +49,6 @@ __all__ = [
     "_MIN_KERNEL_ENGAGED_GAIN_PCT",
     "action_fits_time_budget",
     "baseline_benchmark_script",
-    "coerce_needs_gpu",
     "expected_action_cost_minutes",
     "measured_baseline_runtime_sec",
     "resolve_reactor_turn_timeout_sec",
@@ -77,13 +77,6 @@ def resolve_reactor_turn_timeout_sec(env: Mapping[str, str] | None = None) -> fl
         DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
     )
     return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-
-
-def coerce_needs_gpu(value: Any) -> bool:
-    """Coerce a ``needs_gpu`` specialist parameter value to a Python bool."""
-    if isinstance(value, str):
-        return value.strip().lower() in ("1", "true", "yes", "on")
-    return bool(value)
 
 
 def format_exc_brief(exc: BaseException, limit: int | None = None) -> str:
@@ -219,7 +212,7 @@ _MULTI_VALUE_SGLANG_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-_DEFAULT_ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
+ROOFLINE_WATERMARK_RATIO: float = 1.10  # 10% step over last roofline
 
 # Consecutive roofline failures tolerated before the watermark stops re-arming.
 _MAX_ROOFLINE_FAILURE_RETRIES: int = 3
@@ -366,12 +359,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     if "enable_torch_compile" not in out:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
         if isinstance(tc_env, str):
-            out["enable_torch_compile"] = tc_env.strip().lower() in (
-                "1",
-                "true",
-                "yes",
-                "on",
-            )
+            out["enable_torch_compile"] = is_truthy(tc_env)
     return out
 
 
@@ -401,11 +389,6 @@ def approved_proposal_idempotency_key(action_name: str, params: dict[str, Any] |
         usedforsecurity=False,
     ).hexdigest()[:16]
     return f"approved:{action_name}:{digest}"
-
-
-def _resolve_roofline_watermark_ratio() -> float:
-    """Resolve the roofline watermark ratio."""
-    return _DEFAULT_ROOFLINE_WATERMARK_RATIO
 
 
 def _merge_cumulative_extra_server_args(

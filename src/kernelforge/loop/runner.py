@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
 
+from hyperloom.common.unified_diff import touched_paths
+
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
@@ -1364,14 +1366,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             return ""
         import re as _re
 
-        files: list[str] = []
-        for ln in diff.splitlines():
-            if ln.startswith("diff --git "):
-                parts = ln.split()
-                if len(parts) >= 4:
-                    name = parts[3][2:] if parts[3].startswith("b/") else parts[3]
-                    files.append(name)
-        stat_lines = [f"{name} | changed" for name in files[:4]]
+        stat_lines = [f"{name} | changed" for name in touched_paths(diff)[:4]]
         signal = _re.compile(
             r"BLOCK_|VEC_|WARP|WAVE|tile|fastmath|const_expr|num_stage|num_warp|"
             r"occupancy|def |return |Vec\(|\.to\(|=|if ",

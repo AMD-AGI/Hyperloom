@@ -31,6 +31,16 @@ def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+# Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
+GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+
+
+def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
+    """Sort key putting the highest-severity, then least-attempted, then oldest gap first."""
+    severity = GAP_SEVERITY_RANK.get(str(gap.get("severity") or "").lower(), 0)
+    return (-severity, len(gap.get("attempts") or []), str(gap.get("first_seen_ts") or ""))
+
+
 class _PhaseStateMixin:
     def record_specialist_round(self, entry: dict[str, Any]) -> None:
         """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
@@ -126,7 +136,6 @@ class _PhaseStateMixin:
         target = self._anchor_for(anchor)
         if not target:
             return ""
-        severity_rank = {"high": 3, "medium": 2, "low": 1}
         matches: list[tuple[tuple[int, int, str], str]] = []
         for g in self.gaps:
             if not isinstance(g, dict):
@@ -136,10 +145,7 @@ class _PhaseStateMixin:
                 continue
             if self._anchor_for(str(g.get("domain_hint") or "")) != target:
                 continue
-            sev = severity_rank.get(str(g.get("severity") or "").lower(), 0)
-            attempts = len(g.get("attempts") or [])
-            first_seen = str(g.get("first_seen_ts") or "")
-            matches.append(((-sev, attempts, first_seen), cid))
+            matches.append((gap_actionability_key(g), cid))
         if not matches:
             return ""
         matches.sort(key=lambda m: m[0])
@@ -160,7 +166,7 @@ class _PhaseStateMixin:
             "action": str(action or ""),
             "task_id": str(task_id or ""),
             "delta_pct": delta_pct,
-            "ts": _shared_state_module()._now_iso(),
+            "ts": _shared_state_module().now_iso(),
         }
         self.intervention_mix.append(entry)
         cap = _shared_state_module()._INTERVENTION_MIX_CAP
@@ -360,7 +366,7 @@ class _PhaseStateMixin:
             "accuracy": variant.get("accuracy"),
             "stack_index": variant.get("stack_index"),
             "accepted_at_round": str(variant.get("accepted_at_round") or ""),
-            "ts": str(variant.get("ts") or _shared_state_module()._now_iso()),
+            "ts": str(variant.get("ts") or _shared_state_module().now_iso()),
             "provenance": str(variant.get("provenance") or "llm_direct"),
             # Attribute the win to the macro-cycle it landed in.
             "cycle": int(getattr(self, "macro_cycle", 0) or 0),
@@ -411,7 +417,7 @@ class _PhaseStateMixin:
             return False
         rows = list(getattr(self, "authored_framework_levers", None) or [])
         by_switch = {str(r.get("switch") or ""): i for i, r in enumerate(rows) if isinstance(r, dict)}
-        now = _shared_state_module()._now_iso()
+        now = _shared_state_module().now_iso()
         changed = False
         for entry in switches:
             if not isinstance(entry, dict):

@@ -11,17 +11,11 @@ from hashlib import sha1
 from typing import Any
 
 from ..collaborator import CoordinatorCollaborator
+from ._shared_state.phase_state import _shared_state_module
 
 log = _logging.getLogger(__name__)
 
 __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
-
-
-def _shared_state_module():
-    """Import parent shared_state lazily to avoid a module-level cycle."""
-    from . import shared_state
-
-    return shared_state
 
 
 class GapsStateMixin:
@@ -45,7 +39,7 @@ class GapsStateMixin:
         if not cid:
             return {}
         ss = _shared_state_module()
-        now = ss._now_iso()
+        now = ss.now_iso()
         existing = self.find_gap(cid)
         if existing is None:
             merged: dict[str, Any] = {
@@ -105,11 +99,11 @@ class GapsStateMixin:
             return None
         attempts = list(gap.get("attempts") or [])
         ss = _shared_state_module()
-        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss._now_iso())})
+        attempts.append(dict(attempt) | {"ts": str(attempt.get("ts") or ss.now_iso())})
         if len(attempts) > ss._GAPS_ATTEMPTS_HISTORY:
             attempts = attempts[-ss._GAPS_ATTEMPTS_HISTORY :]
         gap["attempts"] = attempts
-        gap["last_updated_ts"] = ss._now_iso()
+        gap["last_updated_ts"] = ss.now_iso()
         return gap
 
 

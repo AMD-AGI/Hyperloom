@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir
+from hyperloom.inference_optimizer.agentx.deploy import agentx_asset_dir, deploy_agentx_assets
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="bash-driven; POSIX only")
 
@@ -222,12 +222,10 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     bench = tmp_path / "benchmarks"
     bind = tmp_path / "bin"
     res = tmp_path / "res"
-    bench.mkdir()
     bind.mkdir()
     res.mkdir()
-    shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
-    shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
-    shutil.copy2(agentx_asset_dir() / "aiperf_phase_gate.py", bench / "real_phase_gate.py")
+    deploy_agentx_assets(bench)
+    (bench / "aiperf_phase_gate.py").rename(bench / "real_phase_gate.py")
     (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))

@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -247,6 +249,61 @@ def _load_json(path: Path) -> dict[str, Any]:
     from hyperloom.common.jsonio import read_json
 
     return read_json(path, default={}, require_dict=True)
+
+
+_SpanBuilder = Callable[[dict[str, Any]], tuple[str, dict[str, Any]]]
+
+
+def _specialist_intel_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """``intel:<tool>`` span for one specialist intel/tool call."""
+    tool = str(row.get("tool") or "tool")
+    return f"intel:{tool}", {
+        "kind": "specialist_intel",
+        "tool": tool,
+        "task_id": row.get("task_id"),
+        "turn": row.get("turn"),
+        "query": row.get("query"),
+    }
+
+
+def _forge_step_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """``forge:*`` span for one Kernel-Forge loop step."""
+    if str(row.get("kind") or "iteration") == "summary":
+        return "forge:summary", {
+            "kind": "forge_summary",
+            "kernel_id": row.get("kernel_id"),
+            "iterations": row.get("iterations"),
+            "kept": row.get("kept"),
+            "speedup": row.get("speedup"),
+            "improved": row.get("improved"),
+            "termination_reason": row.get("termination_reason"),
+        }
+    return f"forge:iter:{row.get('iteration')}", {
+        "kind": "forge_iteration",
+        "kernel_id": row.get("kernel_id"),
+        "iteration": row.get("iteration"),
+        "decision": row.get("decision"),
+        "wall_ms": row.get("wall_ms"),
+        "snr_db": row.get("snr_db"),
+        "validation_passed": row.get("validation_passed"),
+        "pmc_diagnosis": row.get("pmc_diagnosis"),
+    }
+
+
+def _gemm_tuning_span(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """``gemm_tuning:<engine>`` span for one deterministic GEMM-tuning run."""
+    engine = str(row.get("engine") or row.get("backend") or "unknown")
+    return f"gemm_tuning:{engine}", {
+        "kind": "gemm_tuning",
+        "engine": engine,
+        "backend": row.get("backend"),
+        "decision": row.get("decision"),
+        "micro_decision": row.get("micro_decision"),
+        "best_speedup": row.get("best_speedup"),
+        "precision": row.get("precision"),
+        "framework": row.get("framework"),
+        "tuned_file": row.get("tuned_file"),
+    }
 
 
 class LangfuseEmitter:
@@ -544,13 +601,16 @@ class LangfuseEmitter:
             return
         # ``client_flush`` is last and is a step like any other: everything before it only hands observations to the
         # SDK's buffer, so a failed final flush means nothing reached Langfuse and has to be retried.
+        kb_backfills: dict[str, tuple[Callable[[Path], Path], str, str, _SpanBuilder]] = {
+            "recipe_kb_audit": (recipe_snapshot_audit_jsonl, "recipe_audit_read", "recipe_kb", self._recipe_audit_span),
+            "specialist_intel": (specialist_intel_path, "specialist_intel_read", "specialist", _specialist_intel_span),
+            "forge_steps": (forge_steps_path, "forge_steps_read", "forge", _forge_step_span),
+            "gemm_tuning": (gemm_tuning_steps_path, "gemm_tuning_read", "gemm_tuning", _gemm_tuning_span),
+        }
         steps: dict[str, Any] = {
             "pending_halves": self._flush_pending_halves,
             "ext_shards": self._flush_ext_shards,
-            "recipe_kb_audit": self._flush_recipe_kb_audit,
-            "specialist_intel": self._flush_specialist_intel,
-            "forge_steps": self._flush_forge_steps,
-            "gemm_tuning": self._flush_gemm_tuning,
+            **{name: functools.partial(self._backfill_kb_spans, *spec) for name, spec in kb_backfills.items()},
             "decision_scores": self._flush_decision_scores,
             "close_spans": self._close_spans,
             "client_flush": self._flush_client,
@@ -785,102 +845,25 @@ class LangfuseEmitter:
         if unsent:
             raise RuntimeError(f"{unsent} ext-shard row(s) could not be sent")
 
-    def _flush_recipe_kb_audit(self) -> None:
-        """Backfill recipe-KB reads and writes from the audit log."""
-        rows = _load_jsonl(recipe_snapshot_audit_jsonl(self.session_dir))
-        for row in rows:
-            self._counts["recipe_audit_read"] += 1
-            if lfmap.recipe_audit_is_write(row):
-                self._counts["recipe_write_audit_read"] += 1
-                name, metadata = lfmap.recipe_write_span(row)
-            else:
-                name, metadata = lfmap.recipe_read_span(row)
-            self.record_kb_span(
-                name=name,
-                agent="recipe_kb",
-                output=row,
-                metadata=metadata,
-                ts=row.get("ts"),
-            )
+    def _backfill_kb_spans(
+        self,
+        path_for: Callable[[Path], Path],
+        counter: str,
+        agent: str,
+        span_for: _SpanBuilder,
+    ) -> None:
+        """Backfill every row of one session audit log as a KB span under ``agent``."""
+        for row in _load_jsonl(path_for(self.session_dir)):
+            self._counts[counter] += 1
+            name, metadata = span_for(row)
+            self.record_kb_span(name=name, agent=agent, output=row, metadata=metadata, ts=row.get("ts"))
 
-    def _flush_specialist_intel(self) -> None:
-        """Backfill specialist intel/tool calls as per-call ``intel:<tool>`` spans."""
-        rows = _load_jsonl(specialist_intel_path(self.session_dir))
-        for row in rows:
-            self._counts["specialist_intel_read"] += 1
-            tool = str(row.get("tool") or "tool")
-            self.record_kb_span(
-                name=f"intel:{tool}",
-                agent="specialist",
-                output=row,
-                metadata={
-                    "kind": "specialist_intel",
-                    "tool": tool,
-                    "task_id": row.get("task_id"),
-                    "turn": row.get("turn"),
-                    "query": row.get("query"),
-                },
-                ts=row.get("ts"),
-            )
-
-    def _flush_forge_steps(self) -> None:
-        """Backfill the Kernel-Forge loop's key steps as ``forge:*`` spans."""
-        for row in _load_jsonl(forge_steps_path(self.session_dir)):
-            self._counts["forge_steps_read"] += 1
-            kind = str(row.get("kind") or "iteration")
-            if kind == "summary":
-                name = "forge:summary"
-                metadata = {
-                    "kind": "forge_summary",
-                    "kernel_id": row.get("kernel_id"),
-                    "iterations": row.get("iterations"),
-                    "kept": row.get("kept"),
-                    "speedup": row.get("speedup"),
-                    "improved": row.get("improved"),
-                    "termination_reason": row.get("termination_reason"),
-                }
-            else:
-                name = f"forge:iter:{row.get('iteration')}"
-                metadata = {
-                    "kind": "forge_iteration",
-                    "kernel_id": row.get("kernel_id"),
-                    "iteration": row.get("iteration"),
-                    "decision": row.get("decision"),
-                    "wall_ms": row.get("wall_ms"),
-                    "snr_db": row.get("snr_db"),
-                    "validation_passed": row.get("validation_passed"),
-                    "pmc_diagnosis": row.get("pmc_diagnosis"),
-                }
-            self.record_kb_span(
-                name=name,
-                agent="forge",
-                output=row,
-                metadata=metadata,
-                ts=row.get("ts"),
-            )
-
-    def _flush_gemm_tuning(self) -> None:
-        """Backfill each deterministic GEMM-tuning run as a ``gemm_tuning:*`` span."""
-        for row in _load_jsonl(gemm_tuning_steps_path(self.session_dir)):
-            self._counts["gemm_tuning_read"] += 1
-            engine = str(row.get("engine") or row.get("backend") or "unknown")
-            self.record_kb_span(
-                name=f"gemm_tuning:{engine}",
-                agent="gemm_tuning",
-                output=row,
-                metadata={
-                    "kind": "gemm_tuning",
-                    "engine": engine,
-                    "backend": row.get("backend"),
-                    "decision": row.get("decision"),
-                    "micro_decision": row.get("micro_decision"),
-                    "best_speedup": row.get("best_speedup"),
-                    "precision": row.get("precision"),
-                    "framework": row.get("framework"),
-                    "tuned_file": row.get("tuned_file"),
-                },
-                ts=row.get("ts"),
-            )
+    def _recipe_audit_span(self, row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Name + metadata for one recipe-KB read or write audit row."""
+        if lfmap.recipe_audit_is_write(row):
+            self._counts["recipe_write_audit_read"] += 1
+            return lfmap.recipe_write_span(row)
+        return lfmap.recipe_read_span(row)
 
     def _flush_decision_scores(self) -> None:
         """Convert each decision_trace row into Langfuse Score(s)."""
