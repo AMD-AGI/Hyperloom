@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
@@ -694,11 +695,11 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
     )
     out = coord.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkeypatch) -> None:
-    """The REMOTE sink specifically -- the one _kb_amend_recipe cannot reach."""
+def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None:
+    """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -714,18 +715,117 @@ def test_finalize_recipe_is_skipped_under_agentx_in_remote_mode(tmp_path, monkey
         kb_disabled=False,
     )
 
-    def _must_not_run(*_a, **_k):
-        raise AssertionError("AgentX finalize reached the REMOTE Recipe sink")
+    calls = []
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            calls.append((canonical_id, state, session_id))
+            return SimpleNamespace(
+                status="written",
+                reason="",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="interactivity_gain_pct",
+                primary_value=20.0,
+            )
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
-        _must_not_run,
+        lambda: _Remote(),
+    )
+    out = coord.finalize_recipe_and_journal(source="close")
+    assert out["status"] == "written"
+    assert calls and calls[0][0].startswith("agentx:")
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert audit["result"]["primary_metric"] == "interactivity_gain_pct"
+    assert audit["result"]["primary_value"] == 20.0
+    assert "best_throughput" not in audit["result"]
+
+
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+    state = coord.shared_state
+    state.current_best = {"name": "a+b", "extra_server_args": "--page-size 32", "tput": 120.0}
+    state.optimization_stack = [
+        {"action": "explore", "variant_name": "a"},
+        {"action": "explore", "variant_name": "b"},
+    ]
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+
+    def _must_not_write():
+        raise AssertionError("an unvalidated AgentX stack reached the remote KB")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_write,
+    )
+
+    out = coord.finalize_recipe_and_journal(source="close")
+
+    assert out["reason"] == "unvalidated_recipe_stack"
+    assert out["result_type"] == "unvalidated_recipe"
+
+
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+
+    class _Remote:
+        def write(self, canonical_id, state, *, session_id):
+            return SimpleNamespace(
+                status="skipped",
+                reason="no_new_keep_or_pure_warm_replay",
+                canonical_id=canonical_id,
+                session_id=session_id,
+                primary_metric="",
+                primary_value=0.0,
+            )
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        lambda: _Remote(),
     )
     out = coord.finalize_recipe_and_journal(source="close")
     assert out["status"] == "skipped"
-    assert out["reason"] == "agentx"
-    # Not "disabled": telemetry must stay able to tell an AgentX skip from a KB that was actually down.
-    assert out["backend"] != "disabled"
+
+    from hyperloom.inference_optimizer.session.session_paths import (
+        recipe_snapshot_audit_jsonl,
+    )
+
+    audit = json.loads(recipe_snapshot_audit_jsonl(coord.session_dir).read_text(encoding="utf-8"))
+    assert "primary_metric" not in audit["result"]
+    assert "primary_value" not in audit["result"]
+    assert "best_throughput" not in audit["result"]
 
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
@@ -734,7 +834,7 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
     out = coord.finalize_recipe_and_journal(source="close")
-    assert out["reason"] == "agentx"
+    assert out["reason"] == "agentx_local_store_unsupported"
 
 
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
@@ -753,6 +853,8 @@ def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenKB:
+        mode = "local"
+
         def __getattr__(self, name: str):
             raise AssertionError(f"AgentX T0 anchor reached the recipe KB: {name}")
 

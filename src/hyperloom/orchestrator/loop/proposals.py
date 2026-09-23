@@ -183,6 +183,8 @@ class ProposalsCollaborator:
         precision = str(getattr(ss, "precision", "") or "")
         model_type = str(getattr(ss, "model_type", "") or "")
         architectures = getattr(ss, "model_architectures", None) or []
+        from hyperloom.common.perf_metric import agentx_active
+
         return recipe_canonical_id(
             model=workload,
             hardware=hw,
@@ -191,6 +193,7 @@ class ProposalsCollaborator:
             precision=precision,
             model_type=model_type,
             architectures=architectures,
+            scheme=("agentx" if agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) else "inference"),
         )
 
     def _read_local_recipe_row(self) -> dict[str, Any]:
@@ -291,19 +294,9 @@ class ProposalsCollaborator:
         config = getattr(getattr(self, "knowledge_plane", None), "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
-        # See agentx_kb_blocked for why; this is one of three sinks.
-        from hyperloom.orchestrator.actions.executors._workload_envs import (
-            agentx_kb_blocked,
-        )
+        from hyperloom.common.perf_metric import agentx_active
 
-        if agentx_kb_blocked(self.shared_state):
-            log.info(
-                "_kb_amend_recipe: skipped (AgentX). The recipe KB has no mode or "
-                "workload dimension, so an agentic-replay throughput would overwrite "
-                "a synthetic best_throughput and be tagged isl/osl=%s/%s.",
-                getattr(self.shared_state, "isl", "?"),
-                getattr(self.shared_state, "osl", "?"),
-            )
+        if agentx_active(benchmark_mode=getattr(self.shared_state, "benchmark_mode", "")):
             return
         try:
             cid = self._workload_canonical_id()

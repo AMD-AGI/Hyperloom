@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Current Hyperloom inference Recipe contract, reader, and CLOSE writer."""
+"""Hyperloom Recipe contract, reader, and CLOSE writer."""
 
 from __future__ import annotations
 
 import logging
-import math
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +20,7 @@ from .client import (
     _deactivate_destination,
 )
 from .models import (
+    KBSelectionProfile,
     RecipeScope,
     RemoteRecipeValidationError,
     RemoteWriteResult,
@@ -70,43 +70,41 @@ def write_final_remote_recipe(
         return RemoteWriteResult("disabled", "KB_STORE_URL/TOKEN not configured")
     if not has_new_keep(state):
         return RemoteWriteResult("skipped", "no_new_keep_or_pure_warm_replay", canonical_id, session_id)
-    current_best = getattr(state, "current_best", {}) or {}
-    try:
-        throughput = float(current_best.get("tput") or 0.0) if isinstance(current_best, dict) else 0.0
-    except (TypeError, ValueError):
-        throughput = 0.0
-    if not math.isfinite(throughput):
-        return RemoteWriteResult(
-            "skipped",
-            "nonfinite_optimized_throughput",
-            canonical_id,
-            session_id,
-        )
-    if throughput <= 0:
-        return RemoteWriteResult("skipped", "missing_optimized_throughput", canonical_id, session_id)
     try:
         scope = RecipeScope.from_state(state)
     except RemoteRecipeValidationError:
         return RemoteWriteResult("skipped", "invalid_recipe_scope", canonical_id, session_id)
+    try:
+        profile = KBSelectionProfile.from_state(state, scope=scope)
+    except RemoteRecipeValidationError as exc:
+        return RemoteWriteResult(
+            "skipped",
+            exc.reason or "invalid_recipe_selection_profile",
+            canonical_id,
+            session_id,
+        )
     with tempfile.TemporaryDirectory(prefix="hyperloom-remote-recipe-") as temporary:
         files_dir = Path(temporary) / "files"
         bundle = build_remote_knowledge(
             state,
             files_dir,
             sections=KnowledgeSections.from_env(),
+            metrics=profile.metrics,
         )
         return resolved.write_if_better(
             canonical_id,
             session_id,
             bundle,
-            scope=scope,
-            optimized_throughput=throughput,
+            scope=profile.scope,
+            primary_metric=profile.primary_metric,
+            primary_value=profile.primary_value,
+            objective_schema=profile.objective_schema,
             files_dir=files_dir,
         )
 
 
 class HyperloomRemoteKB:
-    """Public facade for Hyperloom's remote inference knowledge."""
+    """Public facade for remote Hyperloom Recipe knowledge."""
 
     def __init__(self, client: RemoteRecipeClient) -> None:
         self._client = client
@@ -125,7 +123,7 @@ class HyperloomRemoteKB:
         destination: str | Path,
         scope: RecipeScope,
     ) -> dict[str, Any] | None:
-        """Download the selected Recipe View for an inference identity."""
+        """Download the selected Recipe View for a Recipe identity."""
         return read_remote_recipe(
             identity,
             destination,
@@ -349,7 +347,7 @@ class RemoteWarmRecipeAdapter:
         while len(self._scanned_candidate_ids) < self.search_candidate_cap and pages_scanned < self.search_page_cap:
             has_more = False
             result = self._remote_kb.search_identities(
-                scheme="inference",
+                scheme=self._scope.identity_scheme,
                 match=translated,
                 hardware_in=hardware_in,
                 offset=offset,
@@ -365,7 +363,7 @@ class RemoteWarmRecipeAdapter:
                 if not isinstance(item, dict):
                     continue
                 canonical_id = str(item.get("canonical_id") or "").strip()
-                if not canonical_id.startswith("inference:"):
+                if not canonical_id.startswith(f"{self._scope.identity_scheme}:"):
                     continue
                 cached = self._candidate_rows.get(canonical_id)
                 if cached is not None:

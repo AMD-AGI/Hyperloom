@@ -49,6 +49,7 @@ RESULT_NO_NEW_KEEP = "no_new_keep_or_pure_warm_replay"
 RESULT_INVALID_THROUGHPUT = "invalid_throughput"
 RESULT_MISSING_THROUGHPUT = "missing_throughput"
 RESULT_UNVALIDATED_RECIPE = "unvalidated_recipe"
+RESULT_INVALID_SELECTION_PROFILE = "invalid_selection_profile"
 RESULT_EMPTY_REPLAY_MATERIAL = "empty_replay_material"
 RESULT_NOT_BETTER = "not_better_than_champion"
 RESULT_CHAMPION_NOT_PROMOTED = "champion_not_promoted"
@@ -595,6 +596,7 @@ __all__ = [
     "RESULT_CHAMPION_NOT_PROMOTED",
     "RESULT_CONFIGURATION_FAILED",
     "RESULT_EMPTY_REPLAY_MATERIAL",
+    "RESULT_INVALID_SELECTION_PROFILE",
     "RESULT_INVALID_SCOPE",
     "RESULT_INVALID_THROUGHPUT",
     "RESULT_KB_DISABLED",

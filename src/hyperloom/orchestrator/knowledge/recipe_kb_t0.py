@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     RecipeKB,
     cid_to_path_components,
@@ -967,11 +968,12 @@ def run_t0_anchor(
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
 
-    # The warm-start read is the fourth Recipe sink; see agentx_kb_blocked.
-    from hyperloom.orchestrator.actions.executors._workload_envs import agentx_kb_blocked
-
-    if agentx_kb_blocked(shared_state):
-        log.info("run_t0_anchor: skipping (AgentX); the recipe identity has no mode dimension")
+    # The local JSON store remains inference-only.
+    if (
+        agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
+        and str(getattr(kb, "mode", "") or "") != "remote"
+    ):
+        log.info("run_t0_anchor: local Recipe KB does not serve agentx identities")
         return
 
     sd = Path(session_dir)
@@ -1044,6 +1046,7 @@ def run_t0_anchor(
         precision=_precision or "",
         model_type=_model_type_val,
         architectures=_architectures_val,
+        scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
     )
 
     # Persist framework + framework_version so CLOSE/KEEP derives the same cid.
@@ -1162,6 +1165,9 @@ def run_t0_anchor(
     from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
 
     _arch_slug = _architectures_slug(_architectures_val)
+    _tgt_conc = getattr(shared_state, "conc", None)
+    _tgt_isl = None if cid.startswith("agentx:") else getattr(shared_state, "isl", None)
+    _tgt_osl = None if cid.startswith("agentx:") else getattr(shared_state, "osl", None)
 
     warm_point, warm_tier, warm_conf = _cascade_warm_start_search(
         kb,
@@ -1174,9 +1180,9 @@ def run_t0_anchor(
         fw_version=_fw_version,
         precision=_precision,
         warm_prefer=warm_prefer,
-        target_conc=getattr(shared_state, "conc", None),
-        target_isl=getattr(shared_state, "isl", None),
-        target_osl=getattr(shared_state, "osl", None),
+        target_conc=_tgt_conc,
+        target_isl=_tgt_isl,
+        target_osl=_tgt_osl,
     )
 
     # A bare T0 anchor (no best_config) demotes to seed_only.
@@ -1194,9 +1200,6 @@ def run_t0_anchor(
     current_remote_point = bool(
         isinstance(warm_point, Mapping) and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
     )
-    _tgt_conc = getattr(shared_state, "conc", None)
-    _tgt_isl = getattr(shared_state, "isl", None)
-    _tgt_osl = getattr(shared_state, "osl", None)
     # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
     # gate before it becomes the donor.
     if (
