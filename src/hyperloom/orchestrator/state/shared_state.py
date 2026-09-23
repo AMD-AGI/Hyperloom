@@ -459,6 +459,17 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
+    # Roofline CSV interface (CSV_INTERFACE_REFACTOR_PLAN.md §7). When ``roofline_csv_dir`` is set
+    # (``--roofline-csv-dir``), the analytical roofline CSVs are READ from that external directory
+    # (authored by an external MAIDAS program) and Hyperloom writes none — MAIDAS mode. Unset ⇒
+    # native-CSV mode: producers write the CSVs under ``<session_dir>/reports`` and read them there.
+    # ``roofline_csv_disabled`` (``--no-roofline-csv``) forces the stock JSON/state path (byte-identical
+    # rollback, no CSV involved).
+    roofline_csv_dir: str = ""
+    roofline_csv_disabled: bool = False
+    # In MAIDAS mode (``--roofline-csv-strict``), fail instead of falling back to native compute when an
+    # expected external roofline CSV is missing.
+    roofline_csv_strict: bool = False
     # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e) or "native" (per-kernel loop when
     # explicitly requested).
     kernel_optimizer: str = "geak"
@@ -2165,6 +2176,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             from ..kernel.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                write_ceiling_arm,
             )
             from ..kernel.roofline_snapshot import (
                 attach_perfmodel_breakdown,
@@ -2206,6 +2218,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         attach_perfmodel_breakdown(ceiling, self, arm="baseline")
 
         self.baseline_roofline_ceiling = ceiling
+        # CSV interface: in native mode, publish the baseline composed arms.
+        write_ceiling_arm(self, "baseline", breakdown)
         return ceiling
 
     def record_trace_analyze(
@@ -2325,6 +2339,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             trace_input=trace_input,
             kernel_roofline_path=kernel_roofline_path,
         )
+
+    def roofline_csv_read_dir(self) -> "Path | None":
+        """Directory to READ analytical roofline CSVs from, or ``None`` when disabled.
+
+        MAIDAS mode: the external ``roofline_csv_dir``. Native mode: the session
+        ``reports`` dir where this run's producers wrote them. ``None`` when
+        ``--no-roofline-csv`` selects the stock JSON/state path.
+        """
+        if self.roofline_csv_disabled:
+            return None
+        if self.roofline_csv_dir:
+            return Path(self.roofline_csv_dir)
+        session_dir = getattr(self, "_session_dir", None)
+        return (Path(session_dir) / "reports") if session_dir else None
+
+    def roofline_csv_write_dir(self) -> "Path | None":
+        """Directory to WRITE analytical roofline CSVs to in native mode, else ``None``.
+
+        ``None`` in MAIDAS mode (the external author writes them) and when disabled — a
+        ``None`` return is the producers' signal to skip the CSV write.
+        """
+        if self.roofline_csv_disabled or self.roofline_csv_dir:
+            return None
+        session_dir = getattr(self, "_session_dir", None)
+        return (Path(session_dir) / "reports") if session_dir else None
 
     def _read_session_roofline_report(
         self,
@@ -2459,6 +2498,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             from ..kernel.roofline_ceiling import (
                 RooflineBreakdown,
                 compute_roofline_breakdown_from_state,
+                write_ceiling_arm,
             )
 
             # Resolve which arm this snapshot measures first so the ceiling is anchored to the same arm as achieved.
@@ -2495,6 +2535,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             except Exception:  # noqa: BLE001 — ceiling is best-effort
                 pass
             peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
+            # CSV interface: in native mode, publish this arm's composed ceiling.
+            if peak_tput > 0:
+                write_ceiling_arm(self, snapshot_arm, breakdown)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).
             fw = str(getattr(self, "framework", "") or "")

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+from hyperloom.orchestrator.kernel import roofline_csv
 
 log = logging.getLogger(__name__)
 
@@ -1038,7 +1039,84 @@ def compute_roofline_breakdown_from_state(
     *,
     arm: str | None = None,
 ) -> RooflineBreakdown:
-    """Primary decode ceiling + T_mem/T_cmp side projections."""
+    """Primary decode ceiling + T_mem/T_cmp side projections.
+
+    CSV interface (CSV_INTERFACE_REFACTOR_PLAN.md §6.3): in MAIDAS mode
+    (``--roofline-csv-dir`` external) the composed ceiling arms are read from that
+    external ``roofline_ceiling.csv`` in place of the native computation below —
+    this is where an external MAIDAS Excel-composed ceiling enters. Native/disabled
+    modes compute the arms here as before; the native CSV *write* happens at the
+    two assembly sites (``shared_state`` baseline + per-cycle) via
+    :func:`write_ceiling_arm`, not on every call.
+    """
+    external = _external_ceiling_breakdown(state, arm)
+    if external is not None:
+        return external
+    return _compute_roofline_breakdown_native(state, arm=arm)
+
+
+def _external_ceiling_breakdown(state: Any, arm: str | None) -> RooflineBreakdown | None:
+    """Read a composed ceiling arm from an external (MAIDAS-authored) CSV, or ``None``.
+
+    Active only in MAIDAS mode (``state.roofline_csv_dir`` set) and when the arm row is
+    present with a usable ``peak_tok_per_sec``. Otherwise returns ``None`` so the caller
+    falls back to native compute (``--roofline-csv-strict`` turns a missing row into a
+    hard failure instead).
+    """
+    if not arm or not getattr(state, "roofline_csv_dir", ""):
+        return None
+    read_dir = state.roofline_csv_read_dir()
+    if read_dir is None:
+        return None
+    row = roofline_csv.read_ceiling(read_dir / "roofline_ceiling.csv").get(str(arm))
+    peak = row.get("peak_tok_per_sec") if row else None
+    if not row or not isinstance(peak, (int, float)) or peak <= 0:
+        if getattr(state, "roofline_csv_strict", False):
+            raise FileNotFoundError(
+                f"roofline-csv-strict: no usable ceiling arm {arm!r} in {read_dir}/roofline_ceiling.csv"
+            )
+        return None
+    mem = row.get("mem_tok_per_sec")
+    cmp = row.get("cmp_tok_per_sec")
+    bound_kind = row.get("bound_kind") or select_peak_and_bound(
+        float(mem or 0.0), float(cmp or 0.0)
+    )[1]
+    return RooflineBreakdown(float(mem or 0.0), float(cmp or 0.0), float(peak), str(bound_kind))
+
+
+def write_ceiling_arm(state: Any, arm: str | None, breakdown: RooflineBreakdown) -> None:
+    """Native-mode: upsert one composed ceiling arm into ``roofline_ceiling.csv``.
+
+    No-op when there is no native write dir (MAIDAS mode: the external author writes it;
+    ``--no-roofline-csv``: stock path). Called from the two assembly sites so the CSV is
+    written once per authoritative snapshot, not on every ``compute_*`` query.
+    """
+    if not arm:
+        return
+    write_dir = state.roofline_csv_write_dir()
+    if write_dir is None:
+        return
+    roofline_csv.write_ceiling(
+        [
+            {
+                "row_type": "arm",
+                "arm": str(arm),
+                "mem_tok_per_sec": breakdown.mem_tok_per_sec,
+                "cmp_tok_per_sec": breakdown.cmp_tok_per_sec,
+                "peak_tok_per_sec": breakdown.peak_tok_per_sec,
+                "bound_kind": breakdown.bound_kind,
+            }
+        ],
+        write_dir / "roofline_ceiling.csv",
+    )
+
+
+def _compute_roofline_breakdown_native(
+    state: Any,
+    *,
+    arm: str | None = None,
+) -> RooflineBreakdown:
+    """Native decode ceiling + T_mem/T_cmp side projections (the stock computation)."""
     runtime = resolve_runtime_workload(state, arm=arm)
     # Diffusion (xDiT) uses a distinct images/sec ceiling.
     if (runtime.framework or "").strip().lower() == "xdit":
