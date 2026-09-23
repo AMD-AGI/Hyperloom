@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from hyperloom.orchestrator.loop.coordinator import Coordinator, PendingProposal
+from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
 from hyperloom.orchestrator.state.task_registry import Task
@@ -127,28 +127,30 @@ async def test_integrate_patch_stays_denied_on_a_reject_verdict(session_dir: Pat
 
 
 @pytest.mark.asyncio
-async def test_dropping_a_patch_whose_specialist_is_gone_raises_an_alert(session_dir: Path) -> None:
-    """No specialist means no ownership evidence at all, so the drop stands.
+async def test_an_unownable_patch_is_refused_before_it_reaches_the_critic(session_dir: Path) -> None:
+    """Ownership is settled where the proposal is published, not after review.
 
-    It is terminal and unrecoverable, so an unattended run has to hear it.
+    A patch naming a specialist that does not exist has no ownership evidence
+    at all, so it never becomes a proposal and never costs a Critic turn.
     """
-    coord = _coordinator(session_dir, phase="KERNEL_AGENT")
+    coord = _coordinator(session_dir, phase="FRAMEWORK_AGENT")
     try:
-        pending = PendingProposal(
-            proposal_msg_id="prop-ownerless",
-            from_agent="coordinator",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload={"params": {"specialist_task_id": "missing-specialist"}},
+        await coord._handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={
+                    "action_name": "integrate_patch",
+                    "params": {"specialist_task_id": "missing-specialist"},
+                },
+            ),
         )
-        coord.state.pending_proposals[pending.proposal_msg_id] = pending
 
-        await coord._materialize_approved_proposal(pending)
-
+        assert list(coord.state.pending_proposals) == []
         assert await _integrate_tasks(coord) == []
-        assert coord.shared_state.get_specialist_patch_verdict("missing-specialist") == "owner_missing"
-        alerts = await coord.bus.tail(topic="alert", n=50)
-        assert [a.payload.get("specialist_task_id") for a in alerts] == ["missing-specialist"]
-        assert alerts[0].payload["severity"] == "high"
+        observations = await coord.bus.tail(topic="observation", n=20)
+        assert [o.payload.get("reason") for o in observations if o.payload.get("kind") == "proposal_rejected"] == [
+            "integrate_patch_owner_missing"
+        ]
     finally:
         await coord.stop()

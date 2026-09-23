@@ -1638,27 +1638,6 @@ async def test_materialize_explore_filters_grid(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_materialize_integrate_patch_rejects_missing_owner(
-    coord: Coordinator,
-) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    pending = _pending(
-        "integrate_patch",
-        {"params": {"specialist_task_id": "missing-specialist"}},
-        msg_id="prop-ownerless",
-    )
-    coord.state.pending_proposals[pending.proposal_msg_id] = pending
-
-    await coord._materialize_approved_proposal(pending)
-
-    assert not [task for task in await coord.tasks.queued() if task.kind == "integrate_patch"]
-    assert pending.proposal_msg_id not in coord.state.pending_proposals
-    assert coord.shared_state.get_specialist_patch_verdict("missing-specialist") == "owner_missing"
-    observations = await coord.bus.tail(topic="observation", n=10)
-    assert any(message.payload.get("reason") == "integrate_patch_owner_missing" for message in observations)
-
-
-@pytest.mark.asyncio
 async def test_materialize_sweep_stamps_base(coord: Coordinator) -> None:
     coord.shared_state.baseline_tput = 800.0
     coord.shared_state.current_best = {"tput": 900.0, "extra_server_args": "--tp 1"}
