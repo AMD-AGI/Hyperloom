@@ -123,6 +123,11 @@ dispatcher or fall back to local Recipe data. Runtime amendments are skipped
 and CLOSE performs one best-effort final write. Optional `GBRAIN_*` credentials
 remain available for Framework PR capabilities.
 
+CLOSE writes only a Recipe whose validated gain was measured on it, in both
+modes. When `current_best` changed after the last validation, CLOSE first runs
+one full-stack rebench; if the stack is still unvalidated afterwards, it
+records `unvalidated_recipe_stack` and writes nothing.
+
 Configuration replay requires an exact precision match. A bf16 run does not
 select an fp16 record, or vice versa, during degraded warm-start search. If an
 accepted owner patch disappears before staging, that owner section moves to

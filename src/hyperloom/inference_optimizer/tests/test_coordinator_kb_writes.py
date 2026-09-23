@@ -746,6 +746,44 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
     assert "best_throughput" not in audit["result"]
 
 
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    coord = _make_coordinator(tmp_path)
+    coord.knowledge_plane = SimpleNamespace(
+        config=KnowledgeConfig.from_env(
+            {
+                "KNOWLEDGE_STORE_MODE": "remote",
+                "KB_STORE_URL": "https://kb.test",
+                "KB_STORE_TOKEN": "token",
+            }
+        ),
+        kb_disabled=False,
+    )
+    state = coord.shared_state
+    state.current_best = {"name": "a+b", "extra_server_args": "--page-size 32", "tput": 120.0}
+    state.optimization_stack = [
+        {"action": "explore", "variant_name": "a"},
+        {"action": "explore", "variant_name": "b"},
+    ]
+    state.cumulative_gain_validated = 20.0
+    state.cumulative_gain_validated_stack_len = 1
+
+    def _must_not_write():
+        raise AssertionError("an unvalidated AgentX stack reached the remote KB")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.HyperloomRemoteKB.from_env",
+        _must_not_write,
+    )
+
+    out = coord.finalize_recipe_and_journal(source="close")
+
+    assert out["reason"] == "unvalidated_recipe_stack"
+    assert out["result_type"] == "unvalidated_recipe"
+
+
 def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
