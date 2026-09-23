@@ -67,7 +67,7 @@ calls it makes depends on the backend: the entry hook branches before any lane
 runs.
 
 ```python
-# 1. GEAK branch — the documented default. One whole-pipeline e2e run, then
+# 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
 if geak_enabled:                      # geak_selected(): order is not exactly `forge`
     await self._run_geak_kernel_phase(from_phase=from_phase)
@@ -146,26 +146,33 @@ The seven rules from the retired `kernel_agent.md` live in executable Python:
 
 ## Backend selection
 
-GEAK owns the KERNEL phase by default and decides kernel strategy internally.
-The per-kernel Forge backend is an opt-in:
+GEAK owns the KERNEL phase by default for SGLang/vLLM and decides kernel
+strategy internally. ATOM defaults to the per-kernel Forge backend at CLI launch:
 
-- **Default**: `geak`. It is the code default whenever
-  `KERNEL_OPT_BACKEND_ORDER` is unset (`_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
-  `orchestrator/kernel/request_handlers.py`), so no launcher has to set it. The
-  bare-metal installer additionally exports `${KERNEL_OPT_BACKEND_ORDER:-geak}`
-  and persists it into `.env`, and the Slurm launchers export the same
-  `:-geak` fallback into the job / container environment. `.env.template`
-  ships the line commented out.
-- **Forge (per-kernel)**: set `KERNEL_OPT_BACKEND_ORDER=forge` exactly. Any
-  other value (including `--backends` CLI flags, payload `backends` hints, or
-  `GEMM_TUNING_BACKEND`) doesn't enable Forge.
+- **Framework default**: with `--framework atom` and kernel optimization
+  enabled, the CLI fills an unset or blank `KERNEL_OPT_BACKEND_ORDER` with
+  `forge`. Other frameworks retain the handler's `geak` default
+  (`_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
+  `orchestrator/kernel/request_handlers.py`).
+- **Bare-metal setup**: preserves nonempty choices with process env > `.env`
+  precedence, but does not fill or persist a backend default. Existing `.env`
+  assignments, including `KERNEL_OPT_BACKEND_ORDER=geak`, are not automatically
+  migrated. To use the framework default, remove that assignment and unset the
+  shell variable. `.env.template` ships the line commented out.
+- **Slurm launchers**: still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` into
+  the job / container environment; their behavior is unchanged.
+- **Explicit selection**: only an exact, case-insensitive `forge` enables
+  per-kernel Forge. Other nonblank values, including `forge,geak`, retain GEAK;
+  `--backends` CLI flags, payload `backends` hints, and `GEMM_TUNING_BACKEND`
+  do not override this choice.
 
-`run_gemm_tuning_handler` also defaults to GEAK unless
-`KERNEL_OPT_BACKEND_ORDER=forge` is set. That default applies to an
-LLM-issued `run_gemm_tuning` REQUEST, which is dispatched inline whatever the
-backend. The KERNEL-**entry** GEMM tuning is a different matter: under the
-default `geak` backend it never fires at all, because `_on_enter_kernel` hands
-the phase to `_run_geak_kernel_phase` and returns before reaching it.
+`run_gemm_tuning_handler` also defaults to GEAK unless the effective
+`KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
+ATOM CLI default. That default applies to an LLM-issued `run_gemm_tuning`
+REQUEST, which is dispatched inline whatever the backend. The KERNEL-**entry**
+GEMM tuning is a different matter: under `geak` it never fires at all, because
+`_on_enter_kernel` hands the phase to `_run_geak_kernel_phase` and returns
+before reaching it.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
@@ -212,7 +219,7 @@ Required env vars:
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
-| `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
+| `KERNEL_OPT_BACKEND_ORDER` | CLI defaults unset/blank to `forge` for ATOM with kernel optimization enabled; otherwise code defaults to `geak`. Bare-metal setup only persists nonempty choices; Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Exact, case-insensitive `forge` enables per-kernel Forge; existing `.env` choices are retained |
 
 Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
 `FORGE_PATH` that used to be required here is removed and nothing reads it. The

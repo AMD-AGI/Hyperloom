@@ -33,9 +33,9 @@ _SGLANG_PARSER_SOURCE = (
 
 _ATOM_PARSER_SOURCE = (
     "def _build_parser():\n"
-    "    import argparse\n"
+    "    from atom.utils.arg_parser import FlexibleArgumentParser\n"
     "    from atom.model_engine.arg_utils import EngineArgs\n"
-    "    parser = argparse.ArgumentParser()\n"
+    "    parser = FlexibleArgumentParser()\n"
     "    EngineArgs.add_cli_args(parser)\n"
     "    return parser\n"
 )

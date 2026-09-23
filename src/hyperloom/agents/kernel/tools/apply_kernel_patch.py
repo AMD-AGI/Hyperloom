@@ -975,6 +975,35 @@ def _installed_aiter_runtime_root(target_file: Path) -> Path | None:
     return installed[0]
 
 
+def _aiter_package_root() -> Path | None:
+    """Resolve AITER without importing its GPU-initializing package."""
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.submodule_search_locations:
+        return Path(next(iter(spec.submodule_search_locations)))
+    return _isolated_aiter_pkg_root()
+
+
+def _aiter_checkout_root(target_file: Path) -> Path | None:
+    """Identify a source checkout through the installed runtime, not its basename."""
+    package = _aiter_package_root()
+    if package is None or package.parent.name in {"site-packages", "dist-packages"}:
+        return None
+    if not (package / "__init__.py").is_file() or not (package / "jit" / "__init__.py").is_file():
+        return None
+    meta = os.environ.get("AITER_META_DIR", "").strip()
+    source_root = Path(meta).absolute() if meta else package.parent
+    if not (source_root / "csrc").is_dir():
+        source_root = package.parent
+    if (source_root / "csrc").is_dir() and _within_root(target_file, source_root):
+        return source_root
+    if _within_root(target_file, package):
+        return package.parent
+    return None
+
+
 def _target_is_in_aiter_csrc(target_file: Path) -> bool:
     """Report whether a file resides under an ``aiter/csrc/`` tree.
 
@@ -986,7 +1015,10 @@ def _target_is_in_aiter_csrc(target_file: Path) -> bool:
         ``aiter_meta/csrc/`` (split-wheel) directory.
     """
     norm = str(target_file).replace(os.sep, "/")
-    return any(marker in norm for marker in _AITER_CSRC_MARKERS)
+    checkout = _aiter_checkout_root(target_file)
+    return any(marker in norm for marker in _AITER_CSRC_MARKERS) or (
+        checkout is not None and _within_root(target_file, checkout / "csrc")
+    )
 
 
 def _target_is_sglang_jit_source(target_file: Path) -> bool:
@@ -1009,7 +1041,11 @@ def _target_is_sglang_jit_source(target_file: Path) -> bool:
 def _target_uses_aiter_jit(target_file: Path) -> bool:
     """Return whether a source belongs to an installed/editable AITER runtime."""
     normalized = str(target_file).replace(os.sep, "/")
-    return _installed_aiter_runtime_root(target_file) is not None or "/sgl-workspace/aiter/" in normalized
+    return (
+        _installed_aiter_runtime_root(target_file) is not None
+        or "/sgl-workspace/aiter/" in normalized
+        or _aiter_checkout_root(target_file) is not None
+    )
 
 
 def _aiter_jit_build_dir() -> Path | None:
@@ -1019,16 +1055,21 @@ def _aiter_jit_build_dir() -> Path | None:
         The ``<aiter>/jit/build`` path, or ``None`` when aiter is not
         importable.
     """
-    try:
-        spec = importlib.util.find_spec("aiter")
-    except (ImportError, ValueError):
-        isolated = _isolated_aiter_pkg_root()
-        return isolated / "jit" / "build" if isolated is not None else None
-    if spec is None or not spec.submodule_search_locations:
-        isolated = _isolated_aiter_pkg_root()
-        return isolated / "jit" / "build" if isolated is not None else None
-    aiter_pkg = Path(list(spec.submodule_search_locations)[0])
-    return aiter_pkg / "jit" / "build"
+    package = _aiter_package_root()
+    if package is None:
+        return None
+    if "AITER_JIT_DIR" in os.environ:
+        override = os.environ["AITER_JIT_DIR"]
+        # AITER's mkdir("") fails: an explicit empty value is not a fallback.
+        return Path(override).absolute() / "build" if override else None
+    jit = package / "jit"
+    if not os.access(jit, os.W_OK):
+        jit = Path.home() / ".aiter" / "jit"
+        if not jit.is_dir():
+            # First import copies the package cache here, including old modules.
+            # It must be initialized before its contents can be invalidated.
+            return None
+    return jit / "build"
 
 
 def _invalidate_aiter_jit_build(
@@ -1057,50 +1098,65 @@ def _invalidate_aiter_jit_build(
         }
     jit_build = jit_build_dir or _aiter_jit_build_dir()
     if jit_build is None:
-        return {"status": "skipped", "reason": "aiter package not importable"}
-    if not jit_build.exists():
         return {
-            "status": "clean",
-            "reason": "aiter jit/build/ does not exist",
-            "src": str(jit_build),
+            "status": "skipped",
+            "reason": "AITER runtime JIT directory unavailable; correct AITER_JIT_DIR and initialize the runtime cache before applying patches",
         }
+    if jit_build.is_symlink():
+        return {"status": "failed", "error": f"JIT build leaf must not be a symlink: {jit_build}"}
+    # compile_ops imports jit/*.so before consulting build/. Both belong to one
+    # rollback transaction; leaving the served module in place bypasses re-JIT.
+    stamp = time.time_ns()
+    backup_path = backup_dir / f"jit_build_{stamp}"
+    modules_path = backup_dir / f"jit_modules_{stamp}"
+    moved: list[tuple[Path, Path]] = []
     try:
-        is_empty = not any(jit_build.iterdir())
-    except OSError as exc:
+        modules = (
+            sorted(path for path in jit_build.parent.iterdir() if path.suffix == ".so")
+            if jit_build.parent.exists()
+            else []
+        )
+        if any(not module.is_file() or module.is_symlink() for module in modules):
+            raise ValueError("AITER serving modules must be regular files")
+        build_existed = jit_build.exists()
+        record = {
+            "status": "ok" if build_existed or modules else "clean",
+            "src": str(jit_build),
+            "build_existed": build_existed,
+            "modules_invalidated": True,
+            "module_names": [module.name for module in modules],
+            "moved_at": utc_now(),
+        }
+        if not build_existed and not modules:
+            return record
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        if backup_path.exists() or modules_path.exists():
+            raise FileExistsError(f"JIT backup already exists: {backup_path}")
+        if build_existed:
+            shutil.move(str(jit_build), str(backup_path))
+            moved.append((jit_build, backup_path))
+            record["backup_path"] = str(backup_path)
+        if modules:
+            modules_path.mkdir()
+            record["modules_backup_path"] = str(modules_path)
+            for module in modules:
+                destination = modules_path / module.name
+                shutil.move(str(module), str(destination))
+                moved.append((module, destination))
+    except (OSError, shutil.Error, ValueError) as exc:
+        rollback_errors = []
+        for original, saved in reversed(moved):
+            try:
+                shutil.move(str(saved), str(original))
+            except (OSError, shutil.Error) as restore_error:
+                rollback_errors.append(str(restore_error))
         return {
             "status": "failed",
-            "error": f"failed to scan {jit_build}: {exc}",
+            "error": f"JIT cache invalidation failed: {exc}",
             "src": str(jit_build),
+            "rollback_errors": rollback_errors,
         }
-    if is_empty:
-        return {
-            "status": "clean",
-            "reason": "aiter jit/build/ is empty",
-            "src": str(jit_build),
-        }
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup_path = backup_dir / f"jit_build_{time.time_ns()}"
-    if backup_path.exists():
-        return {
-            "status": "failed",
-            "error": f"jit/build backup path already exists: {backup_path}",
-            "src": str(jit_build),
-        }
-    try:
-        shutil.move(str(jit_build), str(backup_path))
-    except (OSError, shutil.Error) as exc:
-        return {
-            "status": "failed",
-            "error": f"shutil.move failed: {exc}",
-            "src": str(jit_build),
-            "backup_path": str(backup_path),
-        }
-    return {
-        "status": "ok",
-        "src": str(jit_build),
-        "backup_path": str(backup_path),
-        "moved_at": utc_now(),
-    }
+    return record
 
 
 def _trusted_aiter_jit_build_dir(path: Path) -> bool:
@@ -1111,15 +1167,29 @@ def _trusted_aiter_jit_build_dir(path: Path) -> bool:
     """
     # A manifest path is untrusted: an unresolvable one reads as not trusted.
     try:
+        if path.name != "build" or path.is_symlink():
+            return False
         resolved = path.resolve()
+        parent = path.parent.resolve()
     except (OSError, RuntimeError):
         return False
     # Classify on the lexical path: site-packages is commonly a symlink, and the
     # resolved spelling no longer carries that marker.
     root = _installed_aiter_runtime_root(path) or _EDITABLE_AITER_ROOT
-    if resolved != (root / "aiter" / "jit" / "build").resolve():
-        return False
-    return (root / "aiter" / "__init__.py").is_file() and (root / "aiter" / "jit" / "__init__.py").is_file()
+    jit = root / "aiter" / "jit"
+    if parent == jit.resolve() and resolved == (jit / "build").resolve():
+        return (root / "aiter" / "__init__.py").is_file() and (jit / "__init__.py").is_file()
+    package = _aiter_package_root()
+    expected = _aiter_jit_build_dir()
+    return (
+        package is not None
+        and expected is not None
+        and not expected.is_symlink()
+        and parent == expected.parent.resolve()
+        and resolved == expected.resolve()
+        and (package / "__init__.py").is_file()
+        and (package / "jit" / "__init__.py").is_file()
+    )
 
 
 def _restore_aiter_jit_build(
@@ -1143,32 +1213,39 @@ def _restore_aiter_jit_build(
     Returns:
         A status dict with ``status`` of ``ok``, ``skipped``, or ``failed``.
     """
-    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") != "ok":
+    if not isinstance(jit_build_backup, dict) or jit_build_backup.get("status") not in {"ok", "clean"}:
         return {"status": "skipped", "reason": "no backup recorded"}
     src_raw = str(jit_build_backup.get("src") or "").strip()
     backup_raw = str(jit_build_backup.get("backup_path") or "").strip()
-    if not src_raw or not backup_raw:
+    modules_raw = str(jit_build_backup.get("modules_backup_path") or "").strip()
+    build_existed = jit_build_backup.get("build_existed", True)
+    if not src_raw or (build_existed and not backup_raw):
         return {"status": "skipped", "reason": "incomplete backup record"}
     src = Path(src_raw)
-    backup_path = Path(backup_raw)
-    if backup_root is not None and not _within_root(
-        backup_path,
-        Path(backup_root),
-    ):
-        return {
-            "status": "failed",
-            "error": f"untrusted jit/build backup path: {backup_path}",
-        }
+    backup_path = Path(backup_raw) if backup_raw else None
+    modules_backup = Path(modules_raw) if modules_raw else None
+    for saved in (backup_path, modules_backup):
+        if saved is None:
+            continue
+        if backup_root is not None and not _within_root(saved, Path(backup_root)):
+            return {"status": "failed", "error": f"untrusted jit/build backup path: {saved}"}
+        if not saved.is_dir():
+            return {"status": "failed", "error": f"backup path missing: {saved}"}
     # The manifest is untrusted at revert time; ``src`` is an ``rmtree`` target.
     # Only the strategy-pinned or importable aiter jit/build dir is legitimate.
     expected_raw = str(expected_jit_build_dir or "").strip()
     expected = Path(expected_raw) if expected_raw else _aiter_jit_build_dir()
-    if expected_raw and not _trusted_aiter_jit_build_dir(expected):
+    if expected is not None and not _trusted_aiter_jit_build_dir(expected):
         return {
             "status": "failed",
             "error": f"untrusted strategy jit/build dir: {expected}",
         }
-    if expected is None or src.resolve() != expected.resolve():
+    if (
+        expected is None
+        or src.is_symlink()
+        or src.parent.resolve() != expected.parent.resolve()
+        or src.resolve() != expected.resolve()
+    ):
         log.warning(
             "revert: skipping jit/build restore; recorded src %s does not match the "
             "strategy/import aiter jit/build dir %s (aiter reinstalled/relocated "
@@ -1180,23 +1257,24 @@ def _restore_aiter_jit_build(
             "status": "failed",
             "error": f"jit/build src {src} does not match expected dir {expected}",
         }
-    if not backup_path.exists():
-        return {
-            "status": "failed",
-            "error": f"backup path missing: {backup_path}",
-        }
-    if src.exists():
-        try:
-            shutil.rmtree(src)
-        except OSError as exc:
-            return {
-                "status": "failed",
-                "error": f"failed to clear regenerated jit/build/: {exc}",
-                "src": str(src),
-            }
     try:
+        modules = list(modules_backup.iterdir()) if modules_backup is not None else []
+        if any(not module.is_file() or module.is_symlink() or module.suffix != ".so" for module in modules):
+            return {"status": "failed", "error": "invalid serving-module backup"}
+        if "module_names" in jit_build_backup and sorted(module.name for module in modules) != sorted(
+            jit_build_backup["module_names"]
+        ):
+            return {"status": "failed", "error": "incomplete serving-module backup"}
+        if jit_build_backup.get("modules_invalidated"):
+            for module in src.parent.glob("*.so"):
+                module.unlink()
+        if src.exists():
+            shutil.rmtree(src)
         src.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(backup_path), str(src))
+        for module in modules:
+            shutil.copy2(module, src.parent / module.name)
+        if backup_path is not None:
+            shutil.move(str(backup_path), str(src))
     except (OSError, shutil.Error) as exc:
         return {
             "status": "failed",
@@ -1230,7 +1308,10 @@ def _target_is_in_aiter_cpp_itfs(target_file: Path) -> bool:
         ``True`` if the path is under an ``aiter/csrc/cpp_itfs/`` directory.
     """
     norm = str(target_file).replace(os.sep, "/")
-    return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS)
+    checkout = _aiter_checkout_root(target_file)
+    return any(marker in norm for marker in _AITER_CPP_ITFS_MARKERS) or (
+        checkout is not None and _within_root(target_file, checkout / "csrc" / "cpp_itfs")
+    )
 
 
 def _aiter_cpp_itfs_build_dir() -> Path:
@@ -1542,6 +1623,7 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     import_probes: list[str] = []
     installed_kernel = _installed_kernel_package(target_file)
     installed_aiter_root = _installed_aiter_runtime_root(target_file)
+    checkout_root = _aiter_checkout_root(target_file) if installed_aiter_root is None else None
 
     if "/sgl-workspace/aiter/" in lower:
         root = _EDITABLE_AITER_ROOT
@@ -1588,6 +1670,10 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
         # tree below. Recursively copying wheel .so/.co files here is redundant
         # and can consume gigabytes per integration attempt.
         artifact_roots = []
+    elif checkout_root is not None:
+        root = checkout_root
+        rebuild_mode = _REBUILD_MODE_RUNTIME_JIT
+        jit_build_dir = str(_aiter_jit_build_dir() or "")
     elif installed_kernel:
         root = installed_kernel[0]
         deploy_roots = _installed_kernel_deploy_roots(installed_kernel[0])
@@ -1597,7 +1683,12 @@ def _detect_strategy(target_file: Path) -> dict[str, Any]:
     # repo-relative descriptors against it, so a guessed parent writes the
     # optimized bytes beside the target instead of into it.
 
-    if suffix in PYTHON_SOURCE_SUFFIXES and installed_aiter_root is not None and _target_is_in_aiter_csrc(target_file):
+    if (
+        suffix in PYTHON_SOURCE_SUFFIXES
+        and (installed_aiter_root is not None or checkout_root is not None)
+        and rebuild_mode == _REBUILD_MODE_RUNTIME_JIT
+        and _target_is_in_aiter_csrc(target_file)
+    ):
         compiled = True
     elif suffix in PYTHON_SOURCE_SUFFIXES:
         compiled = False
@@ -1851,7 +1942,7 @@ def _runtime_jit_invalidation_error(
     expected_raw = str(strategy.get("jit_build_dir") or "").strip()
     actual_raw = str(result.get("src") or "").strip()
     if not expected_raw:
-        return "runtime-JIT strategy has no authoritative jit_build_dir"
+        return "runtime-JIT strategy has no authoritative jit_build_dir; correct AITER_JIT_DIR and initialize the runtime cache before applying patches"
     if not actual_raw or Path(actual_raw).resolve() != Path(expected_raw).resolve():
         return f"JIT invalidation did not inspect the strategy-pinned build dir {expected_raw}"
     if result.get("status") not in {"ok", "clean"}:
@@ -1978,7 +2069,9 @@ def revert_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     # Restore aiter jit/build/ (before multi-node fan-out) if apply moved it aside.
     jit_build_backup = manifest.get("jit_build_backup") or {}
     jit_build_restore: dict[str, Any] = {}
-    if jit_build_backup.get("status") == "ok":
+    if jit_build_backup.get("status") == "ok" or (
+        jit_build_backup.get("status") == "clean" and jit_build_backup.get("modules_invalidated")
+    ):
         strategy = manifest.get("strategy") or {}
         # Singular key is retained for manifests created by earlier releases.
         expected_jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
@@ -2099,6 +2192,7 @@ def finalize_kernel_patch(manifest_path: str | Path) -> dict[str, Any]:
     for key in ("jit_build_backup", "cpp_itfs_cache_backup"):
         record = manifest.get(key) or {}
         candidates.add(str(record.get("backup_path") or ""))
+        candidates.add(str(record.get("modules_backup_path") or ""))
 
     for raw in sorted(path for path in candidates if path):
         path = Path(raw)
@@ -2600,7 +2694,11 @@ def _apply_kernel_patch_snapshot(
 
     rebuild_strategies = _multi_root_strategies(write_paths)
     compiled = bool(rebuild_strategies)
-    jit_strategies = [strategy for strategy in rebuild_strategies if strategy.get("jit_build_dir")]
+    jit_strategies = [
+        strategy
+        for strategy in rebuild_strategies
+        if strategy.get("jit_build_dir") or strategy.get("rebuild_mode") == _REBUILD_MODE_RUNTIME_JIT
+    ]
     if len(jit_strategies) > 1:
         return {
             "status": "failed",

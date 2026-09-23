@@ -2313,10 +2313,9 @@ _default_workspace_root() {
 }
   user_data="${user_data:-$(_default_workspace_root)}"
   export USER_DATA_PATH="$user_data"
-  # Same precedence as USER_DATA_PATH above: the setup skill writes the backend
-  # into .env before this runs, so an unread .env would silently reset it to geak.
+  # Preserve explicit choices with env > .env precedence; leave an omitted backend
+  # empty so the CLI can apply its framework-specific default at launch.
   export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-$(read_dotenv_var KERNEL_OPT_BACKEND_ORDER)}"
-  export KERNEL_OPT_BACKEND_ORDER="${KERNEL_OPT_BACKEND_ORDER:-geak}"
 
   if [ -n "$DEPS_ROOT_ARG" ]; then
     export HYPERLOOM_DEPS_ROOT="$DEPS_ROOT_ARG"

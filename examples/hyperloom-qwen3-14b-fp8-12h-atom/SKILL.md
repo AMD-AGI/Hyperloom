@@ -1,191 +1,77 @@
 ---
 name: hyperloom-qwen3-14b-fp8-12h-atom
-description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on the ATOM serving framework with the per-kernel KernelForge backend. Use when the user wants the medium-length Hyperloom demo on ATOM rather than SGLang or vLLM.
+description: Run a 12-hour Hyperloom Qwen3-14B-FP8 optimization session on ATOM in an existing development environment or Docker, with KernelForge by default.
 ---
 
 # Hyperloom Qwen3-14B-FP8 12h Run (ATOM Framework)
 
-Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a 12-hour Qwen3-14B-FP8 demo on ATOM.
-
-This is the [`hyperloom-qwen3-14b-fp8-12h`](../hyperloom-qwen3-14b-fp8-12h/SKILL.md)
-demo moved onto a different **serving framework**. The workload, budget, and
-phase split are identical on purpose, so a run here stays directly comparable
-with the SGLang/vLLM variants of the same demo.
-
-Two things are pinned by this demo rather than inherited from `.env`:
-
-- `FRAMEWORK=atom` — the whole point of this variant. The other 12h demos read
-  whatever framework `.env` carries; this one does not.
-- `KERNEL_OPT_BACKEND_ORDER` — left unset. On ATOM the CLI defaults it to
-  `forge`, because GEAK's seam resolution is unproven on this backend.
-
-## Framework
-
-ATOM (AiTer Optimized Model) is an AMD out-of-tree serving engine. Hyperloom
-launches it as `python3 -m atom.entrypoints.openai_server` and talks to it over
-the same OpenAI-compatible surface it uses for SGLang and vLLM, so the phase
-structure, benchmarking, and reporting are unchanged.
-
-Set the framework in the environment that launches `optimize`, and confirm it
-before launch:
-
-```bash
-export FRAMEWORK=atom
-```
-
-**ATOM cannot be installed by the bare-metal installer.** `install_baremetal.sh`
-lists `atom` in its default `--frameworks` verification list, so Phase 1
-preflight passes on a host that already has ATOM. But `--install-framework`
-accepts only `none`, `sglang`, and `vllm` — there is no code path that installs
-ATOM. The ATOM layer must already be present, which in practice means running
-this demo from an ATOM container image (see [Run Mode](#run-mode)).
-
-### Server arguments
-
-ATOM needs no special launch flags for this model on MI300/MI355-class hardware.
-The following argument set was verified to boot Qwen3-14B-FP8 and serve
-completions at `-tp 1`:
-
-```
---model $MODEL_PATH -tp 1 --server-port <port> --max-model-len 8192
-```
-
-`--max-model-len 8192` leaves ample headroom over this demo's 1024 + 1024
-token budget. Do **not** copy the `--level 0 --block-size 64 --kv_cache_dtype bf16`
-flag set from ATOM's published `Qwen3-8B-FP8` recipe: those constraints belong to
-a small-VRAM gfx1201 consumer card and are not required here.
-
-If Hyperloom needs the arguments passed explicitly, supply them through the
-`--server-args` CLI flag. Do not export `EXTRA_ATOM_ARGS` in the launching shell
-and expect it to be read: that variable is the transport, not the knob — the
-optimizer writes `--server-args` into it inside each materialized Magpie YAML,
-so a value exported by hand is overwritten rather than merged.
-
-## Kernel Backend
-
-On ATOM the optimizer **defaults** `KERNEL_OPT_BACKEND_ORDER` to `forge`, so
-this demo needs no action here. Leave the variable unset and the CLI reports the
-choice at launch:
-
-```
-framework=atom: KERNEL_OPT_BACKEND_ORDER defaulted to 'forge'
-  (on atom GEAK must resolve a live rewrite seam; forge needs none)
-```
-
-This is not a preference. GEAK's own extraction rules forbid *guessing* a
-rewrite seam on a quantized, non-vLLM backend: it must grep the live server for
-the actual quant-apply or backend forward and use that verbatim. That path is
-sound in principle but unproven on ATOM, and the default phase split gives the
-kernel phase half the session — a poor place to find out. Forge works per kernel
-and needs no seam discovery at all, so it is the safer default here.
-
-Only a value you set yourself is kept. Setting anything other than `forge`
-(the opt-in is an **exact** match) hands the phase back to GEAK, and the CLI
-warns that its seam resolution is unproven here. Do not set it for this demo.
-
-Nothing else has to be installed or configured for the forge backend:
-
-- KernelForge is vendored into Hyperloom. There is no repository to clone and
-  no `FORGE_PATH` to point anywhere.
-- The runtime installer ensures the `claude_agent_sdk` Python package the forge
-  backend imports. It does **not** install the `claude` CLI binary that the SDK
-  drives. On an image that ships neither Node nor that binary, the SDK call
-  hangs until the caller's timeout rather than failing loudly, so check for it
-  before launching and install it if missing:
-
-  ```bash
-  command -v claude || npm install -g @anthropic-ai/claude-code
-  ```
-
-  Measured on `rocm/atom-dev:v0.1.7-rc0`: neither `node` nor `claude` is
-  present, and `install.sh` leaves it that way.
-- Forge reuses the LLM credentials setup already wrote. It reads
-  `CLAUDE_MODEL` / `CODEX_MODEL`, the same pair every other Hyperloom
-  component reads, so no separate key or model id is needed.
-
-Do **not** set the other `FORGE_*` variables. They are internal tuning knobs
-with working defaults; overriding them is not part of this demo.
-
-Write the framework into `.env` as well when the user wants it to persist across
-runs, so a `--resume-from` relaunch stays on ATOM:
-
-```bash
-FRAMEWORK=atom
-```
-
-Do **not** write `KERNEL_OPT_BACKEND_ORDER` into `.env` for this demo. Leaving
-it out is what lets the ATOM default apply; a value written there is treated as
-your choice and is kept, including on a `--resume-from` relaunch.
-
-Before launch, confirm `FRAMEWORK` is actually set in the launching shell and
-report it.
+Read `.env` and resolve `HYPERLOOM_SKILL_PATH`. Follow `@${HYPERLOOM_SKILL_PATH}`;
+if unset, use `@hyperloom/inference_optimizer/SKILL.md` (wheel installation) or
+`@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This ATOM variant
+uses the same workload and phase budgets as the
+[12h SGLang/vLLM example](../hyperloom-qwen3-14b-fp8-12h/SKILL.md).
 
 ## Run Mode
 
-Resolve the run mode before launching Hyperloom:
+Use **baremetal** to run directly in the development machine's existing ATOM
+Python environment, or **docker** to start an ATOM container there. A development
+platform that is itself a container still counts as baremetal when no additional
+Docker container is started. ATOM's unset/empty mode still defaults to **docker**;
+unlike the generic example, baremetal must be selected explicitly.
 
-1. If `HYPERLOOM_RUN_MODE=docker` or it is unset, run this demo in Docker. This
-   is the normal path for ATOM, because the installer cannot add the ATOM layer
-   to a bare-metal host.
-2. If `HYPERLOOM_RUN_MODE=baremetal`, only continue when ATOM is already
-   importable on the host. Verify it before launch and stop if it is not:
+### Execution shell
 
-   ```bash
-   python3 -c "import atom, os; print(os.path.dirname(atom.__file__))"
-   ```
-
-   Some ATOM images ship the engine inside a virtualenv rather than the system
-   interpreter, so check the interpreter that will actually launch the server.
-
-In docker mode:
-- If `hyperloom-setup` already ran, do **not** re-run setup on the host.
-- Read `HYPERLOOM_DOCKER_TARGET_HOST` from `.env` when present. If it names a
-  host different from `$(hostname)`, first SSH to that host and continue this
-  Docker setup there; do not start Docker on the login/current host.
-- Always run setup **inside the container** after `docker run`.
-- Pass `--install-framework none --yes` in the container. ATOM comes from the
-  image and cannot be installed by the script in any case. Do **not** use
-  `--skip-base-check` — let Phase 1 preflight validate the container
-  environment; `atom` is already in the default `--frameworks` list, so the
-  check passes on a correct image.
-- Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
-- `FRAMEWORK=atom` must be set **inside the container**, in the same
-  `docker exec` that launches `optimize`. Exporting it only on the host does not
-  reach the optimizer; the kernel-backend default is applied by the CLI itself,
-  so it needs no such handling.
-
-### Prior workload cleanup (required)
-
-Before any replacement launch after a failed or abandoned demo run (`docker run`,
-`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
-gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
-skip the user-approval step (#1314).
-
-This matters more on ATOM than on the other frameworks. The engine spawns
-multiprocessing workers that do not share the entrypoint in their command line,
-so a `pkill -f openai_server` reaches the leader and leaves the workers alive
-still holding VRAM — and the next launch then fails on a card that looks full.
-Signal the whole process group instead, and confirm the card is actually free
-before relaunching:
+Keep `USER_DATA_PATH` unchanged. If the parent shell marks it `readonly`, export
+it and run all subsequent environment/setup/runtime/launch blocks together in a
+new non-login Bash process:
 
 ```bash
-rocm-smi --showmemuse
-pgrep -af "openai_server|spawn_main"
+export USER_DATA_PATH
+bash --noprofile --norc
 ```
 
-Suggested Docker image:
+For non-interactive execution, feed those blocks to this process as a script or
+heredoc. A `( ... )` subshell retains readonly attributes and is not a substitute.
+Do not unset the isolation root or copy the child's environment back to the parent.
 
-- ATOM: `docker.io/rocm/atom-dev:v0.1.7-rc0`
-
-`rocm/atom-dev` is a public repository, so this tag pulls anonymously. Prefer
-this pinned tag over `latest`: `latest` tracks the newest nightly build and
-moves, which makes a run unreproducible.
-
-In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
-(or the current host when it is unset) before running setup or optimize:
+In the chosen workspace, load `.env` with caller exports taking precedence.
+Repeat this preamble in each new execution shell, including inside Docker:
 
 ```bash
 export REPO_ROOT="$(pwd -P)"
+# .env fills gaps; existing non-empty exports remain authoritative.
+_dotenv_prev="$(export -p | grep -v -e '=\"\"$' -e "=''\$")"
+set -a; [ ! -f "${REPO_ROOT}/.env" ] || . "${REPO_ROOT}/.env"; set +a
+eval "$_dotenv_prev"
+unset _dotenv_prev
+```
+
+### Baremetal
+
+After choosing direct execution, select the mode in that execution shell:
+
+```bash
+export HYPERLOOM_RUN_MODE=baremetal
+```
+
+Activate the existing ATOM environment, or select its executable with `PYTHON`.
+Continue with [Environment](#environment) below; do not run any Docker commands.
+
+### Docker container
+
+Only for `HYPERLOOM_RUN_MODE=docker` or an unset/empty mode: use the approved
+`HYPERLOOM_DOCKER_TARGET_HOST`, or the current development host if unset. Do not
+create containers or run setup/optimize on a login host. Reuse completed setup
+only in the actual execution environment, not a different host Python.
+
+The recorded MI355X environment used `docker.io/rocm/atom-dev:v0.1.7-rc0`; preserve
+an explicit `HYPERLOOM_IMAGE`. Other GPU/build combinations need validation.
+After approval, mount the workspace at the same absolute path. Add matching
+mounts for `USER_DATA_PATH` and any model directory outside the workspace:
+
+```bash
+export REPO_ROOT="$(pwd -P)"
+export HYPERLOOM_IMAGE="${HYPERLOOM_IMAGE:-docker.io/rocm/atom-dev:v0.1.7-rc0}"
 docker run -d \
   --name "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" \
   --shm-size "${HYPERLOOM_SHM_SIZE:-64g}" \
@@ -198,60 +84,162 @@ docker run -d \
   -f /dev/null
 ```
 
-Mount the Hyperloom workspace at the same absolute path (`-v "$REPO_ROOT:$REPO_ROOT"`) so paths in `.env`, logs, and session artifacts stay valid. If `USER_DATA_PATH` or a pre-downloaded model directory is outside the workspace, add matching `-v host_path:host_path` mounts before starting the container.
-
-Then run the setup backend inside the container:
+Enter the container and feed the shared steps below to Bash. This non-TTY form
+forwards exported selections by name without printing their values; use `-it`
+instead of `-i` for an interactive terminal. Add any other required shell-only
+credential/provider variables to the list. Mounted `.env` supplies missing values.
+Do not forward host `PYTHON`, `PATH`, or venv settings: select the container's
+existing ATOM environment after entry.
 
 ```bash
-docker exec -w "$REPO_ROOT" "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash -lc \
-  'REPO_ROOT="$(pwd -P)"; PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup -- --install-framework none --yes'
+set -e
+_atom_container_env=()
+for _atom_name in USER_DATA_PATH MODEL_PATH KERNEL_OPT_BACKEND_ORDER CLAW_SESSION_ID \
+  FORGE_AGENT_BACKEND FORGE_AGENT_CLI CLAUDE_MODEL CODEX_MODEL HYPERLOOM_SKILL_PATH \
+  ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN OPENAI_API_KEY OPENAI_BASE_URL; do
+  if printenv "$_atom_name" > /dev/null; then
+    _atom_container_env+=(--env "$_atom_name")
+  fi
+done
+unset _atom_name
+docker exec -i -w "$REPO_ROOT" "${_atom_container_env[@]}" \
+  "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}" bash
 ```
 
-After that, run all remaining commands for this demo inside the same container with `docker exec -w "$REPO_ROOT" ...`; do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host in Docker mode. When the demo is finished, ask the user whether to stop the container. If they say yes, run:
+Inside that shell, repeat the [execution-shell preamble](#execution-shell), then
+run Environment, Runtime Install, and Launch Requirements below. A new
+`docker exec` shell needs those selections and runtime loading again. Stop this
+session's container only with approval after the run finishes.
+
+### Prior workload cleanup (required)
+
+Before replacement launches, follow **IR-1 — Prior workload cleanup gate** in the
+packaged optimizer skill, on the direct environment or Docker target as applicable.
+ATOM worker command lines can omit the server entrypoint. Identify this session's
+PIDs, process groups, ports and container before proposing cleanup; never broadly
+kill Python workers or restart the machine. Check GPU usage before GPU work:
 
 ```bash
-docker stop "${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
+rocm-smi --showmemuse
+pgrep -af "openai_server|spawn_main"
 ```
 
 ## Environment
 
-- `MODEL_PATH=<optional; if unset, download Qwen/Qwen3-14B-FP8 from Hugging Face with the Python steps below, then set MODEL_PATH to that local path>`
-- `FRAMEWORK=atom` (required by this demo; see [Framework](#framework))
-- `GPU_TYPE=<do not set; omit --gpu-type and let Hyperloom auto-detect from ROCm/system info>`
-- `KERNEL_OPT_BACKEND_ORDER=<leave unset; the CLI defaults it to forge on ATOM>` (see [Kernel Backend](#kernel-backend))
+Both modes use the following steps in the shell where ATOM will run.
 
-Required optimize CLI flags:
+### Framework
 
-- `--tp 1`
-- `--conc 64`
-- `--isl 1024`
-- `--osl 1024`
-- `--precision fp8`
-- `--target-gain 50`
-- `--max-hours 12`
-- `--max-minutes-framework-pct 0.43`
-- `--max-minutes-kernel-pct 0.42`
+ATOM must already be installed with ROCm torch. Hyperloom does not install ATOM:
+use `--install-framework none --frameworks atom --require-frameworks` below.
+This example is single-node, fixes `FRAMEWORK=atom`, and lets Hyperloom detect the
+GPU rather than passing `--gpu-type`.
 
-There is no CLI flag for the kernel backend — it is selected by the environment
-variable only. Do not invent one.
+For additional serving settings, use the optimizer's `--server-args` option.
+Do not launch a separate server or export `EXTRA_ATOM_ARGS`: Hyperloom materializes
+that transport variable. Keep the initial configuration untuned; do not copy
+another GPU's block/KV settings or the final settings of a previous optimization.
 
-Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`. `FRAMEWORK` is the one value this demo overrides rather than inherits.
+### Kernel Backend
 
-Before resolving or downloading any model, always ask the user which model path to use. Present the currently resolved option when `MODEL_PATH` is already set, and always offer a custom local path plus the demo default. Do not continue until the user chooses one.
+Preserve an explicit `KERNEL_OPT_BACKEND_ORDER` from the caller or `.env`.
+Otherwise leave it unset/empty so the ATOM CLI defaults to `forge`. Matching is
+exact after whitespace trimming and lowercasing: `FORGE` and ` forge ` select
+Forge; other non-empty values, including `forge,geak`, route to GEAK. Report
+GEAK's unproven ATOM rewrite-seam support and obtain the operator's choice before
+continuing; do not silently clear or replace it. There is no backend CLI flag.
 
-Use this decision flow:
+Forge is included in Hyperloom; do not clone it or set `FORGE_PATH`. Preserve the
+selected agent provider and `FORGE_AGENT_CLI`; verify the executable after loading
+runtime. Persist `FRAMEWORK=atom` in `.env` only when requested, and never add a
+backend key merely to reproduce the CLI default.
 
-- If the user chooses the existing `MODEL_PATH`, inspect that path and use it only when it contains `config.json`; otherwise ask again for a valid path or the demo default.
-- If the user provides a custom local path, export `MODEL_PATH` to that path and require `config.json` before launch.
-- If the user chooses the demo default, set `MODEL_PATH=${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8` and download `Qwen/Qwen3-14B-FP8` there when `config.json` is not already present.
+### Selected Python and Setup
 
-Do not assume the Hugging Face CLI exists; resolve or download the selected model with Python:
+Use the existing ATOM venv or an explicit `PYTHON`; do not create a fresh venv or
+require `/opt/venv`. Run this check before setup and repeat it after loading runtime:
 
 ```bash
-python -m pip install -U huggingface_hub
-export REPO_ROOT="$(pwd -P)"
+set -e
+PYTHON="${PYTHON:-$(command -v python3)}"
+PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
+export PYTHON
+export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
+_atom_venv="$("$PYTHON" -c 'import sys; print(sys.prefix if sys.prefix != sys.base_prefix else "")')"
+if [ -n "$_atom_venv" ]; then
+  export VIRTUAL_ENV="$_atom_venv"
+elif [ -n "${VIRTUAL_ENV:-}" ]; then
+  printf '%s\n' 'Deactivate the unrelated venv before selecting a non-venv Python.' >&2
+  exit 1
+fi
+unset _atom_venv
+export PATH="$(dirname "$PYTHON"):$PATH"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
+"$PYTHON" - <<'PY'
+import os
+import sys
+from pathlib import Path
+
+import atom
+import torch
+
+vllm_root = os.environ.get("VLLM_VENV_ROOT", "")
+if vllm_root and Path(vllm_root).resolve() != Path(sys.prefix).resolve():
+    raise SystemExit(
+        f"VLLM_VENV_ROOT={vllm_root} conflicts with the selected ATOM Python prefix {sys.prefix}. "
+        "Preflight would prepend its bin directory; ask the operator to reconcile this setting."
+    )
+print(f"Python: {sys.executable}")
+print(f"ATOM: {atom.__file__}")
+print(f"torch: {torch.__version__}; HIP: {torch.version.hip}")
+if not torch.version.hip:
+    raise SystemExit("ATOM requires a ROCm torch build in the selected Python environment")
+PY
+# Magpie launches the server with python3 from PATH.
+[ "$(python3 -c 'import sys; print(sys.prefix)')" = "$("$PYTHON" -c 'import sys; print(sys.prefix)')" ]
+"$PYTHON" -m atom.entrypoints.openai_server --help > /dev/null
+```
+
+Stop on failed imports, prefix conflicts or CLI help; do not bypass checks or
+silently switch environments. The recorded ATOM build needed a fix for `%` in
+argparse help text. If affected, obtain approval to repair it or select a corrected
+build; vendor repair is not an automatic example step.
+
+Verify even when setup previously completed:
+
+```bash
+"$PYTHON" -m hyperloom.inference_optimizer.setup --check-only -- \
+  --install-framework none --frameworks atom --require-frameworks \
+  --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+```
+
+Reuse successful setup in this environment. Only if setup is needed, explain its
+changes and obtain approval before running:
+
+```bash
+"$PYTHON" -m hyperloom.inference_optimizer.setup -- \
+  --install-framework none --frameworks atom --require-frameworks \
+  --user-data-path "${USER_DATA_PATH:?USER_DATA_PATH missing}" --yes
+```
+
+`none` skips framework installation only: actual setup writes `.env` and may
+apply ROCm hotfixes; `--yes` is not user consent. Do not bypass base checks, repeat
+onboarding unnecessarily, or install SGLang/vLLM to compensate for missing ATOM.
+
+### Model
+
+Ask the operator to choose the existing `MODEL_PATH`, a custom local directory,
+or the demo default `Qwen/Qwen3-14B-FP8`. A chosen local directory must contain
+`config.json`; resolve the path in the actual execution environment.
+
+For the demo default, use `${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8` when
+no local path was selected. Use the selected Python, not an assumed Hugging Face
+CLI. If `huggingface_hub` is missing, obtain approval before installing it with
+`"$PYTHON" -m pip install huggingface_hub`.
+
+```bash
 export MODEL_PATH="${MODEL_PATH:-${REPO_ROOT}/.cache/hyperloom-models/Qwen3-14B-FP8}"
-python - <<'PY'
+"$PYTHON" - <<'PY'
 import os
 from pathlib import Path
 from huggingface_hub import snapshot_download
@@ -270,124 +258,166 @@ PY
 
 ## Pre-launch Runtime Install
 
-Before the first `optimize` launch, run the full runtime installer in the same
-environment that will launch the optimizer. Preflight loads `kernel-agent.env.sh`
-before it can reach the later Ray/Magpie/InferenceX auto-install checks, so this
-step must happen before launching.
-
-For Docker mode, run this inside the container. For bare-metal mode, run it on
-the host:
+Prepare runtime in the same environment as ATOM, using the existing installer.
+Reuse a prepared runtime; installation needs approval because it installs
+dependencies and may start services. If shell and setup-written `.env` disagree
+on `USER_DATA_PATH`, reconcile the selected root first: the installer treats
+setup's `.env` as authoritative. Never silently replace the artifact root.
 
 ```bash
-export REPO_ROOT="$(pwd -P)"
-# .env fills gaps only: re-exporting the non-empty pre-source snapshot keeps every
-# value the caller exported. Wider than install.sh, which guards a fixed list.
-_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
-set -a; . "${REPO_ROOT}/.env"; set +a
-eval "$_dotenv_prev"
-unset _dotenv_prev
-export USER_DATA_PATH="${USER_DATA_PATH:?USER_DATA_PATH missing}"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+set -e
+: "${USER_DATA_PATH:?USER_DATA_PATH missing}"
+export USER_DATA_PATH
+export PYTHON="${PYTHON:?Select the existing ATOM Python first}"
+export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
+export PATH="$(dirname "$PYTHON"):$PATH"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 ulimit -Sn 65536 || true
 INSTALL_SH="${REPO_ROOT}/hyperloom/inference_optimizer/assets/install.sh"
 if [ ! -f "$INSTALL_SH" ]; then
   INSTALL_SH="${REPO_ROOT}/src/hyperloom/inference_optimizer/assets/install.sh"
 fi
 bash "$INSTALL_SH"
-. "$USER_DATA_PATH/runtime/kernel-agent.env.sh"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 ```
 
-If `hyperloom/inference_optimizer/assets/install.sh` is not present (source
-checkout layout), use `src/hyperloom/inference_optimizer/assets/install.sh`.
+### Load runtime environment
 
-Sourcing `.env` in the block above sets `FRAMEWORK` and
-`KERNEL_OPT_BACKEND_ORDER` to whatever the file carries, and
-`eval "$_dotenv_prev"` then replays the caller's pre-existing exports on top of
-it. Either value can win, so export both **after** this block, and verify them
-right before launching:
+Run this before every launch, including an approved resume. In a new shell,
+repeat the execution-shell preamble and Selected Python steps first. Keep all
+steps in that shell; do not source generated env files in a readonly parent.
 
 ```bash
+set -e
+_atom_python="${PYTHON:?Select the existing ATOM Python first}"
+_atom_user_data="${USER_DATA_PATH:?USER_DATA_PATH missing}"
+_atom_backend="${KERNEL_OPT_BACKEND_ORDER:-}"
+. "$_atom_user_data/runtime/kernel-agent.env.sh"
+export PYTHON="$_atom_python" USER_DATA_PATH="$_atom_user_data"
+export INFERENCE_OPTIMIZER_FORCE_PYTHON=1
+export PATH="$(dirname "$PYTHON"):$PATH"
+export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/src:${PYTHONPATH:-}"
 export FRAMEWORK=atom
-unset KERNEL_OPT_BACKEND_ORDER
-echo "framework: ${FRAMEWORK}  kernel backend: <defaulted to forge by the CLI>"
+export KERNEL_OPT_BACKEND_ORDER="$_atom_backend"
+unset _atom_python _atom_user_data _atom_backend
+printf 'framework: %s  kernel backend: %s\n' "$FRAMEWORK" "${KERNEL_OPT_BACKEND_ORDER:-<CLI default: forge>}"
 ```
 
-## User-visible Progress
+Repeat the full [Selected Python](#selected-python-and-setup) check now, including
+`VLLM_VENV_ROOT`, PATH and server help, then check Forge CLI readiness below.
 
-Keep the user informed with concise status updates throughout the demo. Do not
-dump full debug logs into chat; report the important values and paths so the user
-can tell that work is progressing.
+### Forge CLI readiness
 
-Before launch, report the launch plan:
-
-- model path and whether it is an existing local model or a downloaded default;
-- run mode (`baremetal` or `docker`) and target host/container when applicable;
-- framework, TP, concurrency, ISL, OSL, precision, max hours, and required demo
-  flags;
-- the resolved kernel backend (`KERNEL_OPT_BACKEND_ORDER`);
-- `USER_DATA_PATH` and where runtime artifacts will be written.
-
-After the runtime install, report whether it succeeded and the path to
-`kernel-agent.env.sh`. After starting the optimizer, report:
-
-- optimizer PID;
-- run log path;
-- launch-info JSON path;
-- resolved session directory;
-- `state.json` path;
-- initial health check result.
-
-Confirm both the framework and the backend actually took effect rather than
-assuming they did. The optimizer records the resolved choices in the session
-`state.json`; `kernel_optimizer` is `geak` unless the environment variable
-opted in:
+Use Forge's actual provider/executable resolvers. This checks the local CLI only,
+not API credentials or gateway availability; it never starts an agent.
 
 ```bash
-grep -o '"kernel_optimizer": *"[^"]*"' "$SESSION_DIR/state.json"
-grep -o '"framework": *"[^"]*"' "$SESSION_DIR/state.json"
+set -e
+"$PYTHON" - <<'PY'
+import subprocess
+
+from hyperloom.common.env import env_str
+from kernelforge.config import Config
+
+if env_str("KERNEL_OPT_BACKEND_ORDER").lower() in {"", "forge"}:
+    runtime = Config.from_env().agent_runtime()
+    if runtime.provider == "claude":
+        from kernelforge.agent_backends.claude import resolve_claude_cli
+
+        executable = resolve_claude_cli(runtime.executable)
+        try:
+            result = subprocess.run(
+                [executable, "--version"], capture_output=True, text=True,
+                timeout=10, check=True,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise SystemExit(
+                f"Forge Claude CLI is not ready: {executable}: {exc}. "
+                "Request approval to repair it or set FORGE_AGENT_CLI to a working executable."
+            ) from exc
+        version = (result.stdout + "\n" + result.stderr).strip()
+        if "claude" not in version.lower():
+            raise SystemExit(f"Forge Claude CLI returned an unexpected version: {executable}")
+        print(f"Forge Claude CLI ready: {executable}")
+    else:
+        print(f"Forge agent backend: {runtime.provider}; Claude CLI check not applicable")
+PY
 ```
 
-Check these right after launch and report the values. If `kernel_optimizer` is
-`geak`, or the framework is not `atom`, stop and tell the user the environment
-did not reach the optimizer, instead of letting a 12-hour run continue
-mislabelled.
-
-On each requested status check, read persisted state and print a short summary.
-Use platform-scheduled invocations if recurring checks are requested; do not
-start a background watchdog, hold a blocking polling connection, or auto-resume.
-Busy logs alone are not evidence of useful progress. Include:
-
-- process alive/stopped;
-- phase and `stop_reason`;
-- baseline throughput, current best throughput, and cumulative gain when present;
-- latest benchmark result or candidate decision when available;
-- the most relevant recent log lines, excluding secrets.
-
-When the run finishes, report the final status, final report path, best result,
-and the stop reason. Never print API keys, tokens, or custom header values.
+Stop on failure; obtain approval to repair a CLI or change providers. Installing
+`claude_agent_sdk` or finding its bundled CLI alone is not a successful check.
 
 ## Launch Requirements
 
-1. Run the pre-launch runtime install above and source
-   `$USER_DATA_PATH/runtime/kernel-agent.env.sh` before launching.
-2. Export `FRAMEWORK=atom` in the launching shell, after sourcing
-   `kernel-agent.env.sh`, and confirm it before launch. In docker mode, set it
-   inside the same `docker exec` that runs `optimize`. Leave
-   `KERNEL_OPT_BACKEND_ORDER` unset so the ATOM default applies.
-3. Keep `PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"` in the launch shell so critic
-   subprocesses can import `hyperloom.agents` after changing cwd.
-4. Run it detached the way the harness understands: if `$CLAW_SESSION_ID` is set and your bash tool takes a `run_in_background` parameter, hand the command to it with `run_in_background=true`; otherwise use `setsid nohup ... &`. See the Launch section of the packaged `hyperloom/inference_optimizer/SKILL.md` for why — a hand-detached run is invisible to Claw and its sandbox is reclaimed about fifteen minutes after the turn ends.
-5. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-6. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
-   in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
-   this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT), and
-   `--no-kernel` would skip the very phase this demo exists to exercise.
-7. Report the session ID, log path, PID, and initial health check result.
-8. Inspect persisted state on requested status checks; report when work stops.
-9. Unexpected crashes are not automatically resumed. After explicit operator approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `FRAMEWORK=atom` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-10. If an approved relaunch is needed after a crash, clear any surviving ATOM workers
-    first (see [Prior workload cleanup](#prior-workload-cleanup-required)); an
-    orphaned worker still holding VRAM makes the replacement launch fail on a
-    card that looks full.
-11. If `stop_reason` in the current session `state.json` is final, stop and exit.
+Use the packaged optimizer skill's **Launch a New Optimization** instructions to
+prepare `RUN_LOG`, `PID_FILE`, `LAUNCH_INFO_FILE` and run-scoped metadata in this
+execution environment. Reuse the ATOM environment loaded above; do not replay a
+generic dotenv/runtime block that would replace those selections.
+
+### First launch
+
+After setup, runtime loading and readiness checks, use this complete command for
+both modes. Do not replace workload flags with environment-only settings or add
+`--no-framework-agent` / `--no-kernel`:
+
+```bash
+set -e
+: "${PYTHON:?PYTHON missing}" "${MODEL_PATH:?MODEL_PATH missing}"
+: "${RUN_LOG:?RUN_LOG missing}" "${LAUNCH_INFO_FILE:?LAUNCH_INFO_FILE missing}"
+"$PYTHON" -m hyperloom.inference_optimizer.cli --verbose optimize \
+  --model "$MODEL_PATH" \
+  --framework atom \
+  --tp 1 --conc 64 --isl 1024 --osl 1024 \
+  --precision fp8 \
+  --target-gain 50 --max-hours 12 \
+  --max-minutes-framework-pct 0.43 --max-minutes-kernel-pct 0.42 \
+  --launch-info-file "$LAUNCH_INFO_FILE" \
+  > "$RUN_LOG" 2>&1 < /dev/null
+```
+
+Detach through the existing harness-aware launch path: when `CLAW_SESSION_ID` is
+set and the Bash tool supports `run_in_background`, use it without shell-level
+detachment; otherwise prefix the optimize command with `setsid nohup` and append
+`&`. Follow the packaged skill's separate health check and launch-info/PID
+reconciliation; a shell wrapper PID is not the optimizer PID. Do not create a
+second launcher or watchdog for baremetal.
+
+### Resume
+
+After the first launch, never start another fresh `optimize` to recover a failed
+run. Diagnose it, obtain explicit approval, and pass `--resume-from "$SESSION_DIR"`
+for that same session instead of a new model launch. Reload the selected ATOM
+runtime and readiness checks, retain phase fractions `.43/.42`, and follow IR-1
+for any remaining ATOM workers before relaunching. Do not assume resume rewrites
+launch-info: verify the current process and session state rather than using an old
+PID. A final `stop_reason` ends the run; do not automatically restart it.
+
+## User-visible Progress
+
+Follow the packaged skill's **Monitoring** and **Report Back To User** rules.
+Report the chosen mode, Python, model, framework/backend, workload and artifact
+root before launch, then the real PID, session directory, log/launch-info paths
+and initial health check. Never print credentials or custom header values.
+
+Confirm the recorded framework/backend immediately, not just the shell exports:
+
+```bash
+grep -o '"framework": *"[^"]*"' "$SESSION_DIR/state.json"
+grep -o '"kernel_optimizer": *"[^"]*"' "$SESSION_DIR/state.json"
+```
+
+Expect `atom` and the approved backend (`forge` by default). Report mismatches
+without silently replacing the session. On requested checks report process state,
+phase, accepted throughput/gain and the latest business outcome, not just heartbeats.
+
+At completion, verify and report:
+
+- throughput and full accuracy evidence, distinguishing warmup from measurement;
+- Profile's actual serving configuration/trace, not a stale path or declared flag;
+- actual kernel application/loading and finite outputs, not an unchecked PASS label;
+- sweep point/pair coverage and what its baseline arm compares;
+- CLOSE/report status, skipped or failed substeps, and this session's process/GPU release.
+
+An exit code of zero, task `succeeded`, or a report file alone does not establish
+all of these. Recorded direct-run evidence included an approved resume and manual
+repairs to generated numerical checks, with final profiling/reporting gaps; it is
+not an unattended-run guarantee or a Docker-versus-baremetal performance claim.

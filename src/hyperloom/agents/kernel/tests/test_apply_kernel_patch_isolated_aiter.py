@@ -238,6 +238,56 @@ def test_editable_jit_build_survives_invalidate_then_restore(
     assert (jit_build / "baseline.so").read_text(encoding="utf-8") == "baseline"
 
 
+@pytest.mark.parametrize("layout", ("editable", "installed"))
+def test_jit_transaction_restores_top_level_modules_and_build_for_known_layouts(akp, tmp_path, monkeypatch, layout):
+    if layout == "editable":
+        checkout, aiter_pkg = _make_editable_aiter(tmp_path)
+        monkeypatch.setattr(akp, "_EDITABLE_AITER_ROOT", checkout)
+        target = checkout / "csrc" / "kernels" / "foo.cu"
+    else:
+        _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
+        target = aiter_pkg.parent / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
+    target.write_text("int tile = 128;\n", encoding="utf-8")
+    build = aiter_pkg / "jit" / "build"
+    baseline = build / "baseline.o"
+    baseline.write_bytes(b"baseline build")
+    served = build.parent / "module.so"
+    served.write_bytes(b"baseline module")
+    backup_root = tmp_path / "backups"
+
+    record = akp._invalidate_aiter_jit_build(target, backup_root, jit_build_dir=build)
+
+    assert not served.exists(), "first use must not import the old native module"
+    assert not build.exists()
+    assert record["status"] == "ok", record
+    assert record["src"] == str(build)
+    assert record["build_existed"] is True
+    assert record["modules_invalidated"] is True
+    assert record["module_names"] == [served.name]
+    saved_build = Path(record["backup_path"])
+    saved_modules = Path(record["modules_backup_path"])
+    assert saved_build.parent == backup_root
+    assert saved_modules.parent == backup_root
+    assert (saved_build / baseline.name).read_bytes() == b"baseline build"
+    assert (saved_modules / served.name).read_bytes() == b"baseline module"
+
+    build.mkdir()
+    candidate_build = build / "candidate.o"
+    candidate_build.write_bytes(b"candidate build")
+    served.write_bytes(b"candidate module")
+    candidate_only = build.parent / "candidateonly.so"
+    candidate_only.write_bytes(b"candidate-only module")
+
+    restored = akp._restore_aiter_jit_build(record, expected_jit_build_dir=str(build), backup_root=backup_root)
+
+    assert restored["status"] == "ok", restored
+    assert restored["restored_to"] == str(build)
+    assert served.read_bytes() == b"baseline module"
+    assert baseline.read_bytes() == b"baseline build"
+    assert not candidate_only.exists()
+    assert not candidate_build.exists()
+
+
 @pytest.mark.parametrize(
     "relative",
     (
@@ -1054,6 +1104,402 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
     assert result["jit_build_backup"]["status"] == "remote"
     assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
     assert local_stale.is_file()
+
+
+def _make_importable_checkout(akp, tmp_path, monkeypatch):
+    checkout = tmp_path / "custom-checkout"
+    package = checkout / "aiter"
+    (package / "jit" / "build").mkdir(parents=True)
+    (package / "__init__.py").write_text("raise RuntimeError('must not import aiter')\n", encoding="utf-8")
+    (package / "jit" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "csrc" / "kernels").mkdir(parents=True)
+    monkeypatch.setattr(
+        akp.importlib.util,
+        "find_spec",
+        lambda name: types.SimpleNamespace(submodule_search_locations=[str(package)]),
+    )
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("AITER_META_DIR", raising=False)
+    monkeypatch.setattr(akp, "_is_multi_node", lambda: False)
+    monkeypatch.setattr(akp, "_clear_python_kernel_caches", lambda target: {"status": "ok"})
+    return checkout, package
+
+
+@pytest.mark.parametrize("relative", ("csrc/kernels/quant_kernels.cu", "csrc/kernels/gen_instances.py"))
+@pytest.mark.parametrize("override_jit", (False, True))
+def test_importable_checkout_native_snapshot_invalidates_served_modules(
+    akp, tmp_path, monkeypatch, relative, override_jit
+):
+    checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    jit = tmp_path / "private-jit" if override_jit else package / "jit"
+    if override_jit:
+        monkeypatch.setenv("AITER_JIT_DIR", str(jit))
+    build = jit / "build"
+    build.mkdir(parents=True, exist_ok=True)
+    (build / "baseline.o").write_bytes(b"old build")
+    served = jit / "module_quant.so"
+    served.write_bytes(b"old native module")
+    target = checkout / relative
+    original = "TILE = 128\n" if target.suffix == ".py" else "int tile = 128;\n"
+    optimized = original.replace("128", "64")
+    target.write_text(original, encoding="utf-8")
+    snapshot = tmp_path / "snapshot"
+    destination = snapshot / relative
+    destination.parent.mkdir(parents=True)
+    destination.write_text(optimized, encoding="utf-8")
+    patch = tmp_path / "change.patch"
+    patch.write_text(
+        f"diff --git a/{relative} b/{relative}\n--- a/{relative}\n+++ b/{relative}\n"
+        f"@@ -1 +1 @@\n-{original}+{optimized}",
+        encoding="utf-8",
+    )
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        snapshot_dir=snapshot,
+        repo_root=checkout,
+        kernel_id="checkout-native",
+    )
+
+    assert result["status"] == "ok", result
+    assert result["compiled"] is True
+    assert result["rebuild"]["status"] == "deferred"
+    assert result["rebuild"]["mode"] == "runtime_jit"
+    assert not served.exists(), "first use must not import the old native module"
+    assert not build.exists()
+    assert (package / "jit" / "__init__.py").is_file()
+    # Model the runtime's cache miss and first-use compilation without invoking a GPU/compiler.
+    build.mkdir()
+    (build / "candidate.o").write_bytes(optimized.encode())
+    served.write_bytes(optimized.encode())
+    (jit / "module_new.so").write_bytes(b"candidate-only module")
+
+    reverted = akp.revert_kernel_patch(result["manifest_path"])
+
+    assert reverted["status"] == "ok", reverted
+    assert served.read_bytes() == b"old native module"
+    assert (build / "baseline.o").read_bytes() == b"old build"
+    assert not (build / "candidate.o").exists()
+    assert not (jit / "module_new.so").exists()
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("had_build", (False, True))
+def test_jit_transaction_invalidates_top_level_so_even_without_build(akp, tmp_path, monkeypatch, had_build):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    if not had_build:
+        build.rmdir()
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"baseline")
+    backup_root = tmp_path / "backups"
+    record = akp._invalidate_aiter_jit_build(package / "dummy.cu", backup_root, jit_build_dir=build)
+
+    assert record["status"] == "ok", record
+    assert not served.exists()
+    served.write_bytes(b"candidate")
+    restored = akp._restore_aiter_jit_build(record, expected_jit_build_dir=build, backup_root=backup_root)
+    assert restored["status"] == "ok", restored
+    assert served.read_bytes() == b"baseline"
+    assert build.exists() is had_build
+
+
+def test_importable_checkout_does_not_claim_unrelated_source_or_python_ops(akp, tmp_path, monkeypatch):
+    checkout, _package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    unknown = akp._detect_strategy(tmp_path / "unrelated" / "csrc" / "kernel.cu")
+    assert unknown["rebuild_mode"] == "none"
+    assert unknown["root"] == ""
+    strategy = akp._detect_strategy(checkout / "aiter" / "ops" / "triton" / "kernel.py")
+    assert strategy["compiled"] is False
+    assert strategy["rebuild_mode"] == "none"
+
+
+def test_importable_checkout_honors_source_metadata_override(akp, tmp_path, monkeypatch):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    meta = tmp_path / "device-sources"
+    (meta / "csrc").mkdir(parents=True)
+    monkeypatch.setenv("AITER_META_DIR", str(meta))
+
+    strategy = akp._detect_strategy(meta / "csrc" / "kernel.cu")
+
+    assert strategy["root"] == str(meta)
+    assert strategy["rebuild_mode"] == "runtime_jit"
+    assert strategy["jit_build_dir"] == str(package / "jit" / "build")
+    inactive = akp._detect_strategy(_checkout / "csrc" / "kernels" / "old.cu")
+    assert inactive["rebuild_mode"] == "none"
+    monkeypatch.delenv("AITER_META_DIR")
+    assert akp._detect_strategy(meta / "csrc" / "kernel.cu")["rebuild_mode"] == "none"
+
+
+def test_clean_checkout_jit_revert_removes_first_use_artifacts(akp, tmp_path, monkeypatch):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    build.rmdir()
+    backup_root = tmp_path / "backups"
+    record = akp._invalidate_aiter_jit_build(package / "dummy.cu", backup_root, jit_build_dir=build)
+    assert record["status"] == "clean", record
+    build.mkdir()
+    (build / "candidate.o").write_bytes(b"candidate build")
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"candidate module")
+
+    restored = akp._restore_aiter_jit_build(record, expected_jit_build_dir=build, backup_root=backup_root)
+
+    assert restored["status"] == "ok", restored
+    assert not served.exists()
+    assert not build.exists()
+
+
+def test_missing_serving_module_backup_preserves_candidate_cache(akp, tmp_path, monkeypatch):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"baseline")
+    backup_root = tmp_path / "backups"
+    record = akp._invalidate_aiter_jit_build(package / "dummy.cu", backup_root, jit_build_dir=build)
+    saved = Path(record["modules_backup_path"])
+    (saved / served.name).unlink()
+    saved.rmdir()
+    served.write_bytes(b"candidate")
+
+    restored = akp._restore_aiter_jit_build(record, expected_jit_build_dir=build, backup_root=backup_root)
+
+    assert restored["status"] == "failed"
+    assert "backup path missing" in restored["error"]
+    assert served.read_bytes() == b"candidate"
+
+
+@pytest.mark.parametrize("failed_rebuild", (False, True))
+def test_checkout_native_rebuild_failure_and_finalize(akp, tmp_path, monkeypatch, failed_rebuild):
+    checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    target = checkout / "csrc" / "kernels" / "kernel.cu"
+    original = "int tile = 128;\n"
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "optimized.cu"
+    patch.write_text("int tile = 64;\n", encoding="utf-8")
+    served = package / "jit" / "module_quant.so"
+    served.write_bytes(b"baseline")
+    monkeypatch.setattr(akp, "_run_rebuild", lambda *args: {"status": "failed", "returncode": 1})
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch,
+        target_file=target,
+        backup_root=tmp_path / "backups",
+        kernel_id="native-outcome",
+        rebuild_command=["python", "build.py"] if failed_rebuild else None,
+    )
+
+    if failed_rebuild:
+        assert result["status"] == "failed", result
+        assert result["revert"]["status"] == "ok"
+        assert target.read_text(encoding="utf-8") == original
+        assert served.read_bytes() == b"baseline"
+    else:
+        assert result["status"] == "ok", result
+        manifest = json.loads(Path(result["manifest_path"]).read_text())
+        saved = Path(manifest["jit_build_backup"]["modules_backup_path"])
+        assert saved.exists()
+        served.write_bytes(b"candidate")
+        finalized = akp.finalize_kernel_patch(result["manifest_path"])
+        assert finalized["status"] == "ok", finalized
+        assert not saved.exists()
+        assert served.read_bytes() == b"candidate"
+
+
+def test_jit_cache_move_failure_restores_already_moved_files(akp, tmp_path, monkeypatch):
+    checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    (build / "baseline.o").write_bytes(b"baseline build")
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"baseline module")
+    real_move = akp.shutil.move
+
+    def fail_module_move(src, dst):
+        if Path(src) == served:
+            raise OSError("simulated module move failure")
+        return real_move(src, dst)
+
+    monkeypatch.setattr(akp.shutil, "move", fail_module_move)
+    result = akp._invalidate_aiter_jit_build(checkout / "csrc" / "kernel.cu", tmp_path / "backup", jit_build_dir=build)
+    assert result["status"] == "failed"
+    assert served.read_bytes() == b"baseline module"
+    assert (build / "baseline.o").read_bytes() == b"baseline build"
+
+
+@pytest.mark.parametrize("alias_src,alias_expected", ((True, False), (True, True), (False, True)))
+def test_restore_rejects_build_leaf_alias_without_touching_sibling_modules(
+    akp, tmp_path, monkeypatch, alias_src, alias_expected
+):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    (build / "baseline.o").write_bytes(b"baseline build")
+    backup_root = tmp_path / "backups"
+    record = akp._invalidate_aiter_jit_build(package / "dummy.cu", backup_root, jit_build_dir=build)
+    build.mkdir()
+    candidate = build.parent / "module_quant.so"
+    candidate.write_bytes(b"candidate")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    preserved = victim / "unrelated.so"
+    preserved.write_bytes(b"unrelated")
+    alias = victim / "build"
+    if os.name == "nt":
+        # Exercise the same path-resolution attack without Windows symlink privileges.
+        real_resolve, real_is_symlink = Path.resolve, Path.is_symlink
+        monkeypatch.setattr(
+            Path, "resolve", lambda self, *a, **kw: real_resolve(build if self == alias else self, *a, **kw)
+        )
+        monkeypatch.setattr(Path, "is_symlink", lambda self: self == alias or real_is_symlink(self))
+    else:
+        alias.symlink_to(build, target_is_directory=True)
+    if alias_src:
+        record["src"] = str(alias)
+
+    result = akp._restore_aiter_jit_build(
+        record, expected_jit_build_dir=alias if alias_expected else build, backup_root=backup_root
+    )
+
+    assert preserved.read_bytes() == b"unrelated"
+    assert candidate.read_bytes() == b"candidate"
+    assert result["status"] == "failed", result
+    assert akp._trusted_aiter_jit_build_dir(alias) is False
+
+
+@pytest.mark.parametrize("value", ("", " relative cache ", "~/literal-cache"))
+def test_jit_override_preserves_explicit_runtime_value(akp, tmp_path, monkeypatch, value):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AITER_JIT_DIR", value)
+    if not value:
+        assert akp._aiter_jit_build_dir() is None
+        record = akp._invalidate_aiter_jit_build(package.parent / "csrc" / "kernel.cu", tmp_path / "backups")
+        assert record["status"] == "skipped"
+        assert (package / "jit" / "build").is_dir()
+    else:
+        assert akp._aiter_jit_build_dir() == Path(value).absolute() / "build"
+
+
+def test_checkout_cpp_itfs_invalidates_and_requires_fresh_runtime_build(akp, tmp_path, monkeypatch):
+    checkout, _package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    target = checkout / "csrc" / "cpp_itfs" / "mha_fwd.py"
+    target.parent.mkdir()
+    original = 'MD_NAME = "mha_fwd"\nTILE = 128\n\ndef launch():\n    return TILE\n'
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "optimized.py"
+    patch.write_text(original.replace("128", "64"), encoding="utf-8")
+    cache_root = tmp_path / "runtime-cache"
+    monkeypatch.setenv("AITER_ROOT_DIR", str(cache_root))
+    baseline = cache_root / "build" / "mha_fwd_baseline" / "lib.so"
+    _write_lib_so(baseline, mtime=1_700_000_000)
+
+    result = akp.apply_kernel_patch(
+        patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="checkout-cpp-itfs"
+    )
+
+    assert result["status"] == "ok", result
+    record = result["cpp_itfs_cache_backup"]
+    assert record["is_cpp_itfs"] is True
+    assert record["status"] == "ok"
+    assert not baseline.exists()
+    assert akp.verify_cpp_itfs_rebuilt(record)["verified"] is False
+    _write_lib_so(baseline, mtime=int(record["invalidated_unix"]) + 2)
+    assert akp.verify_cpp_itfs_rebuilt(record)["verified"] is True
+    reverted = akp.revert_kernel_patch(result["manifest_path"])
+    assert reverted["status"] == "ok", reverted
+    assert target.read_text(encoding="utf-8") == original
+    assert int(baseline.stat().st_mtime) == 1_700_000_000
+
+
+def test_module_restore_copy_failure_keeps_build_backup_retryable(akp, tmp_path, monkeypatch):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    (build / "baseline.o").write_bytes(b"baseline build")
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"baseline module")
+    backup_root = tmp_path / "backups"
+    record = akp._invalidate_aiter_jit_build(package / "dummy.cu", backup_root, jit_build_dir=build)
+    saved_build = Path(record["backup_path"])
+    real_copy = akp.shutil.copy2
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("simulated restore copy failure")
+
+    monkeypatch.setattr(akp.shutil, "copy2", fail_copy)
+    failed = akp._restore_aiter_jit_build(record, expected_jit_build_dir=build, backup_root=backup_root)
+    assert failed["status"] == "failed"
+    assert saved_build.is_dir(), "a failed module restore must not consume the build backup"
+    monkeypatch.setattr(akp.shutil, "copy2", real_copy)
+
+    retried = akp._restore_aiter_jit_build(record, expected_jit_build_dir=build, backup_root=backup_root)
+
+    assert retried["status"] == "ok", retried
+    assert served.read_bytes() == b"baseline module"
+    assert (build / "baseline.o").read_bytes() == b"baseline build"
+
+
+@pytest.mark.parametrize("snapshot_mode", (False, True))
+def test_uninitialized_home_jit_fallback_refuses_source_patch(akp, tmp_path, monkeypatch, snapshot_mode):
+    checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    target = checkout / "csrc" / "kernels" / "kernel.cu"
+    original = "int tile = 128;\n"
+    target.write_text(original, encoding="utf-8")
+    patch = tmp_path / "optimized.cu"
+    patch.write_text("int tile = 64;\n", encoding="utf-8")
+    served = package / "jit" / "module_quant.so"
+    served.write_bytes(b"baseline module")
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    real_access = akp.os.access
+    monkeypatch.setattr(
+        akp.os, "access", lambda path, mode: False if Path(path) == package / "jit" else real_access(path, mode)
+    )
+
+    kwargs = {}
+    if snapshot_mode:
+        snapshot = tmp_path / "snapshot"
+        relative = target.relative_to(checkout).as_posix()
+        destination = snapshot / relative
+        destination.parent.mkdir(parents=True)
+        destination.write_text("int tile = 64;\n", encoding="utf-8")
+        patch = tmp_path / "change.patch"
+        patch.write_text(
+            f"diff --git a/{relative} b/{relative}\n--- a/{relative}\n+++ b/{relative}\n"
+            "@@ -1 +1 @@\n-int tile = 128;\n+int tile = 64;\n",
+            encoding="utf-8",
+        )
+        kwargs = {"snapshot_dir": snapshot, "repo_root": checkout}
+    result = akp.apply_kernel_patch(
+        patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="uninitialized-home", **kwargs
+    )
+
+    assert result["status"] == "failed", result
+    assert "initialize" in result["error"].lower()
+    assert target.read_text(encoding="utf-8") == original
+    assert served.read_bytes() == b"baseline module"
+    assert not (home / ".aiter" / "jit").exists()
+    assert akp._aiter_jit_build_dir() is None
+    (home / ".aiter" / "jit").mkdir(parents=True)
+    assert akp._aiter_jit_build_dir() == home / ".aiter" / "jit" / "build"
+
+
+def test_legacy_build_only_restore_preserves_serving_modules(akp, tmp_path, monkeypatch):
+    _checkout, package = _make_importable_checkout(akp, tmp_path, monkeypatch)
+    build = package / "jit" / "build"
+    served = build.parent / "module_quant.so"
+    served.write_bytes(b"untouched serving module")
+    backup_root = tmp_path / "backups"
+    saved = backup_root / "jit_build_legacy"
+    saved.mkdir(parents=True)
+    (saved / "baseline.o").write_bytes(b"baseline build")
+    legacy = {"status": "ok", "src": str(build), "backup_path": str(saved)}
+
+    result = akp._restore_aiter_jit_build(legacy, expected_jit_build_dir=build, backup_root=backup_root)
+
+    assert result["status"] == "ok", result
+    assert served.read_bytes() == b"untouched serving module"
+    assert (build / "baseline.o").read_bytes() == b"baseline build"
 
 
 def _cpp_itfs_backup(build_dir, *, invalidated_unix=1_700_000_000.0, module_names=None, is_cpp_itfs=True):

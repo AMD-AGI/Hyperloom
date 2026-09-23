@@ -57,6 +57,108 @@ def serving(tmp_path, monkeypatch):
     }
 
 
+_ATOM_ENGINE_ARGS = """
+class EngineArgs:
+    @staticmethod
+    def add_cli_args(parser):
+        parser.add_argument("--kv_cache_dtype", choices=("bf16", "fp8"), default="bf16")
+        return parser
+"""
+
+_ATOM_ARG_PARSER = """
+import argparse
+
+class FlexibleArgumentParser(argparse.ArgumentParser):
+    def add_argument(self, *names, **kwargs):
+        aliases = [name.replace("_", "-") for name in names if name.startswith("--") and "_" in name]
+        return super().add_argument(*names, *aliases, **kwargs)
+"""
+
+
+@pytest.fixture
+def atom_serving(tmp_path, monkeypatch):
+    """Expose ATOM's snake/kebab parser contract to the real probe subprocess."""
+    site = tmp_path / "serve"
+    atom = site / "atom"
+    for package in (atom, atom / "model_engine", atom / "utils"):
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    (atom / "model_engine" / "arg_utils.py").write_text(_ATOM_ENGINE_ARGS, encoding="utf-8")
+    (atom / "utils" / "arg_parser.py").write_text(_ATOM_ARG_PARSER, encoding="utf-8")
+    monkeypatch.setattr(pf, "_resolve_probe_interpreter", lambda _framework: sys.executable)
+    return {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(site),
+        pf.SERVING_PYTHON_ENV: sys.executable,
+    }
+
+
+@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
+@pytest.mark.parametrize("digest", ("", "atom-fp8"), ids=("no-repair", "repair-available"))
+def test_atom_kv_cache_dtype_spellings_are_preserved(atom_serving, flag, equals, digest):
+    """A valid FP8 request must not be repaired into the BF16 default."""
+    argv = (f"{flag}=fp8",) if equals else (flag, "fp8")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(framework="atom", argv=argv, text=text, launch_env=atom_serving, digest=digest)
+    assert verdict.status == pf.OK
+    assert verdict.argv == argv
+    assert verdict.text == text
+    assert verdict.reason == pf.PARSED
+    assert verdict.dropped == ()
+    assert verdict.repaired_digest == ""
+
+
+@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
+def test_atom_invalid_kv_cache_dtype_is_never_repaired(atom_serving, flag, equals):
+    """Alias support does not turn rejected values into droppable unknown flags."""
+    argv = (f"{flag}=invalid",) if equals else (flag, "invalid")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-invalid"
+    )
+    assert verdict.status == pf.INVALID
+    assert verdict.reason == pf.VALUE_REJECTED
+    assert verdict.argv == argv
+    assert verdict.text == text
+    assert verdict.dropped == ()
+    assert verdict.repaired_digest == ""
+    assert "invalid choice" in verdict.detail
+
+
+@pytest.mark.parametrize("flag", ("--kv_cache_dtype", "--kv-cache-dtype"))
+@pytest.mark.parametrize("equals", (False, True), ids=("separate-value", "equals-value"))
+def test_atom_unknown_flag_is_dropped_once_without_losing_kv_cache_dtype(atom_serving, flag, equals):
+    """Only a genuinely unknown flag may consume the one drop-only repair."""
+    kv_argv = (f"{flag}=fp8",) if equals else (flag, "fp8")
+    argv = (*kv_argv, "--unknown-option", "value")
+    text = " ".join(argv)
+    verdict = pf.check_server_argv(
+        framework="atom", argv=argv, text=text, launch_env=atom_serving, digest="atom-unknown"
+    )
+    assert verdict.status == pf.OK
+    assert verdict.reason == pf.PARSED_AFTER_DROP
+    assert verdict.argv == kv_argv
+    assert verdict.text == " ".join(kv_argv)
+    assert verdict.dropped == ("--unknown-option",)
+    assert verdict.repaired_digest == "atom-unknown"
+
+    repeated = pf.check_server_argv(
+        framework="atom",
+        argv=argv,
+        text=text,
+        launch_env=atom_serving,
+        digest="atom-unknown",
+        repaired=(verdict.repaired_digest,),
+    )
+    assert repeated.status == pf.INVALID
+    assert repeated.reason == pf.REPAIR_SPENT
+    assert repeated.argv == argv
+    assert repeated.dropped == ("--unknown-option",)
+    assert repeated.repaired_digest == ""
+
+
 def _check(argv, env, **kwargs):
     """Run the preflight over ``argv`` written as an argument string."""
     return pf.check_server_argv(framework="sglang", argv=argv, text=" ".join(argv), launch_env=env, **kwargs)
