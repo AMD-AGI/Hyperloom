@@ -81,7 +81,8 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HL_INT", " 7 ")
     assert env.env_int("HL_INT") == 7
     monkeypatch.setenv("HL_INT", "bad")
-    assert env.env_int("HL_INT", default=3) == 3
+    with pytest.raises(env.EnvValueError):
+        env.env_int("HL_INT", default=3)
 
     monkeypatch.setenv("HL_FLOAT", " 2.5 ")
     assert env.env_float("HL_FLOAT") == pytest.approx(2.5)
@@ -89,11 +90,12 @@ def test_common_env_readers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert env.env_float("HL_FLOAT", default=1.25) == pytest.approx(1.25)
 
 
-def test_env_float_invalid_returns_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.common.env import env_float
+def test_env_float_invalid_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.common.env import EnvValueError, env_float
 
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
-    assert env_float("HL_BAD_FLOAT", 3.5) == 3.5
+    with pytest.raises(EnvValueError):
+        env_float("HL_BAD_FLOAT", 3.5)
 
 
 # common.io

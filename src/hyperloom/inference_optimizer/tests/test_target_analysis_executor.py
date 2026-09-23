@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.env import EnvValueError, env_int
 from hyperloom.orchestrator.actions.executors import TargetAnalysisExecutor
 from hyperloom.orchestrator.actions.executors import target_analysis as ta
 from hyperloom.orchestrator.state.task_registry import Task
@@ -502,17 +503,21 @@ async def test_agentx_state_to_external_reference_and_final_report(session_dir, 
 
 
 class TestEnvHelpers:
+    """``ISL`` / ``OSL`` reach the analysis through the canonical reader."""
+
     def test_env_int_uses_default_when_missing(self, monkeypatch):
         monkeypatch.delenv("TARGET_INT_TEST", raising=False)
-        assert ta._env_int("TARGET_INT_TEST", default=7) == 7
+        assert env_int("TARGET_INT_TEST", default=7) == 7
 
     def test_env_int_parses_valid(self, monkeypatch):
         monkeypatch.setenv("TARGET_INT_TEST", "42")
-        assert ta._env_int("TARGET_INT_TEST") == 42
+        assert env_int("TARGET_INT_TEST") == 42
 
-    def test_env_int_falls_back_on_invalid(self, monkeypatch):
+    def test_env_int_raises_on_invalid(self, monkeypatch):
+        """An unreadable request shape used to become 0 and analyse the wrong workload."""
         monkeypatch.setenv("TARGET_INT_TEST", "garbage")
-        assert ta._env_int("TARGET_INT_TEST", default=3) == 3
+        with pytest.raises(EnvValueError, match="TARGET_INT_TEST"):
+            env_int("TARGET_INT_TEST", default=3)
 
 
 # session_dir resolution

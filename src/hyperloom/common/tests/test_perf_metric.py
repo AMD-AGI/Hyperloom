@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.common.env import EnvValueError
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     INTVTY_V1,
@@ -200,11 +201,19 @@ def test_an_explicit_metric_still_opts_a_synthetic_run_in(monkeypatch):
     assert intvty_grading_enabled() is True
 
 
-@pytest.mark.parametrize("raw", ["0", "false", "no", "off", "", "nonsense"])
+@pytest.mark.parametrize("raw", ["0", "false", "no", "off", ""])
 def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     assert intvty_grading_enabled() is False
+
+
+def test_an_unreadable_agentx_value_is_not_silently_off(monkeypatch):
+    """Grading the wrong metric for a whole run is worse than refusing to start."""
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
+    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
+        intvty_grading_enabled()
 
 
 # --- the persisted marker ---
