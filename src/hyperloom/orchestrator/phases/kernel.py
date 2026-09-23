@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
@@ -2649,6 +2650,7 @@ class KernelPhase(PhaseHandler):
         """Did the tuned table reach the server's merge list and get read?"""
         if tuner_name == "fmoe_ck":
             return self._fmoe_apply_verdict(envs)
+        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
         from ..measurement.apply_verification import verify_applied
 
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
@@ -2670,8 +2672,7 @@ class KernelPhase(PhaseHandler):
         table_names = [name for key in envs if (name := _AITER_ENV_TO_TABLE.get(key))]
         # aiter prints a hit line only under this flag; every serving run now sets it by default, but an operator
         # value in the candidate env wins, and then a zero-hit result means nothing.
-        raw_flag = str(envs.get("AITER_LOG_TUNED_CONFIG", "1")).strip().lower()
-        hit_logging = raw_flag not in ("", "0", "false", "no", "off")
+        hit_logging = aiter_log_tuned_config_enabled(envs)
 
         try:
             return verify_applied(
@@ -3968,9 +3969,7 @@ class KernelPhase(PhaseHandler):
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry."""
-        import os
-
-        if str(os.environ.get("HYPERLOOM_SKIP_FUSION", "")).strip().lower() in ("1", "true", "yes", "on"):
+        if env_bool("HYPERLOOM_SKIP_FUSION"):
             return False
         framework = str(getattr(self.shared_state, "framework", "") or "sglang").strip().lower()
         if framework not in ("sglang", "vllm", "vllm-aiter"):

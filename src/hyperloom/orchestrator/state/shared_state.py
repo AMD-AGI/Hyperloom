@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
@@ -1478,15 +1479,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         if is_valid_stop_reason(text):
             return self._commit_stop_reason(text)
         if strict is None:
-            strict_env = (
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_STRICT_STOP_REASON",
-                    "",
-                )
-                .strip()
-                .lower()
-            )
-            strict = strict_env in ("1", "true", "yes")
+            strict = env_bool("INFERENCE_OPTIMIZER_STRICT_STOP_REASON")
         if strict:
             raise ValueError(f"stop_reason={text!r} not in STOP_REASON_VOCAB ({sorted(STOP_REASON_VOCAB)!r})")
         # Lenient: map to "unknown" and warn.

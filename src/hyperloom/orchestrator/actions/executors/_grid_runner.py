@@ -19,7 +19,7 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
+from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -587,10 +587,7 @@ async def _settled_measurement(
 
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
-    raw = os.environ.get("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP")
-    if raw is None and os.environ.get("PYTEST_CURRENT_TEST"):
-        return False
-    return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
+    return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
 def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:

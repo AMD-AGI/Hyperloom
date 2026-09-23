@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.env import is_truthy
+
 if TYPE_CHECKING:
     from .domains import SpecialistDomain
 
@@ -57,22 +59,6 @@ class SpecialistProfile:
         return self.mode == MODE_PATCH and self.bench
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    """Coerce a loosely-typed value to a boolean."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in ("1", "true", "yes", "on"):
-        return True
-    if text in ("0", "false", "no", "off"):
-        return False
-    return default
-
-
 def _infer_scope(p: dict[str, Any]) -> str:
     """Infer the dispatch scope when none is explicitly given."""
     # Local import avoids a module-load cycle.
@@ -118,7 +104,7 @@ def resolve_specialist_profile(
         else:
             mode = MODE_RESEARCH if scope == SCOPE_FREEFORM else DEFAULT_MODE
 
-    bench = _coerce_bool(p.get("bench"), DEFAULT_BENCH)
+    bench = is_truthy(p.get("bench"), default=DEFAULT_BENCH)
     if mode != MODE_PATCH:
         bench = False
 

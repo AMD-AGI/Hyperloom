@@ -17,14 +17,13 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import build_benchmark_env
 
 from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
-
-_FALSE_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -58,7 +57,7 @@ def _run_eval_enabled(bench_envs: dict[str, Any]) -> bool:
     raw = bench_envs.get("RUN_EVAL")
     if raw is None:
         raw = os.environ.get("RUN_EVAL", "false")
-    return str(raw).strip().lower() not in _FALSE_VALUES
+    return is_truthy(raw, default=True)
 
 
 def _tokenize_extra_args(bench_envs: dict[str, Any], framework: str) -> list[str]:
@@ -966,7 +965,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    cleanup = str(getattr(args, "server_lifecycle_cleanup", "true")).strip().lower() not in _FALSE_VALUES
+    cleanup = is_truthy(getattr(args, "server_lifecycle_cleanup", "true"), default=True)
     return run_benchmark(
         Path(args.benchmark_config),
         Path(args.output_dir),

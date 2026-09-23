@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
+from hyperloom.common.env import env_bool
 from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.knowledge.experience_store import (
@@ -196,12 +197,7 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     """Resolve the PR KB switch: CLI flag wins, env is the fallback, default off."""
     if flag is not None:
         return bool(flag)
-    return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return env_bool("PR_KB_ENABLE")
 
 
 def _git_remote_url(workspace: Path) -> str:

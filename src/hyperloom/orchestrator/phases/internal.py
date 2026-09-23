@@ -8,6 +8,9 @@ import logging as _logging
 import os
 import re
 from typing import Any
+
+from hyperloom.common.env import env_bool
+
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -229,10 +232,7 @@ class InternalTasksPhase(PhaseHandler):
 
     async def _maybe_enqueue_trajectory_reviewer(self) -> None:
         """On a plateau, dispatch a Coordinator-owned readonly specialist seeded with the deterministic trajectory digest to propose fresh directions."""
-        if os.getenv(
-            "INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW",
-            "1",
-        ).strip().lower() not in ("1", "true", "on", "yes"):
+        if not env_bool("INFERENCE_OPTIMIZER_TRAJECTORY_LLM_REVIEW", default=True):
             return
         state = self.shared_state
         try:

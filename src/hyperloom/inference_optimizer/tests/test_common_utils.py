@@ -1645,10 +1645,9 @@ def test_llm_prompt_parse_response_edges() -> None:
 def test_coerce_bool_and_infer_scope() -> None:
     from hyperloom.orchestrator.specialists import profile as sp
 
-    assert sp._coerce_bool("off", default=True) is False
-    assert sp._coerce_bool("yes", default=False) is True
-    assert sp._coerce_bool(None, default=True) is True
-    assert sp._coerce_bool("???", default=True) is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "yes"}).bench is True
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "off"}).bench is False
+    assert sp.resolve_specialist_profile({"mode": "patch", "bench": "???"}).bench is sp.DEFAULT_BENCH
 
     profile = sp.resolve_specialist_profile({})
     assert profile.scope == sp.SCOPE_FREEFORM

@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from hyperloom.common.env import env_bool
 
 # All module loggers descend from this root.
 _ROOT_NAME = "framework_agent"
@@ -75,7 +76,7 @@ def configure_logging(
     quiet_third_party: bool = True,
 ) -> logging.Logger:
     """Initialise the framework-agent root logger and return it."""
-    use_json = json_output if json_output is not None else os.environ.get(_JSON_ENV, "").strip() in ("1", "true", "yes")
+    use_json = json_output if json_output is not None else env_bool(_JSON_ENV)
     effective_level = _resolve_level(level)
     resolved_file = log_file if log_file is not None else os.environ.get(_FILE_ENV)
 

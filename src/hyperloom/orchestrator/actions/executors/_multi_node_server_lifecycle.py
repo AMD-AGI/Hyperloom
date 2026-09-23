@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from ...loop.coordinator_helpers import format_exc_brief
+from hyperloom.common.env import env_flag
 from hyperloom.inference_optimizer.multi_node._internal.env_safety import filter_forward_env
 from hyperloom.inference_optimizer.multi_node._internal.server_args_safety import (
     ServerArgsRejected,
@@ -571,12 +572,7 @@ async def restart_server_for_round(
                 await _restart_and_wait(force_full_restart)
             except ServerRestartFailed as first_exc:
                 # C — multi-node VRAM reclaim before exactly one retry.
-                if os.environ.get(_MN_RESTART_RECLAIM_RETRY_ENV, "1").strip().lower() in {
-                    "0",
-                    "false",
-                    "no",
-                    "off",
-                }:
+                if not env_flag(_MN_RESTART_RECLAIM_RETRY_ENV, default=True):
                     raise
                 log.warning(
                     "restart_server_for_round: restart failed (%s); attempting "
@@ -765,13 +761,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     ready: set[str] = set()
     # Detokenizer-wedge fast-fail: bail early on a wedged worker instead of burning the full timeout.
     _wedge_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_GRACE_S", "420") or 420)
-    _wedge_enabled = os.environ.get("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", "1").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-        "",
-    }
+    _wedge_enabled = env_flag("HYPERLOOM_MN_WORKER_WEDGE_FASTFAIL", default=True)
     # Startup-crash fast-fail: an argparse rejection / fatal exit is terminal, so bail within seconds instead of the
     # full gate.
     _crash_grace = int(os.environ.get("HYPERLOOM_MN_WORKER_CRASH_GRACE_S", "45") or 45)

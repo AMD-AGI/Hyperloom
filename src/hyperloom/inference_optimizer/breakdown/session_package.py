@@ -19,6 +19,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
+from hyperloom.common.env import env_flag
+
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
@@ -130,8 +132,7 @@ def _dest_root() -> Path:
 
 def _loose_enabled() -> bool:
     """Whether to also drop loose (unzipped) copies. Defaults to True."""
-    raw = (os.environ.get(ENV_PACKAGE_LOOSE) or "").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return env_flag(ENV_PACKAGE_LOOSE, default=True)
 
 
 def _copy_loose_tree(
