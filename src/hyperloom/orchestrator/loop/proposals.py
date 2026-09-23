@@ -528,6 +528,25 @@ class ProposalsCollaborator:
                         "specialist_task_id": specialist_task_id,
                     },
                 )
+                # The drop is terminal and the patch was already approved, so an unattended
+                # run has to hear it rather than find it in the event log afterwards.
+                summary = (
+                    f"integrate_patch dropped for specialist={specialist_task_id}: "
+                    "the patch was approved but names no owning phase"
+                )
+                log.error("%s", summary)
+                await self.bus.append_and_seq(
+                    Message.new(
+                        "coordinator",
+                        "*",
+                        "alert",
+                        {
+                            "severity": "high",
+                            "summary": summary,
+                            "specialist_task_id": specialist_task_id,
+                        },
+                    )
+                )
                 return
             params["source_phase"] = owner
             params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
