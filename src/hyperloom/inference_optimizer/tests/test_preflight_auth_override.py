@@ -26,6 +26,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
     """Stub out heavyweight install steps so _preflight() is fast."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
     # Stub the kernel-agent env fallback (it hard-fails when missing).
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", lambda: None)
@@ -42,14 +43,12 @@ def stub_install_steps(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli_preflight.shutil, "which", _fake_which)
 
-    class _FakeCompleted:
-        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = ""):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
     def _fake_run(cmd, *args, **kwargs):
-        return _FakeCompleted(returncode=0)
+        stdout = "Claude Code test\n" if cmd[1:] == ["--version"] else ""
+        text_mode = bool(
+            kwargs.get("text") or kwargs.get("universal_newlines") or kwargs.get("encoding") or kwargs.get("errors")
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout if text_mode else stdout.encode(), "" if text_mode else b"")
 
     monkeypatch.setattr(cli_preflight.subprocess, "run", _fake_run)
     return None
