@@ -8,6 +8,9 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.actions.executors import _aiter_jit as aj
 
@@ -549,6 +552,7 @@ def test_serving_modules_cover_csv_when_so_absent(tmp_path):
 
 
 def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
@@ -560,7 +564,7 @@ def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, m
     )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
     result = aj.prepare_serving_so_for_csvs(
-        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": csv_path.name},
         backup_dir=tmp_path / "backup",
     )
     assert result["action"] == "skip"
@@ -568,6 +572,7 @@ def test_prepare_serving_so_skips_when_only_asm_names_are_outside_so(tmp_path, m
 
 
 def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     bp = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
@@ -583,7 +588,7 @@ def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_
     )
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
     result = aj.prepare_serving_so_for_csvs(
-        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": csv_path.name},
         backup_dir=tmp_path / "backup",
     )
     assert result["action"] == "skip"
@@ -592,6 +597,7 @@ def test_prepare_serving_so_skips_when_cktile_lives_in_blockscale_cktile_so(tmp_
 
 
 def test_prepare_serving_so_skips_when_registry_covers_csv(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     jit_dir = tmp_path / "jit"
     jit_dir.mkdir()
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
@@ -600,7 +606,7 @@ def test_prepare_serving_so_skips_when_registry_covers_csv(tmp_path, monkeypatch
     csv_path.write_text("kernelName\nkernel_keep\n", encoding="utf-8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
     result = aj.prepare_serving_so_for_csvs(
-        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": csv_path.name},
         backup_dir=tmp_path / "backup",
     )
     assert result["action"] == "skip"
@@ -608,22 +614,208 @@ def test_prepare_serving_so_skips_when_registry_covers_csv(tmp_path, monkeypatch
 
 
 def test_prepare_serving_so_drops_so_when_registry_is_narrow(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     jit_dir = tmp_path / "jit"
     build_dir = jit_dir / "build"
     build_dir.mkdir(parents=True)
     (build_dir / "stamp").write_text("x", encoding="utf-8")
     so_path = jit_dir / "module_gemm_a8w8_blockscale_bpreshuffle.so"
     so_path.write_bytes(b"kernel_old")
+    unrelated = jit_dir / "module_attention.so"
+    unrelated.write_bytes(b"unrelated kernel")
     csv_path = tmp_path / "merged.csv"
     csv_path.write_text("kernelName\nkernel_old\nkernel_new\n", encoding="utf-8")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit_dir))
     result = aj.prepare_serving_so_for_csvs(
-        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv_path)},
+        {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": csv_path.name},
         backup_dir=tmp_path / "backup",
     )
     assert result["action"] == "invalidate"
     assert not so_path.exists()
     assert not build_dir.exists()
+    assert unrelated.read_bytes() == b"unrelated kernel"
+    assert result["jit_dir"] == str(jit_dir)
+    assert result["removed"] == [str(so_path)]
+    record = result["jit_build"]
+    assert record["status"] == "ok"
+    assert record["module_names"] == [so_path.name]
+    assert record["module_scope"] == list(
+        aj.AITER_ENV_TO_SERVING_MODULES["AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"]
+    )
+    assert (Path(record["modules_backup_path"]) / so_path.name).read_bytes() == b"kernel_old"
+    assert (Path(record["backup_path"]) / "stamp").read_text(encoding="utf-8") == "x"
+
+
+@pytest.mark.parametrize(
+    "envs",
+    [None, {}, {"AITER_CONFIG_GEMM_A8W8": "tuned.csv"}, {"AITER_CONFIG_FMOE": "fmoe.csv"}],
+    ids=["all-known", "empty-env", "selected-env", "no-matching-env"],
+)
+@pytest.mark.parametrize("build_exists", [False, True], ids=["modules-only", "with-build"])
+def test_drop_serving_so_preserves_modules_outside_the_requested_scope(tmp_path, monkeypatch, envs, build_exists):
+    jit = tmp_path / "jit"
+    jit.mkdir()
+    known = tuple(dict.fromkeys(module for modules in aj.AITER_ENV_TO_SERVING_MODULES.values() for module in modules))
+    for module in (*known, "module_attention"):
+        (jit / f"{module}.so").write_bytes(module.encode())
+    build = jit / "build"
+    if build_exists:
+        build.mkdir()
+        (build / "stamp").write_bytes(b"build cache")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+
+    result = aj.drop_serving_so_for_envs(envs, backup_dir=tmp_path / "backup")
+
+    expected = known if not envs else ("module_gemm_a8w8",) if "AITER_CONFIG_GEMM_A8W8" in envs else ()
+    record = result["jit_build"]
+    assert result["action"] == "invalidate"
+    assert result["jit_dir"] == str(jit)
+    assert record["status"] == ("ok" if expected or build_exists else "clean")
+    assert record["src"] == str(build)
+    assert record["build_existed"] is build_exists
+    assert record["module_scope"] == list(expected)
+    assert sorted(record["module_names"]) == sorted(f"{module}.so" for module in expected)
+    assert sorted(result["removed"]) == sorted(str(jit / f"{module}.so") for module in expected)
+    assert not build.exists()
+    for module in (*known, "module_attention"):
+        module_path = jit / f"{module}.so"
+        if module in expected:
+            assert not module_path.exists()
+            assert (Path(record["modules_backup_path"]) / module_path.name).read_bytes() == module.encode()
+        else:
+            assert module_path.read_bytes() == module.encode()
+    if build_exists:
+        assert (Path(record["backup_path"]) / "stamp").read_bytes() == b"build cache"
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare_serving_so_for_csvs", "drop_serving_so_for_envs"])
+def test_serving_so_invalidation_failure_preserves_the_cache(tmp_path, monkeypatch, entrypoint):
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "jit"
+    build = jit / "build"
+    build.mkdir(parents=True)
+    (build / "stamp").write_bytes(b"build cache")
+    so = jit / "module_gemm_a8w8.so"
+    so.write_bytes(b"kernel_old")
+    unrelated = jit / "module_attention.so"
+    unrelated.write_bytes(b"unrelated")
+    Path("tuned.csv").write_text("kernelName\nkernel_new\n", encoding="utf-8")
+    backup = tmp_path / "backup"
+    backup.write_bytes(b"not a directory")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(jit))
+
+    with pytest.raises(OSError, match="JIT cache invalidation failed"):
+        getattr(aj, entrypoint)({"AITER_CONFIG_GEMM_A8W8": "tuned.csv"}, backup_dir=backup)
+
+    assert so.read_bytes() == b"kernel_old"
+    assert unrelated.read_bytes() == b"unrelated"
+    assert (build / "stamp").read_bytes() == b"build cache"
+
+
+@pytest.fixture
+def serving_package(tmp_path, monkeypatch):
+    package = tmp_path / "aiter"
+    (package / "jit").mkdir(parents=True)
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _: SimpleNamespace(origin=str(package / "__init__.py")))
+    monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", ())
+    return package
+
+
+@pytest.mark.parametrize("override", ["runtime-cache", "~/runtime-cache", " runtime-cache ", ""])
+def test_serving_dir_uses_the_runtime_override_verbatim(tmp_path, monkeypatch, serving_package, override):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AITER_JIT_DIR", override)
+    assert aj._resolve_serving_jit_dir() == (Path(override).absolute() if override else None)
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare_serving_so_for_csvs", "drop_serving_so_for_envs"])
+def test_runtime_cache_named_build_does_not_invalidate_its_parent(tmp_path, monkeypatch, serving_package, entrypoint):
+    monkeypatch.chdir(tmp_path)
+    jit = tmp_path / "runtime" / "build"
+    build = jit / "build"
+    build.mkdir(parents=True)
+    (build / "stamp").write_bytes(b"runtime build")
+    name = "module_gemm_a8w8.so"
+    (jit / name).write_bytes(b"kernel_old")
+    (jit.parent / name).write_bytes(b"parent module")
+    Path("tuned.csv").write_text("kernelName\nkernel_new\n", encoding="utf-8")
+    monkeypatch.setenv("AITER_JIT_DIR", str(jit))
+
+    result = getattr(aj, entrypoint)({"AITER_CONFIG_GEMM_A8W8": "tuned.csv"}, backup_dir=tmp_path / "backup")
+
+    assert result["action"] == "invalidate"
+    assert result["jit_dir"] == str(jit)
+    assert result["removed"] == [str(jit / name)]
+    assert result["jit_build"]["src"] == str(build)
+    assert jit.is_dir()
+    assert not build.exists()
+    assert not (jit / name).exists()
+    assert (jit.parent / name).read_bytes() == b"parent module"
+    assert (Path(result["jit_build"]["modules_backup_path"]) / name).read_bytes() == b"kernel_old"
+
+
+def test_drop_keeps_the_explicit_build_directory_override(tmp_path, monkeypatch):
+    jit = tmp_path / "jit"
+    build = jit / "build"
+    build.mkdir(parents=True)
+    name = "module_gemm_a8w8.so"
+    (jit / name).write_bytes(b"kernel_old")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(build))
+
+    result = aj.drop_serving_so_for_envs({"AITER_CONFIG_GEMM_A8W8": "tuned.csv"}, backup_dir=tmp_path / "backup")
+
+    assert result["action"] == "invalidate"
+    assert result["jit_dir"] == str(build)
+    assert result["jit_build"]["src"] == str(build)
+    assert result["removed"] == [str(jit / name)]
+    assert not build.exists()
+    assert not (jit / name).exists()
+
+
+@pytest.mark.parametrize("leaf", ["jit", "jit/build"])
+def test_serving_dir_keeps_the_explicit_wrapper_override(tmp_path, monkeypatch, serving_package, leaf):
+    selected = tmp_path / "manual" / leaf
+    selected.mkdir(parents=True)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", f"  {selected}  ")
+    monkeypatch.setenv("AITER_JIT_DIR", str(tmp_path / "other"))
+    assert aj._resolve_serving_jit_dir() == selected
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_serving_dir_uses_only_the_initialized_home_cache(tmp_path, monkeypatch, serving_package, initialized):
+    home = tmp_path / "home"
+    fallback = home / ".aiter" / "jit"
+    if initialized:
+        fallback.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    real_access = os.access
+    monkeypatch.setattr(
+        os, "access", lambda path, mode: False if Path(path) == serving_package / "jit" else real_access(path, mode)
+    )
+    assert aj._resolve_serving_jit_dir() == (fallback if initialized else None)
+
+
+@pytest.mark.parametrize("use_probe", [False, True])
+def test_serving_dir_retains_package_and_probe_discovery(monkeypatch, serving_package, use_probe):
+    if use_probe:
+        monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _: None)
+        monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", (str(serving_package / "jit"),))
+    assert aj._resolve_serving_jit_dir() == serving_package / "jit"
+
+
+def test_serving_dir_ignores_a_missing_wrapper_override(monkeypatch, serving_package):
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", str(serving_package / "missing"))
+    assert aj._resolve_serving_jit_dir() == serving_package / "jit"
+
+
+def test_serving_dir_unavailable_without_a_package_or_override(monkeypatch):
+    monkeypatch.delenv("INFERENCE_OPTIMIZER_AITER_JIT_DIR", raising=False)
+    monkeypatch.delenv("AITER_JIT_DIR", raising=False)
+    monkeypatch.setattr(aj.importlib.util, "find_spec", lambda _: None)
+    monkeypatch.setattr(aj, "AITER_JIT_PROBE_PATHS", ())
+    assert aj._resolve_serving_jit_dir() is None
 
 
 def test_is_aiter_jit_registry_mismatch_inside_cuda_graph_blob():

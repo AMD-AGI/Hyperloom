@@ -10,10 +10,11 @@ import importlib.util
 import logging
 import os
 import re
-import shutil
 import time
 from pathlib import Path
 from typing import Any
+
+from hyperloom.common.aiter_jit_cache import invalidate_jit_cache, resolve_jit_build_dir
 
 log = logging.getLogger(__name__)
 
@@ -593,55 +594,39 @@ def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path:
     return True
 
 
+def _resolve_serving_package_root() -> Path | None:
+    """Locate package configs independently of the runtime's writable cache."""
+    candidates = [Path(path) for path in _resolve_aiter_jit_dir_dynamic()]
+    if not candidates:
+        candidates = [Path(path) for path in AITER_JIT_PROBE_PATHS if Path(path).is_dir()]
+    if not candidates:
+        return None
+    jit = candidates[0]
+    return jit.parent.parent if jit.name == "build" else jit.parent
+
+
 def _resolve_serving_jit_dir() -> Path | None:
-    """The aiter ``jit/`` directory that holds serving ``module_*.so`` files."""
+    """The runtime cache holding serving modules, unless explicitly overridden."""
     override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
-    candidates: list[Path] = []
-    if override:
-        candidates.append(Path(override))
-    candidates.extend(Path(path) for path in _resolve_aiter_jit_dir_dynamic())
-    candidates.extend(Path(path) for path in AITER_JIT_PROBE_PATHS)
-    for path in candidates:
-        if path.is_dir():
-            return path
-    return None
+    if override and Path(override).is_dir():
+        return Path(override)
+    build = resolve_jit_build_dir(_resolve_serving_package_root())
+    return build.parent if build is not None else None
 
 
 def _jit_build_dir(jit_dir: Path) -> Path:
-    return jit_dir if jit_dir.name == "build" else jit_dir / "build"
+    override = os.environ.get("INFERENCE_OPTIMIZER_AITER_JIT_DIR", "").strip()
+    if override and jit_dir == Path(override) and jit_dir.name == "build":
+        return jit_dir
+    return jit_dir / "build"
 
 
-def _unlink_serving_modules(jit_dir: Path, modules: tuple[str, ...]) -> list[str]:
-    removed: list[str] = []
-    for module in modules:
-        so_path = jit_dir / f"{module}.so"
-        if not so_path.is_file():
-            continue
-        try:
-            so_path.unlink()
-            removed.append(str(so_path))
-        except OSError as exc:
-            log.warning("failed to unlink serving so %s: %s", so_path, exc)
-    return removed
-
-
-def _invalidate_jit_build(jit_dir: Path, backup_dir: Path) -> dict[str, Any]:
-    """Move ``jit/build`` aside so the next import re-runs codegen for the new CSV."""
-    try:
-        from hyperloom.agents.kernel.tools.apply_kernel_patch import _invalidate_aiter_jit_build
-    except ImportError:
-        build = _jit_build_dir(jit_dir)
-        if not build.is_dir():
-            return {"status": "clean", "reason": "aiter jit/build/ does not exist"}
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        dest = backup_dir / f"jit_build_{time.time_ns()}"
-        shutil.move(str(build), str(dest))
-        return {"status": "ok", "src": str(build), "backup_path": str(dest)}
-    return _invalidate_aiter_jit_build(
-        target_file=jit_dir / "core.py",
-        backup_dir=backup_dir,
-        jit_build_dir=_jit_build_dir(jit_dir),
-    )
+def _invalidate_jit_build(jit_dir: Path, backup_dir: Path, modules: tuple[str, ...]) -> dict[str, Any]:
+    """Invalidate selected modules and build state, surfacing transaction failure."""
+    record = invalidate_jit_cache(_jit_build_dir(jit_dir), backup_dir, modules=modules)
+    if record["status"] == "failed":
+        raise OSError(record["error"])
+    return record
 
 
 def _modules_for_envs(envs: dict[str, str] | None) -> tuple[str, ...]:
@@ -694,7 +679,7 @@ def prepare_serving_so_for_csvs(
     Args:
         envs: The round's ``AITER_CONFIG_*`` values; a variable it does not name is
             checked on aiter's unset branch, which is where the model overlays come in.
-        backup_dir: Where to move ``jit/build`` if invalidation runs.
+        backup_dir: Where to back up selected modules and ``jit/build`` for invalidation.
 
     Returns:
         A status dict with ``action`` of ``skip``, ``invalidate``, or ``noop``.
@@ -702,9 +687,9 @@ def prepare_serving_so_for_csvs(
     jit_dir = _resolve_serving_jit_dir()
     if jit_dir is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
-    # Only the unset branch reads this; a value the round pinned is taken verbatim, so a tree
-    # without configs/ beside jit/ still gets its named tables checked.
-    configs_dir = jit_dir.parent / "configs"
+    # Runtime caches may live outside the package; only manual trees without a
+    # discoverable package keep configs/ beside jit/. Pinned CSVs bypass this.
+    configs_dir = (_resolve_serving_package_root() or jit_dir.parent) / "configs"
     modules_needed: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
@@ -724,10 +709,10 @@ def prepare_serving_so_for_csvs(
     if not modules_needed_t:
         return {"action": "skip", "jit_dir": str(jit_dir)}
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
-    removed = _unlink_serving_modules(jit_dir, modules_needed_t)
-    invalidation = _invalidate_jit_build(jit_dir, dest)
+    invalidation = _invalidate_jit_build(jit_dir, dest, modules_needed_t)
+    removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
     log.info(
-        "aiter serving so does not cover tuned CSV; unlinked %d module(s) jit_build=%s",
+        "aiter serving so does not cover tuned CSV; invalidated %d module(s) jit_build=%s",
         len(removed),
         invalidation.get("status"),
     )
@@ -745,22 +730,22 @@ def drop_serving_so_for_envs(
     backup_dir: Path | None = None,
     also_modules: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """Unlink serving GEMM .so files and move ``jit/build`` so a later start rebuilds.
+    """Back up serving GEMM modules and ``jit/build`` so a later start rebuilds.
 
     Args:
-        envs: ``AITER_CONFIG_*`` the round carried; ``None`` means every known module.
-        backup_dir: Where to park the invalidated ``jit/build``.
-        also_modules: Modules to unlink on top of the env's own, for a mismatch whose
+        envs: ``AITER_CONFIG_*`` the round carried; ``None`` or empty means every known module.
+        backup_dir: Where to park the invalidated cache.
+        also_modules: Modules to invalidate on top of the env's own, for a mismatch whose
             kernel belongs to a variable this round never set. Without them an env
-            that maps to no module unlinks nothing and the retry repeats the failure.
+            that maps to no module invalidates none and the retry repeats the failure.
     """
     jit_dir = _resolve_serving_jit_dir()
     if jit_dir is None:
         return {"action": "noop", "reason": "aiter jit dir not found"}
     modules = tuple(dict.fromkeys((*_modules_for_envs(envs), *also_modules)))
     dest = backup_dir or (jit_dir / "hyperloom_jit_backup")
-    removed = _unlink_serving_modules(jit_dir, modules)
-    invalidation = _invalidate_jit_build(jit_dir, dest)
+    invalidation = _invalidate_jit_build(jit_dir, dest, modules)
+    removed = [str(Path(invalidation["src"]).parent / name) for name in invalidation["module_names"]]
     return {
         "action": "invalidate",
         "jit_dir": str(jit_dir),
