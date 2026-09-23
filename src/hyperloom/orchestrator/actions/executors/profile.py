@@ -28,6 +28,7 @@ from hyperloom.common.profile_args import sanitize_profile_server_args as _sanit
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from ._inferencex_patcher import (
+    benchmark_serving_path_in,
     ensure_benchmark_lib_patched,
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
@@ -777,8 +778,12 @@ def _candidate_trace_dirs(workspace: Path) -> list[Path]:
     """Trace directories to probe for a Magpie profile workspace."""
     return [
         workspace / "torch_trace",
+        workspace,
         workspace / "capture_traces",
         workspace.parent / "capture_traces",
+        # vLLM writes rank traces straight into the run's output dir, which is the
+        # workspace's parent rather than anything under the Magpie workspace.
+        workspace.parent,
     ]
 
 
@@ -1003,7 +1008,10 @@ class ProfileExecutor(BaselineExecutor):
         serving_ok = ensure_benchmark_serving_patched(ix_root)
         patchers["benchmark_serving"] = serving_ok
         lib_path = ix_root / "benchmarks" / "benchmark_lib.sh"
-        serving_path = ix_root / "utils" / "bench_serving" / "benchmark_serving.py"
+        # Resolved, not fixed: upstream moved the implementation under ``infx/`` and left the old
+        # path as a forwarding shim, which never carries the sentinel however well the patch landed.
+        # Scoped to ``ix_root`` like ``lib_path`` above: this gate speaks for the tree Magpie runs.
+        serving_path = benchmark_serving_path_in(ix_root)
 
         def _contains(path: Path, needle: str) -> bool:
             """Check whether ``needle`` appears in ``path``'s text."""

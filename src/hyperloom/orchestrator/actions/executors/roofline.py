@@ -17,10 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
+from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
     ANALYSIS_ATTEMPT_INITIAL,
@@ -37,13 +39,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     make_roofline_recorder,
     roofline_event_id,
 )
-
-#: Task param naming the event an inline roofline's rows belong to. A phase
-#: that owns a timeline event puts its event id here when it dispatches the
-#: action, and that one string is the whole of the difference between the
-#: inline and standalone modes: with it the rows join the enclosing event, and
-#: without it the action leaves an event of its own.
-INLINE_EVENT_PARAM = "sbd_event_id"
 
 log = logging.getLogger(__name__)
 
@@ -134,6 +129,25 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
         log.info("roofline: post-reclaim free VRAM (MiB): %s", free_mb)
     except Exception:  # noqa: BLE001 — best-effort
         log.debug("roofline: post-reclaim probe failed", exc_info=True)
+
+
+def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
+    """Why this stack can never record GPU kernels, or empty when the capture merely failed this time. Demands a
+    parsed trace carrying host ops beside zero kernels, so one transient empty capture cannot condemn the session.
+    """
+    if not isinstance(profile_result, dict):
+        return ""
+    measures = ((profile_result.get("trace_validate") or {}).get("verdict") or {}).get("measures") or {}
+    kernel_count = measures.get("kernel_count") if isinstance(measures, dict) else None
+    if not isinstance(kernel_count, int) or kernel_count != 0:
+        return ""
+    health = profile_result.get("trace_health")
+    if not isinstance(health, dict) or health.get("zero_ops") is not False:
+        return ""
+    return (
+        f"the profiler recorded {kernel_count} GPU kernels beside a populated host timeline, "
+        "so this stack cannot capture GPU traces at all"
+    )
 
 
 def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
@@ -944,6 +958,23 @@ class RooflineExecutor:
             successful_profile_params or ctx.task.params or {},
             arm=roofline_arm,
         )
+        _backend = detect_kineto_backend(trace_path)
+        if _backend:
+            _fingerprint = dict(self.shared_state.stack_fingerprint_meta or {})
+            if _fingerprint.get("kineto_backend") != _backend:
+                _fingerprint["kineto_backend"] = _backend
+                self.shared_state.stack_fingerprint_meta = _fingerprint
+        if not self.shared_state.gpu_trace_unsupported_reason:
+            _unsupported = _gpu_trace_unsupported_reason(profile_result)
+            if _unsupported:
+                if _backend:
+                    _unsupported = f"{_unsupported} (Kineto backend: {_backend})"
+                self.shared_state.gpu_trace_unsupported_reason = _unsupported
+                log.error(
+                    "roofline: %s; automatic profile/roofline enqueues will be suppressed (stack=%s)",
+                    _unsupported,
+                    self.shared_state.stack_fingerprint_meta or "(unknown)",
+                )
         # The host-side rewrite evidence is produced by the profile sub-step and is what the framework specialist is
         # given instead of guessing landing points from source.
         from ._framework_rewrite_evidence import promote_evidence_path

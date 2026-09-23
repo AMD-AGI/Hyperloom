@@ -447,12 +447,38 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # ``profiler=torch`` and a trace dir have to be asserted here too, not left to
-    # Magpie's launcher script alone: that script appends its own flags *after*
+    # Magpie's launcher script alone: that script prepends its own flags *before*
     # EXTRA_VLLM_ARGS at actual launch, but the argv preflight probe only sees
     # EXTRA_VLLM_ARGS, and vLLM's ProfilerConfig validator rejects
     # delay/max_iterations without both present in the checked fragment.
     assert "--profiler-config.profiler torch" in extra, extra
     assert "--profiler-config.torch_profiler_dir" in extra, extra
+
+
+def test_candidate_trace_dirs_covers_the_vllm_output_root(tmp_path):
+    """vLLM writes rank traces into the run output dir, one level above the Magpie workspace."""
+    from hyperloom.orchestrator.actions.executors.profile import _candidate_trace_dirs
+
+    workspace = tmp_path / "task" / "benchmark_vllm_20260922"
+    assert _candidate_trace_dirs(workspace) == [
+        workspace / "torch_trace",
+        workspace,
+        workspace / "capture_traces",
+        workspace.parent / "capture_traces",
+        workspace.parent,
+    ]
+
+
+def test_materialize_profile_pins_magpie_and_vllm_to_one_trace_dir(tmp_path, monkeypatch):
+    """Whichever of the two duplicate flags vLLM keeps, the trace has to land where discovery looks."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    injected = envs["EXTRA_VLLM_ARGS"].split("--profiler-config.torch_profiler_dir ", 1)[1].split()[0]
+    assert envs["VLLM_TORCH_PROFILER_DIR"] == injected
 
 
 def test_materialize_profile_does_not_duplicate_an_explicit_profiler_flag(
@@ -1780,6 +1806,8 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
     assert "--profiler-config" not in extra, f"atom EXTRA_ATOM_ARGS leaked sglang/vllm profiler flag: {extra!r}"
     # --trust-remote-code from the baseline YAML must survive untouched.
     assert "--trust-remote-code" in extra, f"atom EXTRA_ATOM_ARGS lost base --trust-remote-code: {extra!r}"
+    # baseline YAML is not a profile materialize; do not inject ATOM TraceLens knobs.
+    assert "--mark-trace" not in extra
 
 
 def test_default_profile_config_tracks_framework(monkeypatch):
@@ -2416,8 +2444,7 @@ async def test_profile_executor_patches_configured_inferencex_path(
 
 
 @pytest.mark.asyncio
-async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
-    """TraceLens-patched vLLM writes graph-capture traces next to the benchmark workspace, under the profile task's ``capture_traces`` dir."""
+async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tr = TaskRegistry(db)
@@ -2446,10 +2473,10 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
                 }
             )
         )
-        capture_dir = output_dir / "capture_traces"
+        _gz_trace(workspace / "rank0.177.pt.trace.json.gz", 128)
+        capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
-        (capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz").write_bytes(b"fake-trace")
-        (capture_dir / "graph_capture_rank_0.2.pt.trace.json.gz").write_bytes(b"fake-trace")
+        _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
         return subprocess.CompletedProcess(args=[], returncode=0, stdout="ok", stderr="")
 
     pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
@@ -2462,12 +2489,15 @@ async def test_profile_executor_extracts_vllm_capture_traces(tmp_path):
     with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
         res = await sub.run_task(task)
 
-    capture_dir = output_dir / "capture_traces"
+    workspace = output_dir / "benchmark_vllm_20260501_001122"
+    complete_trace = workspace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(capture_dir)
-    assert len(res.result["trace_files"]) == 2
-    assert res.result["main_trace_path"].startswith(str(capture_dir))
+    assert res.result["trace_dir"] == str(workspace)
+    assert res.result["trace_files"] == [str(complete_trace)]
+    assert res.result["main_trace_path"] == str(workspace)
+    assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
+    assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
 
 
@@ -2603,6 +2633,8 @@ async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_d
 @pytest.mark.asyncio
 async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_dir, monkeypatch):
     """With no explicit route, every framework (incl. xDiT) DEFAULTS to the TraceLens ``agent`` route (the shipped default); bypass is an explicit route."""
+    monkeypatch.setattr(krh.sys, "executable", "/task/deps/venv/bin/python")
+    monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
     monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     monkeypatch.setattr(krh, "_resolve_tracelens_root", lambda: session_dir)
     monkeypatch.setattr(krh, "_tracelens_root_error", lambda root: None)
@@ -2627,6 +2659,7 @@ async def test_trace_analyze_handler_xdit_defaults_to_tracelens_agent(session_di
     )
     assert res["status"] == "ok"
     cmd = captured["cmd"]
+    assert cmd[0] == "/task/deps/venv/bin/python"
     assert any("tracelens_analysis.py" in c for c in cmd)
     assert not any("bypass_trace_analysis.py" in c for c in cmd)
     assert "--tracelens-root" in cmd

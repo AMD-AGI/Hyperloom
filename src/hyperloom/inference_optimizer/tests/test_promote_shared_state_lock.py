@@ -21,6 +21,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
 from hyperloom.orchestrator.loop import writeback as wb
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
@@ -2555,3 +2556,45 @@ async def test_promote_leaves_a_clean_result_out_of_the_failure_log(session_dir)
     )
 
     assert coord.shared_state.last_action_failures == []
+
+
+@pytest.mark.asyncio
+async def test_a_config_attempt_is_ledgered_with_no_timeline_open(session_dir):
+    """The row is what the dryness judgment reads, so no recorder may gate it.
+
+    The recorder lives for one FRAMEWORK_AGENT entry; a round settling in SWEEP
+    finds it closed, which is how every row outside that window went missing.
+    """
+    coord = _coord(session_dir)
+    assert coord._framework_timeline() is None
+
+    await coord._fact_write_hook(
+        task=_task("explore", task_id="ex-1"),
+        result=SubAgentResult(
+            task_id="ex-1",
+            state="succeeded",
+            result={
+                "round_id": "explore-004",
+                "per_variant_outcomes": [
+                    {
+                        "outcome": "REVERT",
+                        "fingerprint": "fp-1",
+                        "variant_name": "v-1",
+                        "provenance": "llm_direct",
+                        "metrics": {"gain_pct": -1.5, "base_tput": 1000.0, "tput": 985.0},
+                    },
+                    {"outcome": "SKIPPED_DEDUP", "fingerprint": "fp-2", "variant_name": "v-2"},
+                ],
+            },
+        ),
+        kept=False,
+    )
+
+    # The deduped variant was never measured, so it is not an attempt.
+    (row,) = coord.shared_state.attempts
+    assert row["lever_kind"] == LEVER_CONFIG
+    assert row["outcome"] == "REVERT"
+    assert row["adopted"] is False
+    assert row["round_id"] == "explore-004"
+    assert row["fingerprint"] == "fp-1"
+    assert row["gain_pct"] == -1.5

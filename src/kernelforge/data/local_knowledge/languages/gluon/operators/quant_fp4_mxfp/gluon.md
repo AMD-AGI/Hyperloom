@@ -70,8 +70,8 @@ BF8 reaches is chasing a ceiling this operator does not have.
 
 **This is the highest-risk item on this card.** The order is not symmetric, so changing the MFMA shape
 without re-deriving the scale packing compiles cleanly, runs at full speed, and returns wrong numbers.
-If you switch variants — which is a natural thing to try while tuning — **re-run the task's
-`correctness_command` before you read the timing at all.** SNR will not reliably catch it.
+If you switch variants — which is a natural thing to try while tuning — **re-run the driver's
+correctness suite before you read the timing at all.** SNR will not reliably catch it.
 
 ## Knobs worth sweeping
 Tile dims and pipeline depth as for FP16, plus the scale pipeline's own depth and whether the scales

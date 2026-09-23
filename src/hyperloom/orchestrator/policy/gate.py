@@ -53,7 +53,7 @@ from ..specialists.profile import (
     SCOPE_VALUES as SPECIALIST_SCOPE_VALUES,
 )
 from ..specialists.patch_safety import parse_patch_targets
-from ..state._shared_state.explore_state import gap_actionability_key
+from ..state._shared_state.phase_state import gap_actionability_key
 
 if TYPE_CHECKING:  # pragma: no cover — type-only
     from ..roles.agent_role import AgentRole
@@ -408,6 +408,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",
+        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
+        # that can.
+        "gpu_trace_unsupported_reason",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",
@@ -468,6 +471,8 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "target_reached_at",
         # explore search ledger; Coordinator-only writers (LLM rewrite would bypass dedup-by-fingerprint).
         "explore_search",
+        # per-lever attempt ledger; one Coordinator-side writer per lever.
+        "attempts",
         # structured gaps ledger; Coordinator-only writers (``_refresh_gaps``,
         # ``_seed_gaps_from_research_hints``, ``_record_explore_round_gaps``,
         # ``_consume_static_recon``), all via ``SharedState.upsert_gap``.

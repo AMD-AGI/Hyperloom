@@ -14,7 +14,7 @@ from hyperloom.common.env import env_bool
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
 
-from .explore_state import GAP_SEVERITY_RANK, _shared_state_module
+from .phase_state import GAP_SEVERITY_RANK, _shared_state_module
 
 # Failure rows rendered into the prompt, and per-row excerpt budget.
 _FAILURES_RENDERED = 10

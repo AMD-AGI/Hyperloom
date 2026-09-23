@@ -246,6 +246,16 @@ def test_outcome_baseline_reads_the_anchoring_measurement_off_the_timeline():
         # test_sbd_v6_grading.py for the axes themselves.
         "perf": _UNMEASURED_AXES,
     }
+    assert outcome["anchoring_eval"] == {
+        "task_id": "b-1",
+        "action_status": "succeeded",
+        "decision": "",
+        "status": "succeeded",
+        "accuracy": 0.81,
+        "task": "",
+        "metric": "",
+        "source_file": "",
+    }
 
 
 def test_outcome_baseline_ignores_a_kernel_probe_that_anchors_nothing():

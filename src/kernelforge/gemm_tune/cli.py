@@ -429,7 +429,8 @@ def run(
                     [g.gpu_id for g in busy],
                 )
 
-    # aiter tune/serve alignment preflight (warn-only, best-effort).
+    # aiter tune/serve alignment preflight.
+    preflight_hard: list[str] = []
     try:
         from .aiter_preflight import collect as _aiter_collect
 
@@ -439,10 +440,13 @@ def run(
             log.warning("aiter preflight: %s", _m)
         for _m in _pf["hard"]:
             log.warning("aiter preflight PROBLEM: %s", _m)
+        preflight_hard = list(_pf["hard"])
         if _pf["aligned"]:
             log.info("aiter preflight: serve aiter aligned with tuner root")
-    except Exception as _exc:  # noqa: BLE001 - preflight must never break tuning
+    except Exception as _exc:  # noqa: BLE001 - unavailable diagnostics remain best-effort
         log.debug("aiter preflight skipped: %s", _exc)
+    if preflight_hard:
+        raise click.ClickException("aiter preflight failed: " + "; ".join(preflight_hard))
 
     # Analyze model
     try:

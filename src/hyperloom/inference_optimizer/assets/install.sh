@@ -13,10 +13,10 @@
 #      pyproject `[test]` extra)
 #   2. Magpie (benchmark engine) pip-installed from MAGPIE_PACKAGE_SPEC,
 #      pinned to MAGPIE_REF (a commit SHA or tag)
-#   2b. Atomic-write patch for Magpie._prepare_benchmark_scripts
-#       (root-cause fix for the Hyperloom #C1 script-tearing race;
-#       fail-soft — a no-op when the MAGPIE_REF target already has
-#       upstream atomic copying)
+#   2b. Magpie compatibility patches (SGLang custom-tokenizer trust +
+#       eval-concurrency flag scrub); idempotent no-ops on re-run. The
+#       default MAGPIE_REF already copies benchmark scripts atomically
+#       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
 #   4. Delegates to src/hyperloom/agents/kernel/scripts/install.sh for ray, ray-head
@@ -151,6 +151,10 @@ if [ -z "${_user_data_was_set}" ]; then
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
 KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
+VLLM_IMAGE_SOURCE_ROOT="/app/vllm"
+VLLM_IMAGE_SOURCE_COMMIT="f46a9dfe2c5f57bebbd29556cbbb25eabd874226"
+VLLM_IMAGE_REPO="${VLLM_IMAGE_REPO:-https://github.com/vllm-project/vllm.git}"
+VLLM_IMAGE_SOURCE_ACTIVE=0
 # Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
 HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
 # Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
@@ -216,7 +220,10 @@ EOF
 
 MAGPIE_REPO="${MAGPIE_REPO:-https://github.com/AMD-AGI/Magpie.git}"
 # Pin Magpie to a release commit/tag instead of the default branch. Operators can
-# re-pin with MAGPIE_REF=<tag|sha>.
+# re-pin with MAGPIE_REF=<tag|sha>. Must stay at or above e6833b8183c6c41adf6038252337550876ca0433
+# (Magpie v0.2.0), which copies benchmark scripts via ``_copy_benchmark_script_atomic``.
+# ``ensure_magpie()`` skips pip when ``import Magpie`` already succeeds, so a pre-existing
+# tree on disk is NOT upgraded to this ref — only fresh installs and explicit reinstalls are.
 MAGPIE_REF="${MAGPIE_REF:-e6833b8183c6c41adf6038252337550876ca0433}"
 MAGPIE_PACKAGE_SPEC="${MAGPIE_PACKAGE_SPEC:-magpie-eval @ git+${MAGPIE_REPO}@${MAGPIE_REF}}"
 
@@ -313,8 +320,8 @@ Env overrides:
     unset => open-source-only),
   USER_DATA_PATH,
   HYPERLOOM_RUNTIME_DIR, KERNEL_AGENT_ENV, HYPERLOOM_ROOT,
-  PATCH_MAGPIE (=1; set 0 only if upstream Magpie atomic-write
-  PR is already merged into your clone),
+  PATCH_MAGPIE (=1; set 0 to skip the SGLang trust and eval-concurrency
+  compatibility patches in step 2b),
   MAGPIE_EVAL_FLAG_STRICT (=1; abort when the redundant
     --concurrent-requests eval flag cannot be removed from a Magpie
     benchmark script. Set 0 only when GSM8K accuracy eval is not
@@ -340,7 +347,7 @@ die() { echo "[inference-optimizer ERROR] $*" >&2; exit 1; }
 
 # Truthy/falsy test for boolean-ish env vars. Numeric `-eq` comparisons choke on
 # string values (`[ false -eq 0 ]` errors and reads as true under set -e), so a
-# user writing MAGPIE_PATCH_STRICT=false would get the OPPOSITE of intent. Accept
+# user writing MAGPIE_EVAL_FLAG_STRICT=false would get the OPPOSITE of intent. Accept
 # the common spellings case-insensitively; returns success (0) when falsy.
 is_falsy() {
   case "$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -378,6 +385,210 @@ git_fetch_pinned() {
     run git clone --depth 1 --branch "$ref" "$repo" "$dir" || return 1
   fi
   return 0
+}
+
+probe_vllm_image_wheel() {
+  "$PYTHON" - <<'PY'
+import re
+from importlib import metadata
+from pathlib import Path
+
+try:
+    dist = metadata.distribution("vllm")
+except metadata.PackageNotFoundError:
+    raise SystemExit(1)
+version = dist.version.lower()
+match = re.search(r"(?:^|[.+])g([0-9a-f]{7,40})(?=$|[.+])", version)
+if match is None:
+    raise SystemExit(2)
+print(f"{version}\t{match.group(1)}\t{Path(dist.locate_file('vllm')).resolve()}")
+PY
+}
+
+prepare_vllm_image_git_tree() {
+  local root="$1" origin="" head="" parent="" subject="" baseline_ref="" upstream_ref=""
+  local index_tmp git_dir tree baseline commit_date
+  [[ "$VLLM_IMAGE_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+    { die "VLLM image source commit must be a full SHA"; return 1; }
+  if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+    head="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+       { ! git -C "$root" diff --quiet --ignore-submodules=all ||
+         ! git -C "$root" diff --cached --quiet --ignore-submodules=all; }; then
+      die "vLLM image source has tracked or staged user changes: ${root}"; return 1
+    fi
+  else
+    [ ! -e "$root/.git" ] ||
+      { die "vLLM image source has invalid Git metadata: ${root}"; return 1; }
+    git init -q "$root" || { die "failed to initialize Git metadata in ${root}"; return 1; }
+  fi
+  origin="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$origin" ]; then
+    git -C "$root" remote add origin "$VLLM_IMAGE_REPO" ||
+      { die "failed to add vLLM image source remote"; return 1; }
+  elif [ "$origin" != "$VLLM_IMAGE_REPO" ]; then
+    die "vLLM image source origin mismatch: ${origin}"; return 1
+  fi
+  if [ -n "$head" ]; then
+    parent="$(git -C "$root" rev-parse "${head}^" 2>/dev/null || true)"
+    subject="$(git -C "$root" show -s --format=%s "$head" 2>/dev/null || true)"
+    baseline_ref="$(git -C "$root" rev-parse refs/hyperloom/image-baseline 2>/dev/null || true)"
+    upstream_ref="$(git -C "$root" rev-parse refs/hyperloom/upstream 2>/dev/null || true)"
+    if [ "$parent" != "$VLLM_IMAGE_SOURCE_COMMIT" ] ||
+       [ "$subject" != "Hyperloom prebuilt vLLM image baseline" ] ||
+       [ "$baseline_ref" != "$head" ] ||
+       [ "$upstream_ref" != "$VLLM_IMAGE_SOURCE_COMMIT" ]; then
+      die "vLLM image source HEAD is not the managed synthetic baseline: ${root}"; return 1
+    fi
+    export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+    export VLLM_IMAGE_BASELINE_SHA="$head"
+    return 0
+  fi
+  git -C "$root" fetch --quiet origin "$VLLM_IMAGE_SOURCE_COMMIT" ||
+    { die "failed to fetch vLLM image source commit ${VLLM_IMAGE_SOURCE_COMMIT}"; return 1; }
+  index_tmp="$(mktemp)"
+  if ! GIT_INDEX_FILE="$index_tmp" git -C "$root" read-tree "$VLLM_IMAGE_SOURCE_COMMIT" ||
+     ! GIT_INDEX_FILE="$index_tmp" git -C "$root" add -u -- .; then
+    rm -f "$index_tmp"; die "failed to capture vLLM image tracked deltas"; return 1
+  fi
+  tree="$(GIT_INDEX_FILE="$index_tmp" git -C "$root" write-tree)" ||
+    { rm -f "$index_tmp"; die "failed to write vLLM image baseline tree"; return 1; }
+  commit_date="$(git -C "$root" show -s --format=%cI "$VLLM_IMAGE_SOURCE_COMMIT")"
+  baseline="$(
+    printf '%s\n' "Hyperloom prebuilt vLLM image baseline" |
+      GIT_AUTHOR_NAME=Hyperloom GIT_AUTHOR_EMAIL=hyperloom@amd.com GIT_AUTHOR_DATE="$commit_date" \
+      GIT_COMMITTER_NAME=Hyperloom GIT_COMMITTER_EMAIL=hyperloom@amd.com GIT_COMMITTER_DATE="$commit_date" \
+      git -C "$root" commit-tree "$tree" -p "$VLLM_IMAGE_SOURCE_COMMIT"
+  )" || { rm -f "$index_tmp"; die "failed to commit vLLM image baseline tree"; return 1; }
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir)"
+  mv "$index_tmp" "$git_dir/index"
+  git -C "$root" update-ref refs/hyperloom/upstream "$VLLM_IMAGE_SOURCE_COMMIT" &&
+    git -C "$root" update-ref refs/hyperloom/image-baseline "$baseline" &&
+    git -C "$root" update-ref --no-deref HEAD "$baseline" ||
+    { die "failed to pin vLLM image source HEAD"; return 1; }
+  git -C "$root" diff-index --quiet "$baseline" -- ||
+    { die "vLLM image source verification changed after pinning"; return 1; }
+  export VLLM_IMAGE_UPSTREAM_SHA="$VLLM_IMAGE_SOURCE_COMMIT"
+  export VLLM_IMAGE_BASELINE_SHA="$baseline"
+}
+
+copy_missing_vllm_wheel_artifacts() {
+  local root="$1" wheel_package="$2"
+  "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+source = root / "vllm"
+tracked = set(subprocess.check_output(["git", "-C", str(root), "ls-files"], text=True).splitlines())
+overlay = []
+for path in wheel.rglob("*"):
+    rel = path.relative_to(wheel)
+    native = path.name.endswith((".so", ".pyd", ".dll", ".dylib")) or ".so." in path.name
+    if path.name != "_version.py" and not native:
+        continue
+    destination = source / rel
+    relative = Path("vllm") / rel
+    if os.path.lexists(destination):
+        if relative.as_posix() not in tracked:
+            overlay.append(relative)
+        continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        destination.symlink_to(os.readlink(path))
+    elif path.is_file():
+        shutil.copy2(path, destination)
+    else:
+        continue
+    overlay.append(relative)
+
+info = root / ".git" / "info"
+info.mkdir(parents=True, exist_ok=True)
+exclude = info / "exclude"
+existing = set(exclude.read_text(encoding="utf-8").splitlines()) if exclude.exists() else set()
+entries = [f"/{path.as_posix()}" for path in overlay]
+if entries:
+    with exclude.open("a", encoding="utf-8") as stream:
+        for entry in entries:
+            if entry not in existing:
+                stream.write(entry + "\n")
+    (info / "hyperloom-wheel-overlay").write_text("".join(f"{path.as_posix()}\n" for path in overlay), encoding="utf-8")
+print(len(overlay))
+PY
+}
+
+verify_vllm_image_source_import() {
+  local root="$1" wheel_package="$2"
+  PYTHONPATH="${root}${PYTHONPATH:+:${PYTHONPATH}}" "$PYTHON" - "$root" "$wheel_package" <<'PY'
+import importlib
+import sys
+from pathlib import Path
+
+root, wheel = map(Path, sys.argv[1:])
+import vllm
+
+loaded = Path(vllm.__file__).resolve()
+expected = (root / "vllm").resolve()
+if expected not in loaded.parents:
+    raise SystemExit(f"vLLM loaded from {loaded}, expected {expected}")
+modules = [name for name in ("_C", "_rocm_C") if (wheel / f"{name}.so").exists() or list(wheel.glob(f"{name}*.so"))]
+if not modules:
+    raise SystemExit("wheel exposes neither vllm._C nor vllm._rocm_C")
+for name in modules:
+    importlib.import_module(f"vllm.{name}")
+PY
+}
+
+activate_vllm_image_source() {
+  local info runtime_version runtime_commit wheel_package
+  [ -d "$VLLM_IMAGE_SOURCE_ROOT/vllm" ] || return 0
+  if ! info="$(probe_vllm_image_wheel 2>/dev/null)"; then
+    log "vLLM image source skipped: installed wheel has no commit-qualified version"
+    return 0
+  fi
+  IFS=$'\t' read -r runtime_version runtime_commit wheel_package <<<"$info"
+  case "$VLLM_IMAGE_SOURCE_COMMIT" in
+    "$runtime_commit"*) ;;
+    *) log "vLLM image source skipped: runtime ${runtime_version} is not ${VLLM_IMAGE_SOURCE_COMMIT}"; return 0 ;;
+  esac
+  if [ "${DRY_RUN:-0}" -eq 1 ] || [ "${CHECK_ONLY:-0}" -eq 1 ]; then
+    log "would activate ${VLLM_IMAGE_SOURCE_ROOT} for runtime ${runtime_version}"
+    return 0
+  fi
+  prepare_vllm_image_git_tree "$VLLM_IMAGE_SOURCE_ROOT" || return 1
+  copy_missing_vllm_wheel_artifacts "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" >/dev/null ||
+    { die "failed to overlay vLLM wheel artifacts"; return 1; }
+  verify_vllm_image_source_import "$VLLM_IMAGE_SOURCE_ROOT" "$wheel_package" ||
+    { die "vLLM image source import verification failed"; return 1; }
+  export FRAMEWORK_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_REPO_PATH="$VLLM_IMAGE_SOURCE_ROOT"
+  export VLLM_DIR="$VLLM_IMAGE_SOURCE_ROOT"
+  export HYPERLOOM_VLLM_IMAGE_SOURCE=1
+  VLLM_IMAGE_SOURCE_ACTIVE=1
+  log "activated exact vLLM image source at ${VLLM_IMAGE_SOURCE_ROOT}"
+}
+
+persist_vllm_image_source_env() {
+  [ "$VLLM_IMAGE_SOURCE_ACTIVE" -eq 1 ] || return 0
+  local pair name value
+  for pair in \
+    "FRAMEWORK_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_REPO_PATH=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "VLLM_DIR=${VLLM_IMAGE_SOURCE_ROOT}" \
+    "HYPERLOOM_VLLM_IMAGE_SOURCE=1" \
+    "VLLM_IMAGE_UPSTREAM_SHA=${VLLM_IMAGE_UPSTREAM_SHA}" \
+    "VLLM_IMAGE_BASELINE_SHA=${VLLM_IMAGE_BASELINE_SHA}"; do
+    name="${pair%%=*}"
+    value="${pair#*=}"
+    if grep -q "^export ${name}=" "$KERNEL_AGENT_ENV" 2>/dev/null; then
+      sed -i "s|^export ${name}=.*|export ${name}='${value}'|" "$KERNEL_AGENT_ENV"
+    else
+      printf "export %s='%s'\n" "$name" "$value" >> "$KERNEL_AGENT_ENV"
+    fi
+  done
 }
 
 # Serialize concurrent installs that share one open-source checkout root
@@ -1515,37 +1726,28 @@ ensure_aiperf() {
   fi
 }
 
-# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts ---
-# The Hyperloom #C1 script-tearing race (vllm_mi300x.sh / sglang_mi300x.sh
-# sourced by a leaked bash while a new Magpie subprocess is mid-`shutil.copy2` →
-# `syntax error near unexpected token 'fi'`). Magpie is invoked as a
-# subprocess, so monkey-patching from the Coordinator process does not
-# reach it; we patch the cloned source in place at install time. The
-# patcher itself is idempotent + flock-serialised + atomic-rename
-# (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
+# --- 2b. Atomic-write patch for Magpie._prepare_benchmark_scripts (compat patches only) ---
+# Two gaps between the pinned Magpie/InferenceX revision and what Hyperloom
+# needs: SGLang custom-tokenizer trust gating for MAGPIE_TRUST_REMOTE_CODE=1
+# (Magpie's client call sites never forward the `trust` flag upstream), and
+# the redundant `--concurrent-requests` flag InferenceX's `run_lm_eval`
+# rejects. Magpie is invoked as a subprocess, so monkey-patching from the
+# Coordinator process does not reach it; we patch the cloned source in place
+# at install time. The patcher itself is idempotent + flock-serialised +
+# atomic-rename (see `_magpie_patcher.py`), so re-runs are O(1) no-ops.
 #
-# Fail-soft (was fail-loud): a `False` return means the legacy
-# `shutil.copy2` block was not found. With MAGPIE_REF now pinned to an
-# upstream commit that already copies scripts atomically
-# (`_copy_benchmark_script_atomic`), that is the EXPECTED no-op state —
-# the #C1 race is already mitigated upstream, so we `warn` and continue
-# instead of aborting every install. (A sibling branch makes the patcher
-# itself upstream-aware; this warn is the defense-in-depth complement.) If
-# you re-pin MAGPIE_REF to a pre-refactor commit and the patch still cannot
-# apply, the script-tearing race is genuinely unpatched — review the
-# warning. Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
-ensure_magpie_atomic_scripts_patch() {
+# Override the gate via PATCH_MAGPIE=0 to skip the step entirely.
+ensure_magpie_compat_patches() {
   if is_falsy "${PATCH_MAGPIE:-1}"; then
-    log "PATCH_MAGPIE is falsy — skipping Magpie atomic-write patch (caller asserts upstream already fixed)"
+    log "PATCH_MAGPIE is falsy — skipping Magpie compatibility patches"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "would apply Hyperloom #C1 atomic-write patch to ${MAGPIE_PATH}/Magpie/modes/benchmark/benchmarker.py"
+    log "would apply Magpie SGLang trust + eval-concurrency compatibility patches under ${MAGPIE_PATH}"
     return 0
   fi
-  log "applying Hyperloom #C1 atomic-write patch to Magpie._prepare_benchmark_scripts"
-  # Exit-code contract (read below): 0 ok · 2 remote-trust drift only ·
-  # 4 GENUINE atomic failure (race unmitigated) · 1 benign atomic no-op.
+  log "applying Magpie SGLang trust + eval-concurrency compatibility patches"
+  # Exit-code contract (read below): 0 ok · 2 remote-trust drift · 5 eval-flag survives.
   # INFERENCEX_PATH is passed explicitly: the patcher also has to scrub the
   # InferenceX ``benchmarks/`` copies Magpie executes and teach
   # ``benchmark_lib.sh::run_lm_eval`` to tolerate the flag. This step therefore
@@ -1560,19 +1762,11 @@ status = magpie_scripts_patch_status(
     os.environ["MAGPIE_PATH"],
     os.environ.get("INFERENCEX_PATH") or None,
 )
-print(f"_magpie_patcher: atomic_reason={status.atomic_reason} "
-      f"atomic_ok={status.atomic_ok} remote_trust_ok={status.remote_trust_ok} "
+print(f"_magpie_patcher: remote_trust_ok={status.remote_trust_ok} "
       f"eval_flag_ok={status.eval_flag_ok}",
       file=sys.stderr)
 if status.ok:
     sys.exit(0)
-# A GENUINE atomic failure (unrecognized shape / I/O error) means the
-# script-tearing race is actually unmitigated — distinct exit so a strict
-# install can fail-loud instead of swallowing it as an expected no-op.
-if status.atomic_genuine_failure:
-    sys.exit(4)
-if not status.atomic_ok:
-    sys.exit(1)
 if not status.remote_trust_ok:
     sys.exit(2)
 # eval_flag_ok is False ONLY when a live `run_eval --concurrent-requests`
@@ -1584,26 +1778,13 @@ if not status.remote_trust_ok:
 # install can name the failure mode.
 if not status.eval_flag_ok:
     sys.exit(5)
-# Defensive catch-all: a not-ok status with none of the bits above set should
-# never happen, but exit non-zero so we never fall through to exit 0.
-sys.exit(3)
+sys.exit(1)
 PY
   then
-    log "Magpie #C1 patch OK"
+    log "Magpie compatibility patches OK"
   else
     rc=$?
-    if [ "$rc" -eq 4 ]; then
-      # GENUINE failure: the legacy block is gone AND upstream is not atomic
-      # (or a read/write error). The Hyperloom #C1 script-tearing race is NOT
-      # mitigated — `profile`/`baseline` can hit `syntax error near unexpected
-      # token 'fi'`. Strict mode (default) aborts; a falsy MAGPIE_PATCH_STRICT
-      # (0/false/no/off) keeps the legacy fail-soft behaviour and only warns.
-      if is_falsy "${MAGPIE_PATCH_STRICT:-1}"; then
-        warn "Magpie atomic-write patch GENUINELY failed (race unmitigated); MAGPIE_PATCH_STRICT=${MAGPIE_PATCH_STRICT:-} (falsy), continuing anyway — review _magpie_patcher.py."
-      else
-        die "Magpie atomic-write patch GENUINELY failed: neither the legacy shutil.copy2 block nor an upstream atomic copy was found in benchmarker.py. The Hyperloom #C1 script-tearing race is unmitigated. Re-pin MAGPIE_REF to a supported commit, review _magpie_patcher.py, or set MAGPIE_PATCH_STRICT=0 to downgrade to a warning (or PATCH_MAGPIE=0 to skip entirely)."
-      fi
-    elif [ "$rc" -eq 2 ]; then
+    if [ "$rc" -eq 2 ]; then
       warn "Magpie SGLang remote trust patch did not apply. If MAGPIE_TRUST_REMOTE_CODE=1 is required for custom-code models (for example Kimi/Qwen tokenizer paths), remote benchmark clients may still fail to pass trust; review _magpie_patcher.py or set PATCH_MAGPIE=0 only if this is intentional."
     elif [ "$rc" -eq 5 ]; then
       # Fail-loud by default: a surviving --concurrent-requests aborts EVERY
@@ -1620,11 +1801,7 @@ PY
         die "Magpie redundant --concurrent-requests eval flag could not be stripped from a generic benchmark script (unrecognised run_eval line), and InferenceX's run_lm_eval could not be taught to tolerate it. Every RUN_EVAL=true baseline will abort with 'Unknown parameter: --concurrent-requests' and the run will stop with baseline_accuracy_failed. Concurrency must flow via EVAL_CONCURRENT_REQUESTS (fallback CONC), not the flag — fix the script's run_eval line or review _magpie_patcher.py. Set MAGPIE_EVAL_FLAG_STRICT=0 to downgrade to a warning if accuracy eval is not required."
       fi
     else
-      # Benign no-op (rc=1): MAGPIE_PATH unset / benchmarker.py missing. With
-      # MAGPIE_REF pinned to an upstream-atomic commit the patcher reports
-      # ``upstream_atomic`` (exit 0) instead, so this branch is just the
-      # missing-tree case — warn and continue. PATCH_MAGPIE=0 skips the step.
-      warn "Magpie atomic-write patch skipped (no benchmarker.py under MAGPIE_PATH). Fine for tests/dry-runs; otherwise check MAGPIE_PATH or set PATCH_MAGPIE=0."
+      die "Magpie compatibility patch step failed (rc=$rc): the patcher process exited before reporting remote_trust_ok/eval_flag_ok. Check MAGPIE_PATH/INFERENCEX_PATH and review _magpie_patcher.py."
     fi
   fi
 }
@@ -1636,12 +1813,10 @@ PY
 # etc.) and pointed every install at whichever it found first. That
 # multi-install / shared-checkout layout is the upstream source of the
 # concurrent-write races behind the Hyperloom #C1 script-tearing race —
-# every fresh Magpie subprocess `shutil.copy2`'d its scripts on top of
-# the same shared files, while bash interpreters from neighbouring
-# installs were `source`-ing them. Cloning a per-install copy here
-# eliminates the cross-install fan-in (Magpie's in-place atomic-write patch then
-# closes the intra-install race window — both fixes are needed; this
-# one alone is not sufficient).
+# every fresh Magpie subprocess copied its scripts on top of the same shared
+# files, while bash interpreters from neighbouring installs were `source`-ing
+# them. Cloning a per-install copy here eliminates the cross-install fan-in;
+# the pinned Magpie ref copies scripts atomically upstream.
 #
 # Policy:
 #   * INFERENCEX_PATH set and exists -> preserve verbatim. This is the
@@ -1998,7 +2173,7 @@ acquire_install_lock
 # ALL whitespace would wrongly collapse "by pass" -> "bypass" and diverge.
 HYPERLOOM_BENCHMARK_BACKEND_LC="$(printf '%s' "${HYPERLOOM_BENCHMARK_BACKEND:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" = "bypass" ]; then
-  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_atomic_scripts_patch"
+  log "benchmark backend is bypass; skipping ensure_magpie + ensure_magpie_compat_patches"
 else
   ensure_magpie
 fi
@@ -2010,7 +2185,7 @@ ensure_inferencex
 # — running the patch before it silently skipped those targets and left
 # RUN_EVAL=true baselines aborting on 'Unknown parameter'.
 if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
-  ensure_magpie_atomic_scripts_patch
+  ensure_magpie_compat_patches
 fi
 
 # aiperf (AgentX client) installs whenever this build ships the AgentX assets.
@@ -2064,8 +2239,10 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
 fi
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
+activate_vllm_image_source
 ensure_framework_deps
 chain_kernel_agent
+persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
 # step (chain_kernel_agent included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)

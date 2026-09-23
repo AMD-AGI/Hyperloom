@@ -226,6 +226,8 @@ def test_reset_claude_config_leaves_file_alone_for_oauth_only(tmp_path: Path, mo
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     # Pre-seeded so "left alone" is observable rather than indistinguishable from "was never going to be written".
     cfg_path = tmp_path / ".claude" / "config.json"
@@ -264,6 +266,8 @@ def test_reset_claude_config_preserves_existing_file_for_oauth_only(
 
     oauth_env = "_".join(("CLAUDE", "CODE", "OAUTH", "TOKEN"))
     monkeypatch.setenv(oauth_env, "sk-ant-oat01-fake")
+    monkeypatch.delenv("_".join(("ANTHROPIC", "API", "KEY")), raising=False)
+    monkeypatch.delenv("_".join(("ANTHROPIC", "AUTH", "TOKEN")), raising=False)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
     cfg_path = tmp_path / ".claude" / "config.json"
     cfg_path.parent.mkdir(parents=True)

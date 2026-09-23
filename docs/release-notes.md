@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.1, a patch release that corrects the Recipe knowledge base warm-start path, unifies agent-backend selection, bounds supervisor watchdog restarts, and bumps the bare-metal vLLM default; plus the 1.1.0 feature release."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.2, a patch release that validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end; plus the 1.1.1 and 1.1.0 releases."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.1 (`pyproject.toml`). For the
+The current packaged version is 1.1.2 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
@@ -19,6 +19,134 @@ release has shipped yet.
 Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
+
+Nothing yet.
+
+## Hyperloom 1.1.2 release
+
+The [1.1.2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.2)
+is a patch release on top of 1.1.1. ROCm 10 becomes a validated stack, bring-up
+gets a phase of its own, and the automatic supervision layer is retired in
+favour of explicit resume and recovery. The session record resumes across the
+upgrade: `ensure_schema` migrates a 1.1.1 `coordinator.db` on the way in. The
+command line, the environment contract and several report fields do move; see
+"Before upgrading from 1.1.1" below.
+
+### Before upgrading from 1.1.1
+
+Two optimizer options and one console script 1.1.1 accepted are removed. The
+parser is strict, so a launch or resume command that still carries an option
+exits with `unrecognized arguments` before the session starts.
+
+| Removed | What to do |
+|---|---|
+| `--conc-sweep-timeout-sec` | Delete it. Each benchmark spawn is bounded by `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` (default `7800`) and, once a ready marker is seen, `INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC` (default `600`); sweep admission uses measured durations and the session deadline. |
+| `--recipe-kb-strict-fingerprint` | Delete it. It was read nowhere; partition mode and `ep` are now part of the KB key, so the mismatch it promised to catch cannot occur. |
+| `robustness-agent` console script, `tools/robustness_monitor.sh.example` | Nothing restarts a session automatically any more. Resume explicitly with `--resume-from`. |
+
+Resume now refuses, before any write or dispatch, when the session holds
+execution ownership it cannot verify; ownership recorded by an earlier build is
+diagnosed rather than assumed dead. After confirming that the task's process
+tree, remote workers and Ray actor have stopped, release it with
+`inference_optimizer recover-session --session-dir PATH --confirm-stopped TASK_ID --confirmation-reason TEXT`.
+
+Environment variables fail differently: nothing refuses them, so a box that
+still exports one starts normally and behaves as though it were unset. Find
+them by reading launch scripts and `.env`.
+
+| Removed or changed variable | What to do |
+|---|---|
+| `LLM_GATEWAY_KEY` as the only OpenAI-side credential | Rename it to `OPENAI_API_KEY`; value and endpoint are unchanged. `OPENAI_API_KEY` and the Anthropic-side names are the only credentials read, and `LLM_API_KEY`, `AMD_LLM_API_KEY`, `LLM_GATEWAY_KEY`, `AMD_API_KEY`, `LLM_PROXY_BASE_URL`, `LLM_PROXY_API_KEY` and `GEAK_WORK_DIR` are no longer forwarded to workers. |
+| `HYPERLOOM_SUPERVISOR`, `HYPERLOOM_SUPERVISOR_ENFORCE`, `HYPERLOOM_SUPERVISOR_TICK_STALL_SEC`, `ROBUSTNESS_AGENT_ROOT`, `ROBUSTNESS_LLM_RCA_DISABLED` | Delete them. The Supervisor, the Monitor and the Robustness agent are gone. |
+| `INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX`, `INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT` | Delete them. Baseline benchmarks run from `$INFERENCEX_PATH` as set; a network-filesystem checkout warns once and is recorded as `network_fs`. |
+| `MAGPIE_PATCH_STRICT` | Delete it. It had no effect once the atomic-write patch was dropped. |
+
+Installation prerequisites move with the stack:
+
+- TraceLens and its dependencies must be pre-installed in the coordinator's
+  Python interpreter; analysis no longer runs `pip install -e .` per request.
+  SGLang >= 0.5.18 profiles through TraceLens `kernel_shape_tool` under
+  `TRACELENS_ROOT` instead of git-applied roofline patches.
+- The recommended SGLang image is
+  `lmsysorg/sglang-rocm:v0.5.20-rocm10-mi30x|mi35x-20260920`, and the vLLM image
+  is `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`.
+- Bare-metal vLLM accepts ROCm 7.2.x (the `0.29.0+rocm723` wheel) or ROCm 10
+  (a source build of `VLLM_SOURCE_REF`); any other ROCm stack is rejected, and
+  `VLLM_INSTALL_METHOD` can only confirm the detected route.
+- The Slurm sbatch no longer forwards `ROCR_VISIBLE_DEVICES`,
+  `HIP_VISIBLE_DEVICES` or `CUDA_VISIBLE_DEVICES` into the container; isolation
+  comes from the cgroup.
+
+Report consumers have to follow these field changes; no aliases are kept:
+
+- SBD V6 `conc_sweep` comparison rows: `baseline_throughput` → `baseline_value`
+  and `optimized_throughput` → `optimized_value`. V6 failure rows are keyed by
+  `stage` instead of `phase`.
+- `reports/kernel_optimization_summary.json` moves to `schema_version` 2 with a
+  `lane_totals` block, and `kernel_opt_outcome` can be `unvalidated`.
+- A concurrency sweep that produced no comparable pair stops as `sweep_failed`
+  rather than `sweep_done`.
+- `plateau_overrides.explore_empty_streak` counts benched rounds rather than
+  variants, and the GEMM and fusion E2E KEEP threshold defaults to 1% instead of
+  3%.
+
+### 1.1.2 highlights
+
+- **ROCm 10 is a validated stack.** Docker runs SGLang 0.5.20 and vLLM on
+  ROCm 10 user space, bare-metal vLLM builds from source on a ROCm 10 host, and
+  `rocprof-compute` is installed and found on TheRock's pip-packaged ROCm. A
+  prebuilt SGLang image whose torch fails under `rocprofv3` is marked
+  profiling-unavailable instead of hanging the round.
+
+- **ENABLEMENT is the sixth phase of the loop.** Bring-up leaves
+  FRAMEWORK_AGENT and gets its own entry and exit, `phase_history` rows and
+  report section, bounded by the wall clock and `ENABLEMENT_MAX_ATTEMPTS`
+  rather than a budget share. A KEEP now ships an ordered replay recipe with a
+  `sufficient` / `insufficient` verdict under `enablement.recipe` in
+  `session_breakdown.json`.
+
+- **Automatic supervision is retired; limits and recovery are explicit.** The
+  Robustness agent, the runtime `recover` action and the Monitor/Supervisor
+  auto-resume are removed. Each benchmark spawn has a hard deadline plus a
+  silence limit armed only by a ready marker, resume refuses unverifiable
+  ownership instead of guessing, and `recover-session --confirm-stopped`
+  releases a stopped task's residue under the session lock.
+
+- **ATOM is supported end to end.** Its recovery workers are reaped, its kernel
+  backend defaults to forge, and detailed profiling adds `--mark-trace` and
+  ATOM's annotation switches only when the installed build supports them.
+
+- **KernelForge gains an assembly backend and keeps more of its work.**
+  `forge-loop --kernel-backend assembly` optimizes compiler-emitted AMDGPU
+  assembly behind a numerical contract. Warm starts fall back to a fuzzy KB
+  match across framework versions and GPUs, a lane's patch is merged against
+  the KEEPs landed before it, and a killed campaign's proven fusions are
+  salvaged instead of reported as REVERT.
+
+- **SBD V6 says which axis a session graded on.** `metadata.grading`, per-figure
+  `perf` and `graded_on` make AgentX and synthetic sessions distinguishable, and
+  the timeline records the events it used to drop, closing an event cut short by
+  a recording error as `interrupted`.
+
+### Other changes
+
+- **Bump validated SGLang stack to 0.5.20 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.20-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. Kernel-shape profiling for SGLang >= 0.5.18 uses
+  TraceLens `kernel_shape_tool` rather than git-applying SGLang roofline
+  patches. **Upgrade note:** move off `v0.5.18-rocm724-*` images or bare-metal
+  0.5.19 pins to `v0.5.20-rocm10-mi30x|mi35x-20260920` (or match `SGLANG_REF`
+  on bare metal).
+
+- **Repair kernel-tuning promotion and analysis handoffs.** GEMM integration
+  and fusion siblings now default to a 1% E2E KEEP threshold instead of 3%,
+  preserving explicit fusion overrides. MoE tuning collects and persists valid
+  candidate tables and reports missing artifacts instead of exporting unusable
+  paths. TraceLens uses the coordinator's Python interpreter and distinguishes
+  dependency or splitter failures from successful splits with no steady-state
+  output. **Upgrade note:** pre-install TraceLens and its dependencies in that
+  interpreter; analysis no longer runs `pip install -e .` on each request.
 
 - **Simplify optimizer lifecycle and benchmark limits.** Remove the Robustness
   agent/runtime RCA, runtime `recover` action, Monitor/Supervisor automatic
@@ -32,6 +160,72 @@ it.
   budget, and cancellation. Output cannot extend the hard deadline. Session
   cancellation and admission/phase budgets remain, as do explicit `--resume-from`,
   offline `recover-session`, process cleanup, and historical SBDv6 readers.
+
+- **Drop the redundant Magpie `benchmarker.py` atomic-write patch.** The default
+  `MAGPIE_REF` already copies benchmark scripts atomically upstream; install-time
+  patching is limited to SGLang trust, eval-concurrency, and the client tokenizer
+  hook. `MAGPIE_PATCH_STRICT` no longer exists (setting it had no effect after the
+  atomic patcher was removed).
+
+- **Scheduler stalls found in the ROCm 10 six-leg run are fixed.** KERNEL entry
+  hooks no longer block the coordinator tick, conc-sweep boot rounds are no
+  longer counted as measured variants, vLLM roofline reads the real rank trace,
+  and a trace with zero GPU events stops repeat roofline scheduling with a
+  recorded reason. Final reports keep GEAK and GEMM-tuning outcomes, and
+  `kernelforge.gemm_tune run` exits non-zero on a hard AITER tune/serve
+  alignment mismatch.
+
+- **One rule picks every agent CLI.** Orchestration goes through the shared
+  `preferred_agent_backend` ranking, so a host with both sides configured and
+  only the Codex extra installed now orchestrates on Codex. Preflight and the
+  kernel agent no longer mirror the credential into other variable names.
+
+- **One kernel's KB records share one address.** `normalize_operator_name`
+  splits camelCase, so `KdaPackedDecodeKernel` and `kda_packed_decode_kernel`
+  meet, and framework versions reduce to their release (`0.24.0+rocm723` and
+  `v0.24.0` are both `0.24.0`). Task publication refuses a backend outside
+  `KERNEL_BACKENDS` instead of filing it as flydsl. Records stored under the old
+  spellings are reached once the KB Store migration has run.
+
+- **The Explore phase is dissolved into one attempt ledger.** The configuration
+  arm gives up after five benched rounds without a win rather than five
+  variants, a grid that kept an earlier variant is no longer read as dry, and a
+  resumed session extends `tested` / `rejected` / `name_index` instead of
+  replacing them. Apply-conflict retries no longer end FRAMEWORK_AGENT.
+
+- **The rewrite pipeline's caller owns its task shape.** A KEEP requires the
+  task's `compile_command` / `correctness_command` only on the assembly backend;
+  elsewhere the driver's suite decides. `--no-applyback` skips the framework
+  apply-back stage and returns its reserve to the search.
+
+- **Roofline on GPUs without a Hyperloom achievable-peak entry uses AMD vendor
+  theoretical peaks.** MI355X keeps its per-op PerfModel breakdown on vendor
+  peaks and MI308X moves to PerfModel; per-kernel bypass rows record the peak's
+  source. MI300X and MI325X are unchanged.
+
+- **A benchmark that served its whole protocol is kept despite a non-zero
+  wrapper exit.** When `completed_requests` reaches `num_prompts`, the round
+  succeeds with warning `nonzero_rc_after_complete_protocol:<rc>`; a round that
+  served fewer requests still fails.
+
+- **Profiling follows InferenceX's move of `benchmark_serving.py` under
+  `infx/bench_serving/`.** Every AgentX roofline had been failing with
+  `benchmark_serving_ok=False` on current checkouts.
+
+- **SGLang patches under `sglang/kernels/jit/` no longer trigger an editable
+  reinstall.** They rebuild as `content_addressed_jit`, which kept the candidate
+  server importable and the framework version equal to the baseline's; a
+  framework reinstall is followed by an import check that reverts the patch on
+  failure.
+
+- **An agentic AgentX recipe satisfies the server-phase pid contract.**
+  `aiperf_client.sh` accepts a recipe that already ran the lifecycle and wrote
+  `inferencex_result.json`, and flat metric keys sit beside the nested schema so
+  a healthy run no longer reads as 0.00 req/s.
+
+- **The kernel installer preserves operator-supplied GEAK checkouts.** Only the
+  installer-managed `GEAK@*` caches are re-cloned; a missing or invalid operator
+  root fails clearly instead of being overwritten.
 
 ### Added
 
@@ -121,7 +315,11 @@ it.
   killed and even the daemon refuses to remove it (`PID <n> is zombie and can
   not be killed. Use the --init option ...`); the reclaim keeps a cgroup-level
   SIGKILL fallback for containers already in that state. `--name
-  hl-<key>-<jobid>` makes a running container traceable back to its job.
+  hl-<key>-<jobid>` makes a running container traceable back to its job. The
+  liveness check walks `/proc` and matches `CLAW_SESSION_ID=<sid>` literally
+  rather than through a truncating, regex-reading `pgrep -f`, which had
+  reclaimed a live neighbour's container, and a container younger than
+  `HL_ORPHAN_MIN_AGE_S` (default `900`) is never reclaimed.
 
 - **A vLLM profile round had its profiler bounds dropped before launch.** The
   argv preflight probe sees only `EXTRA_VLLM_ARGS`, while the launcher appends
@@ -570,8 +768,7 @@ it.
   flags.** `--max-hours` carried an argparse default, so a resume passing no
   flags at all was indistinguishable from one passing the default: a 24 h
   session was shortened to 2 h and closed as `time_exhausted` before its first
-  action, and the objective was dropped on the way. This is the path
-  `robustness_monitor.sh` takes, which auto-resumes with no flags. The flag now
+  action, and the objective was dropped on the way. The flag now
   defaults to `None` and resolves to `DEFAULT_MAX_HOURS` only after the archive
   has had its chance at the persisted budget, so an absent flag restores 8 h
   while an explicit `--max-hours 2` wins over it.
@@ -583,12 +780,6 @@ it.
   roofline that followed recorded 25.7 GB of trace over the whole workload
   instead of over a steady-state window. The probe goes through the entry point
   that performs the expansion.
-
-- **The robustness monitor called a session over while it was still running.**
-  It read the presence of `reports/final.*` as terminal, but the crash path
-  writes one as a safety net and a resume clears `stop_reason` without removing
-  it. `state.json` decides now, and the artifacts stand in only when there is
-  no state to read.
 
 - **The IR-1 stale-process scan failed on an idle machine, and could not see an
   ATOM server.** It excluded only `os.getpid()`, so the launcher shell — whose

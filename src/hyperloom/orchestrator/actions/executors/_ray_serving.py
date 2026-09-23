@@ -27,6 +27,9 @@ _RAY_ACTOR_DIED_RC: int = -913
 # Timeout for ray.get probes on specialist actor methods (is_alive/exit_code/stop).
 _LEASE_PROBE_TIMEOUT_SEC: float = 30.0
 
+# How long a serving round may wait for its actor to acquire resources.
+RESOURCE_ACQUIRE_TIMEOUT_SEC: float = _LEASE_PROBE_TIMEOUT_SEC
+
 # How often the submitter of a round looks up from ``ray.wait`` to see whether the action it belongs to has been
 # cancelled.
 _CANCEL_POLL_SEC: float = 0.25
@@ -380,6 +383,7 @@ class ServingLease:
         # Registered before the round is submitted, so a cancel that arrives while Ray is still scheduling it is one
         # this call is counted as able to hear -- the same window the local path opens around its spawn.
         with cancel_scope_listener() as cancel_scope:
+            acquire_ref = self._actor.pid.remote()
             ref = self._actor.run_blocking.remote(
                 cmd,
                 env=env,
@@ -390,12 +394,19 @@ class ServingLease:
                 server_already_ready=server_already_ready,
                 session_remaining_sec=session_remaining_sec,
             )
-            return self._collect_round(ref, cmd=cmd, timeout=timeout, cancel_scope=cancel_scope)
+            return self._collect_round(
+                ref,
+                acquire_ref=acquire_ref,
+                cmd=cmd,
+                timeout=timeout,
+                cancel_scope=cancel_scope,
+            )
 
     def _collect_round(
         self,
         ref: Any,
         *,
+        acquire_ref: Any,
         cmd: list[str],
         timeout: int | float | None,
         cancel_scope: Any,
@@ -410,10 +421,11 @@ class ServingLease:
         _actor_err: Any = getattr(_ray_exc, "RayActorError", ()) if _ray_exc else ()
         _task_err: Any = getattr(_ray_exc, "RayTaskError", ()) if _ray_exc else ()
         try:
-            if cancel_scope is None:
-                rc, out, err = ray.get(ref)
-            else:
-                rc, out, err = self._await_or_cancel(ref, cancel_scope=cancel_scope)
+            rc, out, err = self._await_or_cancel(
+                ref,
+                acquire_ref=acquire_ref,
+                cancel_scope=cancel_scope,
+            )
         except _actor_err as exc:  # type: ignore[misc]
             # The actor (worker) itself died — e.g. its server OOM-killed the worker, or raylet reaped it. Drop the
             # dead handle so the next round re-creates a fresh actor via ``ensure()`` and this round surfaces as a
@@ -441,17 +453,38 @@ class ServingLease:
             raise _sp.TimeoutExpired(cmd, timeout or 0, output=out or None, stderr=err or None)
         return rc, out, err
 
-    def _await_or_cancel(self, ref: Any, *, cancel_scope: Any) -> tuple[int, str, str]:
-        """Block on a round, asking the actor to stop it if the scope is cancelled."""
+    def _await_or_cancel(self, ref: Any, *, acquire_ref: Any, cancel_scope: Any) -> tuple[int, str, str]:
+        """Wait for actor scheduling, then forward cancellation while the round runs."""
         import ray  # noqa: PLC0415
 
         from ._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE  # noqa: PLC0415
 
         asked_at: float | None = None
+        acquire_deadline = time.monotonic() + RESOURCE_ACQUIRE_TIMEOUT_SEC
+        acquired = False
         while True:
-            ready, _ = ray.wait([ref], num_returns=1, timeout=_CANCEL_POLL_SEC)
-            if ready:
+            refs = [ref] if acquired else [ref, acquire_ref]
+            wait_timeout = _CANCEL_POLL_SEC
+            if not acquired:
+                wait_timeout = min(wait_timeout, max(0.0, acquire_deadline - time.monotonic()))
+            ready, _ = ray.wait(refs, num_returns=1, timeout=wait_timeout)
+            if ref in ready:
                 return ray.get(ref)
+            if acquire_ref in ready:
+                ray.get(acquire_ref)
+                acquired = True
+                if cancel_scope is None:
+                    return ray.get(ref)
+                continue
+            if not acquired and time.monotonic() >= acquire_deadline:
+                log.warning(
+                    "ServingLease: actor did not acquire resources within %.0fs; killing it",
+                    RESOURCE_ACQUIRE_TIMEOUT_SEC,
+                )
+                self._kill_actor()
+                return 1, "", "resource_acquire_timeout"
+            if cancel_scope is None:
+                continue
             if asked_at is None:
                 if not cancel_scope.cancelled:
                     continue
@@ -645,16 +678,12 @@ class GpuSpecialistLease:
             return False
 
     def close(self) -> bool:
-        """Stop the specialist, then kill the actor to release the GPU lease.
-
-        ``ray.kill`` skips ``__ray_terminate__``, so an unconfirmed stop keeps
-        the same actor available for the release callback's next cleanup attempt.
-        A pending start without an acknowledgement remains unconfirmed too.
-        """
+        """Bound the stop attempt, then kill the actor to release its GPU lease."""
         if self._actor is None:
             return True
-        if not self.stop():
-            return False
+        stopped = self.stop()
+        if not stopped:
+            log.warning("GpuSpecialistLease.close: stop unconfirmed; forcing actor kill")
         import ray  # noqa: PLC0415
 
         try:

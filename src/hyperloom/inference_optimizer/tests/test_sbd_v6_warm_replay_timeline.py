@@ -18,6 +18,8 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
 from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EVENT_STATUS_INTERRUPTED
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
+    APPLY_KERNEL,
+    APPLY_PATCH,
     GATE_ACCURACY,
     GATE_KEEP_THRESHOLD,
     GATE_QUALITY,
@@ -132,6 +134,62 @@ def test_a_quality_rejection_reads_as_a_completed_arc_not_a_failure(_bound_sessi
     assert _ext(_bound_session)["blocked_by"] == GATE_QUALITY
 
 
+def test_every_item_the_replay_had_to_apply_reads_back_with_its_fate(_bound_session):
+    """A replay is one measurement over a set of applies, so which of them
+    landed is what separates "the recipe did not reproduce" from "half of it
+    was never in the server that was measured"."""
+    recorder = _recorder()
+    recorder.record_apply_item("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
+    recorder.record_apply_item(
+        "/kb/prior/rewrite-moe.patch",
+        kind=APPLY_KERNEL,
+        position=1,
+        applied=False,
+        reason="no patch target under the active root",
+    )
+    recorder.record_apply_item("fix-attn.patch", kind=APPLY_PATCH, position=0, applied=True, target="/opt/sglang")
+    recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0)
+    recorder.finish({"status": "reproduced"})
+
+    items = _ext(_bound_session)["applied"]["items"]
+    assert [(row["kind"], row["position"], row["applied"]) for row in items] == [
+        ("kernel", 0, True),
+        ("kernel", 1, False),
+        ("patch", 0, True),
+    ]
+    assert items[1]["reason"] == "no patch target under the active root"
+    assert items[2]["target"] == "/opt/sglang"
+
+
+def test_the_config_and_the_apply_list_settle_into_one_applied_block(_bound_session):
+    """They are written by different seams -- the item list as the replay is
+    dispatched, the config as it is judged -- and a reader wants one answer to
+    "what did this replay actually run"."""
+    recorder = _recorder()
+    recorder.record_apply_item("/kb/prior/fusion-attn.patch", kind=APPLY_KERNEL, position=0, applied=True)
+    recorder.record_applied(extra_server_args="--enable-torch-compile", extra_envs={"SGLANG_X": "1"})
+    recorder.finish({"status": "reproduced"})
+
+    applied = _ext(_bound_session)["applied"]
+    assert applied["extra_server_args"] == "--enable-torch-compile"
+    assert [row["ref"] for row in applied["items"]] == ["/kb/prior/fusion-attn.patch"]
+
+
+def test_a_rejected_replay_survives_the_export_that_recovers_killed_events(_bound_session):
+    """``rejected`` is this event type's own terminal, so finalize must not
+    recover it: a judged rejection reported as ``interrupted`` is a verdict
+    overwritten by the claim that nothing judged it."""
+    recorder = _recorder()
+    recorder.record_measurement(before_tput=14000.0, after_tput=14050.0, gain_pct=0.36)
+    recorder.record_gate(GATE_KEEP_THRESHOLD, passed=False, observed=0.36, threshold=2.0)
+    recorder.finish({"status": "drift", "keep_threshold_pct": 2.0})
+
+    assert finalize_events(_bound_session) == []
+    event = _events(_bound_session)[0]
+    assert event["status"] == "rejected"
+    assert event["ext"]["verdict"]["outcome_status"] == "drift"
+
+
 def test_a_reproduced_replay_records_what_the_promotion_moved(_bound_session):
     recorder = _recorder()
     recorder.record_measurement(before_tput=14000.0, after_tput=15400.0, gain_pct=10.0, accuracy=0.71)
@@ -213,3 +271,13 @@ def test_recording_the_same_gate_twice_settles_rather_than_duplicates(_bound_ses
     gates = _ext(_bound_session)["gates"]
     assert len(gates) == 1
     assert gates[0]["passed"] is True
+
+
+def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatch):
+    """Prelude closes the replay with no catch; a spool OSError must not escape."""
+    recorder = _recorder()
+    monkeypatch.setattr(
+        "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
+    )
+    recorder.finish({"status": "reproduced"})

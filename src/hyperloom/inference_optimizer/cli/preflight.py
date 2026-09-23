@@ -67,10 +67,10 @@ _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
     "OPENAI_API_KEY",
     "OPENAI_CUSTOM_HEADERS",
-    "LLM_GATEWAY_KEY",
     "GEAK_BASE_URL",
     "LLM_API_BASE",
     # Legacy: not consumed anymore, still stripped if present.
+    "LLM_GATEWAY_KEY",
     "SAFE_API_KEY",
     # A retired DeepSeek config normalizes to BOTH protocol sides, so it is stripped in either single-provider mode:
     # neither an Anthropic-only nor an OpenAI-only shell may acquire the other side from a stale .env.
@@ -115,10 +115,9 @@ def _provider_only_mode() -> str:
         or os.environ.get("DEEPSEEK_BASE_URL")
     )
     has_openai = bool(os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_KEY"))
-    has_gateway = bool(os.environ.get("LLM_GATEWAY_KEY"))
-    if has_anthropic and not has_openai and not has_gateway:
+    if has_anthropic and not has_openai:
         return "anthropic"
-    if has_openai and not has_anthropic and not has_gateway:
+    if has_openai and not has_anthropic:
         return "openai"
     return ""
 
@@ -2064,17 +2063,6 @@ def _preflight(
         action=_prepare_kb_install_step,
     )
 
-    # --- Auth alias export (internal LLM aliases only) --- These aliases feed OpenAI-protocol consumers, so they are
-    # filled from the OpenAI-side key only and stay unset when that side is not configured.
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    if openai_key:
-        for alias in (
-            "LLM_API_KEY",
-            "AMD_LLM_API_KEY",
-        ):
-            if not os.environ.get(alias):
-                os.environ[alias] = openai_key
-                print(f"Preflight: filled {alias} from OPENAI_API_KEY")
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (
@@ -2379,13 +2367,14 @@ def _preflight(
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not survive into the child env.
     os.environ["INFERENCEX_PATH"] = inferencex_path
     # A round cd's into this checkout and bash reads the benchmark script off it for the whole run, so a revocable
-    # mount that flaps discards a measurement that already completed. Recording it here is what tells the next
-    # magpie_nonzero_after_valid_measurement apart from a variant that genuinely cannot serve.
+    # mount that flaps fails the round on an exit code the measurement had nothing to do with. Recording it here is
+    # what tells that apart from a variant that genuinely cannot serve.
     inferencex_network_fs = is_network_fs(inferencex_path)
     if inferencex_network_fs:
         print(
             f"Preflight: WARNING — INFERENCEX_PATH={inferencex_path} is on a network filesystem. A mount flap "
-            f"mid-round discards a measurement that already completed, and the round is recorded as "
+            f"mid-round exits the benchmark non-zero after it has already run. A round that served its whole "
+            f"protocol is kept, but one the flap cut short is recorded as "
             f"magpie_nonzero_after_valid_measurement. Point INFERENCEX_PATH at local disk, or unset it and put "
             f"HYPERLOOM_CACHE_DIR on local disk.",
             file=sys.stderr,

@@ -325,7 +325,6 @@ class _DispatchStub:
             "_render_rewrite_evidence_for_prompt",
             "_rewrite_evidence_absence_note",
             "_enqueue_framework_agent_local_explore_specialist",
-            "_next_local_explore_candidate_id",
             "_map_authoring_specialist",
         ):
             setattr(self, name, getattr(FrameworkPhase, name).__get__(self))

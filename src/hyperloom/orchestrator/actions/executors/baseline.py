@@ -39,6 +39,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     RUN_INITIAL,
     make_baseline_recorder,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
@@ -117,6 +118,7 @@ from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
     select_run_workspace,
+    served_complete_protocol,
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
@@ -127,20 +129,6 @@ log = logging.getLogger(__name__)
 
 #: The producer label the baseline event's fragments are written under.
 _RECORDER_PRODUCER = "orchestrator"
-
-#: Set on the params of a measurement that is a sub-step of a phase which
-#: records it itself, to stop it opening a timeline event of its own. The
-#: kernel phase measures through this executor -- stack integration, candidate
-#: A/B re-baselines, vLLM shape capture -- and those measurements belong to the
-#: kernel event that asked for them. A second telling of them as top-level
-#: baseline events is the duplication the recorded timeline exists to remove.
-#:
-#: It is a flag the caller sets rather than something the executor infers,
-#: because whether a run is a sub-step is a property of the caller and nothing
-#: on the task says it: these arrive as synthetic ``kind="baseline"`` tasks
-#: indistinguishable from a dispatched one.
-SBD_INNER_STEP_PARAM = "sbd_inner_step"
-
 
 # Markers identifying an InferenceX ``run_eval`` (lm-eval) failure as the root cause of a benchmark non-zero exit.
 _EVAL_FAILURE_MARKERS = (
@@ -1469,6 +1457,10 @@ def _apply_warm_patches(
         params["_warm_patch_nogit_backups"] = combined_backups
     if any(tree["snapshot_manifest"] for tree in trees.values()):
         params["_warm_patch_trees"] = records
+    # A best-effort timeline reports only the patches that landed, so without
+    # this the per-patch reasons computed above would die with this frame --
+    # and they are the only record of the ones that did not.
+    params["_warm_patch_statuses"] = statuses
 
     if required_timeline:
         if failed_ref:
@@ -1521,6 +1513,28 @@ def _stamp_warm_patch_trees(
         "snapshot_manifest"
     )
     result["warm_patch_canonical_target"] = target
+
+
+def _stamp_warm_patch_outcome(
+    result: dict[str, Any],
+    patch_application: list[dict[str, str]] | Mapping[str, Any],
+    params: Mapping[str, Any],
+    pre_sha: str,
+) -> None:
+    """Carry the patch application's report into the round's result.
+
+    A required timeline reports the structure prelude promotes or restores
+    from. A best-effort one reports only the patches that landed, so its
+    per-patch statuses are lifted out of ``params`` instead: a patch that
+    silently failed to apply would otherwise leave nothing behind, and the
+    round would be measured on a tree nobody downstream can describe.
+    """
+    if isinstance(patch_application, Mapping):
+        _stamp_warm_patch_trees(result, patch_application, pre_sha)
+        result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+        return
+    if statuses := list(params.get("_warm_patch_statuses") or []):
+        result["warm_patch_result"] = {"required": False, "status": "prepared", "patches": statuses}
 
 
 def _revert_legacy_warm_patch_trees(
@@ -2035,6 +2049,7 @@ class BaselineExecutor:
             params=params,
             failure_streak_before=streak,
             total_failures_before=total,
+            owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
@@ -2054,8 +2069,6 @@ class BaselineExecutor:
 
         params = ctx.task.params or {}
         try:
-            if is_truthy(params.get(SBD_INNER_STEP_PARAM)):
-                return None
             if not session_is_bound():
                 log.warning(
                     "baseline timeline: no session bound; this measurement's whole event will "
@@ -2063,6 +2076,9 @@ class BaselineExecutor:
                     "means either that never happened or the context did not name a session"
                 )
                 return None
+            inline = str(params.get(INLINE_EVENT_PARAM) or "")
+            if inline:
+                return make_sink(inline, producer=_RECORDER_PRODUCER)
             state = self._resolve_shared_state((getattr(ctx, "extra", None) or {}).get("shared_state"))
             event = baseline_event_id(
                 str(getattr(state, "phase", "") or "unphased"),
@@ -2956,9 +2972,7 @@ class BaselineExecutor:
                 )
                 if applied_patches:
                     result["warm_patches_applied"] = list(applied_patches)
-                if isinstance(patch_application, dict):
-                    _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
-                    result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+                _stamp_warm_patch_outcome(result, patch_application, params, _pre_patch_sha)
                 return result
             finally:
                 # A required timeline's tree is promoted by prelude after this returns, so it must stay patched;
@@ -3017,9 +3031,7 @@ class BaselineExecutor:
                 )
                 if applied_patches:
                     warmup_result["warm_patches_applied"] = list(applied_patches)
-                if isinstance(patch_application, dict):
-                    _stamp_warm_patch_trees(warmup_result, patch_application, _pre_patch_sha)
-                    warmup_result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+                _stamp_warm_patch_outcome(warmup_result, patch_application, params, _pre_patch_sha)
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
             warmup_runtime = warmup_result.get("subprocess_runtime_sec")
@@ -3092,9 +3104,7 @@ class BaselineExecutor:
             )
             if applied_patches:
                 result["warm_patches_applied"] = list(applied_patches)
-            if isinstance(patch_application, dict):
-                _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
-                result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
+            _stamp_warm_patch_outcome(result, patch_application, params, _pre_patch_sha)
             if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
                 # was priced at.
@@ -4154,20 +4164,34 @@ class BaselineExecutor:
                 **capture_meta,
             }
 
+        nonzero_error = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
         if proc_returncode != 0:
-            return {
-                "status": "failed",
-                "error_class": "magpie_nonzero_after_valid_measurement",
-                "returncode": proc_returncode,
-                "error": redact_secret_values((proc_stderr or proc_stdout or "")[-2000:]),
-                "output_dir": str(output_dir),
-                "workspace": str(workspace),
-                "report_path": str(report_path) if report_path.exists() else None,
-                "reported_success": measurement.get("reported_success"),
-                "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                "nonfatal_warnings": warnings,
-                **capture_meta,
-            }
+            if not served_complete_protocol(measurement):
+                return {
+                    "status": "failed",
+                    "error_class": "magpie_nonzero_after_valid_measurement",
+                    "returncode": proc_returncode,
+                    "error": nonzero_error,
+                    "output_dir": str(output_dir),
+                    "workspace": str(workspace),
+                    "report_path": str(report_path) if report_path.exists() else None,
+                    "reported_success": measurement.get("reported_success"),
+                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
+                    "nonfatal_warnings": warnings,
+                    **capture_meta,
+                }
+            # The round served every request the client recorded as requested,
+            # so the exit code is not evidence against the measurement. The
+            # cause stays on the result rather than only in the log.
+            warnings.append(f"nonzero_rc_after_complete_protocol:{proc_returncode}")
+            log.warning(
+                "baseline_executor: magpie exited %d after serving its whole protocol (%s of %s requests); "
+                "keeping the measurement: %s",
+                proc_returncode,
+                measurement.get("completed_requests"),
+                measurement.get("requested_requests"),
+                nonzero_error,
+            )
 
         result = {
             "status": "succeeded",

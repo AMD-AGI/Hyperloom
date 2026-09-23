@@ -1215,11 +1215,24 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
             "was_skipped": True,
             "budget_exhausted": True,
             "skip_reason": "budget_exhausted_no_successful_pairs",
+            "summary": {"successful_pairs": 0},
         }
     )
-    _, spent = exit_normal_sweep(state)
+    spent_reason, spent = exit_normal_sweep(state)
+    assert spent_reason == "sweep_failed"
     assert spent["sweep_was_skipped"] is True
     assert spent["sweep_skip_budget_exhausted"] is True
+
+    state.record_conc_sweep(
+        {
+            "status": "skipped",
+            "was_skipped": True,
+            "summary": {"successful_pairs": 0},
+        }
+    )
+    no_pair_reason, no_pair = exit_normal_sweep(state)
+    assert no_pair_reason == "sweep_failed"
+    assert no_pair["sweep_status"] == "skipped"
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
@@ -2167,6 +2180,58 @@ def test_single_server_option_a_boot_and_reuse(
     # Last reuse round: cleanup=True.
     last = opt_calls[-1]
     assert last["server_lifecycle"]["cleanup"] is True
+
+
+def test_single_server_boot_only_is_measured_by_reuse_round(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    teardown_log: list[tuple] = []
+    _patch_lifecycle_eligible(monkeypatch, teardown_log)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
+    )
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        variant = grid[0]
+        calls.append(
+            {
+                "name": variant.name,
+                "server_lifecycle": kw.get("server_lifecycle"),
+                "server_already_ready": kw.get("server_already_ready"),
+                "base_extra_envs": kw.get("base_extra_envs") or {},
+            }
+        )
+        if kw.get("server_lifecycle") and kw.get("server_already_ready") is False:
+            booted = _fake_variant(
+                variant.name,
+                throughput=None,
+                envs=variant.extra_envs,
+                status="succeeded",
+                error=None,
+            )
+            booted.note = "server_lifecycle_boot_only"
+            return [booted]
+        return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
+
+    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
+
+    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16]))
+
+    assert [call["name"] for call in calls[:3]] == [
+        "optimized_conc32",
+        "optimized_conc32",
+        "optimized_conc16",
+    ]
+    boot, measured_boot = calls[0], calls[1]
+    assert boot["server_already_ready"] is False
+    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert measured_boot["server_already_ready"] is True
+    assert payload["summary"]["successful_pairs"] == 2
 
 
 def test_single_server_boot_retry_descend(

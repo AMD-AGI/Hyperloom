@@ -251,6 +251,7 @@ optimization. Model names must exist in your key's catalog:
 |---|---|---|
 | `HL_SHM_SIZE` | `64g` | docker `--shm-size`; raise it for high concurrency. |
 | `HL_CONTAINER_RUNTIME` | `auto` | Force `docker` or `pyxis`. |
+| `HL_ORPHAN_MIN_AGE_S` | `900` | Minimum age in seconds before a container whose `CLAW_SESSION_ID` has no live client is reclaimed as orphaned; younger containers are left alone. |
 | `HL_GPU_TYPE_OVERRIDE` | — | Override `--gpu-type` (lowercase) when hardware differs from the table row. |
 | `HL_SHARED_MOUNT` | `/path` | Shared FS bind-mounted into the container. |
 | `HL_DATA_ROOT` | `<shared-mount>/hyperloom-slurm` | Artifact root. |

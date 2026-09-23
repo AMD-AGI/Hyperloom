@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from kernelforge.knowledge.implementation_identity import canonical_framework_version
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
     kernel_recipe_canonical_id,
@@ -36,12 +37,10 @@ class _RankedIdentity:
     updated_at: str
 
 
-def _version(value: str) -> Version | None:
-    raw = str(value or "").strip().lower()
-    if raw in _UNUSABLE:
-        return None
+def _release(canonical_version: str) -> Version | None:
+    """Parse a canonical version, or ``None`` when it names no release."""
     try:
-        return Version(raw)
+        return Version(canonical_version)
     except InvalidVersion:
         return None
 
@@ -86,12 +85,26 @@ def rank_fallback_identities(
 
     Producer, kernel name, framework and backend remain exact. Framework
     version and GPU are soft ranking dimensions: known cross-version and
-    cross-ISA donors remain eligible, while missing/unknown metadata is
-    rejected. The exact identity is omitted because callers probe it first.
+    cross-ISA donors remain eligible. The exact identity is omitted because
+    callers probe it first.
+
+    The target's version is resolved by :func:`canonical_framework_version`
+    because it arrives raw -- installed distribution metadata says
+    ``0.24.0+rocm723`` and an image tag says ``v0.24.0``. A stored dimension is
+    not resolved again: every page is written at its canonical address, so a
+    stored spelling that needs resolving is a page written by something that
+    skipped the address rules, and reading it as the release it names would hide
+    that rather than report it. Such a page ranks as unparseable and is dropped.
+
+    Two runs that both failed to observe a version can still reach each other,
+    because both resolve to the one word for that. What stays rejected is
+    ranking *across* it: how far a known release sits from an unknown one is not
+    a question the strings can answer.
     """
-    target_version = _version(target.framework_version)
+    target_version = canonical_framework_version(target.framework_version)
+    target_release = _release(target_version)
     target_gpu = target.gpu.strip().lower()
-    if target_version is None or target_gpu in _UNUSABLE:
+    if target_gpu in _UNUSABLE:
         return []
 
     exact_id = kernel_recipe_canonical_id(target)
@@ -112,11 +125,19 @@ def rank_fallback_identities(
         if any(values.get(key) != expected for key, expected in fixed.items()):
             continue
         candidate_gpu = values.get("gpu", "")
-        candidate_version = _version(values.get("framework_version", ""))
-        if candidate_gpu in _UNUSABLE or candidate_version is None:
+        if candidate_gpu in _UNUSABLE:
             continue
+        candidate_version = values.get("framework_version", "")
+        candidate_release = _release(candidate_version)
+        if candidate_version == target_version:
+            version_affinity = 3
+            version_distance: tuple[int, ...] = ()
+        elif target_release is None or candidate_release is None:
+            continue
+        else:
+            version_affinity = _version_affinity(target_release, candidate_release)
+            version_distance = _version_distance(target_release, candidate_release)
         seen.add(canonical_id)
-        version_affinity = _version_affinity(target_version, candidate_version)
         gpu_affinity = _gpu_affinity(target_gpu, candidate_gpu)
         ranked.append(
             _RankedIdentity(
@@ -124,7 +145,7 @@ def rank_fallback_identities(
                 score=version_affinity + gpu_affinity,
                 version_affinity=version_affinity,
                 gpu_affinity=gpu_affinity,
-                version_distance=_version_distance(target_version, candidate_version),
+                version_distance=version_distance,
                 updated_at=str(row.get("updated_at") or ""),
             )
         )

@@ -472,7 +472,7 @@ async def test_skip_to_close_is_consumed_when_sweep_already_settled(
     }
     st.set_pending_escalate_hint(ps.ESCALATE_HINT_SKIP_TO_CLOSE)
 
-    async def _entered(*, from_phase, to_phase):
+    async def _entered(*, from_phase, to_phase, reason="", evidence=None):
         return None
 
     monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _entered)

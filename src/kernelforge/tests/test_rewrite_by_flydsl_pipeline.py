@@ -704,6 +704,41 @@ def test_ensure_git_committed_tracks_only_named_paths(tmp_path):
     assert "kernel.py" in tracked and "other.py" not in tracked
 
 
+def test_ensure_git_committed_takes_a_whole_attempt_directory(tmp_path):
+    """The port commits what the driver validated, not one file out of it.
+
+    A port that puts part of its implementation in a module beside the entry
+    point is still one implementation. Committing the entry point alone selects
+    a candidate no stage measured, and a consumer reading the commit gets an
+    entry point whose import is missing.
+    """
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@e.com"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "T"], check=True)
+    (tmp_path / ".gitignore").write_text(".forge_rewrite/\n__pycache__/\n")
+    attempt = create_attempt_workspace(tmp_path)
+    attempt.candidate_path("kernel.py").write_text("import tiles\n")
+    attempt.candidate_path("tiles.py").write_text("SIZE = 64\n")
+    nested = attempt.root / "lib"
+    nested.mkdir()
+    (nested / "util.py").write_text("def pad(x):\n    return x\n")
+    # Interpreter caches sit beside a module at any depth and belong to no one.
+    for cache in (attempt.root / "__pycache__", nested / "__pycache__"):
+        cache.mkdir()
+        (cache / "stale.pyc").write_text("bytecode")
+
+    runner._ensure_git_committed(str(tmp_path), "port", [attempt.relative_root])
+
+    tracked = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-tree", "-r", "--name-only", "HEAD"],
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    prefix = attempt.relative_root + "/"
+    inside = sorted(path.removeprefix(prefix) for path in tracked if path.startswith(prefix))
+    assert inside == ["kernel.py", "lib/util.py", "tiles.py"]
+
+
 def test_ensure_git_committed_skips_empty_and_unaddable_paths(tmp_path):
     # Empty path is skipped; an unaddable path leaves nothing staged -> early return (no commit), and must not raise.
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
@@ -1052,6 +1087,76 @@ def _wire_stub_pipeline(monkeypatch, *, port_ok=True, best_ms=0.5, source_ms=1.0
             canonical_files_root="/exp/rewrite_applyback/best/iter_000/files",
         ),
     )
+
+
+def _rewrite_repo(tmp_path):
+    """A workspace with a resolvable HEAD, which apply-back bases its patch on."""
+    src = tmp_path / "softmax.py"
+    src.write_text("def softmax(x):\n    return x\n")
+    (tmp_path / "driver.py").write_text("print('drive')\n")
+    for command in (
+        ["init", "--quiet", "--initial-branch=work"],
+        ["config", "user.email", "t@local"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "--quiet", "-m", "base"],
+    ):
+        subprocess.run(["git", *command], cwd=tmp_path, check=True, capture_output=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    return src, tmp_path / "driver.py", head
+
+
+def _run_rewrite_in(tmp_path, src, driver, **kwargs):
+    return runner.run_rewrite(
+        op_name="softmax",
+        source_kernel=str(src),
+        driver=str(driver),
+        workspace=str(tmp_path),
+        experiments_dir=str(tmp_path / "exp"),
+        target_functions=["softmax"],
+        source_entry="softmax",
+        shapes=[{"M": 256, "N": 1024, "dtype": "f32"}],
+        config=Config.from_env(workspace=str(tmp_path)),
+        **kwargs,
+    )
+
+
+def test_applyback_is_required_by_default(tmp_path, monkeypatch):
+    """The framework patch stays part of a default run's success."""
+    src, driver, head = _rewrite_repo(tmp_path)
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+    out = _run_rewrite_in(tmp_path, src, driver)
+    assert out["applyback_required"] is True and out["applyback_ok"] is True
+    assert out["base_commit"] == ""  # the stub publishes no base commit of its own
+    assert out["best_commit"] == "framework-best" != out["flydsl_best_commit"]
+    assert out["budget_policy"]["applyback_reserve_sec"] == 1200
+
+
+def test_declined_applyback_skips_the_stage_and_returns_its_reserve(tmp_path, monkeypatch, capsys):
+    """Declining the patch must not run the stage nor judge the run on it."""
+    src, driver, head = _rewrite_repo(tmp_path)
+    _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError("apply-back ran for a caller that declined it")
+
+    monkeypatch.setattr(runner, "generate_applyback_patch", _refuse)
+    out = _run_rewrite_in(tmp_path, src, driver, applyback_enabled=False)
+
+    # A resolvable HEAD no longer implies a patch was wanted.
+    assert out["applyback_required"] is False and out["applyback_ok"] is False
+    assert out["success"] is True and out["port_ok"] is True
+    # Nothing is published, and no field claims an artifact that does not exist.
+    assert out["canonical_manifest"] == "" and out["patch_path"] == ""
+    assert out["changed_files"] == [] and out["artifact_kind"] == ""
+    assert out["artifact_schema_version"] == 0
+    # The standalone selection is the whole deliverable.
+    assert out["best_commit"] == out["flydsl_best_commit"] == head
+    # The reserve is reported as returned rather than silently still held.
+    assert out["budget_policy"]["applyback_reserve_sec"] == 0
+    assert "apply-back not requested" in capsys.readouterr().out
 
 
 def test_run_rewrite_happy_path_reports_speedup(tmp_path, monkeypatch, capsys):

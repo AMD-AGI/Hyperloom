@@ -1825,8 +1825,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     def fake_run(cmd, *args, **kwargs):
         captured.append(list(cmd))
-        # Make pip install and splitter invocations succeed.
-        return _Result(returncode=0, stdout="ok")
+        return _Result(returncode=0, stdout="ok" if kwargs.get("text") else b"ok")
 
     argv = [
         "tracelens_analysis.py",
@@ -1863,7 +1862,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         _os.environ.update(env_backup)
 
     splitter_cmd = next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
         None,
     )
     assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
@@ -1889,7 +1888,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
 # Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window selection uses the analytic PD
 # ratio instead of an empirical heuristic.
-def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None):
+def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None, subprocess_run=None):
     """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
     import gzip
     import json as _json
@@ -1927,6 +1926,8 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
 
     def fake_run(cmd, *_a, **_kw):
         captured.append(list(cmd))
+        if subprocess_run is not None:
+            return subprocess_run(cmd, *_a, **_kw)
         return _Result(returncode=0, stdout="ok")
 
     argv = [
@@ -1967,9 +1968,48 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
     return captured, trace
 
 
+@pytest.mark.parametrize(
+    ("dependency_rc", "split_rc", "error_code"),
+    [
+        (1, 0, "tracelens_dependency_error"),
+        (0, 1, "trace_split_failed"),
+        (0, 0, "trace_split_no_steady_state"),
+    ],
+)
+def test_tracelens_dependency_and_split_failures(tmp_path, capsys, dependency_rc, split_rc, error_code):
+    """Dependency failures and splitter crashes must not masquerade as empty traces."""
+    import subprocess
+
+    def run(cmd, **kwargs):
+        if "pip" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, stdout="ResolutionImpossible: protobuf constraint")
+        rc = dependency_rc if "-c" in cmd else split_rc
+        return subprocess.CompletedProcess(cmd, rc, stdout="ModuleNotFoundError: strenum" if rc else "ok")
+
+    captured, _ = _drive_main_capturing_subprocess(tmp_path, [], subprocess_run=run)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert error_code in result["error"]
+    assert not any("pip" in cmd for cmd in captured)
+    probes = [cmd for cmd in captured if "-c" in cmd]
+    assert len(probes) == 1
+    assert probes[0][0] == sys.executable
+    assert "import TraceLens" in probes[0][-1]
+    assert "split_inference_trace_annotation" in probes[0][-1]
+    splitter = _find_splitter_cmd(captured)
+    if dependency_rc:
+        assert splitter is None
+    else:
+        assert splitter[0] == sys.executable
+    if dependency_rc or split_rc:
+        assert "trace_split_no_steady_state" not in result["error"]
+        log_path = next((tmp_path / "ws").rglob("*.log"))
+        assert "ModuleNotFoundError: strenum" in log_path.read_text(encoding="utf-8")
+
+
 def _find_splitter_cmd(captured):
     return next(
-        (c for c in captured if any("split_inference_trace_annotation" in str(p) for p in c)),
+        (c for c in captured if "TraceLens.TraceUtils.split_inference_trace_annotation" in c),
         None,
     )
 

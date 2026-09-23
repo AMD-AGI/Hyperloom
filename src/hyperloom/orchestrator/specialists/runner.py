@@ -40,6 +40,7 @@ from .domains import (
     SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
     domain_for_tag,
+    get_domain,
     normalize_dispatch_tags,
 )
 from .subprocess_ import (
@@ -61,6 +62,33 @@ from ..prompts.specialist_prompt_builder import (
 
 
 log = logging.getLogger(__name__)
+
+NO_GIT_FRAMEWORK_SOURCE_ROOT = "no_git_framework_source_root"
+
+
+def specialist_patch_preflight_error(
+    params: dict[str, Any] | None,
+    *,
+    framework_repo_path: str = "",
+    framework_source_roots: tuple[str, ...] = (),
+) -> str:
+    """Return the deterministic source-root error for a patch specialist."""
+    task_params = params or {}
+    domain = get_domain(str(task_params.get("domain") or ""))
+    if resolve_specialist_profile(task_params, domain=domain).mode != MODE_PATCH:
+        return ""
+    roots = tuple(
+        path
+        for path in (
+            str(framework_repo_path or "").strip(),
+            *(framework_source_roots or tuple(task_params.get("framework_source_roots") or ())),
+        )
+        if path
+    )
+    preferred = str(task_params.get("session_framework_tree") or "").strip() or resolve_framework_tree(
+        str(task_params.get("framework") or "")
+    )
+    return "" if _pick_worktree_base(roots, preferred=preferred) is not None else NO_GIT_FRAMEWORK_SOURCE_ROOT
 
 
 def _ctx_deadline(ctx: RunnerContext) -> Deadline | None:
@@ -1500,12 +1528,16 @@ class SpecialistRunner:
         if profile is not None:
             if profile.mode != MODE_PATCH:
                 return None, None, ""
+        preflight_error = specialist_patch_preflight_error(
+            ctx.task.params,
+            framework_source_roots=self.subprocess_config.framework_source_roots,
+        )
+        if preflight_error:
+            return None, None, preflight_error
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
             preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
         )
-        if base is None:
-            return None, None, "no_git_framework_source_root"
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)
@@ -1725,6 +1757,7 @@ class SpecialistRunner:
 
 
 __all__ = [
+    "NO_GIT_FRAMEWORK_SOURCE_ROOT",
     "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",
@@ -1733,4 +1766,5 @@ __all__ = [
     "SpecialistSubprocessConfig",
     "build_empty_specialist_done",
     "classify_specialist_failure",
+    "specialist_patch_preflight_error",
 ]

@@ -256,6 +256,7 @@ class TestKeepGoingAsymmetry:
 
     def test_rc_nonzero_invalid_measurement_breaks(self, tmp_path, monkeypatch):
         """Contrast: an ``rc != 0`` invalid measurement DOES break the loop."""
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)
@@ -273,6 +274,7 @@ class TestKeepGoingAsymmetry:
 
     def test_rc_nonzero_blank_pipe_uses_report_errors(self, tmp_path, monkeypatch):
         """Last-resort: empty pipe and no log files, diagnostic only in report.errors."""
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
         base = tmp_path / "base.yaml"
         _write_base_yaml(base)

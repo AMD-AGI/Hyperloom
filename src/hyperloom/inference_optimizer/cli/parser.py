@@ -13,7 +13,7 @@ from typing import NoReturn
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
-from hyperloom.common.llm_config import provider_model_defaults
+from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
 # Workload knob fallbacks live in ``hyperloom.common`` so that the orchestrator
 # can read the same numbers without importing this module, which would close a
@@ -116,18 +116,14 @@ def _default_claude_model_env() -> str:
     gateway_model = provider_model_defaults().get("CLAUDE_MODEL", "")
     if gateway_model:
         return gateway_model
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    if openai_url and not anthropic_url:
+    if is_openai_only():
         return (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
     return DEFAULT_CLAUDE_MODEL
 
 
 def _default_codex_model_env() -> str:
     """Resolve the default Codex-style model from env."""
-    anthropic_url = (os.environ.get("ANTHROPIC_BASE_URL") or "").strip()
-    openai_url = (os.environ.get("OPENAI_BASE_URL") or "").strip()
-    if anthropic_url and not openai_url:
+    if is_anthropic_only():
         return (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
     explicit = (os.environ.get("CODEX_MODEL") or "").strip()
     if explicit:

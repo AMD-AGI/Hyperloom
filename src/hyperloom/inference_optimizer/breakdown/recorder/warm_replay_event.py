@@ -54,7 +54,18 @@ SECTION_EVENT = "warm_replay_event"
 #: One row per gate evaluated, keyed by the gate's name.
 SECTION_GATE = "warm_replay_gate"
 
+#: One row per item the replay had to apply, keyed by the item's own ref.
+SECTION_APPLY = "warm_replay_apply"
+
 ROW_GATE = "gate"
+ROW_APPLY = "apply_item"
+
+# What an apply row is an attempt on. The two are applied by different seams --
+# the prior champion's kernel plan before the task is dispatched, the recipe's
+# code patches at launch -- and both have to land for the single measurement
+# that follows to mean anything, so they read as one list grouped by kind.
+APPLY_KERNEL = "kernel"
+APPLY_PATCH = "patch"
 
 # The gates the arc can end on, in the order the settling applies them.
 # Constants because assembly selects on them, so a consumer reading "which gate
@@ -107,6 +118,8 @@ STATUS_BY_OUTCOME: dict[str, str] = {
 }
 
 __all__ = [
+    "APPLY_KERNEL",
+    "APPLY_PATCH",
     "EVENT_COMPONENT",
     "EVENT_KIND",
     "EVENT_TYPE",
@@ -117,6 +130,7 @@ __all__ = [
     "GATE_QUALITY",
     "GATE_TPUT_VALID",
     "PRODUCER",
+    "SECTION_APPLY",
     "SECTION_EVENT",
     "SECTION_GATE",
     "SKIP_BEST_CONFIG_EMPTY",
@@ -312,6 +326,41 @@ class WarmReplayEventRecorder:
             return
         self._sink.record(SECTION_EVENT, {"applied": applied})
 
+    def record_apply_item(
+        self,
+        ref: str,
+        *,
+        kind: str,
+        position: Any,
+        applied: bool | None,
+        reason: str = "",
+        target: str = "",
+    ) -> None:
+        """Record what became of one item the replay had to apply.
+
+        ``applied`` is tri-state for the reason a gate's ``passed`` is: an item
+        the sequence stopped short of neither landed nor failed, and ``False``
+        would read as an apply that was tried and lost. An item the sequence
+        never reached at all writes no row. ``position`` is the item's place in
+        the list its own seam applied, which is the order a reader needs and
+        not this recorder's to invent -- the rows arrive from two seams, and
+        one of them runs before the event is even open.
+        """
+        self._sink.record(
+            SECTION_APPLY,
+            {
+                "ref": str(ref or ""),
+                "kind": str(kind or ""),
+                "position": None if position is None else int(position),
+                "applied": None if applied is None else bool(applied),
+                "reason": str(reason or ""),
+                "target": str(target or ""),
+                "ts": _now(),
+            },
+            row_type=ROW_APPLY,
+            natural_ids=(str(kind or ""), str(ref or "")),
+        )
+
     def record_rollback(self, *, ok: Any, errors: Any = None) -> None:
         """Record the attempt to undo a replay that did not survive its gates.
 
@@ -451,18 +500,22 @@ class WarmReplayEventRecorder:
             },
         )
         from .assembler import warm_replay_event_parts
+        from .recorder_warnings import RECORDING_ERRORS, note_failure
 
-        ext, derived = assemble_warm_replay_ext(warm_replay_event_parts(self.event_id), event=self.event_id)
-        finish_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
-            sequence=self._sequence,
-            status=derived or status,
-            ext=ext,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
-            end_time=end_time,
-        )
+        try:
+            ext, derived = assemble_warm_replay_ext(warm_replay_event_parts(self.event_id), event=self.event_id)
+            finish_event(
+                event_type=EVENT_TYPE,
+                event=self.event_id,
+                sequence=self._sequence,
+                status=derived or status,
+                ext=ext,
+                kind=EVENT_KIND,
+                start_time=self._start_time,
+                end_time=end_time,
+            )
+        except RECORDING_ERRORS as exc:
+            note_failure(section=SECTION_EVENT, error=exc, detail=f"closing warm_replay event {self.event_id}")
 
 
 def assemble_warm_replay_ext(
@@ -481,6 +534,16 @@ def assemble_warm_replay_ext(
         sort_rows(rows_for_event(parts.get(SECTION_GATE) or [], event), keys=("ordinal", "ts", "gate")),
         drop=("event_id", "ordinal"),
     )
+    # Grouped by kind, then in the order each seam applied them. ``position``
+    # stays on the wire: it is what says the plan stopped at item three rather
+    # than holding three items.
+    apply_items = wire_rows(
+        sort_rows(rows_for_event(parts.get(SECTION_APPLY) or [], event), keys=("kind", "position", "ref")),
+        drop=("event_id",),
+    )
+    applied = _as_dict(header.get("applied"))
+    if apply_items:
+        applied["items"] = apply_items
     status = str(header.get("status") or "")
     ext = {
         "request": _as_dict(header.get("request")),
@@ -490,7 +553,7 @@ def assemble_warm_replay_ext(
         # consumer. A successful arc names nothing: a replay is admitted on an
         # eval that could not rule, which is no blocker.
         "blocked_by": None if status == "succeeded" else _text_or_none(_blocking_gate(gates)),
-        "applied": _as_dict(header.get("applied")) or None,
+        "applied": applied or None,
         "verdict": _as_dict(header.get("verdict")),
         "promotion": _as_dict(header.get("promotion")) or None,
         "rollback": _as_dict(header.get("rollback")) or None,

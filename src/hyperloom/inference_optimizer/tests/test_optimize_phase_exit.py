@@ -50,9 +50,9 @@ def test_candidate_exhaustion_dries_the_source_arm_without_a_no_keep_streak():
 @pytest.mark.parametrize("arm", [_DRY_SOURCE, _DRY_CONFIG])
 def test_one_dry_arm_still_flags_a_bottleneck_switch(arm):
     state = optimize_state(**arm)
-    source_dry, _ = ps.source_arm_plateaued(state)
-    config_dry, _ = ps.compute_plateau_explore(state)
-    assert source_dry or config_dry
+    patch_dry, _ = ps._patch_lever_dry(state, {})
+    config_dry, _ = ps._config_lever_dry(state, {})
+    assert patch_dry or config_dry
     # No exit, but the signal is available to whatever does exit later.
     assert ps.exit_normal_optimize(state) is None
 
@@ -97,17 +97,16 @@ def test_with_kernel_disabled_it_winds_down_to_sweep_carrying_its_reason():
     assert evidence["passed_through_reason"] == "optimize_no_more_leverage"
 
 
-def test_the_config_arm_needs_specialist_evidence_to_report_dry():
-    """The streak counts rounds; a variant count is a different quantity."""
+def test_the_config_arm_needs_a_trailing_no_keep_streak_to_report_dry():
+    """Low gain alone (streak == 0) does not trigger config lever dryness."""
     state = SimpleNamespace(
-        explore_search={
-            "winners_history": [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)],
-            "tested": {f"fp{i}": {"cycle": 0} for i in range(50)},
-        },
-        specialist_rounds=[],
         macro_cycle=0,
+        # A single adopted row: gain is below floor but streak is 0.
+        attempts=[
+            {"lever_kind": "config", "outcome": "KEEP", "adopted": True, "gain_pct": 0.01, "cycle": 0},
+        ],
     )
-    triggered, evidence = ps.compute_plateau_explore(state)
+    triggered, evidence = ps._config_lever_dry(state, {})
     assert triggered is False
     assert evidence["empty_streak"] == 0
 
@@ -132,5 +131,7 @@ def test_skip_to_kernel_is_refused_before_either_arm_has_run():
     state.specialist_rounds = []
     state.explore_search = {"tested": {}, "winners_history": []}
     state.framework_agent_phase_progress = []
+    # Clear attempts so the phase has recorded no work this cycle.
+    state.attempts = []
 
     assert ps.exit_normal_optimize(state) is None

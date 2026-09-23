@@ -1899,7 +1899,7 @@ def _forge_gemm_tune_available() -> bool:
 
 
 def _resolve_aiter_root_for_forge() -> str:
-    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    """Resolve AITER's source root from split wheels or editable installs."""
     explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
     if explicit:
         return explicit
@@ -1911,6 +1911,19 @@ def _resolve_aiter_root_for_forge() -> str:
     for location in locations:
         root = Path(location)
         if (root / "csrc").is_dir():
+            return str(root)
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = list(getattr(spec, "submodule_search_locations", None) or [])
+    origin = getattr(spec, "origin", None)
+    if origin:
+        locations.append(str(Path(origin).parent))
+    for location in locations:
+        package = Path(location)
+        root = package.parent
+        if package.name == "aiter" and (root / "csrc").is_dir():
             return str(root)
     return ""
 
@@ -3735,6 +3748,9 @@ async def _capture_vllm_tunableop_shapes(
         capture_remove_args = [str(arg) for arg in inherited_remove]
     if not profile_mode:
         capture_remove_args.append("--port")
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+
     task_params: dict[str, Any] = {
         "output_dir": str(capture_dir),
         "framework": "vllm",
@@ -3745,6 +3761,10 @@ async def _capture_vllm_tunableop_shapes(
         "remove_args": capture_remove_args,
         "unset_envs": capture_unset_envs,
         "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+        # Either arm of the capture is a sub-step of the KERNEL phase's own
+        # event, not a dispatched measurement, so it records into that event
+        # rather than leaving one of its own.
+        INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
     }
     if profile_mode:
         task_params["workspace_path"] = str(capture_dir / "tracelens")
@@ -3754,17 +3774,12 @@ async def _capture_vllm_tunableop_shapes(
             if benchmark_script:
                 task_params["benchmark_script"] = benchmark_script
     else:
-        from ..actions.executors.baseline import SBD_INNER_STEP_PARAM
-
         task_params.update(
             {
                 "config_path": config_path,
                 "timeout_sec": timeout_sec,
                 "disable_run_eval": True,
                 "baseline_double_run": False,
-                # Shape capture is a sub-step of the KERNEL phase's own event,
-                # not a dispatched measurement, so it leaves no baseline event.
-                SBD_INNER_STEP_PARAM: True,
             }
         )
     task = Task(
@@ -5094,7 +5109,7 @@ def _build_trace_analyze_cmd(
     # Both tools share the CLI surface below except ``--tracelens-root``.
     tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
-        "python3",
+        "python3" if is_bypass else sys.executable,
         str(_kernel_agent_tool_path(tool_name)),
         "--trace-input",
         str(trace_input),
@@ -6063,7 +6078,9 @@ async def integrate_handler(
         ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
         follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
     """
-    from ..actions.executors.baseline import SBD_INNER_STEP_PARAM, BaselineExecutor
+    from ..actions.executors.baseline import BaselineExecutor
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
     from ..actions.executors.benchmark_result import is_valid_measurement
     from ..loop.sub_agent_runner import RunnerContext
     from ..measurement.integrate_performance import assess_integrate_performance
@@ -6253,8 +6270,9 @@ async def integrate_handler(
             # gate but never establishes a replacement quality reference.
             "quality_ref_exempt": True,
             # A sub-step of the KERNEL phase's own event, not a dispatched
-            # measurement, so it leaves no baseline event.
-            SBD_INNER_STEP_PARAM: True,
+            # measurement, so it records into that event rather than leaving a
+            # baseline event of its own.
+            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
         },
         idempotency_key=f"{fake_task_id}-rebaseline",
     )
