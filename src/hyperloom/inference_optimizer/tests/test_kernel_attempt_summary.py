@@ -668,3 +668,81 @@ def test_failure_breakdown_classifies_by_error_class(tmp_path: Path) -> None:
     assert breakdown.get("preprocess_failed") == 1, breakdown
     assert breakdown.get("timeout") == 1, breakdown
     assert breakdown.get("other", 0) == 0, f"new buckets should absorb root causes, leaving other empty: {breakdown}"
+
+
+def test_geak_accepted_kernel_is_counted_as_e2e_success(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.geak_result = {
+        "status": "ok",
+        "accepted_kernels": [{"kernel_name": "rms_norm", "e2e_delta_pct": 3.05}],
+    }
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["schema_version"] == 2
+    assert out["totals"]["attempted"] == 1
+    assert out["lane_totals"]["geak"] == {
+        "attempted": 1,
+        "success": 1,
+        "unvalidated": 0,
+        "failed": 0,
+        "outcome": "success",
+    }
+
+
+def test_forge_micro_winners_without_e2e_are_unvalidated(tmp_path: Path) -> None:
+    state = _make_state(top15=[])
+    state.gemm_tuning_attempts = [
+        {
+            "status": "ok",
+            "engine": "forge",
+            "requires_e2e_validation": True,
+            "tuners_run": [
+                {
+                    "tuner": f"tuner-{index}",
+                    "kept": index < 22,
+                    "best_micro_speedup": 1.05 if index < 22 else 1.0,
+                }
+                for index in range(23)
+            ],
+        }
+    ]
+
+    out = build_kernel_optimization_summary(state, tmp_path)
+
+    assert out["lane_totals"]["gemm_tuning"] == {
+        "attempted": 23,
+        "success": 0,
+        "unvalidated": 22,
+        "failed": 1,
+        "outcome": "unvalidated",
+    }
+    assert out["kernel_opt_outcome"] == "unvalidated"
+
+
+def test_only_never_run_lanes_are_skipped(tmp_path: Path) -> None:
+    out = build_kernel_optimization_summary(_make_state(top15=[]), tmp_path)
+
+    assert out["lane_totals"] == {
+        "source_level": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "geak": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+        "gemm_tuning": {
+            "attempted": 0,
+            "success": 0,
+            "unvalidated": 0,
+            "failed": 0,
+            "outcome": "skip",
+        },
+    }

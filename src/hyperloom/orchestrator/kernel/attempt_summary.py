@@ -24,9 +24,10 @@ CATEGORY_KEEP_PENDING = "KEEP_PENDING"
 CATEGORY_ATTEMPTED_REJECTED = "ATTEMPTED_REJECTED"
 CATEGORY_IN_FLIGHT = "IN_FLIGHT"
 
-#: Closed 4-value terminal kernel-outcome bucket the dashboard reads directly.
+#: Closed terminal kernel-outcome bucket the dashboard reads directly.
 #: ``IN_FLIGHT`` (no terminal decision) folds into ``fail``.
 OUTCOME_SUCCESS = "success"
+OUTCOME_UNVALIDATED = "unvalidated"
 OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
@@ -310,6 +311,99 @@ def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
     return OUTCOME_FAIL
 
 
+def _lane_totals(
+    attempted: int,
+    success: int,
+    unvalidated: int,
+    failed: int,
+    *,
+    outcome: str = "",
+) -> dict[str, Any]:
+    """Build one lane's counters and terminal outcome."""
+    if not outcome:
+        if attempted == 0:
+            outcome = OUTCOME_SKIP
+        elif success:
+            outcome = OUTCOME_SUCCESS
+        elif unvalidated:
+            outcome = OUTCOME_UNVALIDATED
+        else:
+            outcome = OUTCOME_FAIL
+    return {
+        "attempted": attempted,
+        "success": success,
+        "unvalidated": unvalidated,
+        "failed": failed,
+        "outcome": outcome,
+    }
+
+
+def _geak_lane_totals(state: Any) -> dict[str, Any]:
+    """Summarize GEAK's E2E result independently of source rewrites."""
+    result = getattr(state, "geak_result", {}) or {}
+    if not isinstance(result, dict):
+        return _lane_totals(0, 0, 0, 0)
+    accepted = [
+        row
+        for key in ("accepted_kernels", "accepted_heads")
+        for row in (result.get(key) or [])
+        if isinstance(row, (dict, str)) and bool(row)
+    ]
+    if accepted:
+        count = len(accepted)
+        return _lane_totals(count, count, 0, 0)
+    status = str(result.get("status") or "").strip().lower()
+    if not status or status == OUTCOME_SKIP or status == "skipped":
+        return _lane_totals(0, 0, 0, 0)
+    return _lane_totals(1, 0, 0, 1)
+
+
+def _gemm_tuning_lane_totals(state: Any) -> dict[str, Any]:
+    """Summarize GEMM micro-tuning without treating candidates as E2E wins."""
+    attempts = list(getattr(state, "gemm_tuning_attempts", []) or [])
+    if not attempts:
+        last = getattr(state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict) and last:
+            attempts = [last]
+    attempted = success = unvalidated = failed = 0
+    for result in attempts:
+        if not isinstance(result, dict):
+            continue
+        rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
+        if rows:
+            winners = sum(
+                1 for row in rows if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
+            )
+            attempted += len(rows)
+            if result.get("requires_e2e_validation"):
+                unvalidated += winners
+            else:
+                success += winners
+            failed += len(rows) - winners
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if not status or status in (OUTCOME_SKIP, "skipped"):
+            continue
+        attempted += 1
+        kept = str(result.get("decision") or "").upper() == "KEEP"
+        if kept and result.get("requires_e2e_validation"):
+            unvalidated += 1
+        elif kept:
+            success += 1
+        else:
+            failed += 1
+    return _lane_totals(attempted, success, unvalidated, failed)
+
+
+def _overall_lane_outcome(lanes: dict[str, dict[str, Any]]) -> str:
+    """Roll lane outcomes up without calling unvalidated work successful."""
+    outcomes = {str(row.get("outcome") or "") for row in lanes.values()}
+    for outcome in (OUTCOME_SUCCESS, OUTCOME_UNVALIDATED, OUTCOME_TIMEOUT, OUTCOME_FAIL):
+        if outcome in outcomes:
+            return outcome
+    return OUTCOME_SKIP
+
+
 def _summary_integrated(
     entry: dict[str, Any],
     backend_ladder: list[dict[str, Any]],
@@ -402,7 +496,7 @@ def build_kernel_optimization_summary(
     state: Any,
     session_dir: Path | str,
     *,
-    schema_version: int = 1,
+    schema_version: int = 2,
 ) -> dict[str, Any]:
     """Build the full summary block for one session."""
     sd_path = Path(session_dir)
@@ -519,13 +613,35 @@ def build_kernel_optimization_summary(
         rejection_breakdown=rejection_breakdown,
         failure_reason_breakdown=failure_reason_breakdown,
     )
+    source_outcome = _session_kernel_opt_outcome(by_kernel)
+    lane_totals: dict[str, dict[str, Any]] = {
+        "source_level": _lane_totals(
+            counts["attempted"],
+            counts["integrated"],
+            counts["keep_pending"] + counts["in_flight"],
+            counts["rejected"],
+            outcome=(
+                OUTCOME_UNVALIDATED
+                if counts["attempted"] and not counts["integrated"] and (counts["keep_pending"] or counts["in_flight"])
+                else source_outcome
+            ),
+        ),
+        "geak": _geak_lane_totals(state),
+        "gemm_tuning": _gemm_tuning_lane_totals(state),
+    }
+    overall_outcome = source_outcome
+    if schema_version >= 2:
+        counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
+        overall_outcome = _overall_lane_outcome(lane_totals)
+        if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
+            top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
 
-    return {
+    summary = {
         "schema_version": schema_version,
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
-        "kernel_opt_outcome": _session_kernel_opt_outcome(by_kernel),
+        "kernel_opt_outcome": overall_outcome,
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
@@ -533,6 +649,9 @@ def build_kernel_optimization_summary(
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
     }
+    if schema_version >= 2:
+        summary["lane_totals"] = lane_totals
+    return summary
 
 
 def _render_attempted_row(
@@ -762,6 +881,7 @@ def _to_float(v: Any) -> float | None:
 __all__ = [
     "build_kernel_optimization_summary",
     "OUTCOME_SUCCESS",
+    "OUTCOME_UNVALIDATED",
     "OUTCOME_FAIL",
     "OUTCOME_TIMEOUT",
     "OUTCOME_SKIP",

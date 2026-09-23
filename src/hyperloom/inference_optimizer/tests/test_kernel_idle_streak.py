@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import asyncio
 import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
@@ -100,6 +101,120 @@ async def test_idle_kernel_winds_down_even_while_work_pending(kernel_coordinator
     assert row["evidence"]["evidence"] == "kernel_idle_no_progress"
     # The ledger still says there is work; that must no longer suppress the exit.
     assert ps.kernel_work_pending(st) is True
+
+
+@pytest.mark.asyncio
+async def test_phase_entry_hook_cannot_starve_the_next_tick(kernel_coordinator, monkeypatch):
+    """Phase entry side effects are long-running work; they must not freeze the coordinator tick loop."""
+    from hyperloom.orchestrator.phases import machine as phase_machine_mod
+
+    c = kernel_coordinator
+    st = c.shared_state
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
+    st.phase_started_ts = datetime.now(timezone.utc).isoformat()
+    st.max_minutes = 96 * 60
+    entered = asyncio.Event()
+
+    async def _slow_entry(**_kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _slow_entry)
+    monkeypatch.setattr(
+        phase_machine_mod._phase_state,
+        "compute_next_phase",
+        lambda *_args, **_kwargs: (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"}),
+    )
+
+    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=0.2)
+    await asyncio.sleep(0)
+
+    assert entered.is_set()
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.phase_history[-1]["reason"] == "test_enter_kernel"
+
+
+def _enter_kernel_once(monkeypatch, phase_machine_mod):
+    """Make the next scan enter KERNEL, then hand every later scan back to the real exit rules."""
+    real = phase_machine_mod._phase_state.compute_next_phase
+    calls = {"n": 0}
+
+    def _next(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return (ps.PHASE_KERNEL_AGENT, "test_enter_kernel", {"source": "test"})
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(phase_machine_mod._phase_state, "compute_next_phase", _next)
+
+
+@pytest.mark.asyncio
+async def test_kernel_holds_while_its_entry_run_is_in_flight(kernel_coordinator, monkeypatch):
+    """GEAK owns KERNEL from inside the entry hook; the idle guard must not hand the GPUs to SWEEP mid-run."""
+    from hyperloom.orchestrator.phases import machine as phase_machine_mod
+
+    c = kernel_coordinator
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
+    release = asyncio.Event()
+
+    async def _geak_like_entry(**kwargs):
+        if kwargs.get("to_phase") == ps.PHASE_KERNEL_AGENT:
+            await release.wait()
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _geak_like_entry)
+    _enter_kernel_once(monkeypatch, phase_machine_mod)
+
+    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=2.0)
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+
+    for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 5):
+        await asyncio.wait_for(c._advance_phase_if_needed(), timeout=2.0)
+        _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
+    budget_spent = datetime.now(timezone.utc) - timedelta(hours=30)
+    st.phase_started_ts = budget_spent.isoformat()
+    st.phase_started_unix = budget_spent.timestamp()
+    assert ps.exit_normal_kernel(st) is not None
+    await asyncio.wait_for(c._advance_phase_if_needed(), timeout=2.0)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.kernel_idle_ticks == 0
+    assert st.phase_history[-1]["reason"] == "test_enter_kernel"
+
+    release.set()
+    await asyncio.sleep(0)
+    _arm_kernel_phase(st)
+    for _ in range(ps.KERNEL_IDLE_MAX_TICKS + 1):
+        await c._advance_phase_if_needed()
+    _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS + 1.0)
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_SWEEP
+    assert st.phase_history[-1]["reason"] == "kernel_no_more_leverage"
+
+
+@pytest.mark.asyncio
+async def test_run_waits_for_the_kernel_entry_run_before_returning(kernel_coordinator, monkeypatch):
+    """A session that stops while GEAK still runs must not return and leave the run behind it."""
+    from hyperloom.orchestrator.phases import machine as phase_machine_mod
+
+    c = kernel_coordinator
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
+    finished: list[bool] = []
+
+    async def _geak_like_entry(**_kwargs):
+        await asyncio.sleep(0.2)
+        finished.append(True)
+
+    monkeypatch.setattr(c.phase_machine, "_on_phase_entered", _geak_like_entry)
+    _enter_kernel_once(monkeypatch, phase_machine_mod)
+
+    await c.run(max_ticks=1)
+
+    assert finished == [True]
 
 
 @pytest.mark.asyncio

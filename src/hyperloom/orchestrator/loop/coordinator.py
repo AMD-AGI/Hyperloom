@@ -758,6 +758,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_kernel_enabled": "phase_machine",
         "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
+        "_await_kernel_entry_task": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
         "_record_phase_entry_evidence": "phase_machine",
@@ -1758,6 +1759,10 @@ class Coordinator(metaclass=_CoordinatorMeta):
                         # Normal path: no stop signal within the tick interval.
                         pass
         finally:
+            try:
+                await self._await_kernel_entry_task()
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                log.exception("Coordinator: KERNEL entry hook did not settle before shutdown")
             final_signals: AbstractSet[int] = frozenset()
             if self._signals is not None:
                 final_signals = self._signals.close()

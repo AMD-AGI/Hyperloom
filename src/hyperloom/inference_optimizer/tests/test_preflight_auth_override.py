@@ -1780,6 +1780,7 @@ def test_smoke_test_codex_model_warns_on_probe_failure(monkeypatch, capsys):
 def test_smoke_test_codex_model_skips_for_anthropic_only_fallback(monkeypatch, capsys):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     def _no_probe(**kw):
         raise AssertionError("Anthropic-only fallback does not use CodexBackend")
@@ -1795,6 +1796,7 @@ def test_parser_anthropic_only_empty_codex_model_uses_claude_model(monkeypatch):
     """With only Anthropic configured, an empty CODEX_MODEL follows CLAUDE_MODEL."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1811,7 +1813,11 @@ def test_parser_dual_protocol_gateway_empty_codex_model_uses_gateway_model(monke
     monkeypatch.delenv("DEEPSEEK_BASE_URL", raising=False)
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("CODEX_MODEL", "")
 
@@ -1832,7 +1838,11 @@ def test_parser_retired_deepseek_key_only_defaults_to_gateway_model(monkeypatch)
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
         "OPENAI_BASE_URL",
+        "OPENAI_API_KEY",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
         "INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX",
@@ -1885,6 +1895,7 @@ def test_parser_anthropic_only_generated_codex_default_uses_claude_model(monkeyp
     """Generated setup env defaults must not force GPT on an Anthropic-only run."""
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://llm.example.invalid/anthropic")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-4-6")
     monkeypatch.setenv("CODEX_MODEL", "gpt-5.4")
 
@@ -1930,6 +1941,9 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
 def test_parser_openai_only_empty_claude_model_uses_codex_model(monkeypatch):
     """With only OpenAI configured, an empty CLAUDE_MODEL follows CODEX_MODEL."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
@@ -1958,6 +1972,9 @@ def test_parser_marker_forces_claude_model_to_follow_codex(monkeypatch):
 def test_validate_claude_model_openai_only_accepts_codex_model(monkeypatch):
     """OpenAI-only runs validate the followed orchestration model against the OpenAI catalog."""
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://llm.example.invalid/Unified/v1")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-token")
     monkeypatch.setenv("CODEX_MODEL", "GPT-5.4")

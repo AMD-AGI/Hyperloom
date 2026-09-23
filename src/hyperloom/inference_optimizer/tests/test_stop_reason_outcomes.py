@@ -18,6 +18,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
     [
         ("target_reached", "completed"),
         ("sweep_done", "completed"),
+        ("sweep_failed", "failed"),
         ("signal", "aborted"),
         ("", "aborted"),
         ("baseline_failed", "failed"),

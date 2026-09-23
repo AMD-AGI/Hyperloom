@@ -1042,6 +1042,7 @@ async def run_grid(
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
     deadline_stop: StoppedByTheRun = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+    lifecycle_boot_only: bool = False,
 ) -> list[VariantResult]:
     """Execute variants; ``deadline_stop`` names the owner of the supplied deadline."""
     silence_timeout_sec, benchmark_timeout_sec = resolve_benchmark_timeouts()
@@ -2007,6 +2008,22 @@ async def run_grid(
             warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
         if not measurement.get("valid_measurement"):
+            if lifecycle_boot_only and rc == 0:
+                results.append(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="succeeded",
+                        workspace=str(workspace),
+                        report_path=str(report_path) if report_path.exists() else None,
+                        returncode=rc,
+                        nonfatal_warnings=warnings,
+                        note="server_lifecycle_boot_only",
+                    )
+                )
+                await _report_finished_variant(i)
+                continue
             death_excerpt = server_log_death_excerpt(str(server_log))
             if rc != 0:
                 error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])

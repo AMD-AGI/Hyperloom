@@ -1921,7 +1921,7 @@ def _forge_gemm_tune_available() -> bool:
 
 
 def _resolve_aiter_root_for_forge() -> str:
-    """Resolve AITER's source root, including split ``aiter_meta`` wheels."""
+    """Resolve AITER's source root from split wheels or editable installs."""
     explicit = os.environ.get("AITER_ROOT_DIR", "").strip()
     if explicit:
         return explicit
@@ -1933,6 +1933,19 @@ def _resolve_aiter_root_for_forge() -> str:
     for location in locations:
         root = Path(location)
         if (root / "csrc").is_dir():
+            return str(root)
+    try:
+        spec = importlib.util.find_spec("aiter")
+    except (ModuleNotFoundError, ValueError):
+        spec = None
+    locations = list(getattr(spec, "submodule_search_locations", None) or [])
+    origin = getattr(spec, "origin", None)
+    if origin:
+        locations.append(str(Path(origin).parent))
+    for location in locations:
+        package = Path(location)
+        root = package.parent
+        if package.name == "aiter" and (root / "csrc").is_dir():
             return str(root)
     return ""
 

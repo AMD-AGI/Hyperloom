@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
 [![Lint](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/lint.yml)
-[![Version](https://img.shields.io/badge/version-1.1.1-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.2-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](https://github.com/AMD-AGI/Hyperloom/blob/main/LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://github.com/AMD-AGI/Hyperloom/blob/main/pyproject.toml)
 
