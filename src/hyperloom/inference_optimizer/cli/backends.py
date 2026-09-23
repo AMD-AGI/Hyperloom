@@ -51,14 +51,14 @@ def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_co
 
 def _resolve_orchestration_backend(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> str:
     """Pick the agent CLI that runs the orchestration role."""
-    requested = (os.environ.get(ORCHESTRATION_BACKEND_ENV) or "").strip().lower()
-    if requested:
+    for env_name in (ORCHESTRATION_BACKEND_ENV, llm_config.AGENT_BACKEND_ENV):
+        requested = (os.environ.get(env_name) or "").strip().lower()
+        if not requested:
+            continue
         if requested not in ORCHESTRATION_BACKEND_CHOICES:
-            raise ValueError(f"{ORCHESTRATION_BACKEND_ENV}={requested!r} not in {set(ORCHESTRATION_BACKEND_CHOICES)}")
+            raise ValueError(f"{env_name}={requested!r} not in {set(ORCHESTRATION_BACKEND_CHOICES)}")
         if requested == llm_config.AGENT_BACKEND_DEEPSEEK and not llm_config.deepseek_harness_sdk_installed():
-            raise ValueError(
-                f"{ORCHESTRATION_BACKEND_ENV}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra"
-            )
+            raise ValueError(f"{env_name}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra")
         return requested
     if orchestration_runs_on_codex(
         codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex

@@ -197,13 +197,38 @@ async def run_one_attempt(
 
     prompt = build_attempt_prompt(attempt, skill_path=skill_path, fix_hypothesis_path=fix_hypothesis_path)
 
-    sdk = sdk or _import_sdk()
-
     system_prompt = (
         "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
         "SKILL.md. Never modify files under quark_root. Treat artifact presence "
         "in workspace as the source of truth; do not lie about success."
     )
+
+    from hyperloom.common import llm_config
+
+    if sdk is None and llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_DEEPSEEK:
+        from hyperloom.common.agent_sdk_runner import drive_agent_session
+
+        child_env = _quark_py310_compat_env()
+        child_env.update(sdk_env_overlay(component="quantization", operation="quantize_attempt"))
+        if log:
+            log(
+                f"quantization-agent DeepSeek runner: workspace={workspace} quark_root={quark_root} attempt={attempt_number}"
+            )
+        result = await drive_agent_session(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            cwd=workspace,
+            model=model,
+            max_turns=DEFAULT_MAX_TURNS,
+            allowed_tools=DEFAULT_ALLOWED_TOOLS,
+            child_env=child_env,
+            log=log,
+            backend=llm_config.AGENT_BACKEND_DEEPSEEK,
+        )
+        return AttemptResult(workspace=workspace, sdk_error=result.error, raw_text=result.text)
+
+    sdk = sdk or _import_sdk()
+
     kwargs: dict[str, Any] = {
         "max_turns": DEFAULT_MAX_TURNS,
         "system_prompt": system_prompt,

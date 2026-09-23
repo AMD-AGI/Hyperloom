@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from importlib import metadata
 from typing import Callable, Mapping
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -325,6 +325,13 @@ def _create_codex_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
     return CodexBackend(runtime=runtime)
 
 
+def _create_deepseek_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
+    """Construct the built-in DeepSeek Harness backend lazily."""
+    from kernelforge.agent_backends.deepseek import DeepSeekHarnessBackend
+
+    return DeepSeekHarnessBackend(runtime=runtime)
+
+
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
     from hyperloom.common import llm_config
@@ -339,6 +346,13 @@ def _codex_available() -> bool:
     return llm_config.codex_agent_sdk_installed()
 
 
+def _deepseek_available() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from hyperloom.common import llm_config
+
+    return llm_config.deepseek_harness_sdk_installed()
+
+
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether the Anthropic side can authenticate this CLI."""
     from hyperloom.common import llm_config
@@ -348,6 +362,13 @@ def _claude_credentialed(env: Mapping[str, str]) -> bool:
 
 def _codex_credentialed(env: Mapping[str, str]) -> bool:
     """Return whether the OpenAI side can authenticate this CLI."""
+    from hyperloom.common import llm_config
+
+    return llm_config.openai_agent_credentialed(env)
+
+
+def _deepseek_credentialed(env: Mapping[str, str]) -> bool:
+    """Return whether the harness route can authenticate."""
     from hyperloom.common import llm_config
 
     return llm_config.openai_agent_credentialed(env)
@@ -368,6 +389,11 @@ def _codex_owns_model(model: str) -> bool:
     if normalized.startswith("gpt"):
         return True
     return re.match(r"^o\d(?:$|[-._:/])", normalized) is not None
+
+
+def _deepseek_owns_model(model: str) -> bool:
+    """Recognize DeepSeek model identifiers."""
+    return model.strip().lower().startswith("deepseek")
 
 
 register_agent_provider(
@@ -413,6 +439,25 @@ register_agent_provider(
         availability=_codex_available,
         credentialed=_codex_credentialed,
         owns_model=_codex_owns_model,
+    )
+)
+register_agent_provider(
+    AgentProvider(
+        name="deepseek",
+        factory=_create_deepseek_backend,
+        default_model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        capabilities=AgentCapabilities(
+            writable=True,
+            resumable=True,
+            sandbox=True,
+            probe=True,
+            requires_workspace_cwd=True,
+            session_env=True,
+            workspace_guard=True,
+        ),
+        availability=_deepseek_available,
+        credentialed=_deepseek_credentialed,
+        owns_model=_deepseek_owns_model,
     )
 )
 

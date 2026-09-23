@@ -67,3 +67,16 @@ def gateway_reasoning_effort(value: str | None) -> str:
     """
     name = normalize_reasoning_effort(value)
     return _GATEWAY_PROJECTION.get(name, name)
+
+
+#: Levels the DeepSeek Harness route accepts by name.
+_HARNESS_LEVELS: frozenset[str] = frozenset({"low", "high", "max"})
+
+
+def harness_reasoning_effort(value: str | None) -> str:
+    """Return the level the DeepSeek Harness route accepts, or ``""``."""
+    name = normalize_reasoning_effort(value)
+    if not name or name in _HARNESS_LEVELS:
+        return name
+    deeper = [level for level in REASONING_EFFORT_LEVELS[REASONING_EFFORT_RANK[name] :] if level in _HARNESS_LEVELS]
+    return deeper[0] if deeper else max(_HARNESS_LEVELS, key=lambda level: REASONING_EFFORT_RANK[level])

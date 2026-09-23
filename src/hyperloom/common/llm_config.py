@@ -168,6 +168,17 @@ AGENT_BACKEND_DEEPSEEK = "deepseek"
 #: a route an operator asks for rather than one a credential shape can select.
 ORCHESTRATION_BACKEND_ENV = "INFERENCE_OPTIMIZER_ORCHESTRATION_BACKEND"
 
+#: Names the agent CLI for every other harness role (Forge, TraceLens, framework
+#: KB, quantization). Same explicit-only rule as orchestration: deepseek is never
+#: inferred from credentials alone.
+AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
+
+AGENT_BACKEND_CHOICES: tuple[str, ...] = (
+    AGENT_BACKEND_CLAUDE,
+    AGENT_BACKEND_CODEX,
+    AGENT_BACKEND_DEEPSEEK,
+)
+
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
@@ -268,6 +279,40 @@ def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int,
 
 # The rank of a candidate that can neither authenticate nor import: no reason to prefer it over any other.
 UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
+
+
+def _validate_explicit_agent_backend(requested: str) -> str:
+    """Return a canonical backend name or raise when the operator typoed it."""
+    backend = (requested or "").strip().lower()
+    if backend not in AGENT_BACKEND_CHOICES:
+        raise ValueError(f"{AGENT_BACKEND_ENV}={requested!r} not in {set(AGENT_BACKEND_CHOICES)}")
+    if backend == AGENT_BACKEND_DEEPSEEK and not deepseek_harness_sdk_installed():
+        raise ValueError(
+            f"{AGENT_BACKEND_ENV}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra"
+        )
+    return backend
+
+
+def explicit_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the operator-named harness backend, or ``""`` when unset."""
+    source = env if env is not None else os.environ
+    requested = (source.get(AGENT_BACKEND_ENV) or "").strip().lower()
+    if not requested:
+        return ""
+    return _validate_explicit_agent_backend(requested)
+
+
+def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the harness backend every non-critic agent role should run.
+
+    An explicit :data:`AGENT_BACKEND_ENV` wins over the credential-ranked rule
+    between Claude and Codex. DeepSeek is reachable only through that explicit
+    name: it is not a third candidate in :func:`preferred_agent_backend`.
+    """
+    explicit = explicit_agent_backend(env)
+    if explicit:
+        return explicit
+    return preferred_agent_backend(env)
 
 
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
@@ -403,6 +448,9 @@ def resolve_forge_llm_model(
     backend = (agent_backend or "").strip().lower()
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    if backend == AGENT_BACKEND_DEEPSEEK:
+        explicit_dsh = (source.get("DEEPSEEK_MODEL") or source.get("DSH_MODEL") or "").strip()
+        return explicit_dsh or DEFAULT_DEEPSEEK_HARNESS_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
@@ -1090,9 +1138,11 @@ def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> Non
 
 
 __all__ = [
+    "AGENT_BACKEND_CHOICES",
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
     "AGENT_BACKEND_DEEPSEEK",
+    "AGENT_BACKEND_ENV",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
@@ -1147,6 +1197,8 @@ __all__ = [
     "openai_client_kwargs",
     "preferred_agent_backend",
     "provider_model_defaults",
+    "explicit_agent_backend",
+    "resolve_agent_backend",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "with_synthesized_anthropic_keys",

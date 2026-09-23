@@ -82,6 +82,7 @@ def _isolated_provider_env(monkeypatch):
     _clear_provider_env(monkeypatch)
     # An operator override outranks the credential rule every case here exercises.
     monkeypatch.delenv(clib.ORCHESTRATION_BACKEND_ENV, raising=False)
+    monkeypatch.delenv(llm_config.AGENT_BACKEND_ENV, raising=False)
     # Orchestration selection ranks the installed SDKs after the credential, and which extras the suite happens to
     # run with is exactly the kind of machine state this fixture exists to hold still.
     monkeypatch.setattr(llm_config, "claude_agent_sdk_installed", lambda: True)

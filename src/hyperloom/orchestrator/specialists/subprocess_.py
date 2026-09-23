@@ -49,7 +49,6 @@ from hyperloom.common.llm_attribution import inject_env as inject_attribution_en
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
-    preferred_agent_backend,
 )
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
@@ -1198,7 +1197,9 @@ class SpecialistSubprocessDispatcher:
         """
         pinned = (self.config.agent_backend or "").strip().lower()
         if not pinned:
-            return preferred_agent_backend()
+            from hyperloom.common.llm_config import resolve_agent_backend
+
+            return resolve_agent_backend()
         if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "

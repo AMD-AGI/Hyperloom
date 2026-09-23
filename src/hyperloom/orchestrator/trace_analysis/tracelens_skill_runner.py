@@ -31,7 +31,11 @@ from hyperloom.common.codex_session import (
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_DEEPSEEK_HARNESS_MODEL,
+)
 
 from ._capture_shapes import is_capture_dir_name
 from ._io_utils import safe_float
@@ -519,17 +523,25 @@ def _import_sdk() -> tuple[Any, Any]:
     return sdk.query, sdk.ClaudeAgentOptions
 
 
-def _should_use_codex_runner() -> bool:
-    """Return true when the Codex Agent SDK runner should run this skill.
-
-    An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The choice
-    itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge kernel_backend.
-    """
+def _resolved_tracelens_runner() -> str:
+    """Return the harness backend that should execute this skill."""
     from hyperloom.common import llm_config  # local import: keep module import-light
 
-    return llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
+    return llm_config.resolve_agent_backend()
+
+
+def _should_use_codex_runner() -> bool:
+    """Return true when the Codex Agent SDK runner should run this skill."""
+    from hyperloom.common import llm_config
+
+    return _resolved_tracelens_runner() == llm_config.AGENT_BACKEND_CODEX
+
+
+def _should_use_deepseek_runner() -> bool:
+    """Return true when the DeepSeek Harness should run this skill."""
+    from hyperloom.common import llm_config
+
+    return _resolved_tracelens_runner() == llm_config.AGENT_BACKEND_DEEPSEEK
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -661,6 +673,59 @@ async def _drive_sdk_stream(
     return sdk_error
 
 
+async def _run_tracelens_skill_deepseek(
+    *,
+    prompt: str,
+    output_dir: Path,
+    prefix_path: Path,
+    tracelens_root: Path,
+    model: str,
+    timeout_sec: float,
+    log: Callable[[str], None] | None,
+) -> TraceLensSkillRunResult:
+    """Run the TraceLens skill on the DeepSeek Harness."""
+    from hyperloom.common.agent_sdk_runner import drive_agent_session
+
+    harness_error = ""
+    raw_text = ""
+    try:
+        result = await drive_agent_session(
+            prompt=prompt,
+            system_prompt=_CODEX_DEVELOPER_INSTRUCTIONS.replace("Codex", "DeepSeek Harness"),
+            cwd=tracelens_root,
+            model=model,
+            max_turns=300,
+            allowed_tools=DEFAULT_ALLOWED_TOOLS,
+            log=log,
+        )
+        raw_text = result.text
+        harness_error = result.error
+    except Exception as exc:  # noqa: BLE001
+        harness_error = f"{type(exc).__name__}: {exc}"
+        if log:
+            log(f"[deepseek-harness] WARNING: {harness_error}")
+
+    report_path = output_dir / "analysis.md"
+    if not report_path.exists():
+        if harness_error:
+            raise RuntimeError(f"TraceLens DeepSeek runner failed before writing {report_path}: {harness_error}")
+        raise RuntimeError(f"TraceLens DeepSeek runner did not write {report_path}")
+
+    artifact_paths = {
+        "tracelens_agent_report": str(report_path),
+        "tracelens_cmd_prefix": str(prefix_path),
+    }
+    if harness_error:
+        artifact_paths["tracelens_agent_sdk_error"] = harness_error
+    return TraceLensSkillRunResult(
+        output_dir=output_dir,
+        report_path=report_path,
+        runner="deepseek",
+        raw_text=raw_text,
+        artifact_paths=artifact_paths,
+    )
+
+
 async def _run_tracelens_skill_codex(
     run: _SkillRun,
     turn: CodexTurnRequest,
@@ -783,6 +848,18 @@ async def run_tracelens_skill(
     prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
+    if _should_use_deepseek_runner() and sdk_query_factory is None and sdk_options_cls is None:
+        deepseek_model = resolved_model or DEFAULT_DEEPSEEK_HARNESS_MODEL
+        return await _run_tracelens_skill_deepseek(
+            prompt=prompt,
+            output_dir=output_dir,
+            prefix_path=prefix_path,
+            tracelens_root=tracelens_root,
+            model=deepseek_model,
+            timeout_sec=max(60.0, float(budget_minutes) * 60.0),
+            log=log,
+        )
+
     if _should_use_codex_runner() and (
         sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
     ):

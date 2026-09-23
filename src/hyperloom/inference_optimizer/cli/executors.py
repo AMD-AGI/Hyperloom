@@ -81,7 +81,12 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
-    from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
+    from hyperloom.common.llm_config import (
+        AGENT_BACKEND_CODEX,
+        AGENT_BACKEND_DEEPSEEK,
+        resolve_agent_backend,
+        resolve_forge_llm_model,
+    )
     from hyperloom.orchestrator.roles.claude import resolve_claude_executable
     from hyperloom.orchestrator.specialists.subprocess_ import (
         SpecialistSubprocessConfig,
@@ -93,14 +98,20 @@ def _build_specialist_executor(
     framework_source_roots = tuple(resolve_kernel_search_roots())
     # Resolve the agent CLI once here so the backend, its executable and its
     # model are chosen together and a later dispatch cannot disagree with them.
-    agent_backend = preferred_agent_backend()
+    agent_backend = resolve_agent_backend()
     specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
-    selected_model = specialist_override or (
-        str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
-    )
+    if agent_backend == AGENT_BACKEND_DEEPSEEK:
+        default_model = resolve_forge_llm_model(agent_backend)
+    elif agent_backend == AGENT_BACKEND_CODEX:
+        default_model = str(args.codex_model).strip()
+    else:
+        default_model = str(args.claude_model).strip()
+    selected_model = specialist_override or default_model
     codex_bin = ""
     claude_bin = ""
-    if agent_backend == AGENT_BACKEND_CODEX:
+    if agent_backend == AGENT_BACKEND_DEEPSEEK:
+        pass
+    elif agent_backend == AGENT_BACKEND_CODEX:
         codex_bin = resolve_codex_executable()
         if not codex_bin:
             raise RuntimeError(
