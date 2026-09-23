@@ -200,6 +200,11 @@ def trace_ext_dir(session_dir: Path) -> Path:
     return trace_dir(session_dir) / "ext"
 
 
+def trajectory_dir(session_dir: Path) -> Path:
+    """``<sd>/reports/trace/trajectory/`` — one ``<writer>.jsonl`` event shard per writing process; the append-only source of truth for the session trajectory (Langfuse spans are a projection of it)."""
+    return trace_dir(session_dir) / "trajectory"
+
+
 def decision_trace_path(session_dir: Path) -> Path:
     """``<sd>/reports/trace/decision_trace.jsonl`` — collector output joining every decision to its LLM token spend along the phase→tick timeline."""
     return trace_dir(session_dir) / "decision_trace.jsonl"
@@ -483,4 +488,5 @@ __all__ = [
     "target_analysis_report_md",
     "target_baseline_json",
     "trace_dir",
+    "trajectory_dir",
 ]

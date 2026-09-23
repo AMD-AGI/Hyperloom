@@ -78,6 +78,7 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
+from ..trace.trajectory_trace import EVENT_SESSION, trajectory_scope, trajectory_span
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
@@ -1592,7 +1593,49 @@ class Coordinator(metaclass=_CoordinatorMeta):
         crash_emergency_threshold: int = 25,
         closing_grace_sec: float | None = None,
     ) -> str:
-        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason."""
+        """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
+
+        The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
+        session dir and the live phase / tick.
+        """
+        with (
+            trajectory_scope(
+                session_dir=self.session_dir,
+                component="coordinator",
+                phase_tick_source=self._trajectory_phase_tick,
+            ),
+            trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
+        ):
+            stop_reason = await self._run_ticks(
+                objective=objective,
+                max_minutes=max_minutes,
+                tick_interval_sec=tick_interval_sec,
+                max_ticks=max_ticks,
+                stop_when=stop_when,
+                install_signal_handlers=install_signal_handlers,
+                crash_emergency_threshold=crash_emergency_threshold,
+                closing_grace_sec=closing_grace_sec,
+            )
+            span.finish(stop_reason=stop_reason)
+            return stop_reason
+
+    def _trajectory_phase_tick(self) -> tuple[str | None, int | None]:
+        """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
+        return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
+
+    async def _run_ticks(
+        self,
+        *,
+        objective: Objective | None,
+        max_minutes: float | None,
+        tick_interval_sec: float,
+        max_ticks: int | None,
+        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
+        install_signal_handlers: bool,
+        crash_emergency_threshold: int,
+        closing_grace_sec: float | None,
+    ) -> str:
+        """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
         # Stash so _compose_prompt can update target_gap_pct.
         self._current_objective = objective

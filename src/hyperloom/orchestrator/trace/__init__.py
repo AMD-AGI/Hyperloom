@@ -27,6 +27,9 @@ Modules:
 * :mod:`trace_env` — the env-var knobs and credential resolution.
 * :mod:`task_progress` — the ambient heartbeat a long composite action reports
   its internal units through (:func:`progress_scope`, :func:`report_progress`).
+* :mod:`trajectory_trace` — the append-only ``reports/trace/trajectory/`` event
+  ledger (:func:`record_event`, :func:`trajectory_span`, :func:`trajectory_scope`);
+  :mod:`trajectory_projection` maps its rows onto Langfuse spans.
 
 The join of this ledger with the decision streams lives in
 ``src/hyperloom/inference_optimizer/breakdown/collectors/decision.py``
@@ -57,6 +60,12 @@ from .parse_usage import (
 )
 from .task_progress import progress_scope, report_progress
 from .trace_env import langfuse_live_enabled
+from .trajectory_trace import (
+    load_events,
+    record_event,
+    trajectory_scope,
+    trajectory_span,
+)
 
 __all__ = [
     "ConversationRecord",
@@ -68,13 +77,17 @@ __all__ = [
     "flush_session",
     "get_emitter",
     "langfuse_live_enabled",
+    "load_events",
     "new_call_id",
     "normalize_usage",
     "parse_claude_stream_json_usage",
     "parse_codex_jsonl_error",
     "parse_codex_jsonl_usage",
     "progress_scope",
+    "record_event",
     "redact_secrets",
     "report_progress",
+    "trajectory_scope",
+    "trajectory_span",
     "write_mcp_setup_once",
 ]

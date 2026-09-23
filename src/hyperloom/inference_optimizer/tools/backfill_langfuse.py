@@ -10,8 +10,9 @@ path mirrors calls into Langfuse while a run is in flight, this CLI replays
 one finished session's ``reports/trace/`` after the fact. Both share the same
 projection (:mod:`hyperloom.orchestrator.trace.langfuse_mapping`), so the spans
 this CLI does emit are shaped like the live ones. Not replayed here: ext token
-shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step and
-GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
+shards (``reports/trace/ext/*.jsonl``), specialist-intel, forge-step,
+GEMM-tuning and trajectory (``reports/trace/trajectory/*.jsonl``) spans, which
+only the live emitter's ``flush_session`` backfills.
 
 Mapping (trace -> phase span -> agent span -> generation)::
 
