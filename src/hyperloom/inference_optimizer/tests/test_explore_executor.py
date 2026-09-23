@@ -34,6 +34,8 @@ from hyperloom.orchestrator.actions.stop_attribution import (
 from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
+    filter_baseline_noop_variants,
+    observed_launch_flags_from_state,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
@@ -150,6 +152,140 @@ def test_canonical_fingerprint_distinguishes_envs():
         {"VLLM_ROCM_USE_AITER": "1"},
     )
     assert fp_args != fp_args_envs
+
+
+def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
+    base_yaml = tmp_path / "base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"framework": "sglang", "envs": {"EXTRA_SGLANG_ARGS": "--mem-fraction-static 0.9"}}}
+        ),
+        encoding="utf-8",
+    )
+    kwargs = {
+        "framework": "sglang",
+        "base_yaml_path": base_yaml,
+        "base_extra_args": "",
+        "base_extra_envs": {},
+        "base_remove_args": [],
+        "base_unset_envs": [],
+        "base_args_mode": "append",
+        "model_path": None,
+        "gpu_type": None,
+        "benchmark_script": None,
+        "observed_server_launch_flags": "--mem-fraction-static 0.9 --max-running-requests 512",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_filter_baseline_noop_variants_drops_and_records_a_noop(tmp_path):
+    """A noop variant is dropped and recorded."""
+    grid = [GridVariant("noop", extra_server_args="--max-running-requests 512")]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert kept == []
+    assert len(dropped) == 1
+    name, reason = dropped[0]
+    assert name == "noop"
+    assert reason
+
+
+def test_filter_baseline_noop_variants_keeps_a_real_stack_change(tmp_path):
+    """A variant that changes the stack is not dropped."""
+    grid = [GridVariant("real_change", extra_server_args="--max-running-requests 128")]
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["real_change"]
+    assert dropped == []
+
+
+def test_filter_baseline_noop_variants_keeps_a_resume_stack_revalidate_replay(tmp_path):
+    """A resume_stack_revalidate variant is never dropped, even when it matches observed flags."""
+    grid = [
+        GridVariant(
+            "resume_stack_revalidate",
+            extra_server_args="--max-running-requests 512",
+        )
+    ]
+    grid[0].provenance = "resume_stack_revalidate"
+    kept, dropped = filter_baseline_noop_variants(grid, **_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["resume_stack_revalidate"]
+    assert dropped == []
+
+
+def test_filter_baseline_noop_variants_keeps_everything_without_observed_evidence(tmp_path):
+    """Without observed evidence, nothing is dropped."""
+    grid = [
+        GridVariant("noop", extra_server_args="--max-running-requests 256"),
+        GridVariant("real_change", extra_server_args="--max-running-requests 512"),
+    ]
+    kept, dropped = filter_baseline_noop_variants(
+        grid, **_noop_filter_kwargs(tmp_path, observed_server_launch_flags="")
+    )
+    assert [gv.name for gv in kept] == ["noop", "real_change"]
+    assert dropped == []
+
+
+def test_observed_launch_flags_from_state_uses_current_best_when_present():
+    state = SimpleNamespace(
+        current_best_measurement={
+            "launch_evidence": {"observed_server_launch_flags": "--tp 2"},
+        },
+        last_baseline={
+            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
+        },
+    )
+    assert observed_launch_flags_from_state(state) == "--tp 2"
+
+
+def test_observed_launch_flags_from_state_uses_baseline_when_no_current_best():
+    state = SimpleNamespace(
+        current_best_measurement={},
+        last_baseline={
+            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
+        },
+    )
+    assert observed_launch_flags_from_state(state) == "--tp 1"
+
+
+def test_observed_launch_flags_from_state_does_not_fall_back_when_current_best_has_no_flags():
+    """If current_best exists but has no observed flags, do not read last_baseline."""
+    state = SimpleNamespace(
+        current_best_measurement={"launch_evidence": {"observed_server_launch_flags": ""}},
+        last_baseline={
+            "launch_evidence": {"observed_server_launch_flags": "--tp 1"},
+        },
+    )
+    assert observed_launch_flags_from_state(state) == ""
+
+
+def test_filter_baseline_noop_variants_keeps_chunked_prefill_change_over_base_extra_args(tmp_path):
+    """Stack at 32768 via base_extra_args; proposing 65536 is not a noop."""
+    grid = [GridVariant("bump_chunked", extra_server_args="--chunked-prefill-size 65536")]
+    kept, dropped = filter_baseline_noop_variants(
+        grid,
+        **_noop_filter_kwargs(
+            tmp_path,
+            base_extra_args="--chunked-prefill-size 32768",
+            observed_server_launch_flags="--mem-fraction-static 0.9 --chunked-prefill-size 32768",
+        ),
+    )
+    assert [gv.name for gv in kept] == ["bump_chunked"]
+    assert dropped == []
+
+
+def test_filter_baseline_noop_variants_merges_base_extra_args_before_judging_noop(tmp_path):
+    """A restatement of the YAML only is still a noop once base_extra_args is merged in."""
+    grid = [GridVariant("restates_stack", extra_server_args="")]
+    kept, dropped = filter_baseline_noop_variants(
+        grid,
+        **_noop_filter_kwargs(
+            tmp_path,
+            base_extra_args="--chunked-prefill-size 32768",
+            observed_server_launch_flags="--mem-fraction-static 0.9 --chunked-prefill-size 32768",
+        ),
+    )
+    assert kept == []
+    assert dropped[0][0] == "restates_stack"
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
