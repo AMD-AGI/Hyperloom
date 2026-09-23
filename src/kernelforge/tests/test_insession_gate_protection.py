@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -286,6 +287,33 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     assert gate.end_reason == "converged"
     assert gate.passed is True
     assert gate.last_wall_ms == 0.5
+
+
+def test_a_workspace_git_failure_is_not_an_integrity_violation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """An integrity verdict discards the iteration unmeasured, so a broken workspace must not earn one."""
+    gate, workspace = _gate(tmp_path)
+    # What the gate sees when git cannot answer what this session changed.
+    shutil.rmtree(workspace / ".git")
+    validation_calls: list[int] = []
+
+    async def unexpected_validation(**_kwargs):
+        validation_calls.append(1)
+        return {"passed": True}
+
+    monkeypatch.setattr(gate_module, "test_correctness", unexpected_validation)
+
+    result = asyncio.run(gate._on_stop({}, None, None))
+
+    assert result == {}
+    assert gate.end_reason == "jit_rebuild_unavailable"
+    # The outer loop keys REVERT_INTEGRITY, the protected-snapshot restore and the discarded worktree on these two.
+    assert gate.integrity_violation is False
+    assert gate.integrity_verdict == "clean"
+    # And nothing was timed against a binary the rebuild could not be asserted for.
+    assert validation_calls == []
 
 
 def test_snapshot_covers_driver_and_glob_only_harness(tmp_path: Path):

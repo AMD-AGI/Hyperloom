@@ -24,7 +24,7 @@ from kernelforge.llm.workspace_policy import (
     is_protected_path,
     protected_path_inventory,
 )
-from kernelforge.llm.git import git
+from kernelforge.llm.git import GitError, git
 from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
@@ -1086,11 +1086,23 @@ class InSessionGate:
 
             # ── 2) SELF-CORRECTION: canonical correctness + benchmark ───────── Ensure the canonical check compiles
             # the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a subprocess that did not inherit
-            # the loop's AITER_REBUILD, so (re)assert it here (aiter HIP; no-op otherwise).
-            force_jit_rebuild_for_changes(
-                self.workspace_root or Path.cwd(),
-                [self.kernel_abs, *self.target_abs],
-            )
+            # the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one the outer loop reuses, so
+            # a shard chosen from a stale source list would decide keep/revert on the previous iteration's binary.
+            try:
+                force_jit_rebuild_for_changes(
+                    self.workspace_root or Path.cwd(),
+                    [self.kernel_abs, *self.target_abs],
+                )
+            except GitError as error:
+                # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
+                # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
+                # edit can clear.
+                self.end_reason = "jit_rebuild_unavailable"
+                self.findings.append(f"In-session validation skipped; workspace git unavailable: {error}")
+                self._log(
+                    f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
+                )
+                return self._allow()
 
             # 2a) Correctness — canonical driver, same call the pipeline uses.
             corr = await test_correctness(
