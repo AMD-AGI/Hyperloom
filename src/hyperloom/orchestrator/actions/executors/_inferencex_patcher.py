@@ -413,6 +413,68 @@ _hl_eval_bounds_install()
 # --- end HYPERLOOM_EVAL_PROBE -----------------------------------------------
 """
 
+_EVAL_UNBOUND_OUTPUTS_PY = '''
+# --- HYPERLOOM_EVAL_UNBOUND_OUTPUTS -----------------------------------------
+def _hl_eval_unbound_outputs_install():
+    """Keep a refused connection from ending the eval on UnboundLocalError.
+
+    ``TemplateAPI.amodel_call`` logs ``outputs`` when a request fails, but that
+    name is only bound once a response has been parsed. A connect that never got
+    one therefore raises UnboundLocalError from inside the handler -- over the
+    real connection error, and before the ``raise`` that would have let the retry
+    see it. The round ends on a Python-level fault instead of the server being
+    unreachable, and the cause is gone from the log.
+
+    Upstream fixed this in EleutherAI/lm-evaluation-harness#3293 by reading the
+    name through ``locals()``. InferenceX force-reinstalls a ref that predates
+    that fix over whatever is installed, so the harness this run ends up on has
+    it regardless of what was pinned; re-binding the method here is what survives
+    that reinstall. Once InferenceX moves its ref past the fix, this whole block
+    can go.
+    """
+    try:
+        from lm_eval.models.api_models import TemplateAPI as _hl_api
+    except Exception:
+        return
+
+    call = getattr(_hl_api, "amodel_call", None)
+    if call is None or getattr(call, "_hl_unbound_outputs_guard", False):
+        return
+    try:
+        import inspect as _hl_inspect
+
+        source = _hl_inspect.getsource(call)
+    except Exception:
+        return
+    # Only the versions that read the bare name need this; the fixed ones already
+    # go through locals() and must be left alone.
+    if "{outputs}" not in source:
+        return
+
+    async def _hl_amodel_call(self, *args, **kwargs):
+        try:
+            return await call(self, *args, **kwargs)
+        except UnboundLocalError:
+            # The handler destroyed the exception it was reporting. Nothing here
+            # can recover it, so surface why the eval stopped instead.
+            raise RuntimeError(
+                "lm_eval request failed before a response was parsed; the harness "
+                "error handler then raised UnboundLocalError over the original "
+                "error (EleutherAI/lm-evaluation-harness#3293). The usual cause is "
+                "a refused connection to the served endpoint."
+            ) from None
+
+    _hl_amodel_call._hl_unbound_outputs_guard = True
+    _hl_api.amodel_call = _hl_amodel_call
+
+
+_hl_eval_unbound_outputs_install()
+# --- end HYPERLOOM_EVAL_UNBOUND_OUTPUTS -------------------------------------
+'''
+
+_EVAL_UNBOUND_OUTPUTS_SENTINEL = "HYPERLOOM_EVAL_UNBOUND_OUTPUTS"
+_EVAL_UNBOUND_OUTPUTS_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_unbound_outputs_patcher.lock")
+
 _EVAL_PROBE_SENTINEL = "HYPERLOOM_EVAL_PROBE"
 _EVAL_PROBE_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_eval_probe_patcher.lock")
 # Appending needs no anchor, but it does need this file: upstream renaming or moving it puts the probe and the bounds
@@ -740,6 +802,58 @@ def _apply_eval_probe_atomic(src: Path) -> bool:
     return True
 
 
+def _is_eval_unbound_outputs_patched(src: Path) -> bool:
+    """Return whether ``lm_eval_sitecustomize.py`` already carries the guard."""
+    return file_contains_sentinel(src, _EVAL_UNBOUND_OUTPUTS_SENTINEL, log, "_inferencex_patcher")
+
+
+def _apply_eval_unbound_outputs_atomic(src: Path) -> bool:
+    """Append the refused-connection guard to ``src`` via temp-file + atomic rename."""
+    try:
+        original = src.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
+        return False
+    patched = original + _EVAL_UNBOUND_OUTPUTS_PY
+    if not atomic_write_text(
+        src,
+        patched,
+        tmp_prefix=".lm_eval_sitecustomize.unbound_outputs_",
+        log_prefix="_inferencex_patcher",
+    ):
+        return False
+    log.info("_inferencex_patcher: appended eval refused-connection guard to %s", src)
+    return True
+
+
+def ensure_eval_unbound_outputs_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure a refused connection cannot end the eval on UnboundLocalError.
+
+    Separate from the pin in ``cli/preflight.py``: that decides what gets
+    installed, and InferenceX's ``_install_lm_eval_deps`` force-reinstalls its
+    own ref over it before every accuracy round. This runs in the harness the
+    round actually ends up on.
+    """
+    return _ensure_patched(
+        _resolve_eval_sitecustomize_paths(inferencex_path),
+        _is_eval_unbound_outputs_patched,
+        _apply_eval_unbound_outputs_atomic,
+        _EVAL_UNBOUND_OUTPUTS_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "utils/evals/patches/lm_eval_sitecustomize.py missing — "
+            "skipping eval refused-connection guard"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to append the eval refused-connection guard to %s; "
+            "other discovered roots will still be attempted"
+        ),
+    )
+
+
 def ensure_eval_probe_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
@@ -908,6 +1022,7 @@ __all__ = [
     "ensure_benchmark_lib_eval_start_patched",
     "ensure_benchmark_serving_patched",
     "ensure_eval_probe_patched",
+    "ensure_eval_unbound_outputs_patched",
     "failed_patch_anchors",
     "failed_patch_anchors_in",
     "verify_patch_anchors",
