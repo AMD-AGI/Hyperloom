@@ -11,6 +11,7 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
+from hyperloom.common.timeutil import now_iso as _now_iso
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_SOURCE_PATCH,
@@ -21,10 +22,12 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_r
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     ESCALATE_HINT_SKIP_TO_SWEEP,
+    _LIFECYCLE_CAP,
     is_valid_escalate_hint,
 )
 
@@ -804,6 +807,61 @@ def session_remaining_seconds(
     return max(0.0, mm * 60.0 - max(0.0, now - started))
 
 
+def phase_status_summary(
+    state: Any,
+    *,
+    budget_pct: dict[str, float] | None = None,
+    now_unix: float | None = None,
+) -> str:
+    """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
+    phase = (state.phase or "").strip().upper() or "UNSET"
+    elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
+    # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+    cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
+    budget = normalize_budget_pct(budget_pct or state.phase_budget_pct)
+    budget_pct_for_phase = budget.get(phase, 0.0)
+    remaining = phase_budget_remaining_seconds(
+        state,
+        budget_pct=budget,
+        now_unix=now_unix,
+    )
+    budget_line: str
+    if remaining is None:
+        budget_line = f"budget    : pct={budget_pct_for_phase:.2f} (unlimited run; no per-phase cap)"
+    else:
+        budget_line = (
+            f"budget    : pct={budget_pct_for_phase:.2f} elapsed_sec={elapsed} "
+            f"cumulative_sec={cumulative} remaining_sec={int(remaining)}"
+        )
+    actions_in_phase = allowed_actions_for(phase)
+    allowed_line = f"allowed   : {', '.join(actions_in_phase) if actions_in_phase else '(none)'}"
+    lines = [
+        f"phase     : {phase}",
+        f"cycle     : {int(getattr(state, 'macro_cycle', 0) or 0)}",
+        f"entered   : {state.phase_started_ts or '(unset)'}",
+        budget_line,
+        allowed_line,
+    ]
+    # Whether deferring work to a later cycle is still a real option.
+    if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        reloop, evidence = should_reloop_to_explore(state, now_unix=now_unix)
+        feasible = reloop and state.framework_agent_phase_enabled
+        reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
+        threshold = evidence.get("min_remaining_sec_effective")
+        if threshold is not None:
+            reloop_line += f" threshold_sec={int(threshold)}"
+        session_remaining = session_remaining_seconds(state, now_unix=now_unix)
+        if session_remaining is not None:
+            reloop_line += f" session_remaining_sec={int(session_remaining)}"
+        blocked = evidence.get("reloop_blocked")
+        if blocked:
+            reloop_line += f" blocked={blocked}"
+        if phase != PHASE_SWEEP:
+            reloop_line += " (projected)"
+        lines.append(reloop_line)
+    return "\n".join(lines)
+
+
 # plateau pure functions
 def _current_macro_cycle(state: Any) -> int:
     """Return the current macro-cycle index."""
@@ -967,13 +1025,6 @@ def warm_replay_in_flight(state: Any) -> bool:
     if not isinstance(outcome, dict):
         return False
     return str(outcome.get("status") or "").strip() == "in_flight"
-
-
-def _kernel_opt_max_failures() -> int:
-    """Resolve the kernel infra-failure retry budget (lazy import)."""
-    from ..state.shared_state import resolve_kernel_opt_max_failures
-
-    return resolve_kernel_opt_max_failures()
 
 
 # The statuses a finished GEAK run writes to ``geak_result.status``.
@@ -1176,7 +1227,7 @@ def kernel_work_pending(state: Any) -> bool:
                 failure_count = int(attempt.get("failure_count") or 0)
             except (TypeError, ValueError):
                 failure_count = 0
-            if 0 < failure_count < _kernel_opt_max_failures():
+            if 0 < failure_count < resolve_kernel_opt_max_failures():
                 return True
             continue
         if decision in ("", "PARTIAL", "NEEDS_REVIEW"):
@@ -1805,6 +1856,10 @@ def compute_next_phase(
     return None
 
 
+# phase_history cap (record_phase_transition, append_phase_history_event).
+_PHASE_HISTORY_CAP = 100
+
+
 def make_history_row(
     *,
     from_phase: str,
@@ -1946,7 +2001,6 @@ def record_phase_transition(
     """Append a phase_history row and atomically update ``phase`` fields; ``phase``/``phase_history`` are CORE_STATE_FIELDS so LLM update_state is rejected. Returns the inserted row."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
-    from ..state.shared_state import _PHASE_HISTORY_CAP
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
@@ -2024,7 +2078,6 @@ def append_phase_history_event(
     """Append a non-transition marker row for the current phase."""
     from datetime import datetime as _dt, timezone as _tz
     import time as _time
-    from ..state.shared_state import _PHASE_HISTORY_CAP
 
     now_ts = ts or _dt.now(_tz.utc).isoformat(timespec="seconds")
     now_unix = float(ts_unix if ts_unix is not None else _time.time())
@@ -2072,9 +2125,6 @@ def record_lifecycle_event(
     ts: str | None = None,
 ) -> dict[str, Any]:
     """Append a structured lifecycle event marking a phase/step boundary."""
-    from ..state.shared_state import _LIFECYCLE_CAP
-    from hyperloom.common.timeutil import now_iso
-
     events = state.lifecycle
     if events is None:
         events = state.lifecycle = []
@@ -2088,7 +2138,7 @@ def record_lifecycle_event(
         detail=detail,
         duration_s=duration_s,
         seq=next_seq,
-        ts=ts or now_iso(),
+        ts=ts or _now_iso(),
     )
     # Append in place, trim only when over the cap (O(1) common path).
     events.append(event)
@@ -2171,6 +2221,7 @@ __all__ = [
     "phase_elapsed_seconds",
     "phase_elapsed_totals_from_history",
     "phase_index",
+    "phase_status_summary",
     "session_remaining_seconds",
     "warm_replay_in_flight",
 ]

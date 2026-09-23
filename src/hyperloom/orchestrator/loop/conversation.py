@@ -8,6 +8,7 @@ import json
 import time
 from typing import Any
 from ..phases import machine_state as _phase_state
+from ..policy.projection import resource_pools_summary
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
@@ -254,7 +255,8 @@ class ConversationCollaborator:
         sections.append(f"SESSION_DIR={self.session_dir}")
 
         # Per-tick phase block for every agent, high in the prompt.
-        phase_block = self.shared_state.to_phase_status_summary(
+        phase_block = _phase_state.phase_status_summary(
+            self.shared_state,
             budget_pct=self._phase_budget_pct,
         )
         if phase_block:
@@ -290,7 +292,7 @@ class ConversationCollaborator:
         sections.append("=== Shared session state ===")
         sections.append(self.shared_state.to_prompt_summary())
         sections.append("=== Resource pools ===")
-        sections.append(self.shared_state.to_resource_pools_summary())
+        sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
             denial_summary = self.shared_state.to_policy_denial_summary(top_k=6)
             if denial_summary:

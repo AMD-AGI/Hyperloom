@@ -134,7 +134,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         # Advisory model_arch profile via arch_notes carrier (prompt-context only).
         if "arch_notes" not in params:
-            from ..state.shared_state import render_model_arch_compact
+            from ..state._shared_state.render import render_model_arch_compact
 
             _arch_notes = render_model_arch_compact(getattr(state, "model_arch", None))
             if _arch_notes:

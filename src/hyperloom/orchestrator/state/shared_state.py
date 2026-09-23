@@ -30,6 +30,7 @@ if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
     from hyperloom.common.perf_metric import GradedComparison
 
 from . import kernel_decision_settings as _kernel_decision_settings
+from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
 
 log = logging.getLogger(__name__)
@@ -244,37 +245,6 @@ def inject_stack_base_params(
             _put(key, value)
 
 
-# Ordered (key, label) projection for advisory ``model_arch``; empty/None keys dropped.
-_MODEL_ARCH_STRUCTURED_FIELDS: tuple[tuple[str, str], ...] = (
-    ("decoder_type", "decoder"),
-    ("attention", "attention"),
-    ("layer_mix", "layers"),
-    ("kv_cache_per_token", "kv/token"),
-    ("active_params", "params"),
-    ("num_experts", "experts"),
-    ("experts_per_tok", "experts/tok"),
-    ("mtp", "mtp"),
-    ("swa_window", "swa_window"),
-    ("norm", "norm"),
-)
-
-
-def render_model_arch_compact(arch: dict | None) -> str:
-    """Render the advisory ``model_arch`` profile as a single compact line (``\"\"`` when empty/not a dict)."""
-    if not isinstance(arch, dict) or not arch:
-        return ""
-    parts: list[str] = []
-    for key, label in _MODEL_ARCH_STRUCTURED_FIELDS:
-        val = arch.get(key)
-        if val is None or val == "":
-            continue
-        parts.append(f"{label}={val}")
-    notes = str(arch.get("notes") or "").strip()
-    if notes:
-        parts.append(f"notes={notes}")
-    return "; ".join(parts)
-
-
 # Integration faults (environment / apply / bench crashes) are distinct from a genuine gate REVERT; a fault means the
 # patch was never fairly measured, so it gets its own small retry budget instead of burning the REVERT quota.
 _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
@@ -308,45 +278,11 @@ _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
 # Global ``last_action_failures`` rolling-log cap.
 _DEFAULT_LAST_FAILURES = 30
 
-# phase_history cap (record_phase_transition).
-_PHASE_HISTORY_CAP = 100
-
 # Lifecycle-event log cap (fires at every step boundary, so generous but bounded).
 _LIFECYCLE_CAP = 500
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
-
-# gap ledger caps; both enforced in upsert_gap.
-_GAPS_MAX_ENTRIES = 50
-_GAPS_ATTEMPTS_HISTORY = 20
-
-# Long-run bounded-growth caps for append-only telemetry ledgers (tail-trim).
-_INTERVENTION_MIX_CAP = 500
-_SPECIALIST_ROUNDS_CAP = 200
-_SEEN_PR_IDS_CAP = 2000
-_WINNERS_HISTORY_CAP = 200
-# Negative ledger (explore_search["tested"]); oldest insertion-order keys evicted first.
-_EXPLORE_TESTED_CAP = 5000
-
-# Per-action audit trail kinds; kernel_agent-owned actions excluded (dedicated structures).
-_AUDIT_ACTIONS: frozenset[str] = frozenset(
-    {
-        "baseline",
-        "profile",
-        "explore",
-        # ``roofline`` runs profile + trace_analyze atomically.
-        "roofline",
-    }
-)
-
-# audit-action name -> (result-dict key, key_metric_kind).
-_KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
-    "baseline": ("output_throughput", "output_throughput"),
-    "profile": ("output_throughput", "output_throughput"),
-    "explore": ("best_gain_pct", "gain_pct"),
-    "roofline": ("snapshot_id", "snapshot_id"),
-}
 
 
 #: top-level state.json schema version, stamped on every save.
@@ -373,50 +309,6 @@ def timed_teardown_step(state: Any, name: str) -> Iterator[None]:
         recorder = getattr(state, "record_teardown_timing", None)
         if callable(recorder):
             recorder(name, time.monotonic() - started)
-
-
-def _cap_tested_ledger(tested: dict[str, Any]) -> dict[str, Any]:
-    """Bound the explore_search negative ledger for multi-day runs."""
-    if not isinstance(tested, dict) or len(tested) <= _EXPLORE_TESTED_CAP:
-        return tested if isinstance(tested, dict) else {}
-    keys = list(tested.keys())[-_EXPLORE_TESTED_CAP:]
-    return {k: tested[k] for k in keys}
-
-
-def _stamp_cycle_on_tested(
-    tested: dict[str, Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> dict[str, Any]:
-    """Bucket negative-ledger entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(tested, dict):
-        return {}
-    bn = (bottleneck or "").strip()
-    for v in tested.values():
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return tested
-
-
-def _stamp_cycle_on_rejected(
-    rejected: list[Any],
-    cycle: int,
-    bottleneck: str = "",
-) -> list[Any]:
-    """Bucket rejected entries by macro-cycle + bottleneck (R3)."""
-    if not isinstance(rejected, list):
-        return []
-    bn = (bottleneck or "").strip()
-    for v in rejected:
-        if isinstance(v, dict):
-            if "cycle" not in v:
-                v["cycle"] = int(cycle)
-            if bn and "bottleneck" not in v:
-                v["bottleneck"] = bn
-    return rejected
 
 
 from ._shared_state.render import _RenderMixin
@@ -2774,4 +2666,4 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         ) != int(self.validated_recipe_generation)
 
 
-__all__ = ["SharedState", "render_model_arch_compact", "timed_teardown_step"]
+__all__ = ["SharedState", "timed_teardown_step"]

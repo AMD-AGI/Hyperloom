@@ -152,7 +152,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = s.to_phase_status_summary(budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    out = _ps.phase_status_summary(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0)
     assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
@@ -175,7 +175,7 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1.0,
     )
-    out = s.to_phase_status_summary(now_unix=10.0)
+    out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()
 
 

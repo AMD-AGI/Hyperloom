@@ -1025,9 +1025,9 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
     from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
 
     monkeypatch.setattr(rh, "summarise_for_prompt", lambda sd: "HINTS-TEXT")
-    from hyperloom.orchestrator.state import shared_state as ss_mod
+    from hyperloom.orchestrator.state._shared_state import render as render_mod
 
-    monkeypatch.setattr(ss_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
+    monkeypatch.setattr(render_mod, "render_model_arch_compact", lambda a: "ARCH-NOTES")
     from hyperloom.inference_optimizer import framework_paths as fp
 
     monkeypatch.setattr(fp, "resolve_kernel_search_roots", lambda: ["/src/root"])

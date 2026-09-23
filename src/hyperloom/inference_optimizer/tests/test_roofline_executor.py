@@ -755,7 +755,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.state.shared_state import (
+from hyperloom.orchestrator.state._shared_state.attempt_audit import (
     _AUDIT_ACTIONS as SHARED_STATE_AUDIT_ACTIONS,
     _KEY_METRIC_MAP,
 )
