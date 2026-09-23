@@ -7,6 +7,7 @@ import json
 import pytest
 
 from kernelforge.loop import reporting
+from kernelforge.loop.recovery import load_published_best
 from kernelforge.loop.reporting import (
     MANIFEST_SCHEMA_VERSION,
     BestResultPublisher,
@@ -573,3 +574,49 @@ def test_the_restatement_declines_when_there_is_no_published_best(tmp_path):
     publisher = BestResultPublisher(str(tmp_path))
 
     assert publisher.refresh_round_budget({"rounds": 1}) is False
+
+
+class TestPublishedBestLoader:
+    """What every consumer of a finished campaign is allowed to treat as published."""
+
+    def test_a_published_best_is_returned_whole(self, tmp_path):
+        kernel = tmp_path / "src" / "kernel.py"
+        kernel.parent.mkdir()
+        kernel.write_text("one\n")
+        publisher = BestResultPublisher(str(tmp_path))
+        manifest = _publish(
+            publisher,
+            iteration=1,
+            wall_ms=0.9,
+            plan="verified improvement",
+            changed_files=["src/kernel.py"],
+        )
+
+        assert load_published_best(str(tmp_path)) == manifest
+
+    def test_no_campaign_has_no_published_best(self, tmp_path):
+        assert load_published_best(str(tmp_path)) is None
+
+    def test_a_result_from_an_older_schema_is_not_published(self, tmp_path):
+        result = tmp_path / "forge_experiments" / "best_result.json"
+        result.parent.mkdir(parents=True)
+        # A bundle left by a previous release: its fields mean something else now.
+        result.write_text(
+            json.dumps(
+                {
+                    "schema_version": MANIFEST_SCHEMA_VERSION - 1,
+                    "correctness_passed": True,
+                    "iteration": 0,
+                    "commit_hash": "abc123",
+                }
+            )
+        )
+
+        assert load_published_best(str(tmp_path)) is None
+
+    def test_a_truncated_result_is_not_published(self, tmp_path):
+        result = tmp_path / "forge_experiments" / "best_result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text('{"schema_version": 2, "correctness_pass')
+
+        assert load_published_best(str(tmp_path)) is None
