@@ -87,26 +87,26 @@ def forge_loop_prompts(monkeypatch):
 # hipblaslt, since the word now has a defined meaning beside it; and hipblaslt
 # gained the paragraph it had never rendered despite three stop conditions
 # resting on it.
-# Sending the sweep to a copy moved the eight source backends and left assembly
-# byte-identical, which is the expected shape: the two edits are both in the
-# shared prompt_utils.py preamble, and assembly renders neither card. Diffed
-# line by line -- twenty lines in each of the eight, and the changed content is
-# one identical block in all of them (same md5 over the diff bodies). The
-# edit-surface bullet gained the converse it had always implied but never said
-# (reaching someone else's environment constant is in scope, authoring a new
-# read in the deliverable is not), and the sweep bullet moved the knobs into a
-# copy under forge_experiments/ and replaced "KEEP the knobs ... strip at
-# submission" with what the submitted kernel carries instead.
+# Keeping sweep knobs out of the deliverable moved the eight source backends and
+# left assembly byte-identical, which is the expected shape: the two edits are
+# both in the shared prompt_utils.py preamble, and assembly renders neither
+# card. Diffed line by line against main: the changed content is one identical
+# block in all eight (same md5 over the diff bodies). The edit-surface bullet
+# gained the converse it had always implied but never said (reaching someone
+# else's environment constant is in scope, authoring a new read in the
+# deliverable is not), and the sweep bullet replaced "KEEP the knobs ... strip
+# at submission" with a collapse to the selected literals before the
+# implementer ends its turn.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "4998333601ec64f50f489f991ba6a8a3bd8884bf6489ad05b45dca5fb1e0c9d0",
+    "aiter": "1c933e6bdb8f3000ee9bfbb2a83c4931c9a164cd26ec7776e6e2ff33d682f1b5",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
-    "ck": "ced4d49611f49aaf9cc83dbfd6503a96d134cb635e9c2f293b2aa4eac41e8432",
-    "flydsl": "f0e3277302f47ab8588c366a457008932094f17ad59b3421eed4a719ad21e193",
-    "fusion": "f8dff507ff548abd7887bd5482e58fef11be1ee0907680e112f442e46e3bb3d5",
-    "gluon": "6c14947fa8acc317a280b9fbb4dea22a9e21ad145a669db1242d6e690b35e125",
-    "hip": "5b3732328ff0e5c3f341236677ff409dc5a10851bb874ab4566378fa2f8217ba",
-    "hipblaslt": "0025272647704539649c243fd756d4433f0e0f73c77b4b5341985f69f780c0c6",
-    "triton": "14d0f939891735764ed7d425134b527adbdcd3a6c52f82be8331f465b9ace8e7",
+    "ck": "8425aa52e7a9d7681bf75d471617b3a1aa2ce0cf10766f8530ef3025001e0d60",
+    "flydsl": "e9ae6e3f09150964bdff2c74177a923dffd05b96591f8f99cafb11717beeeeca",
+    "fusion": "47a08e347027db64ef09da42fe73e8248d35c22c05084bc850e23a7d013c61e5",
+    "gluon": "45a2cfcd349304581f1ea1cb1d489b7ff326fe7276ac35834840b17d5a6e8c06",
+    "hip": "b423e67f7e17cb20c6edd8166df665f5dfeed31a9bb7abe22dba10a33e6d0f25",
+    "hipblaslt": "b6318a771e02c382658b3a8ddb844343d3528b1b91ca1d8c60febf84afdfc1ae",
+    "triton": "e73f10c4a2bc4fbe59da1e619605401b8f4c602bf0b4480d956584162473c650",
 }
 
 
@@ -243,22 +243,28 @@ class TestEditSurfaceAndSweepContract:
             )
 
     def test_every_kernel_backend_keeps_sweep_plumbing_out_of_what_it_submits(self, source_loop_prompts):
-        """Sweep knobs are scaffolding for the copy; the kernel that ships carries the literal they picked.
+        """Sweep knobs last one turn; the kernel that ships carries the literal they picked.
 
         The prompt used to say the opposite -- keep the knobs in the source for the whole search, strip them at
         submission if anyone asks. Nobody asked, so every campaign delivered its scaffolding: sixty environment reads
         and three hundred echo lines in one shipped kernel, indistinguishable to a reader from live configuration.
-        Sending the sweep to a copy costs the search nothing and is the only version of the rule that holds without a
-        cleanup step somebody has to remember.
+        The collapse is now the implementer's own last edit of every turn. It stays in place rather than on a copy:
+        only the rewrite driver can be pointed at another kernel file, so for every other backend a copy is a file no
+        sweep point runs.
         """
         for backend, prompt in source_loop_prompts.items():
-            lowered = prompt.lower()
+            lowered = " ".join(prompt.lower().split())
             assert "keep the knobs" not in lowered, (
                 f"{backend}: prompt still tells the implementer to ship its own sweep knobs"
             )
-            assert "a copy of the kernel" in lowered, f"{backend}: prompt does not send the sweep to a copy"
-            assert "winning literal" in lowered, (
+            assert "before you end the turn" in lowered, (
+                f"{backend}: prompt does not make removing the knobs part of the implementer's own turn"
+            )
+            assert "with the literal it selected" in lowered, (
                 f"{backend}: prompt does not say the submitted kernel carries the literal, not the read"
+            )
+            assert "kernelforge_rewrite_candidate_kernel" not in lowered, (
+                f"{backend}: the shared prompt prescribes a candidate path only the rewrite driver has"
             )
 
     def test_sweep_contract_is_not_owned_by_one_kernel_backend(self):

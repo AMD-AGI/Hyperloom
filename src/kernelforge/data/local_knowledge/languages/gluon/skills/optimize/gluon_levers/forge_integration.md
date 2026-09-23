@@ -168,8 +168,8 @@ the AMD ladder. Inside a campaign there are exactly two honest ways to use them:
   the narrow exception to the rule that a submitted kernel reads no `os.environ`: name the flag, say
   in a comment that Triton exposes it no other way, and set nothing else that way. A dispatch constant
   of your own is not covered — that one is a literal.
-- **Sweep them explicitly** as `FORGE_SWEEP_*` knobs when the question is whether they help. Sweep on
-  a copy under `forge_experiments/`, one data point per command, echoed, per
+- **Sweep them explicitly** as `FORGE_SWEEP_*` knobs when the question is whether they help. One data
+  point per command, echoed, and collapsed to the chosen setting before the turn ends, per
   `common_methodology/optimization/lever_cheap_sweeps.md`.
 
 What is **not** honest is exporting them in your shell and then reporting the number as the kernel's.

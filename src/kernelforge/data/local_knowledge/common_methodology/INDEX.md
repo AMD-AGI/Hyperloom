@@ -80,7 +80,7 @@ pick a lever → apply → re-benchmark A/B.** Paths are relative to this folder
 | "Should I fuse these two ops?" | `optimization/lever_bottleneck_class.md` (re-classify first) → `optimization/lever_fusion.md` |
 | "Wave/workgroup/grid sizing, `__launch_bounds__`, persistent kernels" | `optimization/lever_grid_sizing.md` → `optimization/lever_xcd_locality.md` |
 | "Tune a GEMM for the live serving path" | `optimization/lever_autotune.md` → `profiling/measure_protocol.md` (validate via A/B) |
-| "Time one constant fast / sweep a dispatch literal / where do the env knobs go?" | `optimization/lever_cheap_sweeps.md` (into a copy — the deliverable gets the literal) → `profiling/measure_protocol.md` (noise band) |
+| "Time one constant fast / sweep a dispatch literal / where do the env knobs go?" | `optimization/lever_cheap_sweeps.md` (in place for one turn — the deliverable gets the literal) → `profiling/measure_protocol.md` (noise band) |
 | "This lever needs a file I was not given / 'that means patching the framework, not this file'" | `optimization/lever_edit_surface.md` → `optimization/lever_cheap_sweeps.md` |
 | "Is this constant editable? its default comes from `os.environ`" | `optimization/lever_edit_surface.md` (yes — it is a module constant in an editable file) |
 | "Accuracy regressed / fp8 mismatch / softmax overflow / norm drift" | `optimization/lever_numerics.md` |
@@ -109,7 +109,7 @@ common_methodology/
     ├── lever_xcd_locality.md         # 8-XCD per-die L2, ≥1024 workgroups, 8-multiple tiles, swizzled CTA order
     ├── lever_fusion.md               # when to fuse (epilogue/prologue, norm+quant, rope+cache, comm+norm), donors, when NOT to
     ├── lever_autotune.md             # AITER_TUNE_GEMM → err_ratio<0.05 → AITER_CONFIG_GEMM_BF16, per-shape key, engagement
-    ├── lever_cheap_sweeps.md         # FORGE_SWEEP_<NAME> + sweep_const echo, one command per data point, on a copy — submit the literal
+    ├── lever_cheap_sweeps.md         # FORGE_SWEEP_<NAME> + sweep_const echo, one command per data point, collapse to the literal before the turn ends
     ├── lever_edit_surface.md         # what an editable file reaches: package rebind, injected device source, module constants (incl. os.environ defaults), data/config rows
     └── lever_numerics.md             # fp32 accumulate, online softmax, Welford, fp8 OCP scale trap, err_ratio gate
 ```

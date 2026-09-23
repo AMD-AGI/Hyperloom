@@ -38,12 +38,9 @@ them with the `Read` tool; what follows is the part you must not have to look up
   it, work out what actually runs first from the files you were given. Reaching a
   constant someone else reads from the environment is in scope; authoring a new
   environment read in the kernel you submit is not.
-- **`lever_cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Work
-  on a COPY of the kernel under `forge_experiments/` and point the driver at it
-  (`KERNELFORGE_REWRITE_CANDIDATE_KERNEL`, or whatever candidate path your driver
-  takes); the knobs live there, never in the kernel you submit. In the copy, read
-  the constant as `FORGE_SWEEP_<NAME>` defaulting to today's value, echo
-  `sweep_const: <NAME> <value>` on every read (a point with no echo fails and
+- **`lever_cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Read
+  the constant on the host as `FORGE_SWEEP_<NAME>` defaulting to today's value,
+  echo `sweep_const: <NAME> <value>` on every read (a point with no echo fails and
   carries no time), parse a BOOLEAN knob against an explicit token set rather
   than with `bool(value)` (`bool("0")` is `True`, so the OFF point would time the
   ON kernel and the echo would still confirm it), and take one data point per
@@ -53,7 +50,10 @@ them with the `Read` tool; what follows is the part you must not have to look up
   the WRAPPER when your session names one). Sweep coupled constants JOINTLY, and
   sweep every inherited literal in BOTH directions. Sweep numbers are
   exploratory; the canonical gate still decides what survives.
-  **What you submit carries the winning literal, not the read that found it.**
+  **The knobs last one turn.** Instrument the kernel in place — the driver loads
+  it from where the task put it, so a copy elsewhere is a file it never runs —
+  and before you end the turn, replace every `FORGE_SWEEP_` read with the literal
+  it selected, delete the echo, and re-run the driver on the file you submit.
   What carries an axis to the next session is the constant you name in this
   iteration's lesson — the values you timed and what they cost — not a knob left
   behind in the shipped file for someone to mistake for live configuration."""

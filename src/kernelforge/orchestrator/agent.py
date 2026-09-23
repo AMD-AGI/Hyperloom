@@ -217,13 +217,15 @@ def make_agent_fn(
     # The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
     # are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
     deliverable_hygiene_rule = (
-        "What you submit is a finished operator, not a scratchpad: it carries no "
-        "`print` and reads no `os.environ` of its own. Watch a value or vary a "
-        "constant in a copy under forge_experiments/, and submit the constant you "
-        "settled on rather than the read that found it — a knob left behind is "
-        "indistinguishable, to everyone downstream, from live configuration. The "
-        "one exception is an option a library you call exposes no other way: set "
-        "that, and say in a comment why there is no API for it."
+        "What you submit is a finished operator, not a scratchpad: when you end "
+        "the turn it carries no `print` and reads no `os.environ` of its own. A "
+        "sweep knob or a probe print may live in the kernel while you search; "
+        "before ending the turn, replace each knob with the constant it selected, "
+        "delete each probe, and re-run the driver on the file you submit. A knob "
+        "left behind is indistinguishable, to everyone downstream, from live "
+        "configuration. The one exception is an option a library you call "
+        "exposes no other way: set that, and say in a comment why there is no "
+        "API for it."
     )
 
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
