@@ -160,8 +160,9 @@ mirror, set the registry prefix accordingly.
    * - ``rocm/atom-dev:v0.1.7-rc0``
      - MI355X (verified); MI300X / MI325X untested
 
-The vLLM image entrypoint is ``vllm serve``, so override it (for example
-``--entrypoint tail``) when starting a long-running Hyperloom container.
+The images default to ``/bin/bash``, which exits at once in a detached
+container, so override the entrypoint (for example ``--entrypoint tail``) when
+starting a long-running Hyperloom container.
 
 The ``rocm/vllm`` image serves an installed wheel, so ``install.sh`` turns its
 ``/app/vllm`` checkout into the patchable source tree: it pins the tree to vLLM
