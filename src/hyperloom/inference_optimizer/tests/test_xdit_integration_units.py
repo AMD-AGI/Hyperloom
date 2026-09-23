@@ -494,10 +494,12 @@ class TestHyperloomArchSpec:
 
         return tab
 
-    def test_build_spec_mi355x_removed(self):
+    def test_build_spec_mi355x_falls_back_to_vendor(self):
         tab = self._tab()
         spec = tab.build_hyperloom_arch_spec("mi355x")
-        assert spec is None
+        assert spec is not None
+        assert spec["mem_bw_gbps"] == pytest.approx(8000.0)
+        assert spec["max_achievable_tflops"]["matrix_bf16"] == pytest.approx(2516.6)
 
     def test_build_spec_case_insensitive_and_named(self):
         tab = self._tab()

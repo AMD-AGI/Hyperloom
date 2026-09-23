@@ -1132,6 +1132,9 @@ if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
 eval "$_dotenv_prev"
 unset _dotenv_prev
 . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
+# Launch is its own shell and inherits no PYTHON from the smoke test, and
+# kernel-agent.env.sh does not set it; resolve it before it leads PATH.
+export PYTHON="${PYTHON:-$(command -v python3)}"
 export PATH="$(dirname "$PYTHON"):/usr/local/bin:$PATH"
 export RUN_TAG="$(basename "$MODEL_PATH")-$(date +%Y%m%d_%H%M%S)"
 # RUN_LOG/PID/launch-info live under the workspace until the session_dir

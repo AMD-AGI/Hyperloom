@@ -406,6 +406,9 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "recipe_finalize_status",
         "recipe_finalize_attempts",
         "recipe_finalize_outcome",
+        # Measured stack incapability; forging it either revives analysis that cannot succeed or silences the one
+        # that can.
+        "gpu_trace_unsupported_reason",
         # KB tag completeness (Coordinator-populated; LLM reads via prompt).
         "stack_fingerprint_meta",
         "baseline_workload_extra",

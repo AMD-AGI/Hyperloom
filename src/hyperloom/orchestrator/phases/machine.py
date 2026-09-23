@@ -6,6 +6,7 @@
 """
 
 from __future__ import annotations
+import asyncio
 import logging as _logging
 from typing import Any
 from . import geak_rebench as _geak_rebench
@@ -19,6 +20,21 @@ log = _logging.getLogger(__name__)
 
 class MachinePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
+
+    _kernel_entry_task: "asyncio.Task[Any] | None" = None
+
+    def _kernel_entry_in_flight(self) -> bool:
+        """True while the out-of-band KERNEL entry hook (GEAK run, reprofile, GEMM tuning) has not returned."""
+        task = self._kernel_entry_task
+        return task is not None and not task.done()
+
+    async def _await_kernel_entry_task(self) -> None:
+        """Let a still-running KERNEL entry hook finish before the session tears down."""
+        task = self._kernel_entry_task
+        if task is None or task.done():
+            return
+        log.info("Coordinator: waiting for the KERNEL entry hook to finish before shutdown")
+        await asyncio.wait({task})
 
     def _ensure_phase_initialised(self) -> None:
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
@@ -157,7 +173,7 @@ class MachinePhase(PhaseHandler):
             state.kernel_idle_ticks = 0
             state.kernel_idle_since_unix = now
             return
-        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
+        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now) or self._kernel_entry_in_flight():
             state.kernel_idle_since_unix = now
             return
         # Only reachable after a tick that opened the streak above, so ``kernel_idle_since_unix`` is already stamped
@@ -184,6 +200,10 @@ class MachinePhase(PhaseHandler):
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
         if next_phase is None:
+            return
+        if self._kernel_entry_in_flight():
+            # The entry hook owns KERNEL until it returns; leaving earlier hands GPUs GEAK still holds to the next phase.
+            log.debug("phase_machine: holding %s -> %s until the KERNEL entry hook returns", state.phase, next_phase[0])
             return
         target, reason, evidence = next_phase
         if target == (state.phase or "").upper():
@@ -319,18 +339,39 @@ class MachinePhase(PhaseHandler):
             )
         except Exception:  # noqa: BLE001 — defensive
             log.exception("Coordinator: phase_transition event bus write failed")
-        # Phase-entry side effects are additive; hook failures are logged only.
+        # Phase-entry side effects are additive; hook failures are logged only. Only KERNEL entry runs out-of-band so
+        # its GEAK/reprofile/tuning work does not freeze the tick loop; the phase is held until it returns.
+        entry_kwargs: dict[str, Any] = {
+            "from_phase": prior or "",
+            "to_phase": target,
+            "reason": reason or "",
+            "evidence": evidence if isinstance(evidence, dict) else None,
+        }
+        if target_phase == _phase_state.PHASE_KERNEL_AGENT:
+            task = asyncio.create_task(self._on_phase_entered(**entry_kwargs))
+            task.add_done_callback(self._record_phase_entry_task_result)
+            self._kernel_entry_task = task
+            return
+        # Every other phase keeps its entry effects on the transition itself, which is what callers advancing into
+        # CLOSE rely on to see the sequencer's settlement once the transition returns.
         try:
-            await self._on_phase_entered(
-                from_phase=prior or "",
-                to_phase=target,
-                reason=reason or "",
-                evidence=evidence if isinstance(evidence, dict) else None,
-            )
+            await self._on_phase_entered(**entry_kwargs)
         except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
             log.exception("Coordinator: _on_phase_entered hook failed")
-            # This hook is also what closes the left phase's event, so a raise
-            # here is the case where that event never got its exit evidence.
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
+            self._record_coordinator_exception(stage="phase_entered", exc=exc)
+
+    def _record_phase_entry_task_result(self, task: "asyncio.Task[Any]") -> None:
+        """Log phase-entry hook failures after the transition tick has returned."""
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            log.warning("Coordinator: _on_phase_entered hook was cancelled")
+        except Exception as exc:  # noqa: BLE001 — a failed hook must not block the transition
+            log.exception("Coordinator: _on_phase_entered hook failed")
+            # This hook is also what closes the left phase's event, so a raise here is the case where that event never
+            # got its exit evidence.
             self._record_coordinator_exception(stage="phase_entered", exc=exc)
 
     async def _on_phase_entered(
