@@ -7,6 +7,7 @@ and the per-phase entry dispatcher (``_on_phase_entered``)."""
 from __future__ import annotations
 import logging as _logging
 from typing import Any
+from . import approved_patch as _approved_patch
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from ..bus.message_bus import Message
@@ -338,10 +339,18 @@ class MachinePhase(PhaseHandler):
         cancelled = await self.tasks.cancel_queued_not_allowed(
             allowed_kinds=allowed_kinds,
             reason=f"phase_transition:{str(prior or '').strip().upper()}->{target}",
-            spare_queued=lambda _task_id, kind, params: _geak_rebench.spare_geak_rebench_on_phase_transition(
-                target_phase=target_phase,
-                kind=kind,
-                params=params,
+            spare_queued=lambda _task_id, kind, params: (
+                _geak_rebench.spare_geak_rebench_on_phase_transition(
+                    target_phase=target_phase,
+                    kind=kind,
+                    params=params,
+                )
+                or _approved_patch.spare_approved_integrate_patch_on_phase_transition(
+                    target_phase=target_phase,
+                    kind=kind,
+                    params=params,
+                    shared_state=state,
+                )
             ),
         )
         if cancelled:
