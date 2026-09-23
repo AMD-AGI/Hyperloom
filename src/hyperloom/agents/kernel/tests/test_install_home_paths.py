@@ -12,6 +12,7 @@ import re
 import stat
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -87,28 +88,220 @@ def test_home_dir_matches_python_path_home(home_env: dict[str, str]) -> None:
 def _run_credential_write(
     tmp_path: Path, *, home: str, extra_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
-    """Run ensure_forge_claude_cli() with stubbed log/warn/run and a fake npm."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    npm = fake_bin / "npm"
-    npm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    npm.chmod(0o755)
-    harness = f"""set -euo pipefail
-log()  {{ echo "[log] $*"; }}
-warn() {{ echo "[warn] $*"; }}
-run()  {{ echo "RUN: $*"; }}
-die()  {{ echo "[die] $*" >&2; exit 1; }}
-CHECK_ONLY=0
+    """Keep the credential-path tests on a working, offline Claude runtime."""
+    return _run_forge_validation(tmp_path, extra_env={"HOME": home, "USERPROFILE": home, **(extra_env or {})})
+
+
+def _run_forge_validation(
+    tmp_path: Path, *, case: str = "ready", check_only: bool = False, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the real installer function and Python validation with all external work isolated."""
+    bootstrap = tmp_path / "offline_python.py"
+    bootstrap.write_text(
+        textwrap.dedent(
+            """\
+            import builtins
+            import os
+            import subprocess
+            import sys
+            from dataclasses import replace
+            from pathlib import Path
+            from unittest.mock import patch
+
+            from kernelforge.agent_backends import claude, registry
+
+            real_import = builtins.__import__
+            def offline_import(name, *args, **kwargs):
+                if name == "claude_agent_sdk" or name.startswith("claude_agent_sdk."):
+                    raise AssertionError("installer must not import the SDK")
+                return real_import(name, *args, **kwargs)
+            builtins.__import__ = offline_import
+            registry._plugins_loaded = True
+            registry._providers = {
+                name: replace(provider, availability=lambda: True,
+                              credentialed=lambda _env, selected=name: selected == os.environ["TEST_PROVIDER"])
+                for name, provider in registry._providers.items() if name in {"claude", "codex"}
+            }
+            case = os.environ["TEST_CASE"]
+            def resolve(explicit=""):
+                if explicit.strip():
+                    return explicit.strip()
+                if case in {"missing", "install-fails", "still-missing", "installed-wrong"} and (
+                    case == "still-missing" or not Path(os.environ["TEST_INSTALLED"]).exists()
+                ):
+                    return "claude"
+                return sys.executable
+            original_validate = claude.ClaudeBackend.validate_runtime
+            def validate(runtime):
+                print("VALIDATE_RUNTIME " + runtime.provider, file=sys.stderr)
+                original_validate(runtime)
+            def version(argv, **kwargs):
+                assert argv[1:] == ["--version"], argv
+                assert kwargs == dict(capture_output=True, timeout=10, check=False), kwargs
+                print("CLI_VERSION", file=sys.stderr)
+                if case in {"version-repair", "version-repair-fails"}:
+                    installed = Path(os.environ["TEST_INSTALLED"])
+                    if not installed.exists() or case == "version-repair-fails":
+                        return subprocess.CompletedProcess(argv, 7, b"", b"broken Claude CLI")
+                if case == "timeout":
+                    raise subprocess.TimeoutExpired(argv, 10)
+                if case == "native-error":
+                    raise OSError("loader failed")
+                return subprocess.CompletedProcess(argv, 7 if case == "nonzero" else 0,
+                                                   b"other tool" if case in {"wrong", "installed-wrong"} else b"Claude Code test", b"")
+            with patch.object(claude, "resolve_claude_cli", resolve), \
+                 patch.object(claude.shutil, "which", return_value=None), \
+                 patch.object(claude.ClaudeBackend, "validate_runtime", validate), \
+                 patch.object(subprocess, "run", version):
+                sys.argv = sys.argv[1:]
+                exec(compile(sys.stdin.read(), "<installer-python>", "exec"), {"__name__": "__main__"})
+            """
+        ),
+        encoding="utf-8",
+    )
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {
+        **{key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR") if key in os.environ},
+        "HOME": home.as_posix(),
+        "USERPROFILE": home.as_posix(),
+        "TEST_PYTHON": Path(sys.executable).as_posix(),
+        "TEST_BOOTSTRAP": bootstrap.as_posix(),
+        "TEST_INSTALLED": (tmp_path / "installed").as_posix(),
+        "TEST_PROVIDER": "claude",
+        "TEST_CASE": case,
+        "PYTHONPATH": str(INSTALL_SH.parents[4]),
+        "FORGE_AGENT_BACKEND": "auto",
+        "KNOWLEDGE_STORE_MODE": "local",
+        "KERNEL_OPT_BACKEND_ORDER": "forge",
+    }
+    env.update(extra_env or {})
+    script = f"""set -euo pipefail
+log() {{ printf '[log] %s\\n' "$*"; }}
+warn() {{ printf '[warn] %s\\n' "$*" >&2; }}
+die() {{ printf '[die] %s\\n' "$*" >&2; exit 1; }}
+python3() {{ "$TEST_PYTHON" "$TEST_BOOTSTRAP" "$@"; }}
+npm() {{ printf 'unexpected direct npm invocation\\n' >&2; exit 99; }}
+run() {{
+  printf 'RUN: %s\\n' "$*"
+  if [[ "$*" == 'npm install '* ]]; then
+    [ "$TEST_CASE" != install-fails ] || return 7
+    : > "$TEST_INSTALLED"
+  fi
+}}
+CHECK_ONLY={int(check_only)}
 DRY_RUN=0
-_ANTHROPIC_KEY_VAL="sk-hl-test-key"
-_ANTHROPIC_BASE_URL_VAL="https://gateway.example.com/v1/"
-{_extract_func("_home_dir", required=False)}
+_ANTHROPIC_KEY_VAL=sk-hl-test-key
+_ANTHROPIC_BASE_URL_VAL=https://gateway.example.com/v1/
+{_extract_func("_home_dir")}
 {_extract_func("ensure_forge_claude_cli")}
 ensure_forge_claude_cli
+printf 'INSTALL_REACHED_END\\n'
 """
-    env = {"PATH": f"{fake_bin}:{_BASE_PATH}", "HOME": home}
-    env.update(extra_env or {})
-    return _run_bash(harness, env)
+    return _run_bash(script, env)
+
+
+@pytest.mark.parametrize("case", ["missing", "wrong", "timeout", "native-error", "nonzero"])
+def test_forge_check_only_fails_without_a_working_claude(tmp_path: Path, case: str) -> None:
+    proc = _run_forge_validation(tmp_path, case=case, check_only=True)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined
+    assert "INSTALL_REACHED_END" not in combined
+    assert "VALIDATE_RUNTIME claude" in combined
+    assert "RUN:" not in combined
+    assert not (tmp_path / "home" / ".claude" / "config.json").exists()
+
+
+@pytest.mark.parametrize("case", ["ready", "missing"])
+def test_forge_installer_validates_reused_and_installed_cli_once(tmp_path: Path, case: str) -> None:
+    proc = _run_forge_validation(tmp_path, case=case)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    assert combined.count("CLI_VERSION") == 1, combined
+    assert ("npm install -g" in combined) is (case == "missing"), combined
+    config = json.loads((tmp_path / "home" / ".claude" / "config.json").read_text(encoding="utf-8"))
+    assert config["primaryApiKey"] == "sk-hl-test-key"
+    assert config["customApiUrl"] == "https://gateway.example.com"
+
+
+@pytest.mark.parametrize("case", ["install-fails", "still-missing", "installed-wrong"])
+def test_forge_installer_cannot_succeed_after_an_unusable_install(tmp_path: Path, case: str) -> None:
+    proc = _run_forge_validation(tmp_path, case=case)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined
+    assert "npm install -g" in combined
+    assert "INSTALL_REACHED_END" not in combined
+    assert not (tmp_path / "home" / ".claude" / "config.json").exists()
+
+
+@pytest.mark.parametrize("case", ["wrong", "timeout", "native-error", "nonzero"])
+def test_forge_installer_refuses_to_replace_a_broken_default_cli(tmp_path: Path, case: str) -> None:
+    proc = _run_forge_validation(tmp_path, case=case)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode != 0, combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    assert "RUN:" not in combined
+    assert "INSTALL_REACHED_END" not in combined
+
+
+@pytest.mark.parametrize("case", ["version-repair", "version-repair-fails"])
+def test_forge_version_pin_reinstalls_broken_default_then_validates(tmp_path: Path, case: str) -> None:
+    proc = _run_forge_validation(tmp_path, case=case, extra_env={"HYPERLOOM_CLAUDE_CODE_VERSION": "1.2.3"})
+    combined = proc.stdout + proc.stderr
+    assert "RUN: npm install -g @anthropic-ai/claude-code@1.2.3" in combined, combined
+    assert (tmp_path / "installed").is_file(), combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    assert combined.count("CLI_VERSION") == 1, combined
+    repaired = case == "version-repair"
+    assert (proc.returncode == 0) is repaired, combined
+    assert ("INSTALL_REACHED_END" in combined) is repaired, combined
+    assert (tmp_path / "home" / ".claude" / "config.json").exists() is repaired
+
+
+@pytest.mark.parametrize("valid", [False, True], ids=["bad-pin", "valid-pin"])
+def test_forge_installer_never_replaces_an_explicit_cli_pin(tmp_path: Path, valid: bool) -> None:
+    pin = Path(sys.executable).as_posix() if valid else (tmp_path / "missing-pin").as_posix()
+    proc = _run_forge_validation(tmp_path, extra_env={"FORGE_AGENT_CLI": pin, "HYPERLOOM_CLAUDE_CODE_VERSION": "1.2.3"})
+    combined = proc.stdout + proc.stderr
+    assert (proc.returncode == 0) is valid, combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    assert "npm install" not in combined
+    assert "npm config" not in combined
+    if not valid:
+        assert "missing-pin" in combined
+        assert "INSTALL_REACHED_END" not in combined
+
+
+@pytest.mark.parametrize(
+    "extra_env",
+    [
+        {"TEST_PROVIDER": "codex"},
+        {"KERNEL_OPT_BACKEND_ORDER": "geak", "FORGE_AGENT_BACKEND": "invalid"},
+        {"KERNEL_OPT_BACKEND_ORDER": "forge,geak", "FORGE_AGENT_BACKEND": "invalid"},
+        {"KERNEL_OPT_BACKEND_ORDER": "", "FRAMEWORK": "vllm", "FORGE_AGENT_BACKEND": "invalid"},
+    ],
+    ids=["resolved-codex", "explicit-geak", "non-exact-forge", "default-vllm"],
+)
+def test_installer_skips_claude_when_forge_does_not_select_it(tmp_path: Path, extra_env: dict[str, str]) -> None:
+    proc = _run_forge_validation(tmp_path, extra_env=extra_env)
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert "INSTALL_REACHED_END" in combined
+    assert "VALIDATE_RUNTIME" not in combined
+    assert "RUN:" not in combined
+    assert not (tmp_path / "home" / ".claude" / "config.json").exists()
+
+
+@pytest.mark.parametrize("backend", ["", "  FORGE  "])
+def test_atom_installer_checks_default_and_explicit_forge(tmp_path: Path, backend: str) -> None:
+    proc = _run_forge_validation(
+        tmp_path, check_only=True, extra_env={"KERNEL_OPT_BACKEND_ORDER": backend, "FRAMEWORK": "atom"}
+    )
+    combined = proc.stdout + proc.stderr
+    assert proc.returncode == 0, combined
+    assert combined.count("VALIDATE_RUNTIME claude") == 1, combined
+    assert "RUN:" not in combined
 
 
 def test_credentials_land_under_home(tmp_path: Path) -> None:

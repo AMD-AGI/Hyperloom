@@ -1417,63 +1417,73 @@ ensure_geak() {
   fi
 }
 
-# The forge backend drives the `claude` CLI inside its autonomous loop, so it
-# needs Node/npm, the claude npm CLI, and ~/.claude auth.
+# Install a CLI only for the provider Forge will actually execute.
 ensure_forge_claude_cli() {
-  log "ensuring claude CLI for the forge backend"
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its kernel_backend"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would install Node.js/npm + @anthropic-ai/claude-code and write ~/.claude/config.json"
-    return 0
-  fi
-  # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
-  if ! command -v npm >/dev/null 2>&1; then
-    if ! command -v apt-get >/dev/null 2>&1; then
-      warn "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
-      return 0
+  local _forge_cli_action _forge_check="$CHECK_ONLY"
+  while :; do
+    _forge_cli_action="$(python3 - "$_forge_check" "$DRY_RUN" <<'PY'
+import os
+import shutil
+import sys
+from pathlib import Path
+
+from hyperloom.common.env import env_str, forge_explicitly_enabled
+
+if not (forge_explicitly_enabled() or (env_str("FRAMEWORK").lower() == "atom" and not env_str("KERNEL_OPT_BACKEND_ORDER"))):
+    print("skip")
+    raise SystemExit(0)
+
+from kernelforge.config import Config
+from kernelforge.agent_backends.claude import ClaudeBackend, resolve_claude_cli
+
+runtime = Config.from_env().agent_runtime()
+if runtime.provider != "claude":
+    print("skip")
+elif sys.argv[2] == "1":
+    print("dry-run")
+else:
+    selected = resolve_claude_cli(runtime.executable)
+    missing = selected == "claude" and shutil.which(selected) is None and not Path(selected).exists()
+    install = sys.argv[1] == "0" and not runtime.executable and (missing or env_str("HYPERLOOM_CLAUDE_CODE_VERSION"))
+    if not install:
+        ClaudeBackend.validate_runtime(runtime)
+    print("install" if install else "ready")
+PY
+)" || die "Forge Claude CLI validation failed"
+    case "$_forge_cli_action" in
+      skip) log "Forge Claude CLI is not selected; skipping"; return 0 ;;
+      dry-run) log "would ensure the selected Forge Claude CLI and write ~/.claude/config.json"; return 0 ;;
+      ready) break ;;
+    esac
+    # Node.js 20 from NodeSource when npm is absent (claude CLI is an npm package).
+    if ! command -v npm >/dev/null 2>&1; then
+      command -v apt-get >/dev/null 2>&1 || die "npm missing and apt-get unavailable; install Node.js 20 manually for the forge claude CLI"
+      command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
+      log "installing Node.js 20 from NodeSource"
+      local ns_script="/tmp/nodesource_setup_20.x"
+      if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
+         && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
+         && bash "$ns_script" >/dev/null 2>&1; then
+        apt-get -y install nodejs >/dev/null || die "nodejs install failed; forge claude CLI unavailable"
+      else
+        die "NodeSource setup failed; forge claude CLI unavailable"
+      fi
     fi
-    command -v curl >/dev/null 2>&1 || { apt-get update >/dev/null; apt-get -y install ca-certificates curl gnupg >/dev/null; }
-    log "installing Node.js 20 from NodeSource"
-    local ns_script="/tmp/nodesource_setup_20.x"
-    if curl -fsSL "https://deb.nodesource.com/setup_20.x" -o "$ns_script" \
-       && echo "2c4c6683a17b6f4128898a7b521e3c8bb725a99ffaf1b5e32ac97c6fa7d381be  ${ns_script}" | sha256sum -c - >/dev/null 2>&1 \
-       && bash "$ns_script" >/dev/null 2>&1; then
-      apt-get -y install nodejs >/dev/null || warn "nodejs install failed; forge claude CLI unavailable"
-    else
-      warn "NodeSource setup failed; forge claude CLI unavailable"
-      return 0
-    fi
-  fi
-  # Claude Code CLI install. $HYPERLOOM_CLAUDE_CODE_VERSION pins a specific npm
-  # version and FORCE-reinstalls it (overriding one already baked into the base
-  # image) — needed because newer claude-code releases reject models the gateway
-  # still serves (e.g. retired Opus 4). When unset, keep the legacy behaviour:
-  # install the latest only when the CLI is absent.
-  if command -v npm >/dev/null 2>&1; then
-    # A global install needs a writable prefix. Off root /usr/local is not one,
-    # and `run` has no failure path, so this would abort the whole installer.
+    command -v npm >/dev/null 2>&1 || die "npm still missing; forge claude CLI unavailable"
+    # A version pin reinstalls the default CLI, never an explicit FORGE_AGENT_CLI.
     local _npm_prefix="/usr/local" _npm_home
     if [ ! -w /usr/local/lib ]; then
       _npm_home="$(_home_dir || true)"
-      if [ -z "$_npm_home" ]; then
-        warn "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
-        return 0
-      fi
-      # ~/.local/bin is where the CLI probe in write_env_file already looks.
+      [ -n "$_npm_home" ] || die "no writable npm prefix (/usr/local and HOME both unavailable); forge claude CLI unavailable"
       _npm_prefix="${_npm_home}/.local"
       mkdir -p "${_npm_prefix}/lib" "${_npm_prefix}/bin"
     fi
-    if [ -n "${HYPERLOOM_CLAUDE_CODE_VERSION:-}" ]; then
-      run npm config set prefix "${_npm_prefix}"
-      run npm install -g "@anthropic-ai/claude-code@${HYPERLOOM_CLAUDE_CODE_VERSION}"
-    elif ! command -v claude >/dev/null 2>&1; then
-      run npm config set prefix "${_npm_prefix}"
-      run npm install -g @anthropic-ai/claude-code
-    fi
-  fi
+    run npm config set prefix "${_npm_prefix}"
+    run npm install -g "@anthropic-ai/claude-code${HYPERLOOM_CLAUDE_CODE_VERSION:+@${HYPERLOOM_CLAUDE_CODE_VERSION}}"
+    export PATH="${_npm_prefix}/bin:$PATH"
+    _forge_check=1
+  done
+  [ "$CHECK_ONLY" -eq 0 ] || return 0
   # ~/.claude authenticates the Claude Code CLI for Anthropic-compatible flows.
   # Its readers resolve Path.home(), so ~ must come from _home_dir here too.
   local _claude_key="${_ANTHROPIC_KEY_VAL:-}"
