@@ -520,24 +520,6 @@ def _collect_runtimes_and_builds(out: dict[str, Any], state: dict[str, Any]) -> 
         }
 
 
-def project_replay_contract(
-    session_dir: Path,
-    state: dict[str, Any],
-) -> dict[str, Any]:
-    """The stack-level recipe the enablement event records at close.
-
-    Lane identity, eval-trigger, and runtime rows are written during the round.
-    Close only needs the contract no author-time site can state: ordered steps
-    and the sufficiency verdict over them.
-    """
-    if _enablement_lane_status(state) is None:
-        return {}
-    out: dict[str, Any] = {}
-    _collect_landed_stack(out, state, session_dir=session_dir)
-    _collect_recipe(out, state, session_dir=session_dir)
-    return out
-
-
 def collect_enablement(
     session_dir: Path,
     state: dict[str, Any],

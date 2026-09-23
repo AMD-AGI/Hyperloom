@@ -11,8 +11,8 @@ knows the sequence finished. Until it writes, the section stands at
 fragment (the close-out was never reached), ``running`` (the mid-sequence
 snapshot, or a process that died), and any other status (the verdict).
 
-Recording is best-effort: a failure here must never propagate into the
-wind-down it is describing.
+Recording is best-effort: spool failures are parked by :class:`Recorder`
+and must not propagate into the wind-down they describe.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from typing import Any, Mapping
 from hyperloom.common.timeutil import now_iso
 
 from .recorder import recorder_for
-from .recorder_warnings import RECORDING_ERRORS, ignore_recording_errors, note_failure
+from .recorder_warnings import RECORDING_ERRORS, note_failure
 from .trace import trace_skip
 
 SECTION = "close"
@@ -75,15 +75,14 @@ def _stamp(ts: str) -> str:
 
 
 def _write(session_dir: Path | str | None, payload: Mapping[str, Any]) -> None:
-    """Deep-merge ``payload`` into the ``close`` singleton. Never raises."""
+    """Deep-merge ``payload`` into the ``close`` singleton."""
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
     if not payload:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    with ignore_recording_errors(section=SECTION, detail="record close"):
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(SECTION, dict(payload))
 
 
 def record_close_opened(session_dir: Path | str | None, *, ts: str = "") -> None:
@@ -131,8 +130,7 @@ def record_close_step(
         row["task_id"] = str(task_id)
     if detail:
         row["detail"] = str(detail)
-    with ignore_recording_errors(section=STEP_SECTION, detail="record close step"):
-        recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
+    recorder_for(session_dir, producer=PRODUCER).record_item(STEP_SECTION, row)
 
 
 def record_close_artifacts(
@@ -202,7 +200,7 @@ def record_final_recipe(
     extra_server_args: str = "",
     extra_envs: Mapping[str, Any] | None = None,
 ) -> None:
-    """Record the configuration the session ended on. Never raises.
+    """Record the configuration the session ended on.
 
     No event holds the terminal recipe: a revert takes a layer off the stack
     without retracting the ledger row that adopted it. ``action_path`` is the
@@ -524,25 +522,23 @@ def record_write_back_settled(
 
 
 def _write_arc(session_dir: Path | str, payload: Mapping[str, Any]) -> None:
-    """Deep-merge ``payload`` into the write-back singleton. Never raises."""
-    with ignore_recording_errors(section=WRITE_BACK_SECTION, detail="record write-back"):
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(
-            WRITE_BACK_SECTION,
-            dict(payload),
-        )
+    """Deep-merge ``payload`` into the write-back singleton."""
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_singleton(
+        WRITE_BACK_SECTION,
+        dict(payload),
+    )
 
 
 def _write_attempt(session_dir: Path | str | None, *, attempt: int, row: Mapping[str, Any]) -> None:
-    """Upsert one attempt row, keyed by its number. Never raises."""
+    """Upsert one attempt row, keyed by its number."""
     if not session_dir:
         trace_skip(reason="no session_dir", section=WRITE_BACK_ATTEMPT_SECTION)
         return
-    with ignore_recording_errors(section=WRITE_BACK_ATTEMPT_SECTION, detail="record write-back attempt"):
-        recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
-            WRITE_BACK_ATTEMPT_SECTION,
-            dict(row),
-            key=str(int(attempt)),
-        )
+    recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
+        WRITE_BACK_ATTEMPT_SECTION,
+        dict(row),
+        key=str(int(attempt)),
+    )
 
 
 def _queue_depth(session_dir: Path | str) -> dict[str, int]:

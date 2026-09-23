@@ -69,10 +69,9 @@ def collect_langfuse(
     from hyperloom.orchestrator.trace import trace_env as tenv
 
     creds = tenv.langfuse_credentials()
-    enabled = bool(tenv.langfuse_live_enabled())
     return {
-        "enabled": enabled,
-        "disabled_reason": "receipt_unavailable" if enabled else "unknown",
+        "enabled": False,
+        "disabled_reason": "unknown",
         "config": {
             "enable_flag": tenv.langfuse_live_enabled(),
             "host": creds.get(tenv.ENV_LANGFUSE_HOST),

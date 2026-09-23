@@ -10,13 +10,11 @@ that measured it.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
-from ..recorder.session_metadata import _grading, _workload_signature
-from ..session_facts import architecture_block
+from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
 from ._common import (
     _dict_rows,
@@ -39,7 +37,7 @@ def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
         if host and trace_id:
             trace_url = f"{host}/trace/{trace_id}"
     counts = langfuse.get("counts")
-    block = {
+    return {
         "enabled": bool(langfuse.get("enabled")),
         "disabled_reason": langfuse.get("disabled_reason") or None,
         "trace_id": langfuse.get("trace_id") or None,
@@ -47,12 +45,6 @@ def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
         "trace_url": trace_url or None,
         "counts": {str(k): int(v or 0) for k, v in counts.items()} if isinstance(counts, dict) else {},
     }
-    source = langfuse.get("receipt_source")
-    if source:
-        block["receipt_source"] = source
-    if "counts_final" in langfuse:
-        block["counts_final"] = bool(langfuse.get("counts_final"))
-    return block
 
 
 def collect_v6_metadata(
@@ -112,7 +104,7 @@ def collect_v6_metadata(
             model_class=str(workload.get("model_class") or ""),
         ),
     }
-    signature = _workload_signature(task_config)
+    signature = workload_signature(task_config)
     if signature:
         task_config["workload_signature"] = signature
     projected = {
@@ -154,39 +146,11 @@ def collect_v6_metadata(
         "task_config": task_config,
         "langfuse": langfuse_block(langfuse),
     }
-    grading = _projected_grading(state)
+    grading = grading_block(state)
     if grading:
         projected["grading"] = grading
     metadata = _overlay_recorded(projected, recorded)
-    receipt_source = str(langfuse.get("receipt_source") or "")
-    if receipt_source == "receipt_file":
-        # Post-flush receipt is newer than any metadata fragment written before
-        # flush_session.
-        metadata["langfuse"] = langfuse_block(langfuse)
-    elif receipt_source in {"live_emitter", "config_only"} and str(session.get("stop_reason") or ""):
-        warnings.append(
-            f"langfuse: using {receipt_source} receipt; counts may predate flush"
-        )
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
-
-
-def _projected_grading(state: dict[str, Any]) -> dict[str, Any]:
-    """Copy the seeded grading axis off ``state.json`` when fragments are missing.
-
-    ``SharedState.grading`` is resolved once at seed. Re-deriving it here would
-    read the exporting process's environment, so this only projects a block
-    that was already recorded onto the state snapshot.
-    """
-    recorded = state.get("grading") if isinstance(state.get("grading"), dict) else {}
-    if not recorded:
-        return {}
-    return _grading(
-        SimpleNamespace(
-            grading=recorded,
-            benchmark_mode=state.get("benchmark_mode") or "synthetic",
-            framework=state.get("framework"),
-        )
-    )
 
 
 def _projected_total_elapsed_minutes(session: dict[str, Any], state: dict[str, Any]) -> float:

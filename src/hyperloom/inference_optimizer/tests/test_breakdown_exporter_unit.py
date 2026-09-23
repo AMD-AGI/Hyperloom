@@ -658,7 +658,7 @@ def test_the_recorder_fragment_overlays_the_collected_section():
         {"session_id": "", "stop_reason": "", "image": "registry.example/hyperloom:test"},
     )
     assert merged["session_id"] == "sess-1178"
-    assert merged["stop_reason"] == "target_reached"
+    assert merged["stop_reason"] == ""
     assert merged["image"] == "registry.example/hyperloom:test"
 
 
@@ -694,15 +694,21 @@ def test_the_live_phase_stays_in_the_section_even_when_blank():
     assert merged["phase"] == ""
 
 
-def test_the_merged_section_measures_its_own_elapsed_time():
+def test_derived_session_fields_stay_collector_owned():
     merged = ex._merge_session(
         {
-            "start_ts": "2026-08-08T00:00:00+00:00",
+            "stop_reason": "time_exhausted",
             "ended_at_utc": "2026-08-08T02:00:00+00:00",
-            "stop_reason": "target_reached",
+            "elapsed_minutes": 1.0,
         },
-        {"elapsed_minutes": 0.0},
+        {
+            "stop_reason": "accuracy_stop",
+            "ended_at_utc": "2026-08-08T02:05:00+00:00",
+            "elapsed_minutes": 120.0,
+        },
     )
+    assert merged["stop_reason"] == "accuracy_stop"
+    assert merged["ended_at_utc"] == "2026-08-08T02:05:00+00:00"
     assert merged["elapsed_minutes"] == 120.0
 
 

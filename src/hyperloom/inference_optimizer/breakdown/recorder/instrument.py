@@ -25,7 +25,6 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
 
 from . import tool_versions
-from .recorder_warnings import ignore_recording_errors
 from .session_metadata import snapshot_metadata
 from .trace import trace_skip
 
@@ -52,12 +51,8 @@ def snapshot_state_sections(
         return
     rec = _recorder(session_dir, producer)
 
-    for name, fn in (
-        ("session", _snapshot_session),
-        ("metadata", snapshot_metadata),
-    ):
-        with ignore_recording_errors(section=name, detail=f"snapshot {name}"):
-            fn(rec, state)
+    _snapshot_session(rec, state)
+    snapshot_metadata(rec, state)
 
 
 def _unset_or_int(st: Any, attr: str) -> int | None:
@@ -246,41 +241,40 @@ def record_backend_versions_and_timeline(
             section="versions",
         )
         return
-    with ignore_recording_errors(section="versions", detail="record_backend_versions_and_timeline"):
-        result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-        attempts = result.get("attempts")
-        attempts = attempts if isinstance(attempts, list) else []
-        recorded: set[str] = set()
-        for att in attempts:
-            if not isinstance(att, dict):
-                continue
-            backend = str(att.get("backend") or "").lower()
-            if not backend or backend in recorded:
-                continue
-            recorded.add(backend)
-            att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+    result_meta = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    attempts = result.get("attempts")
+    attempts = attempts if isinstance(attempts, list) else []
+    recorded: set[str] = set()
+    for att in attempts:
+        if not isinstance(att, dict):
+            continue
+        backend = str(att.get("backend") or "").lower()
+        if not backend or backend in recorded:
+            continue
+        recorded.add(backend)
+        att_meta = att.get("metadata") if isinstance(att.get("metadata"), dict) else {}
+        tool_versions.record_tool_version(
+            session_dir,
+            tool=backend,
+            root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
+            version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+            producer=producer,
+        )
+    # No attempts means the run failed before any backend launched. The
+    # backend the result names is still the one whose build was in play --
+    # unless it names none, which is the pre-dispatch gating case that
+    # never resolved a build to report.
+    if not recorded:
+        backend = str(result.get("backend") or "").lower()
+        if backend:
             tool_versions.record_tool_version(
                 session_dir,
                 tool=backend,
-                root=str(att_meta.get("root_dir") or result_meta.get("root_dir") or "") or None,
-                version=str(att_meta.get("version") or result_meta.get("version") or "") or None,
+                root=str(result_meta.get("root_dir") or "") or None,
+                version=str(result_meta.get("version") or "") or None,
                 producer=producer,
             )
-        # No attempts means the run failed before any backend launched. The
-        # backend the result names is still the one whose build was in play --
-        # unless it names none, which is the pre-dispatch gating case that
-        # never resolved a build to report.
-        if not recorded:
-            backend = str(result.get("backend") or "").lower()
-            if backend:
-                tool_versions.record_tool_version(
-                    session_dir,
-                    tool=backend,
-                    root=str(result_meta.get("root_dir") or "") or None,
-                    version=str(result_meta.get("version") or "") or None,
-                    producer=producer,
-                )
-        _mirror_backend_attempts_to_kernel_timeline(result)
+    _mirror_backend_attempts_to_kernel_timeline(result)
 
 
 __all__ = [

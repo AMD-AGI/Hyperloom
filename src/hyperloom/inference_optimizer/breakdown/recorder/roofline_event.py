@@ -960,20 +960,15 @@ def make_roofline_recorder(
     params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed."""
-    from .construct import try_make_recorder
-
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    return try_make_recorder(
-        lambda: RooflineEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            framework=framework,
-            params=params,
-            owns_event=owns_event,
-        ),
-        label="roofline",
+    return RooflineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        params=params,
+        owns_event=owns_event,
     )

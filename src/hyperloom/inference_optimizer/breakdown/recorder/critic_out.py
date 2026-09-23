@@ -205,7 +205,7 @@ def record_critic_iteration(
             row,
             key=row["iteration_id"],
         )
-    except RECORDING_ERRORS + (TypeError, KeyError) as exc:
+    except RECORDING_ERRORS as exc:
         note_failure(section=ITERATION_SECTION, error=exc, detail="record_critic_iteration failed")
 
 

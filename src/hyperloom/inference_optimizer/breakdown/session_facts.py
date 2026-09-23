@@ -88,3 +88,43 @@ def recovery_block(state: Any) -> dict[str, Any]:
         "resume_pending_revalidation": resume_pending,
         "last_tick_exception": last_exception,
     }
+
+
+def grading_block(state: Any) -> dict[str, Any]:
+    """The axis this session was configured to grade on, and the band it grades under.
+
+    Prefers ``state.grading`` recorded at seed. A mapping snapshot with no
+    recorded axis is absence, not the exporting process's environment. A live
+    object without a recorded axis still uses :func:`resolved_grading`.
+    """
+    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
+    from hyperloom.orchestrator.state.shared_state import resolved_grading
+
+    recorded = _field(state, "grading", None)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    objective = str(recorded.get("objective") or "").strip()
+    if objective:
+        noise_pct = recorded.get("noise_pct")
+        on_intvty = objective == GRADED_INTVTY
+        noise = float(noise_pct) if isinstance(noise_pct, (int, float)) else None
+    elif isinstance(state, Mapping):
+        return {}
+    else:
+        on_intvty, noise = resolved_grading(state)
+    return {
+        "benchmark_mode": str(_field(state, "benchmark_mode", "") or "").strip() or "synthetic",
+        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
+        "tput_guard": {"enabled": on_intvty, "noise_pct": noise},
+    }
+
+
+def workload_signature(config: Mapping[str, Any]) -> str:
+    """The workload contract digest for ``config``, empty when it is unknown."""
+    fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
+    if not any(str(value or "").strip() for value in fields.values()):
+        return ""
+    from hyperloom.orchestrator.actions.executors._canonical_fingerprint import (
+        workload_signature as digest,
+    )
+
+    return digest(**{name: value for name, value in fields.items() if value is not None})

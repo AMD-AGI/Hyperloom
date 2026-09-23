@@ -989,22 +989,15 @@ def make_conc_sweep_recorder(
     reason: str = "",
     params: Mapping[str, Any] | None = None,
 ) -> ConcSweepEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed. Sweep
-    behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", as does the absent sink a caller with no session
-    bound has."""
-    from .construct import try_make_recorder
-
+    """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    return try_make_recorder(
-        lambda: ConcSweepEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            params=params,
-        ),
-        label="conc_sweep",
-        begin=True,
+    recorder = ConcSweepEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        params=params,
     )
+    recorder.begin()
+    return recorder

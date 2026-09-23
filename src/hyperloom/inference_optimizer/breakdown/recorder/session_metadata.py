@@ -22,9 +22,8 @@ from typing import Any, Mapping
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.timeutil import iso_z
 
-from ..session_facts import architecture_block, recovery_block
+from ..session_facts import architecture_block, grading_block, recovery_block, workload_signature
 from .recorder import Recorder, recorder_for
-from .recorder_warnings import RECORDING_ERRORS, ignore_recording_errors
 from .trace import trace_skip
 
 SECTION = "metadata"
@@ -43,15 +42,17 @@ def _image_id(image: str) -> str:
 
 
 def _write(session_dir: Path | str | None, payload: Mapping[str, Any], *, producer: str) -> None:
-    """Deep-merge ``payload`` into the ``metadata`` singleton. Never raises."""
+    """Deep-merge ``payload`` into the ``metadata`` singleton.
+
+    Spool failures are parked by :class:`Recorder`. Projection bugs raise.
+    """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
     if not payload:
         trace_skip(reason="empty payload", section=SECTION)
         return
-    with ignore_recording_errors(section=SECTION, detail="record metadata"):
-        recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
+    recorder_for(session_dir, producer=producer).record_upsert_singleton(SECTION, dict(payload))
 
 
 def record_metadata_identity(
@@ -99,7 +100,7 @@ def record_metadata_identity(
         "max_model_len": workload.get("max_model_len"),
         "objective": dict(manifest.get("objective") or {}),
     }
-    signature = _workload_signature(task_config)
+    signature = workload_signature(task_config)
     if signature:
         task_config["workload_signature"] = signature
     _write(session_dir, {"session": session, "task_config": task_config}, producer=producer)
@@ -153,7 +154,7 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     payload: dict[str, Any] = {
         "session": session,
         "task_config": _launch_config(state),
-        "grading": _grading(state),
+        "grading": grading_block(state),
     }
     architecture = architecture_block(
         getattr(state, "model_info", None) or {},
@@ -162,59 +163,6 @@ def snapshot_metadata(rec: Recorder, state: Any) -> None:
     if architecture:
         payload["task_config"]["architecture"] = architecture
     rec.record_upsert_singleton(SECTION, payload)
-
-
-def _grading(state: Any) -> dict[str, Any]:
-    """Declare the axis this session was configured to grade on, and the band it grades under.
-
-    An AgentX replay is ranked on the slow-tail interactivity percentile with throughput held as a guard; a synthetic
-    run is ranked on output throughput alone. On the canonical corpus the two axes differ by roughly two orders of
-    magnitude, so a consumer that cannot tell them apart will happily sort one against the other -- and nothing else
-    in this document carries the distinction, because every throughput field in it is the output axis by
-    construction and ``benchmark_mode`` never reaches the breakdown at all.
-
-    This is the session-level setting and only that. What a promotion was actually decided on is a different fact,
-    recorded on the promotion itself and published as ``outcome.validation.graded_on``. On a session that promoted
-    anything the two agree, because a comparison that cannot supply the configured axis pair fails rather than
-    settling for another axis. Resolving one of the two from the other would still put a label on a figure it does
-    not describe: a session can be configured for an axis and promote nothing on it.
-
-    Read from the live state rather than resolved here, which is why this reaches the export with no environment read
-    anywhere on the path: ``SharedState.grading`` was resolved once at seed, where the run could still see its own
-    configuration.
-    """
-    from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT
-    from hyperloom.orchestrator.state.shared_state import resolved_grading
-
-    on_intvty, noise_pct = resolved_grading(state)
-    return {
-        "benchmark_mode": _text(getattr(state, "benchmark_mode", "")) or "synthetic",
-        "objective": GRADED_INTVTY if on_intvty else GRADED_OUTPUT,
-        # The throughput guard that rides along with the interactivity objective. ``noise_pct`` is null on a session
-        # seeded before the band was recorded: the band it applied is unknown, and today's default is not evidence
-        # of it.
-        "tput_guard": {"enabled": on_intvty, "noise_pct": noise_pct},
-    }
-
-
-def _workload_signature(config: Mapping[str, Any]) -> str:
-    """The workload contract digest for ``config``, empty when it is unknown.
-
-    A pure function of ``conc`` / ``isl`` / ``osl`` / ``precision`` / ``tp``,
-    which makes it session-level rather than per-variant. An all-unknown
-    contract still digests to a stable string, which the leaf-by-leaf singleton
-    merge would treat as a real value and never replace, so the 12-char digest
-    is only returned once at least one of the five is known.
-    """
-    fields = {name: config.get(name) for name in ("conc", "isl", "osl", "precision", "tp")}
-    if not any(str(value or "").strip() for value in fields.values()):
-        return ""
-    try:
-        from hyperloom.orchestrator.actions.executors._canonical_fingerprint import workload_signature
-
-        return workload_signature(**{name: value for name, value in fields.items() if value is not None})
-    except RECORDING_ERRORS:
-        return ""
 
 
 def _launch_config(state: Any) -> dict[str, Any]:
@@ -241,7 +189,7 @@ def _launch_config(state: Any) -> dict[str, Any]:
     framework_version = _text(getattr(state, "framework_version", ""))
     if framework_version:
         config["framework_version"] = framework_version
-    signature = _workload_signature(config)
+    signature = workload_signature(config)
     if signature:
         config["workload_signature"] = signature
     return config

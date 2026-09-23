@@ -989,18 +989,14 @@ def record_review_evidence(
 
 
 def make_framework_recorder(*, macro_cycle: Any = 0) -> FrameworkEventRecorder | None:
-    """Build a recorder already opened on the timeline, or ``None``. Phase
-    behavior must not depend on the recorder existing, so construction failures
-    degrade to "no event", and an unbound session declines rather than writing
-    the timeline into an arbitrary directory."""
-    from .construct import try_make_recorder
+    """Build a recorder already opened on the timeline, or ``None`` when unbound."""
+    from .construct import decline_unbound
 
-    return try_make_recorder(
-        lambda: FrameworkEventRecorder(
-            make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
-            macro_cycle=int(macro_cycle or 0),
-        ),
-        label="framework",
-        require_bound=True,
-        begin=True,
+    if decline_unbound("framework"):
+        return None
+    recorder = FrameworkEventRecorder(
+        make_sink(framework_event_id(macro_cycle), producer=PRODUCER),
+        macro_cycle=int(macro_cycle or 0),
     )
+    recorder.begin()
+    return recorder

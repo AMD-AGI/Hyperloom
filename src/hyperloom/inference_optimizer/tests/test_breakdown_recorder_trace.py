@@ -116,8 +116,8 @@ def test_a_nested_field_is_named_rather_than_dumped(tmp_path, traced):
     assert "deep" not in second
 
 
-def test_a_failed_write_is_traced_and_still_raises(tmp_path, traced, monkeypatch):
-    """A write that never landed is the most important one to hear about."""
+def test_a_failed_write_is_traced_and_parked(tmp_path, traced, monkeypatch):
+    """A write that never landed is parked, not thrown into the phase."""
 
     def explode(*_args, **_kwargs):
         raise OSError("no space left on device")
@@ -128,13 +128,11 @@ def test_a_failed_write_is_traced_and_still_raises(tmp_path, traced, monkeypatch
     )
     recorder = Recorder(tmp_path, producer="kernel_agent")
 
-    with pytest.raises(OSError):
-        recorder.record_item("kernel_lane_run", {"kernel_id": "k001"})
+    assert recorder.record_item("kernel_lane_run", {"kernel_id": "k001"}) is None
 
-    line = list(traced.records)[-1].getMessage()
-
-    assert "outcome=failed" in line
-    assert "error=OSError:no space left on device" in line
+    failed = [r.getMessage() for r in traced.records if "outcome=failed" in r.getMessage()]
+    assert failed
+    assert "error=OSError:no space left on device" in failed[-1]
 
 
 def test_a_trace_that_breaks_does_not_break_the_write(tmp_path, traced, monkeypatch):

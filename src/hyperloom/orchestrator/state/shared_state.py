@@ -1316,10 +1316,23 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self._session_dir = Path(session_dir)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
+            from hyperloom.inference_optimizer.breakdown.recorder.recorder_warnings import note_failure
 
             instrument.snapshot_state_sections(session_dir, self)
-        except Exception:  # noqa: BLE001 — author-time capture must never block save
-            log.debug("snapshot_state_sections failed", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — author-time capture must never block save
+            log.warning(
+                "snapshot_state_sections failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                extra={"error": exc},
+                exc_info=True,
+            )
+            note_failure(
+                section="snapshot",
+                error=exc,
+                producer="coordinator",
+                detail="snapshot_state_sections",
+            )
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:

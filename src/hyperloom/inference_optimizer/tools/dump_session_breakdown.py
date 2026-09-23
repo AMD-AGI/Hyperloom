@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def _summary_line(breakdown: dict) -> str:
     close = breakdown.get("close") or {}
     warnings = (breakdown.get("metadata") or {}).get("warnings") or []
     gain = final.get("gain_pct")
-    gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and gain == gain else "n/a"
+    gain_text = f"{gain:.2f}%" if isinstance(gain, (int, float)) and not math.isnan(gain) else "n/a"
     return (
         f"session_id={sess.get('session_id', '?')}  "
         f"claw_session_id={sess.get('claw_session_id') or '(none)'}  "

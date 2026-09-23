@@ -17,7 +17,6 @@ from typing import Any
 from hyperloom.common.jsonio import read_json
 
 from . import collectors
-from .collectors.sessions import _should_use_close_stop_reason
 from .recorder.event_finalize import finalize_events
 from .recorder.recorder_warnings import RECORDING_ERRORS
 from .schema import SCHEMA_VERSION_V6
@@ -39,23 +38,23 @@ def _recorded_session_value(value: Any) -> bool:
     return value is not None and value != ""
 
 
+_COLLECTOR_OWNED_SESSION = frozenset({"stop_reason", "ended_at_utc", "elapsed_minutes"})
+
+
 def _merge_session(fragment: Any, collector_value: Any) -> Any:
-    """Overlay the recorder's live ``session`` fields on the collected section."""
+    """Overlay the recorder's live ``session`` fields on the collected section.
+
+    Lifecycle fields the collector derives from CLOSE and timestamps stay
+    collector-owned: a later state snapshot must not cover them up.
+    """
     if not isinstance(fragment, dict) or not fragment:
         return collector_value
     merged = dict(collector_value) if isinstance(collector_value, dict) else {}
     for key, value in fragment.items():
+        if key in _COLLECTOR_OWNED_SESSION:
+            continue
         if _recorded_session_value(value) or key not in merged:
             merged[key] = value
-    # Collector may have refined ``time_exhausted`` into the CLOSE-phase
-    # reason; a later state snapshot must not cover that up.
-    collector_stop = str(collector_value.get("stop_reason") or "") if isinstance(collector_value, dict) else ""
-    recorded_stop = str(merged.get("stop_reason") or "")
-    if _should_use_close_stop_reason(recorded_stop, collector_stop):
-        merged["stop_reason"] = collector_stop
-    recorded_elapsed = fragment.get("elapsed_minutes") if isinstance(fragment, dict) else None
-    if recorded_elapsed is None or recorded_elapsed == "":
-        merged["elapsed_minutes"] = collectors.session_elapsed_minutes(merged)
     return merged
 
 

@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from .recorder import recorder_for
-from .recorder_warnings import ignore_recording_errors
 from .trace import trace_skip
 
 SECTION = "versions"
@@ -181,9 +180,8 @@ def record_tool_version(
     if not session_dir or not name:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
-    with ignore_recording_errors(section=SECTION, detail=f"record_tool_version {name}"):
-        meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
-        recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
+    meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
+    recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
 
 
 __all__ = ["record_tool_version"]

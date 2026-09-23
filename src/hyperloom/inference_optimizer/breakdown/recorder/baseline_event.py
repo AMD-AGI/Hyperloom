@@ -898,29 +898,24 @@ def make_baseline_recorder(
     total_failures_before: Any = None,
     owns_event: bool = True,
 ) -> BaselineEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when ``sink`` is absent.
 
-    Baseline behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating -- as does an absent
-    sink, which is what a caller with no session bound has.
+    An unbound caller has no sink. Construction itself is not swallowed:
+    spool failures are parked by :class:`Recorder` / :class:`EventSink`.
     """
-    from .construct import try_make_recorder
-
     if sink is None:
         return None
-    return try_make_recorder(
-        lambda: BaselineEventRecorder(
-            sink,
-            task_id=task_id,
-            task_kind=task_kind,
-            reason=reason,
-            framework=framework,
-            establishes_quality_ref=establishes_quality_ref,
-            params=params,
-            failure_streak_before=failure_streak_before,
-            total_failures_before=total_failures_before,
-            owns_event=owns_event,
-        ),
-        label="baseline",
-        begin=True,
+    recorder = BaselineEventRecorder(
+        sink,
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+        establishes_quality_ref=establishes_quality_ref,
+        params=params,
+        failure_streak_before=failure_streak_before,
+        total_failures_before=total_failures_before,
+        owns_event=owns_event,
     )
+    recorder.begin()
+    return recorder

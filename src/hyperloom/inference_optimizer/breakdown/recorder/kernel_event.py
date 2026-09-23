@@ -2338,27 +2338,19 @@ def make_kernel_recorder(
     resumed: bool = False,
     code_revision: str = "",
 ) -> KernelEventRecorder | None:
-    """Build a recorder, or ``None`` when one cannot be constructed.
+    """Build a recorder, or ``None`` when no session is bound.
 
-    KERNEL behavior must not depend on the recorder existing, so construction
-    failures degrade to "no event" rather than propagating. An unbound session
-    declines too: writing the timeline into whatever the working directory
-    happens to be is worse than not recording.
-
-    Returns:
-        KernelEventRecorder | None: The recorder, or ``None`` when it could not
-            be built.
+    An unbound session declines rather than writing the timeline into an
+    arbitrary directory. Construction itself is not swallowed.
     """
-    from .construct import try_make_recorder
+    from .construct import decline_unbound
 
-    return try_make_recorder(
-        lambda: KernelEventRecorder(
-            macro_cycle=macro_cycle,
-            route=route,
-            route_reason=route_reason,
-            resumed=resumed,
-            code_revision=code_revision,
-        ),
-        label="kernel",
-        require_bound=True,
+    if decline_unbound("kernel"):
+        return None
+    return KernelEventRecorder(
+        macro_cycle=macro_cycle,
+        route=route,
+        route_reason=route_reason,
+        resumed=resumed,
+        code_revision=code_revision,
     )

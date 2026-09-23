@@ -22,8 +22,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
 
 from ...session.session_binding import SessionNotBoundError
 from .trace import trace_skip
@@ -118,17 +116,4 @@ def note_failure(
         _parking.active = False
 
 
-@contextmanager
-def ignore_recording_errors(*, section: str, detail: str = "") -> Iterator[None]:
-    """Catch the spool failures a writer is allowed to drop, and park them.
-
-    Anything else is a recorder defect and is left to raise, matching
-    :data:`RECORDING_ERRORS`.
-    """
-    try:
-        yield
-    except RECORDING_ERRORS as error:
-        note_failure(section=section, error=error, detail=detail)
-
-
-__all__ = ["RECORDING_ERRORS", "ignore_recording_errors", "note_failure", "reset_for_tests"]
+__all__ = ["RECORDING_ERRORS", "note_failure", "reset_for_tests"]
