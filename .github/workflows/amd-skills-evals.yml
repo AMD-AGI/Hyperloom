@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: AMD Skills Checks
+
+# Runs the catalog's own harness against the skill amd/skills federates out of
+# this repo, so a break is caught in the pull request that causes it rather
+# than in the nightly import on the other side.
+#
+# ``skills`` names the exact folder rather than a glob, so moving or renaming
+# it fails here too -- that path is what amd/skills declares in
+# .github/federation.json, and the nightly importer raises on a path that is
+# no longer there.
+#
+# Deliberately has NO ``paths-ignore``, for the same reason as
+# ``packaging.yml``: the skill is markdown, which is exactly what ``lint.yml``
+# and ``tests-coverage.yml`` skip.
+on:
+  # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo
+  # PR does not double-trigger (one run per event class).
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      structural:
+        description: Structural Tests
+        type: boolean
+        default: true
+      routing:
+        description: Routing Tests
+        type: boolean
+        default: false
+      behavioral:
+        description: Behavioral Tests
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same ref.
+concurrency:
+  group: amd-skills-evals-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    name: AMD Skills Checks
+    # Pinned to the version amd/skills grades this skill with.
+    uses: amd/skillscope/.github/workflows/reusable.yml@v0.1.3
+    # No ``secrets`` mapping: routing and behavioral are the only legs that
+    # spend a model call, they are off below, and this repo holds no
+    # ANTHROPIC_API_KEY. Dispatching either one needs that secret added first,
+    # and the harness says so rather than running without it.
+    with:
+      skills: examples/skills/hyperloom-workload-optimizer
+      # Each step can be set to `required`, `optional`, or `off`.
+      structural: ${{ github.event_name != 'workflow_dispatch' && 'required' || inputs.structural && 'required' || 'off' }}
+      # Routing asks whether a skill wins the prompts it owns and stays quiet
+      # on its neighbours'. The neighbours live in the catalog, so the honest
+      # place to grade it is there; a run here would only ever see one skill.
+      routing: ${{ github.event_name == 'workflow_dispatch' && inputs.routing && 'required' || 'off' }}
+      behavioral: ${{ github.event_name == 'workflow_dispatch' && inputs.behavioral && 'required' || 'off' }}
