@@ -480,7 +480,6 @@ def _apply_line_replacement_atomic(
     legacy: str,
     patched_line: str,
     *,
-    tmp_prefix: str,
     missing_msg: str,
     success_msg: str,
 ) -> bool:
@@ -502,7 +501,6 @@ def _apply_line_replacement_atomic(
     if not atomic_write_text(
         src,
         patched,
-        tmp_prefix=tmp_prefix,
         log_prefix="_inferencex_patcher",
     ):
         return False
@@ -555,7 +553,6 @@ def ensure_benchmark_lib_patched(
             _apply_line_replacement_atomic,
             legacy=_LEGACY_LINE,
             patched_line=_PATCHED_LINE,
-            tmp_prefix=".benchmark_lib.sh.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy line not found in %s; "
                 "the file may already have been hand-patched to a "
@@ -599,7 +596,6 @@ def ensure_benchmark_serving_patched(
             _apply_line_replacement_atomic,
             legacy=_BENCH_SERVING_LEGACY,
             patched_line=_BENCH_SERVING_PATCHED,
-            tmp_prefix=".benchmark_serving.py.hyperloom_",
             missing_msg=(
                 "_inferencex_patcher: expected legacy `extra_body=` line not "
                 "found in %s; InferenceX layout may have changed and Hyperloom "
@@ -645,7 +641,6 @@ def ensure_benchmark_lib_eval_dest_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_DEST_LEGACY,
             patched_line=_EVAL_DEST_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_dest_",
             missing_msg=(
                 "_inferencex_patcher: expected eval-artifact ``mv ./`` line not "
                 "found in %s; upstream layout may have changed. Eval artifacts "
@@ -683,7 +678,6 @@ def ensure_benchmark_lib_eval_start_patched(
             _apply_line_replacement_atomic,
             legacy=_EVAL_START_LEGACY,
             patched_line=_EVAL_START_PATCHED,
-            tmp_prefix=".benchmark_lib.sh.eval_start_",
             missing_msg=(
                 "_inferencex_patcher: expected EVAL_RESULT_DIR export not found "
                 "in %s; upstream layout may have changed. The overtime kill will "
@@ -729,12 +723,7 @@ def _apply_eval_probe_atomic(src: Path) -> bool:
         log.warning("_inferencex_patcher: cannot read %s: %s", src, e)
         return False
     patched = original + _EVAL_PROBE_PY
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".lm_eval_sitecustomize.eval_probe_",
-        log_prefix="_inferencex_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_inferencex_patcher"):
         return False
     log.info("_inferencex_patcher: appended eval generation-pathology probe to %s", src)
     return True

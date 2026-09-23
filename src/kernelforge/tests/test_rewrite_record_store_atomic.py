@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from kernelforge import durable_io
 from kernelforge.rewrite_by_flydsl import record_store
 
 CANONICAL_ID = "kernel:flydsl:softmax:vllm:1.0:flydsl:mi355x"
@@ -71,7 +72,7 @@ def test_failed_session_write_preserves_the_complete_old_session(
     elif failure == "json":
         monkeypatch.setattr(
             record_store,
-            "_write_json_synced",
+            "_write_bytes_synced",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("json failed")),
         )
     else:
@@ -101,8 +102,8 @@ def test_failed_champion_write_preserves_the_old_pointer(
     store.promote(CANONICAL_ID, "old-session", 2.0)
     if failure == "json":
         monkeypatch.setattr(
-            record_store,
-            "_write_json_synced",
+            durable_io.os,
+            "fsync",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("champion json failed")),
         )
     else:

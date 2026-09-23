@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
+from hyperloom.common import io as _common_io
+
 from ._file_lock import best_effort_file_lock
 from ._patch_sentinel import file_contains_sentinel
 
@@ -230,11 +232,6 @@ def _resolve_component_path(
     return candidate if (candidate.is_file() if check == "file" else candidate.is_dir()) else None
 
 
-def _resolve_benchmarker_path(magpie_dir: Path | str | None) -> Path | None:
-    """Resolve ``<magpie_dir>/Magpie/modes/benchmark/benchmarker.py``."""
-    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "modes", "benchmark", "benchmarker.py")
-
-
 def _resolve_sglang_mi300x_script_path(
     magpie_dir: Path | str | None,
 ) -> Path | None:
@@ -249,29 +246,11 @@ def _resolve_sglang_mi355x_script_path(
     return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", "sglang_mi355x.sh")
 
 
-def _resolve_benchmark_scripts_dir(
-    magpie_dir: Path | str | None,
-) -> Path | None:
-    """Resolve Magpie's ``scripts/benchmark`` directory when present."""
-    return _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", check="dir")
-
-
-def _resolve_inferencex_benchmarks_dir(
-    inferencex_dir: Path | str | None,
-) -> Path | None:
-    """Resolve InferenceX's ``benchmarks`` directory when present."""
-    return _resolve_component_path(inferencex_dir, "INFERENCEX_PATH", "benchmarks", check="dir")
-
-
 def _resolve_inferencex_benchmark_lib(
     inferencex_dir: Path | str | None,
 ) -> Path | None:
     """Resolve InferenceX's ``benchmarks/benchmark_lib.sh`` when present."""
-    scripts_dir = _resolve_inferencex_benchmarks_dir(inferencex_dir)
-    if scripts_dir is None:
-        return None
-    candidate = scripts_dir / "benchmark_lib.sh"
-    return candidate if candidate.is_file() else None
+    return _resolve_component_path(inferencex_dir, "INFERENCEX_PATH", "benchmarks", "benchmark_lib.sh")
 
 
 def _strip_eval_concurrency_flag(text: str) -> str | None:
@@ -316,12 +295,7 @@ def _apply_eval_flag_patch_atomic(scripts_dir: Path) -> bool:
             )
             ok = False
             continue
-        if not atomic_write_text(
-            script,
-            patched,
-            tmp_prefix=f".{script.name}.hyperloom_",
-            log_prefix="_magpie_patcher",
-        ):
+        if not atomic_write_text(script, patched, log_prefix="_magpie_patcher"):
             ok = False
             continue
         log.info(
@@ -396,12 +370,7 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     if patched == original:
         return False
 
-    if not atomic_write_text(
-        benchmark_lib,
-        patched,
-        tmp_prefix=".benchmark_lib.sh.hyperloom_",
-        log_prefix="_magpie_patcher",
-    ):
+    if not atomic_write_text(benchmark_lib, patched, log_prefix="_magpie_patcher"):
         return False
 
     log.info(
@@ -430,8 +399,8 @@ def _script_dirs(magpie_dir: Path | str | None, inferencex_dir: Path | str | Non
     """
     scanned: set[Path] = set()
     for scripts_dir in (
-        _resolve_benchmark_scripts_dir(magpie_dir),
-        _resolve_inferencex_benchmarks_dir(inferencex_dir),
+        _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "scripts", "benchmark", check="dir"),
+        _resolve_component_path(inferencex_dir, "INFERENCEX_PATH", "benchmarks", check="dir"),
     ):
         if scripts_dir is None or scripts_dir in scanned:
             continue
@@ -636,45 +605,12 @@ def _upstream_is_already_atomic(text: str) -> bool:
     return _ATOMIC_MKSTEMP in region and _ATOMIC_REPLACE in region
 
 
-def atomic_write_text(
-    src: Path,
-    content: str,
-    *,
-    tmp_prefix: str,
-    log_prefix: str,
-) -> bool:
-    """Write ``content`` to ``src`` via temp-file + atomic rename."""
-    tmp_dir = src.parent
+def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
+    """Atomically replace ``src`` with ``content``, keeping its permission bits; log and return False on OSError."""
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=tmp_prefix,
-            dir=str(tmp_dir),
-        )
-    except OSError as e:
-        log.warning(
-            "%s: cannot create temp file in %s: %s",
-            log_prefix,
-            tmp_dir,
-            e,
-        )
-        return False
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.chmod(tmp_name, src.stat().st_mode)
-        os.replace(tmp_name, src)
+        _common_io.atomic_write_text(src, content, preserve_mode=True)
     except OSError as e:
         log.warning("%s: cannot write %s: %s", log_prefix, src, e)
-        try:
-            os.unlink(tmp_name)
-        except OSError as cleanup_err:
-            log.debug(
-                "%s: best-effort cleanup failed for temp file %s: %s",
-                log_prefix,
-                tmp_name,
-                cleanup_err,
-            )
         return False
     return True
 
@@ -715,12 +651,7 @@ def _apply_patch_atomic_reason(src: Path) -> str:
     if patched == original:
         return _ATOMIC_REASON_UNRECOGNIZED_SHAPE
 
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".benchmarker.py.hyperloom_",
-        log_prefix="_magpie_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
         return _ATOMIC_REASON_IO_ERROR
 
     log.info(
@@ -781,12 +712,7 @@ def _apply_remote_trust_patch_atomic(src: Path) -> bool:
     if patched == original:
         return True
 
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=".sglang_mi300x.sh.hyperloom_",
-        log_prefix="_magpie_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
         return False
 
     log.info(
@@ -852,12 +778,7 @@ def _apply_sglang_client_trust_patch_atomic(src: Path) -> bool:
     if patched == original:
         return True
 
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=f".{src.name}.hyperloom_",
-        log_prefix="_magpie_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
         return False
 
     log.info(
@@ -951,12 +872,7 @@ def _apply_client_tokenizer_mode_patch_atomic(src: Path) -> bool:
         _CLIENT_TOKENIZER_PATCHED_BLOCK,
         1,
     )
-    if not atomic_write_text(
-        src,
-        patched,
-        tmp_prefix=f".{src.name}.hyperloom_",
-        log_prefix="_magpie_patcher",
-    ):
+    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
         return False
     log.info("_magpie_patcher: applied client tokenizer-mode patch to %s", src)
     return True
@@ -967,7 +883,7 @@ def magpie_scripts_patch_status(
     inferencex_dir: Path | str | None = None,
 ) -> MagpiePatchStatus:
     """Return independent status for atomic-copy and remote-trust patches."""
-    src = _resolve_benchmarker_path(magpie_dir)
+    src = _resolve_component_path(magpie_dir, "MAGPIE_PATH", "Magpie", "modes", "benchmark", "benchmarker.py")
 
     with _file_lock(_LOCK_PATH):
         if src is None:

@@ -8,12 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
-import tempfile
 from collections.abc import Callable
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json
 
 from . import collectors
@@ -285,21 +284,7 @@ def write_breakdown_json(
 
     breakdown = build(sd)
     payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
-
-    fd, tmp = tempfile.mkstemp(
-        prefix=f".{BREAKDOWN_FILENAME}.",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        tmp_path.write_text(payload, encoding="utf-8")
-        os.replace(tmp_path, target)
-    except Exception:
-        with suppress(OSError):
-            tmp_path.unlink()
-        raise
+    atomic_write_text(target, payload)
     log.info("session_breakdown: wrote %s (%d bytes)", target, len(payload))
     return target
 
@@ -320,21 +305,7 @@ def _patch_breakdown(
             return False
         if not revise(sd, breakdown):
             return False
-        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{BREAKDOWN_FILENAME}.",
-            suffix=".tmp",
-            dir=str(target.parent),
-        )
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            tmp_path.write_text(payload, encoding="utf-8")
-            os.replace(tmp_path, target)
-        except Exception:
-            with suppress(OSError):
-                tmp_path.unlink()
-            raise
+        atomic_write_text(target, json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default))
         log.info("session_breakdown: refreshed %s section in %s", section, target)
         return True
     except Exception:  # noqa: BLE001
@@ -523,20 +494,7 @@ def write_minimal_final_report(
         "",
     ]
 
-    fd, tmp = tempfile.mkstemp(
-        prefix=".final.md.",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        tmp_path.write_text("\n".join(lines), encoding="utf-8")
-        os.replace(tmp_path, target)
-    except Exception:
-        with suppress(OSError):
-            tmp_path.unlink()
-        raise
+    atomic_write_text(target, "\n".join(lines))
     log.info("emergency final report: wrote %s", target)
     return target
 
@@ -625,23 +583,7 @@ def write_minimal_final_json(
     if extra:
         summary.update(extra)
 
-    fd, tmp = tempfile.mkstemp(
-        prefix=".final.json.",
-        suffix=".tmp",
-        dir=str(target.parent),
-    )
-    os.close(fd)
-    tmp_path = Path(tmp)
-    try:
-        tmp_path.write_text(
-            json.dumps(summary, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        os.replace(tmp_path, target)
-    except Exception:
-        with suppress(OSError):
-            tmp_path.unlink()
-        raise
+    atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
     return target
 

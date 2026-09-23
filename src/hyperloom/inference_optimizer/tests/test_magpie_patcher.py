@@ -676,26 +676,6 @@ def magpie_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# _resolve_benchmarker_path
-class TestResolveBenchmarkerPath:
-    def test_explicit_dir_returns_existing_file(self, magpie_dir):
-        out = mp._resolve_benchmarker_path(magpie_dir)
-        assert out is not None
-        assert out.name == "benchmarker.py"
-
-    def test_returns_none_when_dir_missing(self, tmp_path):
-        assert mp._resolve_benchmarker_path(tmp_path) is None
-
-    def test_returns_none_when_no_input_or_env(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
-        assert mp._resolve_benchmarker_path(None) is None
-
-    def test_env_fallback(self, monkeypatch, magpie_dir):
-        monkeypatch.setenv("MAGPIE_PATH", str(magpie_dir))
-        out = mp._resolve_benchmarker_path(None)
-        assert out is not None
-
-
 # _is_patched
 class TestIsPatched:
     def test_false_when_legacy(self, magpie_dir):

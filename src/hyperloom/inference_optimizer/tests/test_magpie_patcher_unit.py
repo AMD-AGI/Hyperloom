@@ -54,20 +54,35 @@ def _make_magpie(root: Path, *, benchmarker: str | None = _LEGACY_SRC, sglang: s
 
 
 # ---- path resolution ------------------------------------------------------
-def test_resolve_benchmarker_none(monkeypatch):
+_BENCHMARKER_REL = ("Magpie", "modes", "benchmark", "benchmarker.py")
+
+
+def test_resolve_component_path_none(monkeypatch):
     monkeypatch.delenv("MAGPIE_PATH", raising=False)
-    assert mp._resolve_benchmarker_path(None) is None
+    assert mp._resolve_component_path(None, "MAGPIE_PATH", *_BENCHMARKER_REL) is None
 
 
-def test_resolve_benchmarker_env(monkeypatch, tmp_path):
+def test_resolve_component_path_explicit_dir_and_env(monkeypatch, tmp_path):
     _make_magpie(tmp_path)
+    assert mp._resolve_component_path(tmp_path, "MAGPIE_PATH", *_BENCHMARKER_REL) == tmp_path.joinpath(
+        *_BENCHMARKER_REL
+    )
     monkeypatch.setenv("MAGPIE_PATH", str(tmp_path))
-    p = mp._resolve_benchmarker_path(None)
+    p = mp._resolve_component_path(None, "MAGPIE_PATH", *_BENCHMARKER_REL)
     assert p is not None and p.name == "benchmarker.py"
 
 
-def test_resolve_benchmarker_missing_file(tmp_path):
-    assert mp._resolve_benchmarker_path(tmp_path) is None
+def test_resolve_component_path_missing_file(tmp_path):
+    assert mp._resolve_component_path(tmp_path, "MAGPIE_PATH", *_BENCHMARKER_REL) is None
+
+
+def test_resolve_component_path_dir_check(monkeypatch, tmp_path):
+    _make_inferencex(tmp_path)
+    assert mp._resolve_component_path(tmp_path, "INFERENCEX_PATH", "benchmarks", check="dir") == tmp_path / "benchmarks"
+    assert mp._resolve_component_path(tmp_path, "INFERENCEX_PATH", "benchmarks") is None
+    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
+    assert mp._resolve_component_path(None, "INFERENCEX_PATH", "benchmarks", check="dir") == tmp_path / "benchmarks"
+    assert mp._resolve_component_path(tmp_path / "nope", "INFERENCEX_PATH", "benchmarks", check="dir") is None
 
 
 def test_resolve_sglang(monkeypatch, tmp_path):
@@ -189,23 +204,17 @@ def test_apply_reason_applied(tmp_path):
     assert "Hyperloom #C1 patch" in f.read_text(encoding="utf-8")
 
 
+def _fail_replace(monkeypatch):
+    monkeypatch.setattr(mp._common_io.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+
+
 def test_apply_reason_write_error(tmp_path, monkeypatch):
     f = tmp_path / "b.py"
     f.write_text(_LEGACY_SRC, encoding="utf-8")
-
-    def _boom(*a, **k):
-        raise OSError("no space")
-
-    monkeypatch.setattr(mp.tempfile, "mkstemp", _boom)
+    _fail_replace(monkeypatch)
     assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_IO_ERROR
-
-
-def test_apply_reason_fdopen_write_error(tmp_path, monkeypatch):
-    f = tmp_path / "b.py"
-    f.write_text(_LEGACY_SRC, encoding="utf-8")
-    # mkstemp succeeds but os.replace fails -> fdopen-path OSError + cleanup.
-    monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
-    assert mp._apply_patch_atomic_reason(f) == mp._ATOMIC_REASON_IO_ERROR
+    assert f.read_text(encoding="utf-8") == _LEGACY_SRC
+    assert [p.name for p in tmp_path.iterdir()] == ["b.py"]
 
 
 # ---- remote trust patch ---------------------------------------------------
@@ -252,14 +261,7 @@ def test_apply_remote_trust_read_error(tmp_path):
 def test_apply_remote_trust_write_error(tmp_path, monkeypatch):
     f = tmp_path / "s.sh"
     f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.tempfile, "mkstemp", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
-    assert mp._apply_remote_trust_patch_atomic(f) is False
-
-
-def test_apply_remote_trust_fdopen_write_error(tmp_path, monkeypatch):
-    f = tmp_path / "s.sh"
-    f.write_text(_SGLANG_LEGACY, encoding="utf-8")
-    monkeypatch.setattr(mp.os, "replace", lambda *a, **k: (_ for _ in ()).throw(OSError("ro")))
+    _fail_replace(monkeypatch)
     assert mp._apply_remote_trust_patch_atomic(f) is False
 
 
@@ -404,16 +406,6 @@ def _make_inferencex(
     if benchmark_lib is not None:
         (bench / "benchmark_lib.sh").write_text(benchmark_lib, encoding="utf-8")
     return root
-
-
-def test_resolve_inferencex_benchmarks_dir(monkeypatch, tmp_path):
-    _make_inferencex(tmp_path)
-    assert mp._resolve_inferencex_benchmarks_dir(tmp_path) == tmp_path / "benchmarks"
-    monkeypatch.setenv("INFERENCEX_PATH", str(tmp_path))
-    assert mp._resolve_inferencex_benchmarks_dir(None) == tmp_path / "benchmarks"
-    monkeypatch.delenv("INFERENCEX_PATH", raising=False)
-    assert mp._resolve_inferencex_benchmarks_dir(None) is None
-    assert mp._resolve_inferencex_benchmarks_dir(tmp_path / "nope") is None
 
 
 def test_resolve_inferencex_benchmark_lib(tmp_path):
