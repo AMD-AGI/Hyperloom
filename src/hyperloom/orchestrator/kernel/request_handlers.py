@@ -51,29 +51,7 @@ from ..trace.task_progress import heartbeat_while_output_flows
 
 from ._recorder_trace import trace_recording_skipped
 
-# Re-exported: callers patch these at ``request_handlers.<name>``.
-from ._kernel_decisions import (
-    _honest_flag as _honest_flag,
-    _entry_by_kernel_id as _entry_by_kernel_id,
-    index_attempts_by_kernel_id as index_attempts_by_kernel_id,
-    _resolve_kernel_patch_identity as _resolve_kernel_patch_identity,
-    kernel_patch_key as kernel_patch_key,
-    find_rejected_kernel_patch as find_rejected_kernel_patch,
-    record_kernel_integrate_result as record_kernel_integrate_result,
-    record_gemm_tuning as record_gemm_tuning,
-    _kernel_ids_in_optimization_stack as _kernel_ids_in_optimization_stack,
-    _source_files_in_optimization_stack as _source_files_in_optimization_stack,
-    _kernel_ids_with_integrate_attempts as _kernel_ids_with_integrate_attempts,
-    integrate_attempt_count_for_kernel as integrate_attempt_count_for_kernel,
-    _kernel_trace_impact_pct as _kernel_trace_impact_pct,
-    next_pending_keep_kernel_id as next_pending_keep_kernel_id,
-    pending_keep_kernel_ids as pending_keep_kernel_ids,
-    has_keep_pending_integrate as has_keep_pending_integrate,
-    kernel_opt_attempts_count as kernel_opt_attempts_count,
-    untried_hot_reusable_kernels as untried_hot_reusable_kernels,
-    enqueue_nominated_patch as enqueue_nominated_patch,
-)
-from .nomination_result import parse_outcome as parse_outcome
+from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
 
 
 log = logging.getLogger(__name__)
