@@ -1490,7 +1490,7 @@ def test_gemm_tuning_records_one_row_per_tuner_not_a_merged_row(tmp_path):
             "status": "complete",
             "backend": "forge",
             "decision": "KEEP",
-            "gain_pct": 6.9575,
+            "e2e_gain_pct": 6.9575,
             "graded_objective": "output_throughput",
             "best_speedup": 1.5797,
             "tuned_file": "/w/tuners/fmoe_ck/merged_candidate_fmoe.csv",

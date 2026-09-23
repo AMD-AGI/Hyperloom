@@ -204,6 +204,9 @@ def test_forge_loop_integration_classifies_as_integrated_without_a_ledger_row(tm
     # print a fabricated "measured 0.000x" for a micro benchmark that never ran.
     assert "0.000x" not in row["summary"]
     assert "micro_speedup=" not in row["summary"]
+    # The raw field must agree with the summary text: absent, not 0.0, so nothing reading the JSON
+    # directly (bypassing the rendered string) sees a fabricated zero either.
+    assert row["last_micro_speedup"] is None
 
 
 def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> None:
@@ -230,6 +233,7 @@ def test_gemm_tuning_keep_lands_as_its_own_standalone_entry(tmp_path: Path) -> N
     assert row["kernel_id"] == "forge_fmoe_ck"
     assert row["category"] == CATEGORY_INTEGRATED
     assert "micro_speedup=" not in row["summary"]
+    assert row["last_micro_speedup"] is None
 
 
 def test_keep_pending_classifies_correctly(tmp_path: Path) -> None:

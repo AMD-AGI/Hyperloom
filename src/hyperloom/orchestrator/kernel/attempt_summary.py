@@ -836,7 +836,10 @@ def _render_attempted_row(
         "failure_count": int(attempt.get("failure_count") or 0),
         "last_decision": str(attempt.get("last_decision") or ""),
         "last_status": str(attempt.get("last_status") or ""),
-        "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")) or 0.0,
+        # Absent stays absent: a row for a kernel never benchmarked at the micro level (see
+        # _synthetic_forge_loop_attempt / _synthetic_gemm_tuning_attempt) must not publish 0.0
+        # beside a category of INTEGRATED, which reads as "measured and zero".
+        "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")),
         "last_ts": str(attempt.get("last_ts") or ""),
         "verification": verification,
         "backend_ladder": ladder,

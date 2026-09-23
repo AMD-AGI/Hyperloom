@@ -569,7 +569,7 @@ class KernelPhase(PhaseHandler):
             backend = str(result.get("backend") or result.get("engine") or "").lower()
             if backend:
                 tool_versions.record_tool_version(self.session_dir, tool=backend)
-        except Exception:  # noqa: BLE001 — observability cannot change kernel behavior
+        except Exception:
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
 
     def _record_one_gemm_tuner_run(

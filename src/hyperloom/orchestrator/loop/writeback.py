@@ -1054,7 +1054,7 @@ class WritebackCollaborator:
                     tick=int(self.shared_state.tick or 0),
                 )
             )
-        except Exception:  # noqa: BLE001 — journaling is best-effort
+        except Exception:
             log.exception("integrate journal append failed")
 
     def _is_promotable_result(self, task_kind: str, result: dict[str, Any]) -> bool:
