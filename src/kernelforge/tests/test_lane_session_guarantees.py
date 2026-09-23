@@ -548,7 +548,10 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
 def test_the_builtin_codex_provider_runs_concurrent_lanes(capsys):
     """Codex applies the session environment; hooks stay off the lane path."""
     assert cli._require_lane_provider_capabilities("codex", 2) is None
-    assert capsys.readouterr().out == ""
+    warning = capsys.readouterr().out
+    assert "codex" in warning
+    assert "stop_hooks" in warning
+    assert "WARNING" in warning
 
 
 @pytest.mark.parametrize(

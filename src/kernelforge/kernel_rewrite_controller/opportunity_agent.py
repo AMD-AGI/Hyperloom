@@ -492,9 +492,7 @@ class OpportunityAnalysisAgent:
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
         if not (backend.capabilities.stop_hooks or backend.capabilities.resumable):
-            raise ValueError(
-                "opportunity analysis requires a provider with tool hooks or a resumable session"
-            )
+            raise ValueError("opportunity analysis requires a provider with tool hooks or a resumable session")
         self.backend = backend
         self.timeout_sec = int(timeout_sec)
         self.max_turns = int(max_turns)
