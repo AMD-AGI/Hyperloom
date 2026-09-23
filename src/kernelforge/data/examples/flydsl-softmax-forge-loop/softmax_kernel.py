@@ -3,6 +3,8 @@
 
 """Softmax kernel builder using the @flyc.kernel API — the file forge-loop edits."""
 
+import math
+
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.compiler.kernel_function import CompilationContext
@@ -15,15 +17,12 @@ from flydsl.expr.numeric import Numeric, Float32
 
 from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.runtime.device import is_rdna_arch
 
 from flydsl._mlir import ir
 
 
 KERNEL_NAME = "softmax_kernel"
-
-import math
-
-from flydsl.runtime.device import is_rdna_arch
 
 
 def dtype_to_elem_type(dtype_str: str):
@@ -145,9 +144,7 @@ def build_softmax_module(M: int, N: int, dtype_str: str = "f32"):
             c_div = fx.logical_divide(row_c, fx.make_layout(VEC_WIDTH, 1))
 
             copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), elem_bits)
-            vec_reg_ty = fx.MemRefType.get(
-                elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register
-            )
+            vec_reg_ty = fx.MemRefType.get(elem_type, fx.LayoutType.get(VEC_WIDTH, 1), fx.AddressSpace.Register)
             vec_reg_lay = fx.make_layout(VEC_WIDTH, 1)
 
             def _load_vec(div_tensor, idx):

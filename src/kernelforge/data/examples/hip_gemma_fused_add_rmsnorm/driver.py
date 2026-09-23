@@ -24,9 +24,7 @@ def _case_id(rows: int, hidden: int) -> str:
     return f"M{rows}_N{hidden}"
 
 
-def _make_inputs(
-    rows: int, hidden: int, mode: str, device: str
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _make_inputs(rows: int, hidden: int, mode: str, device: str) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build (x, residual, weight) for a given validation mode."""
     torch.manual_seed(_SEED)
     x = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
@@ -39,9 +37,7 @@ def _make_inputs(
     return x, residual, weight
 
 
-def _reference(
-    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _reference(x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Torch oracle: residual add, then fp32-reduced Gemma RMSNorm."""
     summed = x + residual
     sf = summed.float()

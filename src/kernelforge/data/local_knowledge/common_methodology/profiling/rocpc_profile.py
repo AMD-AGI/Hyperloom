@@ -29,7 +29,8 @@ def _python_can_run_rocpc(python: str, libexec: str) -> bool:
     try:
         p = subprocess.run(
             [python, os.path.join(libexec, "rocprof-compute"), "--help"],
-            capture_output=True, timeout=60,
+            capture_output=True,
+            timeout=60,
         )
         return p.returncode == 0
     except Exception:  # noqa: BLE001
@@ -68,7 +69,7 @@ def _descendant_pids(root_pid: int) -> list[int]:
         try:
             with open(f"/proc/{pid}/stat") as f:
                 stat = f.read()
-            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+            ppid = int(stat[stat.rindex(")") + 2 :].split()[1])
         except (OSError, ValueError, IndexError):
             continue
         children.setdefault(ppid, []).append(pid)
@@ -107,8 +108,12 @@ def _run(rocpc_python: str, libexec: str, native: list[str], cwd=None, timeout=1
     global _CURRENT_PROC
     cmd = [rocpc_python, os.path.join(libexec, "rocprof-compute"), *native]
     proc = subprocess.Popen(
-        cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
     _CURRENT_PROC = proc
     try:
@@ -146,10 +151,14 @@ def main() -> int:
         return 3
     rocpc_python = _detect_rocpc_python(libexec)
     if not rocpc_python:
-        print("rocprof-compute is installed, but its Python deps are not available in any detected "
-              "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling.")
-        print("To enable it, install the forge-profiling extra (pip install -e \".[forge-profiling]\") — or "
-              f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them.")
+        print(
+            "rocprof-compute is installed, but its Python deps are not available in any detected "
+            "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling."
+        )
+        print(
+            'To enable it, install the forge-profiling extra (pip install -e ".[forge-profiling]") — or '
+            f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them."
+        )
         return 3
 
     out = a.out or os.path.join(os.getcwd(), "forge_profile")
@@ -164,8 +173,10 @@ def main() -> int:
     if rc != 0:
         # Deps were already verified by _detect_rocpc_python, so a failure here is almost always the driver: it
         # crashed or launched no GPU kernel.
-        print("PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
-              "launched no GPU kernel — see its traceback in the tail below.")
+        print(
+            "PROFILE FAILED (rocprof-compute exited non-zero). The driver most likely crashed or "
+            "launched no GPU kernel — see its traceback in the tail below."
+        )
         print("--- rocprof-compute output tail ---")
         print(log[-1800:])
         return 1
@@ -190,12 +201,16 @@ def main() -> int:
 
     print(report)
     print(f"\nRaw counters + workload kept under: {workload}")
-    print("How to interpret: read measure_triage.md and measure_roofline.md "
-          "(same folder) — the '% of Peak' column is distance-to-ceiling; with --roofline, "
-          "the Roofline section gives arithmetic intensity + distance-to-roof.")
+    print(
+        "How to interpret: read measure_triage.md and measure_roofline.md "
+        "(same folder) — the '% of Peak' column is distance-to-ceiling; with --roofline, "
+        "the Roofline section gives arithmetic intensity + distance-to-roof."
+    )
     if not a.kernel:
-        print("Tip: to isolate YOUR kernel, find its index in the 'Top Stats' table above and "
-              "re-run with --kernel <index>.")
+        print(
+            "Tip: to isolate YOUR kernel, find its index in the 'Top Stats' table above and "
+            "re-run with --kernel <index>."
+        )
     return 0
 
 

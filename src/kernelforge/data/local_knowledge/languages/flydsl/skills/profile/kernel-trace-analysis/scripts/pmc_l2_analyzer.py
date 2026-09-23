@@ -27,10 +27,12 @@ def main():
     ap = argparse.ArgumentParser(description="PMC L2/HBM efficiency analyzer")
     ap.add_argument("csv", nargs="+", help="pmc *_counter_collection.csv file(s)")
     ap.add_argument("--kernel", default="", help="substring filter on Kernel_Name")
-    ap.add_argument("--ideal-gb", type=float, default=0.0,
-                    help="ideal HBM read bytes per dispatch in GB (for over-fetch ratio)")
-    ap.add_argument("--ea-channels", type=int, default=2,
-                    help="EA interfaces to scale single-channel EA0 counters by (default 2)")
+    ap.add_argument(
+        "--ideal-gb", type=float, default=0.0, help="ideal HBM read bytes per dispatch in GB (for over-fetch ratio)"
+    )
+    ap.add_argument(
+        "--ea-channels", type=int, default=2, help="EA interfaces to scale single-channel EA0 counters by (default 2)"
+    )
     args = ap.parse_args()
 
     agg, ndisp = load_counters(args.csv, args.kernel)
@@ -51,7 +53,7 @@ def main():
     if hit + miss > 0:
         print(f"  TCC_HIT_sum  = {hit:,.0f}")
         print(f"  TCC_MISS_sum = {miss:,.0f}")
-        print(f"  L2 hit rate  = {100*hit/(hit+miss):.1f}%   (streaming decode: ~1-3% expected)")
+        print(f"  L2 hit rate  = {100 * hit / (hit + miss):.1f}%   (streaming decode: ~1-3% expected)")
     if tcp:
         print(f"  TCP->TCC read req (L1->L2) = {tcp:,.0f}")
 
@@ -61,13 +63,13 @@ def main():
         print("\n  HBM read efficiency")
         print("  -------------------")
         print(f"  TCC_EA0_RDREQ (L2->HBM) = {ea:,.0f}")
-        print(f"  32B partial fraction    = {100*ea32/ea:.1f}%   (~0% = full 64B lines, no waste)")
+        print(f"  32B partial fraction    = {100 * ea32 / ea:.1f}%   (~0% = full 64B lines, no waste)")
         print(f"  DRAM reads              = {dram:,.0f}")
-        print(f"  est HBM read bytes      = {bytes_ea/1e9:.1f} GB  (EA0 x{args.ea_channels} channels)")
+        print(f"  est HBM read bytes      = {bytes_ea / 1e9:.1f} GB  (EA0 x{args.ea_channels} channels)")
         if args.ideal_gb > 0 and ndisp:
             ideal = args.ideal_gb * ndisp * 1e9
-            print(f"  ideal bytes             = {ideal/1e9:.1f} GB  ({args.ideal_gb} GB x {ndisp} disp)")
-            print(f"  over-fetch ratio        = {bytes_ea/ideal:.2f}x   (~1.0 = no redundant fetch)")
+            print(f"  ideal bytes             = {ideal / 1e9:.1f} GB  ({args.ideal_gb} GB x {ndisp} disp)")
+            print(f"  over-fetch ratio        = {bytes_ea / ideal:.2f}x   (~1.0 = no redundant fetch)")
 
     print("\n  Verdict")
     print("  -------")

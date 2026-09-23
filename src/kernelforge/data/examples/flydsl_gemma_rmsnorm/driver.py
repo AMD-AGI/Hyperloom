@@ -24,9 +24,7 @@ def _case_id(rows: int, hidden: int) -> str:
     return f"M{rows}_N{hidden}"
 
 
-def _make_inputs(
-    rows: int, hidden: int, mode: str, device: str
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _make_inputs(rows: int, hidden: int, mode: str, device: str) -> tuple[torch.Tensor, torch.Tensor]:
     """Build (x, weight) for a given validation mode."""
     torch.manual_seed(_SEED)
     x = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
