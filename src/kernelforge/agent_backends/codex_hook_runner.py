@@ -7,11 +7,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    _MAX_GREP_MATCHES,
+    _MAX_READ_LINES,
+    _bounded_result_cap,
+)
 from kernelforge.kernel_rewrite_controller.task_publisher import pending_rejections
 
 _SHELL_TOOL_NAMES = frozenset(
@@ -22,6 +28,23 @@ _SHELL_TOOL_NAMES = frozenset(
         "terminal",
     },
 )
+_DISALLOWED_TOOL_RE = re.compile(r"(^task|shell|bash|agent)", re.IGNORECASE)
+_WRITE_TOOL_NAMES = frozenset(
+    {
+        "edit",
+        "write",
+        "multiedit",
+        "multi_edit",
+        "notebookedit",
+        "notebook_edit",
+        "apply_patch",
+        "applypatch",
+    },
+)
+_INVESTIGATION_CAPS: dict[str, tuple[str, int]] = {
+    "read": ("limit", _MAX_READ_LINES),
+    "grep": ("head_limit", _MAX_GREP_MATCHES),
+}
 
 
 def _load_state(path: Path) -> dict[str, Any]:
@@ -56,10 +79,39 @@ def _resolve_under_staging(path: Path, staging: Path) -> bool:
         return False
 
 
+def _is_disallowed_tool(tool_name: str) -> bool:
+    lowered = tool_name.strip().lower()
+    if lowered in _SHELL_TOOL_NAMES:
+        return True
+    return _DISALLOWED_TOOL_RE.search(tool_name.strip()) is not None
+
+
+def _is_write_tool(tool_name: str) -> bool:
+    normalized = tool_name.strip().lower().replace("-", "_")
+    return normalized in _WRITE_TOOL_NAMES
+
+
+def _cap_investigation(tool_name: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+    field, ceiling = _INVESTIGATION_CAPS.get(tool_name.strip().lower(), ("", 0))
+    if not field:
+        return {}
+    capped = _bounded_result_cap(tool_input.get(field), ceiling)
+    if capped == tool_input.get(field):
+        return {}
+    updated = dict(tool_input)
+    updated[field] = capped
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": updated,
+        }
+    }
+
+
 def handle_pre_tool_use(payload: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     tool_name = str(payload.get("tool_name") or "").strip()
-    lowered = tool_name.lower()
-    if state.get("deny_shell_tools") and lowered in _SHELL_TOOL_NAMES:
+    if state.get("deny_shell_tools") and _is_disallowed_tool(tool_name):
         return {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -70,6 +122,13 @@ def handle_pre_tool_use(payload: dict[str, Any], state: dict[str, Any]) -> dict[
             }
         }
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    cap = _cap_investigation(tool_name, tool_input)
+    if cap:
+        return cap
+    if _INVESTIGATION_CAPS.get(tool_name.strip().lower()):
+        return {}
+    if not _is_write_tool(tool_name):
+        return {}
     raw_path = _tool_input_path(tool_input)
     if raw_path is None:
         return {}

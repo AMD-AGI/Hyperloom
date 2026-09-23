@@ -54,6 +54,35 @@ def test_pre_tool_use_denies_write_outside_staging(tmp_path: Path) -> None:
     assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_pre_tool_use_allows_read_outside_staging(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    outside = tmp_path / "handoff" / "kernel.cpp"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("x", encoding="utf-8")
+    state = {"staging_root": str(staging), "deny_shell_tools": True}
+    payload = {
+        "tool_name": "read",
+        "tool_input": {"file_path": str(outside), "limit": 99999},
+    }
+    result = handle_pre_tool_use(payload, state)
+    assert result.get("hookSpecificOutput", {}).get("permissionDecision") != "deny"
+    assert result["hookSpecificOutput"]["updatedInput"]["limit"] == 2000
+
+
+def test_pre_tool_use_caps_grep_outside_staging(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    state = {"staging_root": str(staging), "deny_shell_tools": True}
+    payload = {
+        "tool_name": "grep",
+        "tool_input": {"path": str(tmp_path), "head_limit": 99999},
+    }
+    result = handle_pre_tool_use(payload, state)
+    assert result["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert result["hookSpecificOutput"]["updatedInput"]["head_limit"] == 200
+
+
 def test_stop_blocks_when_pending_rejections_exist(tmp_path: Path) -> None:
     staging = tmp_path / "staging"
     draft = staging / "draft-a"
