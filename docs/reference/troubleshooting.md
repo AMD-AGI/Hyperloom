@@ -260,57 +260,72 @@ The installer is idempotent and re-installs only what's missing.
 
 ---
 
-## Codex turns stall or TraceLens roofline times out on network storage
+## Codex SDK turns stall or TraceLens roofline times out
 
-**Symptom**: With the OpenAI Codex backend (TraceLens roofline analysis, GEAK on
-Codex, or other multi-agent Codex turns), one or more of:
+**Symptom**: On code paths that use the shared Codex SDK session helper
+(TraceLens roofline analysis, GEAK on Codex, orchestrator Codex turns), one or
+more of:
 
-* A roofline or TraceLens Codex stage hits its phase budget with no
-  `analysis.md` (or similar declared output).
-* Individual Codex turns take minutes even when the upstream LLM responds in
-  seconds.
-* Codex internal logs under the runtime tree report
-  `pool timed out while waiting for an open connection` or
-  `state db update_thread_metadata failed`.
+* A Codex stage hits its phase budget with no declared output (for example,
+  no `analysis.md`).
+* Individual turns take minutes even when the upstream LLM responds in seconds.
+* Codex internal logs report `pool timed out while waiting for an open
+  connection` or `state db update_thread_metadata failed`.
 
-**Cause**: Codex persists rollout state in SQLite (WAL mode) under a private
-`CODEX_HOME` directory. Hyperloom places that tree under
-`$HYPERLOOM_RUNTIME_DIR` when set, otherwise under
-`$USER_DATA_PATH/runtime` by default. Many Slurm and dev containers keep
-`USER_DATA_PATH` on NFS or another network filesystem. NFS v3 mounts with
-`local_lock=none` (and some other network stores) do not provide the byte-range
-locking SQLite expects, so concurrent writers from the main agent and spawned
-sub-agents queue for minutes on the critical path (`persist_rollout_items`,
-stream handling, and turn teardown).
+**Cause**: Hyperloom picks exactly one parent directory for each SDK turn via
+`_codex_home_parent` in `codex_session.py`:
 
-**Fix**: Keep large session artifacts on the shared mount, but point runtime
-state at **node-local** fast disk before launching the optimizer:
+1. `HYPERLOOM_RUNTIME_DIR` when set (must be outside a source checkout and
+   creatable, or the turn raises `CodexSessionUnavailableError`).
+2. Otherwise the first safe declared **writable root** for that turn.
+3. Otherwise the run working directory.
+
+Each turn then creates a mode-`0700` `.hyperloom-codex-home-*` directory under
+that parent; Codex stores SQLite (WAL) state there. When the SDK client closes,
+`_cleanup_codex_home` removes that directory — it is not left behind for a
+post-stage listing.
+
+Installers often **export** `HYPERLOOM_RUNTIME_DIR=$USER_DATA_PATH/runtime`, but
+that is launch configuration, not a separate placement rule inside
+`_codex_home_parent`. If that path (or an unset-runtime writable root) sits on
+storage that does not support the file locking SQLite needs, concurrent writers
+from the main agent and spawned sub-agents can block for minutes on the critical
+path.
+
+**Scope**: This entry covers SDK turns that go through `_codex_home_parent` only.
+Subprocess **specialist** Codex tasks set `CODEX_HOME` to
+`<task-workspace>/.codex` and do not read `HYPERLOOM_RUNTIME_DIR`; treat stalls
+there as a separate workspace-placement issue.
+
+**Fix**: Before launch, set `HYPERLOOM_RUNTIME_DIR` to a private directory
+outside any source checkout, on storage suitable for SQLite (typically
+node-local fast disk). Session artifacts can stay under `USER_DATA_PATH` on a
+shared mount:
 
 ```bash
 export USER_DATA_PATH=/path/on/shared/storage/hyperloom-sessions
-export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime   # local SSD on the compute node
+export HYPERLOOM_RUNTIME_DIR=/var/lib/hyperloom/runtime
 mkdir -p "$HYPERLOOM_RUNTIME_DIR"
 chmod 700 "$HYPERLOOM_RUNTIME_DIR"
-# launch hyperloom.inference_optimizer.cli as usual
 ```
 
-Use a per-session or per-job subdirectory under the local root when several
-runs can share one node concurrently (for example,
+Use a per-job subdirectory when several runs can share one node (for example,
 `/var/lib/hyperloom/runtime-$SLURM_JOB_ID`).
 
 **Verify**:
 
-1. Confirm the runtime directory is not on NFS:
+1. Before and during the run, confirm the configured parent is on suitable
+   storage:
    ```bash
    df -T "$HYPERLOOM_RUNTIME_DIR"
    ```
-2. After a Codex-heavy stage, check that Codex home was created under that path
-   (for example, `$HYPERLOOM_RUNTIME_DIR/.hyperloom-codex-home-*`) and that new
-   pool-timeout warnings no longer appear in the corresponding `logs_*.sqlite`
-   tables.
+2. While a turn is still open (before the SDK client closes), pool-timeout
+   warnings in Codex `logs_*.sqlite` under the active `.hyperloom-codex-home-*`
+   directory indicate the parent is still unsuitable. After close, rely on the
+   stage finishing within budget rather than inspecting removed directories.
 
-See [Environment variables](environment-variables.md) for how
-`HYPERLOOM_RUNTIME_DIR` interacts with `USER_DATA_PATH`.
+See [Environment variables](environment-variables.md) for
+`HYPERLOOM_RUNTIME_DIR` and Codex `CODEX_HOME` lifecycle.
 
 ---
 
