@@ -50,7 +50,6 @@ def _loop(
         IterationConfig(
             kernel_file="kernel.py",
             driver_script="driver.py",
-            ceiling_report_path=path,
             roofline_target=target,
         ),
         tracker=object(),
@@ -58,6 +57,8 @@ def _loop(
         resume=resume,
         ceiling_estimator=estimator,
     )
+    # Stands in for a ceiling ``_establish_ceiling`` already published.
+    loop._ceiling_report_path = path
     loop._baseline_case_times = dict(case_times or {"decode-t1": 40.0})
     loop._best_case_times = dict(loop._baseline_case_times)
     # ``_run_locked`` loads both before it reaches the ceiling; these stand in for it.
@@ -132,11 +133,14 @@ def test_one_reader_loads_the_ceiling_for_the_whole_loop():
         assert "read_report" not in inspect.getsource(method)
 
 
-def test_forge_loop_offers_the_option_and_defaults_to_auto():
-    option = next(param for param in cli_module.forge_loop.params if param.name == "ceiling_report")
+def test_the_ceiling_is_off_unless_an_operator_turns_it_on():
+    """An estimate costs a profiler pass and an analyst session, so nobody pays for one by default."""
+    option = next(param for param in cli_module.forge_loop.params if param.name == "roofline_ceiling")
 
     assert option.opts == ["--roofline-ceiling"]
-    assert option.default == "auto"
+    assert option.default == "off"
+    assert list(option.type.choices) == ["on", "off"]
+    assert option.type.convert("ON", option, None) == "on"
 
 
 def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
@@ -146,25 +150,20 @@ def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
     assert option.default == 0.0
 
 
-def test_compute_defers_the_ceiling_to_the_loop_where_the_baseline_is(tmp_path):
-    """``compute`` resolves to no path: the estimate needs the measured case set."""
-    assert cli_module._resolve_ceiling_report("compute", str(tmp_path)) == ""
-
-
 def test_a_target_above_one_is_refused_because_attainment_cannot_exceed_the_ceiling():
     with pytest.raises(click.BadParameter, match="cannot exceed 1.0"):
-        cli_module._validate_roofline_target(86.0, "auto")
+        cli_module._validate_roofline_target(86.0, True)
 
 
 def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
-    with pytest.raises(click.BadParameter, match="needs a ceiling"):
-        cli_module._validate_roofline_target(0.86, "off")
+    with pytest.raises(click.BadParameter, match="pass --roofline-ceiling on"):
+        cli_module._validate_roofline_target(0.86, False)
 
 
-def test_no_estimator_is_built_unless_compute_was_asked_for():
+def test_no_estimator_is_built_while_the_ceiling_is_off():
     assert (
         cli_module._make_ceiling_estimator(
-            selection="auto",
+            enabled=False,
             workspace_dir=".",
             driver_script="driver.py",
             source_files=["kernel.py"],
@@ -176,7 +175,7 @@ def test_no_estimator_is_built_unless_compute_was_asked_for():
     )
 
 
-def test_the_compute_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
+def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
     """The loop's estimator is invoked, not just built.
 
     Building it proves nothing: the call into ``estimate_ceiling`` is where a
@@ -196,7 +195,7 @@ def test_the_compute_estimator_calls_estimate_ceiling_with_arguments_it_accepts(
     )
 
     estimator = cli_module._make_ceiling_estimator(
-        selection="compute",
+        enabled=True,
         workspace_dir=".",
         driver_script="driver.py",
         source_files=["kernel.py"],
@@ -294,7 +293,7 @@ def test_the_campaign_estimates_its_ceiling_from_the_baseline_it_measured(tmp_pa
 
     assert seen["case_ids"] == ["decode-t1"]
     assert seen["case_ms"] == {"decode-t1": 40.0}
-    assert loop.ic.ceiling_report_path == str(published)
+    assert loop._ceiling_report_path == str(published)
     assert loop._roofline_attainment().mean == pytest.approx(0.32)
     # Checkpointed, so a resume of this campaign reads it back instead of estimating.
     assert loop.run_state.ceiling_report_path == str(published)
@@ -310,7 +309,7 @@ def _estimator_that_counts(published, calls):
 
 
 def test_a_resumed_campaign_reads_back_the_ceiling_it_recorded(tmp_path):
-    """``compute`` on ``--resume``: the path the CLI hands over is empty, so the run state is what decides."""
+    """``--roofline-ceiling on`` with ``--resume``: the run state, not a second estimate, supplies the ceiling."""
     path = _publish(_report(), tmp_path)
 
     async def estimator(**_kwargs):
@@ -319,7 +318,7 @@ def test_a_resumed_campaign_reads_back_the_ceiling_it_recorded(tmp_path):
     loop = _loop(estimator=estimator, resume=True, run_state=RunState(ceiling_report_path=str(path)))
     asyncio.run(loop._establish_ceiling())
 
-    assert loop.ic.ceiling_report_path == str(path)
+    assert loop._ceiling_report_path == str(path)
     assert loop._roofline_attainment().mean == pytest.approx(0.32)
 
 
@@ -334,7 +333,7 @@ def test_a_report_this_campaign_did_not_record_is_never_adopted(tmp_path, resume
     asyncio.run(loop._establish_ceiling())
 
     assert calls == [1]
-    assert loop.ic.ceiling_report_path == str(published) != str(leftover)
+    assert loop._ceiling_report_path == str(published) != str(leftover)
 
 
 def test_a_recorded_ceiling_without_every_scored_case_is_estimated_again(tmp_path):
@@ -375,7 +374,7 @@ def test_an_estimate_that_fails_costs_the_target_not_the_campaign(tmp_path, caps
     loop = _loop(target=0.86, estimator=estimator)
     asyncio.run(loop._establish_ceiling())
 
-    assert loop.ic.ceiling_report_path == ""
+    assert loop._ceiling_report_path == ""
     assert not loop._is_roofline_target_met()
     assert "no ceiling for this campaign" in capsys.readouterr().out
 
@@ -387,7 +386,7 @@ def test_no_estimate_is_attempted_before_the_case_set_is_known():
     loop = _loop(estimator=estimator, case_times={})
     asyncio.run(loop._establish_ceiling())
 
-    assert loop.ic.ceiling_report_path == ""
+    assert loop._ceiling_report_path == ""
 
 
 def test_an_unscored_case_is_left_out_of_the_standing(tmp_path):
@@ -401,34 +400,16 @@ def test_an_unscored_case_is_left_out_of_the_standing(tmp_path):
     assert loop._is_roofline_target_met()
 
 
-def test_auto_finds_a_ceiling_the_command_published_into_the_workspace(tmp_path):
+def test_off_leaves_a_report_sitting_in_the_workspace_unread(tmp_path):
+    """Off means off: a report from an earlier run changes nothing the planner sees."""
     _publish(_report(), tmp_path / WORKSPACE_SUBDIR)
+    loop = _loop(estimator=None)
+    loop.ic.workspace_dir = str(tmp_path)
 
-    resolved = cli_module._resolve_ceiling_report("auto", str(tmp_path))
+    asyncio.run(loop._establish_ceiling())
 
-    assert resolved == str(tmp_path / WORKSPACE_SUBDIR / REPORT_FILENAME)
-
-
-def test_auto_without_a_published_ceiling_is_simply_no_ceiling(tmp_path):
-    assert cli_module._resolve_ceiling_report("auto", str(tmp_path)) == ""
-
-
-def test_off_declines_a_ceiling_that_is_sitting_right_there(tmp_path):
-    _publish(_report(), tmp_path / WORKSPACE_SUBDIR)
-
-    assert cli_module._resolve_ceiling_report("off", str(tmp_path)) == ""
-
-
-def test_an_explicit_path_that_does_not_exist_is_an_error_not_a_shrug(tmp_path):
-    """Asking for a specific ceiling and silently getting none hides the typo."""
-    with pytest.raises(click.BadParameter, match="not a readable report"):
-        cli_module._resolve_ceiling_report(str(tmp_path / "typo.json"), str(tmp_path))
-
-
-def test_an_explicit_path_is_used_verbatim(tmp_path):
-    path = _publish(_report(), tmp_path / "elsewhere")
-
-    assert cli_module._resolve_ceiling_report(str(path), str(tmp_path)) == str(path)
+    assert loop._ceiling_report_path == ""
+    assert loop._render_ceiling_advisory() == ""
 
 
 def test_the_ceiling_command_is_registered():
