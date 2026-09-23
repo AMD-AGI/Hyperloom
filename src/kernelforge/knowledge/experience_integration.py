@@ -1318,14 +1318,9 @@ def kb_warmstart(
         raise
     except Exception as e:  # noqa: BLE001 - warm-start must never break the run
         from kernelforge.knowledge.experience_reader import sanitize_read_error
+        from kernelforge.rewrite_by_flydsl.agent_kb import kb_store_secrets
 
-        error = sanitize_read_error(
-            e,
-            secrets=(
-                str(getattr(config, "gbrain_token", "") or ""),
-                os.environ.get("GBRAIN_TOKEN", ""),
-            ),
-        )
+        error = sanitize_read_error(e, secrets=kb_store_secrets(config))
         print(f"  [kb] warm-start skipped ({error})", flush=True)
         return {
             "candidate": False,
