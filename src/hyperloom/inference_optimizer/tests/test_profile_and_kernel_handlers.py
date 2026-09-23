@@ -2445,7 +2445,9 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
                 }
             )
         )
-        _gz_trace(workspace / "rank0.177.pt.trace.json.gz", 128)
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(exist_ok=True)
+        _gz_trace(trace_dir / "rank0.177.pt.trace.json.gz", 128)
         capture_dir = workspace / "capture_traces"
         capture_dir.mkdir(exist_ok=True)
         _gz_trace(capture_dir / "graph_capture_rank_0.1.pt.trace.json.gz", 32)
@@ -2462,12 +2464,13 @@ async def test_profile_executor_prefers_workspace_trace_over_capture_sidecar(tmp
         res = await sub.run_task(task)
 
     workspace = output_dir / "benchmark_vllm_20260501_001122"
-    complete_trace = workspace / "rank0.177.pt.trace.json.gz"
+    torch_trace = workspace / "torch_trace"
+    complete_trace = torch_trace / "rank0.177.pt.trace.json.gz"
     assert res.state == "succeeded"
     assert res.result["framework"] == "vllm"
-    assert res.result["trace_dir"] == str(workspace)
+    assert res.result["trace_dir"] == str(torch_trace)
     assert res.result["trace_files"] == [str(complete_trace)]
-    assert res.result["main_trace_path"] == str(workspace)
+    assert res.result["main_trace_path"] == str(torch_trace)
     assert res.result["profile_trace_selection_reason"] == "trace_dir_preferred"
     assert res.result["profile_trace_selection_reason"] != "capture_only_fallback"
     db.close()
